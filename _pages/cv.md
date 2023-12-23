@@ -11,49 +11,50 @@ redirect_from:
 
 Education
 ======
-* B.S. in GitHub, GitHub University, 2012
-* M.S. in Jekyll, GitHub University, 2014
-* Ph.D in Version Control Theory, GitHub University, 2018 (expected)
+* Master of Science by Research in Computer Science, International Institute of Information Technology, Hyderabad, Telangana, 2020 – Present
+* Bachelor of Engineering in Computer Science, Gujarat Technological University, Ahmedabad, Gujarat, 2016 – 2020
 
 Work experience
 ======
-* Summer 2015: Research Assistant
-  * Github University
-  * Duties included: Tagging issues
-  * Supervisor: Professor Git
+* IIIT Hyderabad, Hyderabad, India
+  * Thesis - Numerical Optimization, Advisor: Prof. Pawan Kumar, Aug 2020 - Present
+  * Responsibilities included research in GANs, optimization techniques, and PyTorch solver development.
 
-* Fall 2015: Research Assistant
-  * Github University
-  * Duties included: Merging pull requests
-  * Supervisor: Professor Hub
-  
+* SOCET Software Development Team, Ahmedabad, Gujarat
+  * Team Lead, Sept 2017 - March 2020
+  * Led software development projects, represented Silver Oak at IEEE events.
+
+* Tekion, Bangalore, India
+  * Data Scientist, Jul 2023 - Present
+  * Conducted data-driven analysis in various projects, developed chatbots, and worked on email prediction.
+
 Skills
 ======
-* Skill 1
-* Skill 2
-  * Sub-skill 2.1
-  * Sub-skill 2.2
-  * Sub-skill 2.3
-* Skill 3
+* Languages and Tools: Python, Git, Linux, VS Code
+* Libraries and Frameworks: PyTorch, TensorFlow, langchain, llama-index, scikit-learn, pandas, numpy
 
 Publications
 ======
   <ul>{% for post in site.publications %}
-    {% include archive-single-cv.html %}
-  {% endfor %}</ul>
-  
-Talks
-======
-  <ul>{% for post in site.talks %}
-    {% include archive-single-talk-cv.html %}
+    <li>Angle based dynamic learning rate for gradient descent, IJCNN 2023</li>
+    <li>A Gauss-Newton Approach for Min-Max Optimization in GANs, Submitted in WACV 2023</li>
   {% endfor %}</ul>
   
 Teaching
 ======
   <ul>{% for post in site.teaching %}
-    {% include archive-single-cv.html %}
+    <li>Graduate Teaching Assistant: Topics in Applied Optimization, Probability and Statistics, IIIT Hyderabad</li>
+  {% endfor %}</ul>
+  
+Academic Projects
+======
+  <ul>{% for post in site.projects %}
+    <li>Motion Deblurring Using Transparency</li>
+    <li>Implemented Machine Learning Algorithms From Scratch</li>
+    <li>Implementation of Recommender System Using Latent Factor Model</li>
+    <li>Clustering Analysis</li>
   {% endfor %}</ul>
   
 Service and leadership
 ======
-* Currently signed in to 43 different slack teams
+* Team leadership and coordination in software development and academic research
