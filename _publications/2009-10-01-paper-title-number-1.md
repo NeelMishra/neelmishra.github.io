@@ -1,11 +1,11 @@
 ---
 title: "Angle Based Dynamic Learning Rate for Gradient Descent"
 collection: publications
-permalink: /publication/arxiv.org/pdf/2304.10457.pdf#:~:text=Instead%20of%20the%20traditional%20approach,helps%20us%20in%20determining%20a
-excerpt: 'This paper is about the number 1. The number 2 is left for future work.'
+permalink: /publication/
+excerpt: 'In our work, we propose a novel yet simple ap- proach to obtain an adaptive learning rate for gradient-based descent methods on classification tasks. Instead of the traditional approach of selecting adaptive learning rates via the decayed expectation of gradient-based terms, we use the angle between the current gradient and the new gradient: this new gradient is computed from the direction orthogonal to the current gradient, which further helps us in determining a better adaptive learning rate based on angle history, thereby, leading to relatively better accuracy compared to the existing state-of-the-art optimizers. On a wide variety of benchmark datasets with prominent image classification architectures such as ResNet, DenseNet, Efficient- Net, and VGG, we find that our method leads to the highest accuracy in most of the datasets. Moreover, we prove that our method is convergent.'
 date: 2023-08-02
 venue: 'The International Joint Conference on Neural Networks(IJCNN)'
-paperurl: 'https://arxiv.org/pdf/2304.10457.pdf#:~:text=Instead%20of%20the%20traditional%20approach,helps%20us%20in%20determining%20a'
+paperurl: 'files/angle_based_paper.pdf'
 citation: 'N. Mishra and P. Kumar, "Angle based dynamic learning rate for gradient descent," 2023 International Joint Conference on Neural Networks (IJCNN), Gold Coast, Australia, 2023, pp. 1-8, doi: 10.1109/IJCNN54540.2023.10191702.'
 ---
 <!-- This paper is about the number 1. The number 2 is left for future work.
