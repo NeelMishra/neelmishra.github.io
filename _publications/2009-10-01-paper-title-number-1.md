@@ -1,7 +1,7 @@
 ---
 title: "Angle Based Dynamic Learning Rate for Gradient Descent"
 collection: publications
-permalink: https://arxiv.org/pdf/2304.10457.pdf#:~:text=Instead%20of%20the%20traditional%20approach,helps%20us%20in%20determining%20a
+permalink: /arxiv.org/pdf/2304.10457.pdf#:~:text=Instead%20of%20the%20traditional%20approach,helps%20us%20in%20determining%20a
 excerpt: 'This paper is about the number 1. The number 2 is left for future work.'
 date: 2023-08-02
 venue: 'The International Joint Conference on Neural Networks(IJCNN)'
