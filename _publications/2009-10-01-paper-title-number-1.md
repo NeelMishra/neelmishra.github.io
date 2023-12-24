@@ -1,7 +1,7 @@
 ---
 title: "Angle Based Dynamic Learning Rate for Gradient Descent"
 collection: publications
-permalink: files/angle_based_paper.pdf
+permalink: ../files/angle_based_paper.pdf
 excerpt: 'In our work, we propose a novel yet simple ap- proach to obtain an adaptive learning rate for gradient-based descent methods on classification tasks. Instead of the traditional approach of selecting adaptive learning rates via the decayed expectation of gradient-based terms, we use the angle between the current gradient and the new gradient: this new gradient is computed from the direction orthogonal to the current gradient, which further helps us in determining a better adaptive learning rate based on angle history, thereby, leading to relatively better accuracy compared to the existing state-of-the-art optimizers. On a wide variety of benchmark datasets with prominent image classification architectures such as ResNet, DenseNet, Efficient- Net, and VGG, we find that our method leads to the highest accuracy in most of the datasets. Moreover, we prove that our method is convergent.'
 date: 2023-08-02
 venue: 'The International Joint Conference on Neural Networks(IJCNN)'
