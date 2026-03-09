@@ -1,18 +1,70 @@
-/* Blog index: series filter */
-document.querySelectorAll('.filter-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const filter = btn.dataset.filter;
-    document.querySelectorAll('.blog-card').forEach(card => {
-      card.classList.toggle('hidden', filter !== 'all' && card.dataset.series !== filter);
+/* ===== Blog Navigation Tree ===== */
+var BLOG_TREE = [
+  {
+    name: 'C++ STL Series',
+    posts: [
+      { title: 'Vectors \u2014 Dynamic Arrays Done Right', file: 'cpp-stl-vectors.html' },
+      { title: 'Maps & Sets \u2014 Ordered vs Unordered', file: 'cpp-stl-maps-sets.html' },
+      { title: 'Iterators \u2014 The Glue of STL', file: 'cpp-stl-iterators.html' },
+      { title: 'Algorithms \u2014 Beyond std::sort', file: 'cpp-stl-algorithms.html' },
+      { title: 'Smart Pointers \u2014 Ownership Without the Pain', file: 'cpp-stl-smart-pointers.html' }
+    ]
+  },
+  {
+    name: 'C++ Deep Dives',
+    posts: [
+      { title: 'RAII \u2014 Resource Management the C++ Way', file: 'cpp-raii.html' }
+    ]
+  }
+];
+
+(function buildBlogNav() {
+  var nav = document.querySelector('.blog-nav');
+  if (!nav) return;
+
+  var path = window.location.pathname;
+  var inBlogDir = path.indexOf('/blog/') !== -1;
+  var prefix = inBlogDir ? '' : 'blog/';
+  var currentFile = path.split('/').pop();
+
+  var heading = document.createElement('h4');
+  heading.textContent = 'All Blogs';
+  nav.appendChild(heading);
+
+  BLOG_TREE.forEach(function(series) {
+    var btn = document.createElement('button');
+    btn.className = 'blog-nav-series';
+    btn.innerHTML = '<span class="chevron">&#9654;</span> ' + series.name;
+
+    var ul = document.createElement('ul');
+    ul.className = 'blog-nav-posts';
+
+    var hasActive = false;
+    series.posts.forEach(function(post) {
+      var li = document.createElement('li');
+      var a = document.createElement('a');
+      a.href = prefix + post.file;
+      a.textContent = post.title;
+      if (inBlogDir && currentFile === post.file) {
+        a.classList.add('active');
+        hasActive = true;
+      }
+      li.appendChild(a);
+      ul.appendChild(li);
     });
+
+    if (hasActive) btn.classList.add('open');
+
+    btn.addEventListener('click', function() { btn.classList.toggle('open'); });
+
+    nav.appendChild(btn);
+    nav.appendChild(ul);
   });
-});
+})();
 
 /* Blog post: auto-generate TOC from headings */
 (function buildTOC() {
-  const sidebar = document.querySelector('.toc-sidebar ul');
+  const sidebar = document.querySelector('.toc-section ul');
   const content = document.querySelector('.blog-post-content');
   if (!sidebar || !content) return;
 
