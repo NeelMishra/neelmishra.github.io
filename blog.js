@@ -19,7 +19,11 @@ var BLOG_TREE = [
   {
     name: 'DSA Series',
     posts: [
-      { title: 'Trees', file: 'dsa-trees.html', links: [] }
+      { title: 'Intro to Trees', file: 'dsa-trees-intro.html', links: ['dsa-trees-traversals.html'] },
+      { title: 'Tree Traversals', file: 'dsa-trees-traversals.html', links: ['dsa-trees-intro.html', 'dsa-trees-bst.html'] },
+      { title: 'Binary Search Trees', file: 'dsa-trees-bst.html', links: ['dsa-trees-traversals.html', 'dsa-trees-avl.html'] },
+      { title: 'AVL Trees', file: 'dsa-trees-avl.html', links: ['dsa-trees-bst.html', 'dsa-trees-algorithms.html'] },
+      { title: 'Tree Algorithms', file: 'dsa-trees-algorithms.html', links: ['dsa-trees-avl.html', 'dsa-trees-bst.html'] }
     ]
   }
 ];
