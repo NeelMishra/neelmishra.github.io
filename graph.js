@@ -10,27 +10,36 @@
     var nodeMap = {};
     var edges = [];
     var edgeSet = {};
+    var allPosts = [];
 
-    BLOG_TREE.forEach(function (series) {
-      series.posts.forEach(function (post) {
-        var id = post.file;
-        if (!nodeMap[id]) {
-          var node = { id: id, title: post.title, series: series.name, x: 0, y: 0, vx: 0, vy: 0 };
-          nodes.push(node);
-          nodeMap[id] = node;
+    /* Recursively collect all posts with their top-level series name */
+    function collect(items, seriesName) {
+      items.forEach(function(item) {
+        if (item.file) {
+          allPosts.push({ file: item.file, title: item.title, links: item.links || [], series: seriesName });
+        }
+        if (item.children) {
+          collect(item.children, seriesName || item.label);
         }
       });
+    }
+    BLOG_TREE.forEach(function(entry) { collect([entry], entry.label); });
+
+    allPosts.forEach(function(post) {
+      if (!nodeMap[post.file]) {
+        var node = { id: post.file, title: post.title, series: post.series, x: 0, y: 0, vx: 0, vy: 0 };
+        nodes.push(node);
+        nodeMap[post.file] = node;
+      }
     });
 
-    BLOG_TREE.forEach(function (series) {
-      series.posts.forEach(function (post) {
-        (post.links || []).forEach(function (target) {
-          var key = [post.file, target].sort().join('|');
-          if (!edgeSet[key] && nodeMap[target]) {
-            edgeSet[key] = true;
-            edges.push({ source: post.file, target: target });
-          }
-        });
+    allPosts.forEach(function(post) {
+      (post.links || []).forEach(function(target) {
+        var key = [post.file, target].sort().join('|');
+        if (!edgeSet[key] && nodeMap[target]) {
+          edgeSet[key] = true;
+          edges.push({ source: post.file, target: target });
+        }
       });
     });
 
