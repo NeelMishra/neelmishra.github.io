@@ -63,8 +63,7 @@
     '<button class="speed-btn" data-speed="0.5">2\u00D7</button>' +
     '<button class="speed-btn active" data-speed="1">1\u00D7</button>' +
     '<button class="speed-btn" data-speed="2">0.5\u00D7</button>' +
-    '<button class="speed-btn" data-speed="3">0.3\u00D7</button>' +
-    '<span style="font-size:0.72rem;color:var(--ink-muted);margin-left:0.5rem">(change mid-animation)</span>';
+    '<button class="speed-btn" data-speed="3">0.3\u00D7</button>';
   var first = document.querySelector('.anim-container');
   if (first) first.parentNode.insertBefore(bar, first);
   bar.addEventListener('click', function(e){
