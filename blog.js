@@ -68,7 +68,13 @@ var BLOG_TREE = [
             name: 'algorithms',
             label: 'Algorithms & Patterns',
             children: [
-              { title: 'Algorithms & Patterns', file: 'dsa/trees/algorithms/index.html', links: ['dsa/trees/segment-tree/index.html', 'dsa/trees/threaded/intro.html'] }
+              { title: 'Overview', file: 'dsa/trees/algorithms/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/algorithms/height.html'] },
+              { title: 'Height', file: 'dsa/trees/algorithms/height.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/algorithms/lca.html'] },
+              { title: 'LCA', file: 'dsa/trees/algorithms/lca.html', links: ['dsa/trees/algorithms/height.html', 'dsa/trees/algorithms/diameter.html'] },
+              { title: 'Diameter', file: 'dsa/trees/algorithms/diameter.html', links: ['dsa/trees/algorithms/lca.html', 'dsa/trees/algorithms/serialize.html'] },
+              { title: 'Serialization', file: 'dsa/trees/algorithms/serialize.html', links: ['dsa/trees/algorithms/diameter.html', 'dsa/trees/algorithms/morris.html'] },
+              { title: 'Morris Traversal', file: 'dsa/trees/algorithms/morris.html', links: ['dsa/trees/algorithms/serialize.html', 'dsa/trees/algorithms/patterns.html'] },
+              { title: 'Interview Patterns', file: 'dsa/trees/algorithms/patterns.html', links: ['dsa/trees/algorithms/morris.html', 'dsa/trees/threaded/intro.html'] }
             ]
           },
           {
