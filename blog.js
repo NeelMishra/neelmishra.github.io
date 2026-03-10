@@ -3,17 +3,17 @@ var BLOG_TREE = [
   {
     name: 'C++ STL Series',
     posts: [
-      { title: 'Vectors \u2014 Dynamic Arrays Done Right', file: 'cpp-stl-vectors.html' },
-      { title: 'Maps & Sets \u2014 Ordered vs Unordered', file: 'cpp-stl-maps-sets.html' },
-      { title: 'Iterators \u2014 The Glue of STL', file: 'cpp-stl-iterators.html' },
-      { title: 'Algorithms \u2014 Beyond std::sort', file: 'cpp-stl-algorithms.html' },
-      { title: 'Smart Pointers \u2014 Ownership Without the Pain', file: 'cpp-stl-smart-pointers.html' }
+      { title: 'Vectors', file: 'cpp-stl-vectors.html', links: ['cpp-stl-maps-sets.html'] },
+      { title: 'Maps & Sets', file: 'cpp-stl-maps-sets.html', links: ['cpp-stl-vectors.html', 'cpp-stl-iterators.html'] },
+      { title: 'Iterators', file: 'cpp-stl-iterators.html', links: ['cpp-stl-maps-sets.html', 'cpp-stl-algorithms.html'] },
+      { title: 'Algorithms', file: 'cpp-stl-algorithms.html', links: ['cpp-stl-iterators.html', 'cpp-stl-smart-pointers.html'] },
+      { title: 'Smart Pointers', file: 'cpp-stl-smart-pointers.html', links: ['cpp-stl-algorithms.html', 'cpp-raii.html'] }
     ]
   },
   {
     name: 'C++ Deep Dives',
     posts: [
-      { title: 'RAII \u2014 Resource Management the C++ Way', file: 'cpp-raii.html' }
+      { title: 'RAII', file: 'cpp-raii.html', links: ['cpp-stl-smart-pointers.html'] }
     ]
   }
 ];
