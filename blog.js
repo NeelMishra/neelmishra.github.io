@@ -27,11 +27,44 @@ var BLOG_TREE = [
         name: 'trees',
         label: 'Trees',
         children: [
-          { title: 'Introduction', file: 'dsa/trees/intro.html', links: ['dsa/trees/traversals.html'] },
-          { title: 'Traversals', file: 'dsa/trees/traversals.html', links: ['dsa/trees/intro.html', 'dsa/trees/bst.html'] },
-          { title: 'BST', file: 'dsa/trees/bst.html', links: ['dsa/trees/traversals.html', 'dsa/trees/avl.html'] },
-          { title: 'AVL Trees', file: 'dsa/trees/avl.html', links: ['dsa/trees/bst.html', 'dsa/trees/algorithms.html'] },
-          { title: 'Algorithms & Patterns', file: 'dsa/trees/algorithms.html', links: ['dsa/trees/avl.html', 'dsa/trees/bst.html'] }
+          { title: 'Introduction', file: 'dsa/trees/intro.html', links: ['dsa/trees/traversals/index.html'] },
+          {
+            name: 'traversals',
+            label: 'Traversals',
+            children: [
+              { title: 'Tree Traversals', file: 'dsa/trees/traversals/index.html', links: ['dsa/trees/intro.html', 'dsa/trees/bst/index.html'] }
+            ]
+          },
+          {
+            name: 'bst',
+            label: 'Binary Search Trees',
+            children: [
+              { title: 'BST', file: 'dsa/trees/bst/index.html', links: ['dsa/trees/traversals/index.html', 'dsa/trees/avl/index.html'] }
+            ]
+          },
+          {
+            name: 'avl',
+            label: 'AVL Trees',
+            children: [
+              { title: 'AVL Trees', file: 'dsa/trees/avl/index.html', links: ['dsa/trees/bst/index.html', 'dsa/trees/algorithms/index.html'] }
+            ]
+          },
+          {
+            name: 'algorithms',
+            label: 'Algorithms & Patterns',
+            children: [
+              { title: 'Algorithms & Patterns', file: 'dsa/trees/algorithms/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/threaded/intro.html'] }
+            ]
+          },
+          {
+            name: 'threaded',
+            label: 'Threaded Trees',
+            children: [
+              { title: 'Introduction', file: 'dsa/trees/threaded/intro.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/threaded/construction.html'] },
+              { title: 'Construction', file: 'dsa/trees/threaded/construction.html', links: ['dsa/trees/threaded/intro.html', 'dsa/trees/threaded/traversal.html'] },
+              { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/algorithms/index.html'] }
+            ]
+          }
         ]
       }
     ]
