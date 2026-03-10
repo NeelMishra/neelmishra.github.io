@@ -80,6 +80,21 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        name: 'arrays',
+        label: 'Arrays',
+        children: [
+          {
+            name: 'prefix-sum',
+            label: 'Prefix Sum',
+            children: [
+              { title: 'Fundamentals', file: 'dsa/arrays/prefix-sum/index.html', links: ['dsa/arrays/prefix-sum/patterns.html'] },
+              { title: 'Patterns', file: 'dsa/arrays/prefix-sum/patterns.html', links: ['dsa/arrays/prefix-sum/index.html', 'dsa/arrays/prefix-sum/advanced.html'] },
+              { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/index.html'] }
+            ]
+          }
+        ]
       }
     ]
   }
