@@ -16,7 +16,8 @@ var BLOG_TREE = [
     name: 'cpp-deep-dives',
     label: 'C++ Deep Dives',
     children: [
-      { title: 'RAII', file: 'cpp-deep-dives/raii.html', links: ['cpp-stl/smart-pointers.html'] }
+      { title: 'RAII', file: 'cpp-deep-dives/raii.html', links: ['cpp-stl/smart-pointers.html', 'cpp-deep-dives/operator-overloading.html'] },
+      { title: 'Operator Overloading', file: 'cpp-deep-dives/operator-overloading.html', links: ['cpp-deep-dives/raii.html'] }
     ]
   },
   {
