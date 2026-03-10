@@ -30,9 +30,9 @@
     if (!defs) { defs = document.createElementNS(NS, 'defs'); svg.insertBefore(defs, svg.firstChild); }
     var m = document.createElementNS(NS, 'marker');
     m.id = id;
-    ['markerWidth:10','markerHeight:7','refX:10','refY:3.5','orient:auto'].forEach(function(a){ var p=a.split(':'); m.setAttribute(p[0],p[1]); });
+    ['markerWidth:7','markerHeight:5','refX:7','refY:2.5','orient:auto'].forEach(function(a){ var p=a.split(':'); m.setAttribute(p[0],p[1]); });
     var path = document.createElementNS(NS, 'path');
-    path.setAttribute('d', 'M0,0 L10,3.5 L0,7 L2.5,3.5 Z');
+    path.setAttribute('d', 'M0,0 L7,2.5 L0,5 L1.8,2.5 Z');
     path.setAttribute('fill', color);
     m.appendChild(path); defs.appendChild(m);
   };
