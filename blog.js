@@ -15,6 +15,12 @@ var BLOG_TREE = [
     posts: [
       { title: 'RAII', file: 'cpp-raii.html', links: ['cpp-stl-smart-pointers.html'] }
     ]
+  },
+  {
+    name: 'DSA Series',
+    posts: [
+      { title: 'Trees', file: 'dsa-trees.html', links: [] }
+    ]
   }
 ];
 

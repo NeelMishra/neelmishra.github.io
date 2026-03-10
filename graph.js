@@ -40,7 +40,8 @@
   /* ---- Series → colour mapping ---- */
   var SERIES_COLORS = {
     'C++ STL Series': '#0a8f6a',
-    'C++ Deep Dives': '#ff6b35'
+    'C++ Deep Dives': '#ff6b35',
+    'DSA Series': '#5b7fff'
   };
   function seriesColor(name) { return SERIES_COLORS[name] || '#0a8f6a'; }
 
