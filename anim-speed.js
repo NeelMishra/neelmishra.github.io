@@ -53,16 +53,18 @@
     h += '</div>'; el.innerHTML = h;
   };
 
-  // Inject speed bar
+  // Inject sticky speed bar
   var bar = document.createElement('div');
   bar.className = 'speed-bar';
+  bar.style.cssText = 'position:sticky;top:0;z-index:100;background:var(--bg,#fffdf9);border-bottom:1px solid var(--line,#d9cfba);padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem;border-radius:0 0 10px 10px;box-shadow:0 2px 8px rgba(0,0,0,0.06)';
   bar.innerHTML =
-    '<label class="speed-label">\u23F1 Speed</label>' +
+    '<label class="speed-label" style="font-weight:600;font-size:0.82rem;color:var(--ink-muted)">\u23F1 Animation Speed</label>' +
     '<button class="speed-btn" data-speed="0.25">4\u00D7</button>' +
     '<button class="speed-btn" data-speed="0.5">2\u00D7</button>' +
     '<button class="speed-btn active" data-speed="1">1\u00D7</button>' +
     '<button class="speed-btn" data-speed="2">0.5\u00D7</button>' +
-    '<button class="speed-btn" data-speed="3">0.3\u00D7</button>';
+    '<button class="speed-btn" data-speed="3">0.3\u00D7</button>' +
+    '<span style="font-size:0.72rem;color:var(--ink-muted);margin-left:0.5rem">(change mid-animation)</span>';
   var first = document.querySelector('.anim-container');
   if (first) first.parentNode.insertBefore(bar, first);
   bar.addEventListener('click', function(e){
@@ -72,4 +74,31 @@
     bar.querySelectorAll('.speed-btn').forEach(function(b){ b.classList.remove('active'); });
     btn.classList.add('active');
   });
+
+  /* Auto-inject arrow markers into all animation SVGs */
+  document.querySelectorAll('.anim-container svg, .tree-diagram svg').forEach(function(svg){
+    addArrowMarker(svg, 'anim-arrow', '#0a8f6a');
+    addArrowMarker(svg, 'anim-arrow-warn', '#f59e0b');
+    addArrowMarker(svg, 'anim-arrow-brand', 'var(--brand, #6366f1)');
+  });
+
+  /* Helper: draw an animated directional arrow between two SVG points */
+  window.drawAnimArrow = function(svg, x1, y1, x2, y2, color, id) {
+    var NS = 'http://www.w3.org/2000/svg';
+    color = color || '#0a8f6a';
+    var markerId = color === '#f59e0b' ? 'anim-arrow-warn' : 'anim-arrow';
+    addArrowMarker(svg, markerId, color);
+    var line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    line.setAttribute('stroke', color);
+    line.setAttribute('stroke-width', '2.5');
+    line.setAttribute('marker-end', 'url(#' + markerId + ')');
+    line.setAttribute('opacity', '0');
+    if (id) line.id = id;
+    line.style.transition = 'opacity 0.3s';
+    svg.appendChild(line);
+    requestAnimationFrame(function(){ line.setAttribute('opacity', '1'); });
+    return line;
+  };
 })();
