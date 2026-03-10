@@ -46,14 +46,28 @@ var BLOG_TREE = [
             name: 'avl',
             label: 'AVL Trees',
             children: [
-              { title: 'AVL Trees', file: 'dsa/trees/avl/index.html', links: ['dsa/trees/bst/index.html', 'dsa/trees/algorithms/index.html'] }
+              { title: 'AVL Trees', file: 'dsa/trees/avl/index.html', links: ['dsa/trees/bst/index.html', 'dsa/trees/heap/index.html'] }
+            ]
+          },
+          {
+            name: 'heap',
+            label: 'Binary Heaps',
+            children: [
+              { title: 'Binary Heaps & Priority Queues', file: 'dsa/trees/heap/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/segment-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'segment-tree',
+            label: 'Segment Trees',
+            children: [
+              { title: 'Segment Trees', file: 'dsa/trees/segment-tree/index.html', links: ['dsa/trees/heap/index.html', 'dsa/trees/algorithms/index.html'] }
             ]
           },
           {
             name: 'algorithms',
             label: 'Algorithms & Patterns',
             children: [
-              { title: 'Algorithms & Patterns', file: 'dsa/trees/algorithms/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/threaded/intro.html'] }
+              { title: 'Algorithms & Patterns', file: 'dsa/trees/algorithms/index.html', links: ['dsa/trees/segment-tree/index.html', 'dsa/trees/threaded/intro.html'] }
             ]
           },
           {
