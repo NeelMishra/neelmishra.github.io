@@ -1,71 +1,16 @@
-/* === Global Animation Speed Controller === */
+/* === Animation Utilities (step-only, no speed/pause controls) === */
 (function(){
-  var speed = 1;
-  var paused = false;
-  var pauseQueue = [];  // callbacks waiting to fire when unpaused
-
-  window.animPaused = function(){ return paused; };
-
-  window.animDelay = function(ms){ return Math.round(ms * speed); };
-
-  /* Pause-aware setTimeout wrapper for animations.
-     Use animTimeout(fn, ms) instead of setTimeout(fn, ms) in animations.
-     If paused, the callback is queued and fired when resumed. */
+  /* Backward-compatible stubs — speed is always 1x, no pause */
+  window.animPaused = function(){ return false; };
+  window.animDelay = function(ms){ return ms; };
   window.animTimeout = function(fn, ms) {
-    if (paused) {
-      var entry = { fn: fn, remaining: ms, timer: null };
-      pauseQueue.push(entry);
-      return entry;
-    }
-    var startTime = Date.now();
-    var entry = { fn: fn, remaining: ms, timer: null, startTime: startTime };
-    entry.timer = setTimeout(function(){
-      entry.remaining = 0;
-      fn();
-    }, ms);
-    pauseQueue.push(entry);
+    var entry = { fn: fn, timer: setTimeout(fn, ms) };
     return entry;
   };
+  window.animPause = function(){};
+  window.animResume = function(){};
 
-  function pauseAll() {
-    paused = true;
-    pauseQueue.forEach(function(entry) {
-      if (entry.timer && entry.remaining > 0) {
-        clearTimeout(entry.timer);
-        entry.timer = null;
-        var elapsed = Date.now() - (entry.startTime || Date.now());
-        entry.remaining = Math.max(0, entry.remaining - elapsed);
-      }
-    });
-  }
-
-  function resumeAll() {
-    paused = false;
-    var queue = pauseQueue.slice();
-    pauseQueue.length = 0;
-    queue.forEach(function(entry) {
-      if (entry.remaining > 0 && entry.fn) {
-        entry.startTime = Date.now();
-        entry.timer = setTimeout(function(){
-          entry.remaining = 0;
-          entry.fn();
-        }, entry.remaining);
-        pauseQueue.push(entry);
-      } else if (entry.remaining === 0 && entry.fn) {
-        // Was queued while paused with 0 delay — fire immediately
-      }
-    });
-  }
-
-  // Clean up completed entries periodically
-  setInterval(function(){
-    pauseQueue = pauseQueue.filter(function(e){ return e.remaining > 0; });
-  }, 5000);
-
-  window.animPause = pauseAll;
-  window.animResume = resumeAll;
-
-  /* Step runner — reads current speed before EACH step, so mid-animation changes work */
+  /* Step runner */
   window.animRunner = function(steps, baseDelay, onDone) {
     var i = 0, timer = null, cancelled = false;
     function next() {
@@ -76,7 +21,7 @@
       else if (step && step.fn) step.fn();
       i++;
       var d = (step && step.delay != null) ? step.delay : baseDelay;
-      if (i < steps.length) timer = animTimeout(next, animDelay(d));
+      if (i < steps.length) timer = animTimeout(next, d);
       else if (onDone) onDone();
     }
     next();
@@ -114,45 +59,6 @@
     });
     h += '</div>'; el.innerHTML = h;
   };
-
-  // Inject sticky speed bar
-  var bar = document.createElement('div');
-  bar.className = 'speed-bar';
-  bar.style.cssText = 'position:sticky;top:0;z-index:100;background:var(--bg,#fffdf9);border-bottom:1px solid var(--line,#d9cfba);padding:0.5rem 1rem;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem;border-radius:0 0 10px 10px;box-shadow:0 2px 8px rgba(0,0,0,0.06)';
-  bar.innerHTML =
-    '<label class="speed-label" style="font-weight:600;font-size:0.82rem;color:var(--ink-muted)">\u23F1 Animation Speed</label>' +
-    '<button class="speed-btn" data-speed="0.25">4\u00D7</button>' +
-    '<button class="speed-btn" data-speed="0.5">2\u00D7</button>' +
-    '<button class="speed-btn active" data-speed="1">1\u00D7</button>' +
-    '<button class="speed-btn" data-speed="2">0.5\u00D7</button>' +
-    '<button class="speed-btn" data-speed="3">0.3\u00D7</button>' +
-    '<span style="width:1px;height:20px;background:var(--line,#d9cfba);margin:0 0.3rem"></span>' +
-    '<button class="speed-btn" id="anim-pause-btn" title="Pause/Resume animations">\u23F8 Pause</button>';
-  var first = document.querySelector('.anim-container');
-  if (first) first.parentNode.insertBefore(bar, first);
-  bar.addEventListener('click', function(e){
-    var btn = e.target.closest('.speed-btn');
-    if (!btn) return;
-    if (btn.id === 'anim-pause-btn') return; // handled separately
-    speed = parseFloat(btn.dataset.speed);
-    bar.querySelectorAll('.speed-btn:not(#anim-pause-btn)').forEach(function(b){ b.classList.remove('active'); });
-    btn.classList.add('active');
-  });
-
-  var pauseBtn = document.getElementById('anim-pause-btn');
-  if (pauseBtn) {
-    pauseBtn.addEventListener('click', function(){
-      if (paused) {
-        resumeAll();
-        pauseBtn.textContent = '\u23F8 Pause';
-        pauseBtn.classList.remove('active');
-      } else {
-        pauseAll();
-        pauseBtn.textContent = '\u25B6 Resume';
-        pauseBtn.classList.add('active');
-      }
-    });
-  }
 
   /* Auto-inject arrow markers into all animation SVGs */
   document.querySelectorAll('.anim-container svg, .tree-diagram svg').forEach(function(svg){

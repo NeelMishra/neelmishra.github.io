@@ -46,7 +46,8 @@ var BLOG_TREE = [
             name: 'bst',
             label: 'Binary Search Trees',
             children: [
-              { title: 'BST', file: 'dsa/trees/bst/index.html', links: ['dsa/trees/traversals/index.html', 'dsa/trees/avl/index.html'] }
+              { title: 'BST', file: 'dsa/trees/bst/index.html', links: ['dsa/trees/traversals/index.html', 'dsa/trees/bst/iterator.html'] },
+              { title: 'BST Iterator', file: 'dsa/trees/bst/iterator.html', links: ['dsa/trees/bst/index.html', 'dsa/trees/avl/index.html'] }
             ]
           },
           {
@@ -107,8 +108,9 @@ var BLOG_TREE = [
               { title: 'Introduction', file: 'dsa/trees/threaded/intro.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/threaded/construction.html'] },
               { title: 'Construction', file: 'dsa/trees/threaded/construction.html', links: ['dsa/trees/threaded/intro.html', 'dsa/trees/threaded/traversal.html'] },
               { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/threaded/morris.html'] },
-              { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/patterns.html'] },
-              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris.html', 'dsa/trees/veb-tree/index.html'] }
+              { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/morris-complexity.html'] },
+              { title: 'Morris Complexity', file: 'dsa/trees/threaded/morris-complexity.html', links: ['dsa/trees/threaded/morris.html', 'dsa/trees/threaded/patterns.html'] },
+              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris-complexity.html', 'dsa/trees/veb-tree/index.html'] }
             ]
           },
           {
@@ -157,7 +159,18 @@ var BLOG_TREE = [
               { title: 'Properties & Intuition', file: 'dsa/trees/red-black/index.html', links: ['dsa/trees/trie/patterns.html', 'dsa/trees/red-black/insertion.html'] },
               { title: 'Insertion', file: 'dsa/trees/red-black/insertion.html', links: ['dsa/trees/red-black/index.html', 'dsa/trees/red-black/deletion.html'] },
               { title: 'Deletion', file: 'dsa/trees/red-black/deletion.html', links: ['dsa/trees/red-black/insertion.html', 'dsa/trees/red-black/patterns.html'] },
-              { title: 'Analysis & Patterns', file: 'dsa/trees/red-black/patterns.html', links: ['dsa/trees/red-black/deletion.html'] }
+              { title: 'Analysis & Patterns', file: 'dsa/trees/red-black/patterns.html', links: ['dsa/trees/red-black/deletion.html', 'dsa/trees/serialization/index.html'] }
+            ]
+          },
+          {
+            name: 'serialization',
+            label: 'Serialization',
+            children: [
+              { title: 'Overview', file: 'dsa/trees/serialization/index.html', links: ['dsa/trees/red-black/patterns.html', 'dsa/trees/serialization/preorder.html'] },
+              { title: 'Preorder Serialization', file: 'dsa/trees/serialization/preorder.html', links: ['dsa/trees/serialization/index.html', 'dsa/trees/serialization/level-order.html'] },
+              { title: 'Level-Order Serialization', file: 'dsa/trees/serialization/level-order.html', links: ['dsa/trees/serialization/preorder.html', 'dsa/trees/serialization/advanced.html'] },
+              { title: 'Advanced Techniques', file: 'dsa/trees/serialization/advanced.html', links: ['dsa/trees/serialization/level-order.html', 'dsa/trees/serialization/patterns.html'] },
+              { title: 'Interview Patterns', file: 'dsa/trees/serialization/patterns.html', links: ['dsa/trees/serialization/advanced.html'] }
             ]
           }
         ]
