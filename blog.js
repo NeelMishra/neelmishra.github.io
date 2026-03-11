@@ -105,7 +105,18 @@ var BLOG_TREE = [
               { title: 'Construction', file: 'dsa/trees/threaded/construction.html', links: ['dsa/trees/threaded/intro.html', 'dsa/trees/threaded/traversal.html'] },
               { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/threaded/morris.html'] },
               { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/patterns.html'] },
-              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris.html'] }
+              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris.html', 'dsa/trees/veb-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'veb-tree',
+            label: 'Van Emde Boas Trees',
+            children: [
+              { title: 'Overview', file: 'dsa/trees/veb-tree/index.html', links: ['dsa/trees/threaded/patterns.html', 'dsa/trees/veb-tree/intro.html'] },
+              { title: 'The Predecessor Problem', file: 'dsa/trees/veb-tree/intro.html', links: ['dsa/trees/veb-tree/index.html', 'dsa/trees/veb-tree/structure.html'] },
+              { title: 'The Recursive Structure', file: 'dsa/trees/veb-tree/structure.html', links: ['dsa/trees/veb-tree/intro.html', 'dsa/trees/veb-tree/operations.html'] },
+              { title: 'Operations', file: 'dsa/trees/veb-tree/operations.html', links: ['dsa/trees/veb-tree/structure.html', 'dsa/trees/veb-tree/patterns.html'] },
+              { title: 'Analysis & Patterns', file: 'dsa/trees/veb-tree/patterns.html', links: ['dsa/trees/veb-tree/operations.html'] }
             ]
           }
         ]
