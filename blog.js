@@ -2,22 +2,28 @@
 /* Directory-based hierarchy with nested folders */
 var BLOG_TREE = [
   {
-    name: 'cpp-stl',
-    label: 'C++ STL Series',
+    name: 'cpp',
+    label: 'C++',
     children: [
-      { title: 'Vectors', file: 'cpp-stl/vectors.html', links: ['cpp-stl/maps-sets.html'] },
-      { title: 'Maps & Sets', file: 'cpp-stl/maps-sets.html', links: ['cpp-stl/vectors.html', 'cpp-stl/iterators.html'] },
-      { title: 'Iterators', file: 'cpp-stl/iterators.html', links: ['cpp-stl/maps-sets.html', 'cpp-stl/algorithms.html'] },
-      { title: 'Algorithms', file: 'cpp-stl/algorithms.html', links: ['cpp-stl/iterators.html', 'cpp-stl/smart-pointers.html'] },
-      { title: 'Smart Pointers', file: 'cpp-stl/smart-pointers.html', links: ['cpp-stl/algorithms.html', 'cpp-deep-dives/raii.html'] }
-    ]
-  },
-  {
-    name: 'cpp-deep-dives',
-    label: 'C++ Deep Dives',
-    children: [
-      { title: 'RAII', file: 'cpp-deep-dives/raii.html', links: ['cpp-stl/smart-pointers.html', 'cpp-deep-dives/operator-overloading.html'] },
-      { title: 'Operator Overloading', file: 'cpp-deep-dives/operator-overloading.html', links: ['cpp-deep-dives/raii.html'] }
+      {
+        name: 'stl',
+        label: 'STL Series',
+        children: [
+          { title: 'Vectors', file: 'cpp/stl/vectors.html', links: ['cpp/stl/maps-sets.html'] },
+          { title: 'Maps & Sets', file: 'cpp/stl/maps-sets.html', links: ['cpp/stl/vectors.html', 'cpp/stl/iterators.html'] },
+          { title: 'Iterators', file: 'cpp/stl/iterators.html', links: ['cpp/stl/maps-sets.html', 'cpp/stl/algorithms.html'] },
+          { title: 'Algorithms', file: 'cpp/stl/algorithms.html', links: ['cpp/stl/iterators.html', 'cpp/stl/smart-pointers.html'] },
+          { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/deep-dives/raii.html'] }
+        ]
+      },
+      {
+        name: 'deep-dives',
+        label: 'Deep Dives',
+        children: [
+          { title: 'RAII', file: 'cpp/deep-dives/raii.html', links: ['cpp/stl/smart-pointers.html', 'cpp/deep-dives/operator-overloading.html'] },
+          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html'] }
+        ]
+      }
     ]
   },
   {
