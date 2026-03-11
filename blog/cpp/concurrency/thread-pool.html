@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Building a thread pool in C++: task queues, work stealing, std::jthread, stop tokens, and production-ready pool implementation.">
+  <title>Thread Pools in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">C++ &middot; Concurrency</a><span>&middot; Part 11 of 15</span></div>
+
+      <h1>Thread Pools</h1>
+      <p class="post-meta">March 2026 &middot; 28 min read</p>
+
+      <h2 id="why-thread-pool">Why Thread Pools?</h2>
+      <p>Creating and destroying threads is expensive: each <code>std::thread</code> construction involves an OS syscall, stack allocation (~1MB default), and scheduler bookkeeping. For a web server handling thousands of requests or a game engine running many small tasks, spawning a new thread per task is wasteful.</p>
+      <p>A <strong>thread pool</strong> creates a fixed set of worker threads at startup. Tasks are submitted to a <strong>queue</strong>; idle workers pull tasks and execute them. The threads are reused, eliminating per-task creation overhead.</p>
+
+      <div class="anim-container" id="pool-anim">
+        <h4>&#9654; Thread Pool Architecture</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Tasks enter the queue, workers pull and execute them.</p>
+        <svg id="pool-svg" width="520" height="200" viewBox="0 0 520 200"></svg>
+        <div id="pool-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="pool-step">Step &rarr;</button>
+          <button class="anim-btn" id="pool-reset">Reset</button>
+          <span class="anim-output" id="pool-output"></span>
+        </div>
+      </div>
+
+      <h2 id="basic-implementation">Building a Thread Pool from Scratch</h2>
+
+      <pre><code>#include &lt;thread&gt;
+#include &lt;mutex&gt;
+#include &lt;condition_variable&gt;
+#include &lt;queue&gt;
+#include &lt;functional&gt;
+#include &lt;vector&gt;
+#include &lt;future&gt;
+
+class ThreadPool {
+    std::vector&lt;std::thread&gt; workers_;
+    std::queue&lt;std::function&lt;void()&gt;&gt; tasks_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+
+public:
+    explicit ThreadPool(size_t num_threads) {
+        for (size_t i = 0; i &lt; num_threads; ++i) {
+            workers_.emplace_back([this] {
+                while (true) {
+                    std::function&lt;void()&gt; task;
+                    {
+                        std::unique_lock lock(mtx_);
+                        cv_.wait(lock, [this] {
+                            return stop_ || !tasks_.empty();
+                        });
+                        if (stop_ &amp;&amp; tasks_.empty()) return;
+                        task = std::move(tasks_.front());
+                        tasks_.pop();
+                    }
+                    task();
+                }
+            });
+        }
+    }
+
+    template&lt;typename F, typename... Args&gt;
+    auto submit(F&amp;&amp; f, Args&amp;&amp;... args)
+        -&gt; std::future&lt;std::invoke_result_t&lt;F, Args...&gt;&gt;
+    {
+        using ReturnType = std::invoke_result_t&lt;F, Args...&gt;;
+        auto task = std::make_shared&lt;std::packaged_task&lt;ReturnType()&gt;&gt;(
+            std::bind(std::forward&lt;F&gt;(f), std::forward&lt;Args&gt;(args)...)
+        );
+        auto fut = task-&gt;get_future();
+        {
+            std::lock_guard lock(mtx_);
+            tasks_.emplace([task]{ (*task)(); });
+        }
+        cv_.notify_one();
+        return fut;
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard lock(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto&amp; w : workers_) w.join();
+    }
+};</code></pre>
+
+      <h3 id="usage">Usage</h3>
+      <pre><code>ThreadPool pool(std::thread::hardware_concurrency());
+
+auto result1 = pool.submit([](int a, int b) { return a + b; }, 10, 20);
+auto result2 = pool.submit(heavy_compute, data);
+
+std::cout &lt;&lt; result1.get() &lt;&lt; "\n";  // 30
+std::cout &lt;&lt; result2.get() &lt;&lt; "\n";</code></pre>
+
+      <h2 id="jthread">std::jthread (C++20)</h2>
+      <p><code>std::jthread</code> is a <em>joining thread</em> that destructs safely and supports cooperative cancellation:</p>
+
+      <pre><code>void worker(std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
+        auto task = queue.pop();  // blocks
+        task();
+    }
+}
+
+std::jthread t(worker);
+// ~jthread() automatically:
+//   1. Calls request_stop() on its stop_source
+//   2. Calls join()
+// No manual cleanup needed!</code></pre>
+
+      <h2 id="work-stealing">Work Stealing</h2>
+      <p>In a naive pool, all workers share one queue (single point of contention). In a <strong>work-stealing</strong> pool, each worker has its own local queue. When a worker's queue is empty, it <em>steals</em> from another worker's queue (from the opposite end to minimize contention).</p>
+      <p>Work stealing provides better load distribution and cache locality. It is used in Intel TBB, Go's goroutine scheduler, and Java's ForkJoinPool.</p>
+
+      <figure class="tree-diagram">
+        <svg viewBox="0 0 500 180">
+          <text x="250" y="20" text-anchor="middle" font-family="Syne,sans-serif" font-weight="700" font-size="13" fill="var(--ink)">Work Stealing</text>
+          <!-- Worker 1 -->
+          <rect x="30" y="40" width="120" height="50" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+          <text x="90" y="60" text-anchor="middle" font-family="Syne,sans-serif" font-weight="700" font-size="11" fill="#0a8f6a">Worker 1</text>
+          <text x="90" y="78" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#0a8f6a">[T1, T2, T3]</text>
+          <!-- Worker 2 -->
+          <rect x="190" y="40" width="120" height="50" rx="8" fill="#e3f2fd" stroke="#2196f3" stroke-width="2"/>
+          <text x="250" y="60" text-anchor="middle" font-family="Syne,sans-serif" font-weight="700" font-size="11" fill="#2196f3">Worker 2</text>
+          <text x="250" y="78" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#2196f3">[T4]</text>
+          <!-- Worker 3 -->
+          <rect x="350" y="40" width="120" height="50" rx="8" fill="#fff3cd" stroke="#f59e0b" stroke-width="2"/>
+          <text x="410" y="60" text-anchor="middle" font-family="Syne,sans-serif" font-weight="700" font-size="11" fill="#f59e0b">Worker 3</text>
+          <text x="410" y="78" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#f59e0b">[] (empty)</text>
+          <!-- Steal arrow -->
+          <line x1="350" y1="75" x2="160" y2="75" stroke="#e74c3c" stroke-width="2" stroke-dasharray="6,3"/>
+          <text x="255" y="108" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="10" fill="#e74c3c">steal T3 from Worker 1</text>
+        </svg>
+        <figcaption>Figure: Worker 3 is idle. It steals a task from Worker 1's queue.</figcaption>
+      </figure>
+
+      <h2 id="sizing">How Many Threads?</h2>
+      <ul>
+        <li><strong>CPU-bound tasks:</strong> Use <code>std::thread::hardware_concurrency()</code> threads. More threads cause context-switch overhead without benefit.</li>
+        <li><strong>I/O-bound tasks:</strong> Use more threads than cores, since threads spend most time waiting on I/O. A common heuristic: 2x to 4x the core count.</li>
+        <li><strong>Mixed workloads:</strong> Separate into CPU and I/O pools with different sizes.</li>
+      </ul>
+
+      <h2 id="graceful-shutdown">Graceful Shutdown</h2>
+      <p>The destructor must:</p>
+      <ol>
+        <li>Set a stop flag.</li>
+        <li>Notify all workers (so sleeping workers wake up).</li>
+        <li>Join all threads.</li>
+        <li>Optionally: drain remaining tasks, or discard them.</li>
+      </ol>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li>Thread pools reuse threads, avoiding per-task creation overhead.</li>
+        <li>The core: a task queue + condition variable + worker loop.</li>
+        <li><code>submit()</code> returns a <code>std::future</code> for the task's result.</li>
+        <li><code>std::jthread</code> (C++20) provides auto-join and cooperative cancellation.</li>
+        <li>Work stealing improves load balancing for uneven task sizes.</li>
+        <li>Size the pool based on workload type: core count for CPU-bound, more for I/O-bound.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="async.html"><span>Previous</span><span>&#8592; std::async</span></a>
+        <a class="next" href="lock-free.html"><span>Next</span><span>Lock-Free Programming &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    (function(){
+      var svg=document.getElementById('pool-svg'),info=document.getElementById('pool-info'),out=document.getElementById('pool-output');
+      var steps=[
+        {desc:'Thread pool with 3 workers. Task queue empty. All workers sleeping.',queue:[],workers:['sleep','sleep','sleep']},
+        {desc:'Submit tasks A, B, C, D to the queue.',queue:['A','B','C','D'],workers:['sleep','sleep','sleep']},
+        {desc:'Workers wake up. W1 takes A, W2 takes B, W3 takes C.',queue:['D'],workers:['A','B','C']},
+        {desc:'W2 finishes B, grabs D. W1 and W3 still working.',queue:[],workers:['A','D','C']},
+        {desc:'All tasks done. Workers return to sleep.',queue:[],workers:['sleep','sleep','sleep']}
+      ];
+      var wcol=['#0a8f6a','#2196f3','#f59e0b'];
+      function draw(idx){
+        clearSvg(svg);
+        if(idx<0){svg.appendChild(txt('Click "Step" to see thread pool in action',{x:'260',y:'100','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'14',fill:'var(--ink-muted)'}));info.textContent='';out.textContent='';return;}
+        var s=steps[idx];
+        // Queue
+        svg.appendChild(txt('Task Queue',{x:'100',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+        svg.appendChild(el('rect',{x:'20',y:'30',width:'160',height:'45',rx:'8',fill:'#f5f5f5',stroke:'var(--line)','stroke-width':'1.5'}));
+        if(s.queue.length===0){svg.appendChild(txt('(empty)',{x:'100',y:'58','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#999'}));}
+        else{s.queue.forEach(function(t,i){
+          svg.appendChild(el('rect',{x:''+(30+i*36),y:'38',width:'32',height:'28',rx:'5',fill:'#0a8f6a'}));
+          svg.appendChild(txt(t,{x:''+(46+i*36),y:'57','text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'13',fill:'#fff'}));
+        });}
+        // Workers
+        svg.appendChild(txt('Workers',{x:'370',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+        s.workers.forEach(function(w,i){
+          var bx=250+i*100,by=30;
+          var isActive=w!=='sleep';
+          svg.appendChild(el('rect',{x:''+bx,y:''+by,width:'85',height:'45',rx:'8',fill:isActive?wcol[i]+'22':'#f9f9f9',stroke:wcol[i],'stroke-width':'2'}));
+          svg.appendChild(txt('W'+(i+1),{x:''+(bx+42),y:''+(by+18),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:wcol[i]}));
+          svg.appendChild(txt(w,{x:''+(bx+42),y:''+(by+36),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:isActive?wcol[i]:'#999'}));
+        });
+        // Arrow
+        if(s.queue.length>0||s.workers.some(function(w){return w!=='sleep';})){
+          svg.appendChild(el('line',{x1:'180',y1:'52',x2:'248',y2:'52',stroke:'var(--ink-muted)','stroke-width':'1.5','stroke-dasharray':'4,3'}));
+        }
+        info.textContent=s.desc;out.textContent='Step '+(idx+1)+' of '+steps.length;
+      }
+      draw(-1);var step=0;
+      document.getElementById('pool-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('pool-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+  })();
+  </script>
+</body>
+</html>

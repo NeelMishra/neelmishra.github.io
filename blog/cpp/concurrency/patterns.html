@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Production-ready concurrency patterns in C++: producer-consumer, readers-writers, dining philosophers, barriers, latches, semaphores, and active object.">
+  <title>Concurrency Patterns in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">C++ &middot; Concurrency</a><span>&middot; Part 15 of 15</span></div>
+
+      <h1>Concurrency Patterns</h1>
+      <p class="post-meta">March 2026 &middot; 28 min read</p>
+
+      <h2 id="overview">Battle-Tested Patterns</h2>
+      <p>This final post brings together everything from the series into <strong>production-ready patterns</strong>. These are the recurring designs you will find in real-world concurrent C++ systems.</p>
+
+      <h2 id="producer-consumer">Pattern 1: Producer-Consumer</h2>
+      <p>We covered this in <a href="condition-variables.html">Condition Variables</a>. The canonical pattern uses a bounded queue with two condition variables:</p>
+      <pre><code>template&lt;typename T&gt;
+class Channel {
+    std::queue&lt;T&gt; queue_;
+    size_t capacity_;
+    std::mutex mtx_;
+    std::condition_variable not_full_;
+    std::condition_variable not_empty_;
+    bool closed_ = false;
+
+public:
+    explicit Channel(size_t cap) : capacity_(cap) {}
+
+    bool send(T item) {
+        std::unique_lock lock(mtx_);
+        not_full_.wait(lock, [&amp;]{ return closed_ || queue_.size() &lt; capacity_; });
+        if (closed_) return false;
+        queue_.push(std::move(item));
+        not_empty_.notify_one();
+        return true;
+    }
+
+    std::optional&lt;T&gt; receive() {
+        std::unique_lock lock(mtx_);
+        not_empty_.wait(lock, [&amp;]{ return closed_ || !queue_.empty(); });
+        if (queue_.empty()) return std::nullopt;
+        T item = std::move(queue_.front());
+        queue_.pop();
+        not_full_.notify_one();
+        return item;
+    }
+
+    void close() {
+        std::lock_guard lock(mtx_);
+        closed_ = true;
+        not_full_.notify_all();
+        not_empty_.notify_all();
+    }
+};</code></pre>
+
+      <h2 id="readers-writers">Pattern 2: Readers-Writers</h2>
+      <p>Multiple readers can access data simultaneously, but a writer needs exclusive access. C++17's <code>std::shared_mutex</code> implements this directly:</p>
+
+      <pre><code>class Config {
+    mutable std::shared_mutex mtx_;
+    std::unordered_map&lt;std::string, std::string&gt; data_;
+
+public:
+    std::string get(const std::string&amp; key) const {
+        std::shared_lock lock(mtx_);  // shared (read) access
+        auto it = data_.find(key);
+        return it != data_.end() ? it-&gt;second : "";
+    }
+
+    void set(const std::string&amp; key, std::string value) {
+        std::unique_lock lock(mtx_);  // exclusive (write) access
+        data_[key] = std::move(value);
+    }
+};</code></pre>
+
+      <h2 id="active-object">Pattern 3: Active Object</h2>
+      <p>Encapsulate a thread and its message queue inside an object. All method calls are asynchronous: they post a message to the queue and return a future. The internal thread processes messages sequentially.</p>
+
+      <pre><code>class ActiveObject {
+    std::queue&lt;std::function&lt;void()&gt;&gt; queue_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread thread_;
+
+public:
+    ActiveObject() : thread_([this]{ run(); }) {}
+
+    ~ActiveObject() {
+        {
+            std::lock_guard lock(mtx_);
+            done_ = true;
+        }
+        cv_.notify_one();
+        thread_.join();
+    }
+
+    template&lt;typename F&gt;
+    auto submit(F&amp;&amp; f) -&gt; std::future&lt;decltype(f())&gt; {
+        auto task = std::make_shared&lt;std::packaged_task&lt;decltype(f())()&gt;&gt;(
+            std::forward&lt;F&gt;(f)
+        );
+        auto fut = task-&gt;get_future();
+        {
+            std::lock_guard lock(mtx_);
+            queue_.push([task]{ (*task)(); });
+        }
+        cv_.notify_one();
+        return fut;
+    }
+
+private:
+    void run() {
+        while (true) {
+            std::function&lt;void()&gt; task;
+            {
+                std::unique_lock lock(mtx_);
+                cv_.wait(lock, [&amp;]{ return done_ || !queue_.empty(); });
+                if (done_ &amp;&amp; queue_.empty()) return;
+                task = std::move(queue_.front());
+                queue_.pop();
+            }
+            task();
+        }
+    }
+};</code></pre>
+
+      <h2 id="latch-barrier">Pattern 4: Latches and Barriers (C++20)</h2>
+
+      <h3 id="latch">std::latch</h3>
+      <p>A latch is a single-use countdown. Threads call <code>count_down()</code> to decrement. <code>wait()</code> blocks until the count reaches zero:</p>
+      <pre><code>std::latch done(3);
+
+for (int i = 0; i &lt; 3; ++i) {
+    threads.emplace_back([&amp;done, i]{
+        do_work(i);
+        done.count_down();  // signal completion
+    });
+}
+
+done.wait();  // blocks until all 3 threads have counted down
+// All work is now complete</code></pre>
+
+      <h3 id="barrier">std::barrier</h3>
+      <p>A barrier is reusable. All threads must arrive before any can proceed. The barrier then resets for the next phase:</p>
+      <pre><code>std::barrier sync_point(NUM_THREADS, []{
+    // This completion function runs once after all threads arrive.
+    // Perfect for combining partial results.
+    merge_results();
+});
+
+void worker(int id) {
+    for (auto phase : phases) {
+        compute_phase(id, phase);
+        sync_point.arrive_and_wait();  // synchronize between phases
+    }
+}</code></pre>
+
+      <div class="anim-container" id="barrier-anim">
+        <h4>&#9654; Barrier Synchronization</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">All threads must arrive before the barrier opens. Then it resets for the next phase.</p>
+        <svg id="barrier-svg" width="520" height="180" viewBox="0 0 520 180"></svg>
+        <div id="barrier-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="barrier-step">Step &rarr;</button>
+          <button class="anim-btn" id="barrier-reset">Reset</button>
+          <span class="anim-output" id="barrier-output"></span>
+        </div>
+      </div>
+
+      <h2 id="semaphore">Pattern 5: Counting Semaphore (C++20)</h2>
+      <p>A semaphore maintains a count of available resources. <code>acquire()</code> decrements (blocks if zero). <code>release()</code> increments.</p>
+
+      <pre><code>std::counting_semaphore&lt;3&gt; pool(3);  // 3 permits
+
+void access_resource() {
+    pool.acquire();    // block if all 3 permits are taken
+    use_resource();
+    pool.release();    // return permit
+}
+
+// binary_semaphore is a counting_semaphore&lt;1&gt;
+std::binary_semaphore signal(0);  // starts empty
+// Thread A: signal.release();     // post
+// Thread B: signal.acquire();     // wait for post</code></pre>
+
+      <h2 id="dining-philosophers">Pattern 6: Dining Philosophers</h2>
+      <p>The classic concurrency puzzle: five philosophers sit around a table; each needs two forks to eat. Naive solutions deadlock. Use <code>std::scoped_lock</code> to prevent it:</p>
+
+      <pre><code>std::array&lt;std::mutex, 5&gt; forks;
+
+void philosopher(int id) {
+    int left = id;
+    int right = (id + 1) % 5;
+
+    while (true) {
+        think(id);
+
+        // scoped_lock acquires both forks deadlock-free
+        std::scoped_lock lock(forks[left], forks[right]);
+        eat(id);
+    }   // both forks released
+}</code></pre>
+
+      <h2 id="monitor">Pattern 7: Monitor</h2>
+      <p>A monitor bundles data with its synchronization. Every public method locks the mutex:</p>
+
+      <pre><code>class MonitorStack {
+    std::stack&lt;int&gt; data_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+
+public:
+    void push(int val) {
+        std::lock_guard lock(mtx_);
+        data_.push(val);
+        cv_.notify_one();
+    }
+
+    int pop() {
+        std::unique_lock lock(mtx_);
+        cv_.wait(lock, [&amp;]{ return !data_.empty(); });
+        int val = data_.top();
+        data_.pop();
+        return val;
+    }
+
+    bool empty() const {
+        std::lock_guard lock(mtx_);
+        return data_.empty();
+    }
+};</code></pre>
+
+      <h2 id="double-buffer">Pattern 8: Double Buffering</h2>
+      <p>Use two buffers: one for writing (back buffer) and one for reading (front buffer). Swap them atomically when the writer is done. Readers never block on the writer:</p>
+
+      <pre><code>class DoubleBuffer {
+    std::array&lt;std::vector&lt;int&gt;, 2&gt; buffers_;
+    std::atomic&lt;int&gt; front_{0};
+
+public:
+    // Writer fills back buffer, then swaps
+    void write(const std::vector&lt;int&gt;&amp; data) {
+        int back = 1 - front_.load(std::memory_order_relaxed);
+        buffers_[back] = data;
+        front_.store(back, std::memory_order_release);
+    }
+
+    // Reader always reads front buffer (no locking!)
+    const std::vector&lt;int&gt;&amp; read() const {
+        int f = front_.load(std::memory_order_acquire);
+        return buffers_[f];
+    }
+};</code></pre>
+
+      <h2 id="pattern-selection">Choosing the Right Pattern</h2>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Scenario</th><th style="text-align:left; padding:0.5em;">Pattern</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Work queue with workers</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Producer-Consumer / Thread Pool</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read-heavy, write-rare data</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Readers-Writers (shared_mutex)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Async method calls on an object</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Active Object</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Phased parallel computation</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Barrier</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Wait for N things to finish</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Latch</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Limit concurrent access</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Counting Semaphore</td></tr>
+          <tr><td style="padding:0.5em;">Real-time data display</td><td style="padding:0.5em;">Double Buffer</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="summary">Series Summary</h2>
+      <p>Over these 15 posts, we have covered the entire C++ concurrency landscape:</p>
+      <ol>
+        <li><strong>Foundations:</strong> Threads, data races, mutexes, deadlocks</li>
+        <li><strong>Coordination:</strong> Condition variables, futures, async</li>
+        <li><strong>Low-level:</strong> Atomics, memory model, lock-free data structures</li>
+        <li><strong>High-level:</strong> Thread pools, parallel algorithms, coroutines</li>
+        <li><strong>Patterns:</strong> Producer-consumer, barriers, semaphores, active object, double buffering</li>
+      </ol>
+
+      <p>The key takeaways:</p>
+      <ul>
+        <li><strong>Minimize shared mutable state.</strong> The less sharing, the fewer bugs.</li>
+        <li><strong>Use RAII for locks.</strong> <code>lock_guard</code>, <code>unique_lock</code>, <code>scoped_lock</code>.</li>
+        <li><strong>Test with ThreadSanitizer.</strong> Compile with <code>-fsanitize=thread</code>.</li>
+        <li><strong>Start simple.</strong> Use mutexes and condition variables. Move to atomics and lock-free only when measurements justify it.</li>
+        <li><strong>Think in terms of patterns,</strong> not individual primitives.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="coroutines.html"><span>Previous</span><span>&#8592; Coroutines</span></a>
+        <a class="next" href="../deep-dives/raii.html"><span>Related</span><span>RAII Deep Dive &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    (function(){
+      var svg=document.getElementById('barrier-svg'),info=document.getElementById('barrier-info'),out=document.getElementById('barrier-output');
+      var threads=['T1','T2','T3'];
+      var colors=['#0a8f6a','#2196f3','#f59e0b'];
+      var steps=[
+        {desc:'Phase 1: All threads computing. Barrier count = 3.',arrived:[false,false,false],phase:1},
+        {desc:'T1 finishes Phase 1, arrives at barrier. Count = 2.',arrived:[true,false,false],phase:1},
+        {desc:'T3 finishes Phase 1, arrives at barrier. Count = 1.',arrived:[true,false,true],phase:1},
+        {desc:'T2 finishes Phase 1, arrives at barrier. Count = 0!',arrived:[true,true,true],phase:1},
+        {desc:'Barrier opens! All threads proceed to Phase 2. Barrier resets.',arrived:[false,false,false],phase:2},
+        {desc:'Phase 2: All threads computing again...',arrived:[false,false,false],phase:2}
+      ];
+      function draw(idx){
+        clearSvg(svg);
+        if(idx<0){svg.appendChild(txt('Click "Step" to see barrier sync',{x:'260',y:'90','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'14',fill:'var(--ink-muted)'}));info.textContent='';out.textContent='';return;}
+        var s=steps[idx];
+        svg.appendChild(txt('Phase '+s.phase,{x:'260',y:'20','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+        // Barrier line
+        var allArrived=s.arrived.every(function(a){return a;});
+        svg.appendChild(el('line',{x1:'260',y1:'35',x2:'260',y2:'135',stroke:allArrived?'#0a8f6a':'#e74c3c','stroke-width':'3','stroke-dasharray':allArrived?'0':'6,3'}));
+        svg.appendChild(txt(allArrived?'OPEN':'BARRIER',{x:'260',y:'150','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:allArrived?'#0a8f6a':'#e74c3c'}));
+        // Threads
+        threads.forEach(function(t,i){
+          var ty=40+i*35;
+          var arrived=s.arrived[i];
+          var bx=arrived?210:60;
+          svg.appendChild(el('rect',{x:''+bx,y:''+ty,width:'80',height:'28',rx:'8',fill:arrived?colors[i]+'33':colors[i],stroke:colors[i],'stroke-width':'2'}));
+          svg.appendChild(txt(t+(arrived?' (arrived)':''),{x:''+(bx+40),y:''+(ty+18),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:arrived?colors[i]:'#fff'}));
+        });
+        info.textContent=s.desc;out.textContent='Step '+(idx+1)+' of '+steps.length;
+      }
+      draw(-1);var step=0;
+      document.getElementById('barrier-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('barrier-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Lock-free programming in C++: lock-free stack, lock-free queue, ABA problem, hazard pointers, epoch-based reclamation, and when lock-free makes sense.">
+  <title>Lock-Free Programming in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">C++ &middot; Concurrency</a><span>&middot; Part 12 of 15</span></div>
+
+      <h1>Lock-Free Programming</h1>
+      <p class="post-meta">March 2026 &middot; 32 min read</p>
+
+      <h2 id="what-is-lock-free">What Does "Lock-Free" Mean?</h2>
+      <p>A data structure is <strong>lock-free</strong> if at least one thread can always make progress, regardless of what other threads are doing (even if they are suspended or crashed). This is stronger than "does not use mutexes." A compare-and-swap retry loop is lock-free because even if one thread's CAS fails (another thread succeeded), the system as a whole makes progress.</p>
+
+      <p>The progression of guarantees:</p>
+      <ul>
+        <li><strong>Blocking</strong> (mutex-based): A thread holding a lock can prevent all others from progressing.</li>
+        <li><strong>Lock-free:</strong> At least one thread makes progress. Individual threads may starve, but the system never deadlocks.</li>
+        <li><strong>Wait-free:</strong> Every thread makes progress in a bounded number of steps. The strongest guarantee, and the hardest to achieve.</li>
+      </ul>
+
+      <h2 id="lock-free-stack">Lock-Free Stack</h2>
+      <p>The simplest lock-free data structure. The core idea: use CAS on the head pointer.</p>
+
+      <pre><code>template&lt;typename T&gt;
+class LockFreeStack {
+    struct Node {
+        T data;
+        Node* next;
+        Node(T val) : data(std::move(val)), next(nullptr) {}
+    };
+
+    std::atomic&lt;Node*&gt; head_{nullptr};
+
+public:
+    void push(T val) {
+        auto* node = new Node(std::move(val));
+        node-&gt;next = head_.load(std::memory_order_relaxed);
+        // CAS loop: set head to new node if it hasn't changed
+        while (!head_.compare_exchange_weak(
+            node-&gt;next, node,
+            std::memory_order_release,
+            std::memory_order_relaxed)) {
+            // node->next is updated to current head on failure
+        }
+    }
+
+    bool pop(T&amp; result) {
+        Node* old_head = head_.load(std::memory_order_acquire);
+        while (old_head &amp;&amp;
+               !head_.compare_exchange_weak(
+                   old_head, old_head-&gt;next,
+                   std::memory_order_acq_rel,
+                   std::memory_order_acquire)) {
+            // old_head updated to current head on failure
+        }
+        if (!old_head) return false;
+        result = std::move(old_head-&gt;data);
+        // NOTE: When do we delete old_head? This is the hard part!
+        delete old_head;  // DANGEROUS: another thread might be reading it
+        return true;
+    }
+};</code></pre>
+
+      <div class="anim-container" id="lfstack-anim">
+        <h4>&#9654; Lock-Free Stack: CAS Push</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch a new node get pushed using compare-and-swap on the head pointer.</p>
+        <svg id="lfstack-svg" width="520" height="180" viewBox="0 0 520 180"></svg>
+        <div id="lfstack-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="lfstack-step">Step &rarr;</button>
+          <button class="anim-btn" id="lfstack-reset">Reset</button>
+          <span class="anim-output" id="lfstack-output"></span>
+        </div>
+      </div>
+
+      <h2 id="aba-problem">The ABA Problem</h2>
+      <p>The ABA problem is the most notorious pitfall in lock-free programming. Thread 1 reads head = A, gets preempted. Thread 2 pops A, pops B, pushes A back (possibly a different allocation at the same address). Thread 1 resumes, sees head is still A, and CAS succeeds. But the stack state has completely changed: B is gone, and A's next pointer might be stale.</p>
+
+      <pre><code>// The sequence:
+// Stack: A → B → C
+// Thread 1: old_head = A (preempted)
+// Thread 2: pop A, pop B, push A back
+// Stack: A → C (B is gone!)
+// Thread 1: CAS(head, A, A->next=B)  ← B is GONE! Corrupted!</code></pre>
+
+      <div class="callout">
+        <strong>ABA is not a theoretical concern.</strong> It causes real crashes in production systems. Solutions include tagged pointers (version counters), hazard pointers, and epoch-based reclamation.
+      </div>
+
+      <h3 id="tagged-pointers">Solution: Tagged Pointers</h3>
+      <p>Add a version counter to the pointer. CAS now checks both the pointer and the counter. Even if the pointer value is the same (ABA), the counter will differ:</p>
+
+      <pre><code>struct TaggedPtr {
+    Node* ptr;
+    uintptr_t tag;  // version counter
+};
+
+std::atomic&lt;TaggedPtr&gt; head_{nullptr, 0};
+
+// Push: increment tag with every modification
+TaggedPtr old = head_.load();
+TaggedPtr new_val = {new_node, old.tag + 1};
+while (!head_.compare_exchange_weak(old, new_val)) {
+    new_node-&gt;next = old.ptr;
+    new_val = {new_node, old.tag + 1};
+}</code></pre>
+
+      <h3 id="hazard-pointers">Solution: Hazard Pointers</h3>
+      <p>Each thread publishes the pointers it is currently using in a shared <em>hazard pointer list</em>. Before freeing a node, check if any thread has published it as hazardous. If so, defer the free. This is a general reclamation strategy for lock-free data structures.</p>
+
+      <h3 id="epoch-based">Solution: Epoch-Based Reclamation</h3>
+      <p>Maintain a global epoch counter. Each thread declares which epoch it is in. Nodes removed during epoch <em>e</em> can safely be freed once all threads have advanced past epoch <em>e</em>. Simpler than hazard pointers, used in many production systems (RCU in Linux kernel is a variant).</p>
+
+      <h2 id="lock-free-queue">Lock-Free Queue (Michael-Scott)</h2>
+      <p>The Michael-Scott queue uses two atomic pointers (head and tail) and a sentinel node. Enqueue CAS-es on the tail, dequeue CAS-es on the head:</p>
+
+      <pre><code>template&lt;typename T&gt;
+class MichaelScottQueue {
+    struct Node {
+        T data;
+        std::atomic&lt;Node*&gt; next{nullptr};
+    };
+
+    std::atomic&lt;Node*&gt; head_;
+    std::atomic&lt;Node*&gt; tail_;
+
+public:
+    MichaelScottQueue() {
+        auto* sentinel = new Node{T{}, nullptr};
+        head_.store(sentinel);
+        tail_.store(sentinel);
+    }
+
+    void enqueue(T val) {
+        auto* node = new Node{std::move(val), nullptr};
+        while (true) {
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = tail-&gt;next.load(std::memory_order_acquire);
+            if (next == nullptr) {
+                if (tail-&gt;next.compare_exchange_weak(
+                        next, node, std::memory_order_release)) {
+                    tail_.compare_exchange_strong(
+                        tail, node, std::memory_order_release);
+                    return;
+                }
+            } else {
+                // Tail is lagging, help advance it
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release);
+            }
+        }
+    }
+
+    bool dequeue(T&amp; result) {
+        while (true) {
+            Node* head = head_.load(std::memory_order_acquire);
+            Node* tail = tail_.load(std::memory_order_acquire);
+            Node* next = head-&gt;next.load(std::memory_order_acquire);
+            if (head == tail) {
+                if (!next) return false;  // empty queue
+                tail_.compare_exchange_weak(
+                    tail, next, std::memory_order_release);
+            } else {
+                result = next-&gt;data;
+                if (head_.compare_exchange_weak(
+                        head, next, std::memory_order_acq_rel)) {
+                    delete head;  // reclaim sentinel
+                    return true;
+                }
+            }
+        }
+    }
+};</code></pre>
+
+      <h2 id="when-lock-free">When to Use Lock-Free</h2>
+      <ul>
+        <li><strong>Use lock-free when:</strong> You need guaranteed progress (no deadlocks), real-time latency requirements, or extremely high throughput on simple data structures.</li>
+        <li><strong>Avoid lock-free when:</strong> A mutex-based solution is simpler and performs well enough. Lock-free code is hard to write, hard to verify, and hard to debug. The complexity is rarely worth it.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Herb Sutter's advice:</strong> "Lock-free programming is like juggling razor blades." Only use it when the performance benefit is measured and significant.
+      </div>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><strong>Lock-free</strong> guarantees system-wide progress. <strong>Wait-free</strong> guarantees per-thread progress.</li>
+        <li>CAS (compare-and-swap) is the fundamental building block.</li>
+        <li>The <strong>ABA problem</strong> can corrupt lock-free data structures. Use tagged pointers, hazard pointers, or epoch-based reclamation.</li>
+        <li>Lock-free stacks and queues are well-studied. Implementing them correctly requires extreme care.</li>
+        <li>Prefer mutex-based designs unless you have measured a need for lock-free performance.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="thread-pool.html"><span>Previous</span><span>&#8592; Thread Pools</span></a>
+        <a class="next" href="parallel-algorithms.html"><span>Next</span><span>Parallel Algorithms &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    (function(){
+      var svg=document.getElementById('lfstack-svg'),info=document.getElementById('lfstack-info'),out=document.getElementById('lfstack-output');
+      var steps=[
+        {desc:'Stack: head → [B] → [C] → null. Push a new node [A].',head:'B',nodes:['B','C'],newN:'A',phase:'init'},
+        {desc:'Create node A. Set A.next = head (B).',head:'B',nodes:['B','C'],newN:'A',phase:'setNext'},
+        {desc:'CAS: if head is still B, set head = A. SUCCESS!',head:'A',nodes:['A','B','C'],newN:null,phase:'success'}
+      ];
+      function draw(idx){
+        clearSvg(svg);
+        if(idx<0){svg.appendChild(txt('Click "Step" to see lock-free push',{x:'260',y:'90','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'14',fill:'var(--ink-muted)'}));info.textContent='';out.textContent='';return;}
+        var s=steps[idx];
+        // head pointer
+        svg.appendChild(txt('head',{x:'40',y:'55','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+        // Stack nodes
+        s.nodes.forEach(function(n,i){
+          var nx=100+i*110,ny=40;
+          var isNew=n===s.newN||n==='A';
+          svg.appendChild(el('rect',{x:''+nx,y:''+ny,width:'80',height:'40',rx:'8',fill:isNew?'#0a8f6a':'#fff',stroke:isNew?'#078a5e':'var(--line)','stroke-width':'2'}));
+          svg.appendChild(txt(n,{x:''+(nx+40),y:''+(ny+25),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'16',fill:isNew?'#fff':'var(--ink)'}));
+          if(i<s.nodes.length-1){
+            svg.appendChild(el('line',{x1:''+(nx+80),y1:'60',x2:''+(nx+110),y2:'60',stroke:'#999','stroke-width':'1.5'}));
+          }
+        });
+        // Arrow from head
+        svg.appendChild(el('line',{x1:'60',y1:'50',x2:'98',y2:'60',stroke:s.head==='A'?'#0a8f6a':'#333','stroke-width':'2'}));
+        // New node (floating)
+        if(s.newN&&s.phase!=='success'){
+          svg.appendChild(el('rect',{x:'100',y:'110',width:'80',height:'40',rx:'8',fill:'#0a8f6a',stroke:'#078a5e','stroke-width':'2.5'}));
+          svg.appendChild(txt(s.newN,{x:'140',y:'135','text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'16',fill:'#fff'}));
+          if(s.phase==='setNext'){
+            svg.appendChild(el('line',{x1:'180',y1:'130',x2:'100',y2:'65',stroke:'#f59e0b','stroke-width':'2','stroke-dasharray':'5,3'}));
+            svg.appendChild(txt('next = B',{x:'200',y:'100','font-family':'Consolas,monospace','font-size':'10',fill:'#f59e0b'}));
+          }
+        }
+        info.textContent=s.desc;out.textContent='Step '+(idx+1)+' of '+steps.length;
+      }
+      draw(-1);var step=0;
+      document.getElementById('lfstack-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('lfstack-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+  })();
+  </script>
+</body>
+</html>

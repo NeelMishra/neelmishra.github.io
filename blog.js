@@ -21,7 +21,28 @@ var BLOG_TREE = [
         label: 'Deep Dives',
         children: [
           { title: 'RAII', file: 'cpp/deep-dives/raii.html', links: ['cpp/stl/smart-pointers.html', 'cpp/deep-dives/operator-overloading.html'] },
-          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html'] }
+          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html', 'cpp/concurrency/index.html'] }
+        ]
+      },
+      {
+        name: 'concurrency',
+        label: 'Concurrency',
+        children: [
+          { title: 'Overview', file: 'cpp/concurrency/index.html', links: ['cpp/deep-dives/operator-overloading.html', 'cpp/concurrency/threads.html'] },
+          { title: 'Threads', file: 'cpp/concurrency/threads.html', links: ['cpp/concurrency/index.html', 'cpp/concurrency/sharing-data.html'] },
+          { title: 'Sharing Data', file: 'cpp/concurrency/sharing-data.html', links: ['cpp/concurrency/threads.html', 'cpp/concurrency/mutexes.html'] },
+          { title: 'Mutexes & Locks', file: 'cpp/concurrency/mutexes.html', links: ['cpp/concurrency/sharing-data.html', 'cpp/concurrency/deadlocks.html'] },
+          { title: 'Deadlocks & Hazards', file: 'cpp/concurrency/deadlocks.html', links: ['cpp/concurrency/mutexes.html', 'cpp/concurrency/condition-variables.html'] },
+          { title: 'Condition Variables', file: 'cpp/concurrency/condition-variables.html', links: ['cpp/concurrency/deadlocks.html', 'cpp/concurrency/atomics.html'] },
+          { title: 'Atomic Operations', file: 'cpp/concurrency/atomics.html', links: ['cpp/concurrency/condition-variables.html', 'cpp/concurrency/memory-model.html'] },
+          { title: 'Memory Model', file: 'cpp/concurrency/memory-model.html', links: ['cpp/concurrency/atomics.html', 'cpp/concurrency/futures-promises.html'] },
+          { title: 'Futures & Promises', file: 'cpp/concurrency/futures-promises.html', links: ['cpp/concurrency/memory-model.html', 'cpp/concurrency/async.html'] },
+          { title: 'std::async', file: 'cpp/concurrency/async.html', links: ['cpp/concurrency/futures-promises.html', 'cpp/concurrency/thread-pool.html'] },
+          { title: 'Thread Pools', file: 'cpp/concurrency/thread-pool.html', links: ['cpp/concurrency/async.html', 'cpp/concurrency/lock-free.html'] },
+          { title: 'Lock-Free Programming', file: 'cpp/concurrency/lock-free.html', links: ['cpp/concurrency/thread-pool.html', 'cpp/concurrency/parallel-algorithms.html'] },
+          { title: 'Parallel Algorithms', file: 'cpp/concurrency/parallel-algorithms.html', links: ['cpp/concurrency/lock-free.html', 'cpp/concurrency/coroutines.html'] },
+          { title: 'Coroutines', file: 'cpp/concurrency/coroutines.html', links: ['cpp/concurrency/parallel-algorithms.html', 'cpp/concurrency/patterns.html'] },
+          { title: 'Concurrency Patterns', file: 'cpp/concurrency/patterns.html', links: ['cpp/concurrency/coroutines.html'] }
         ]
       }
     ]
@@ -204,6 +225,23 @@ var BLOG_TREE = [
           { title: 'Why Logarithms Appear', file: 'dsa/complexity/logarithmic.html', links: ['dsa/complexity/space.html', 'dsa/complexity/sorting.html'] },
           { title: 'Sorting Lower Bounds', file: 'dsa/complexity/sorting.html', links: ['dsa/complexity/logarithmic.html', 'dsa/complexity/patterns.html'] },
           { title: 'Complexity Patterns', file: 'dsa/complexity/patterns.html', links: ['dsa/complexity/sorting.html'] }
+        ]
+      },
+      {
+        name: 'bit-manipulation',
+        label: 'Bit Manipulation',
+        children: [
+          { title: 'Overview', file: 'dsa/bit-manipulation/index.html', links: ['dsa/complexity/patterns.html', 'dsa/bit-manipulation/binary-representation.html'] },
+          { title: 'Binary Representation', file: 'dsa/bit-manipulation/binary-representation.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/basic-operations.html'] },
+          { title: 'Bitwise Operators', file: 'dsa/bit-manipulation/basic-operations.html', links: ['dsa/bit-manipulation/binary-representation.html', 'dsa/bit-manipulation/common-tricks.html'] },
+          { title: 'Essential Tricks', file: 'dsa/bit-manipulation/common-tricks.html', links: ['dsa/bit-manipulation/basic-operations.html', 'dsa/bit-manipulation/bit-masks.html'] },
+          { title: 'Bit Masks', file: 'dsa/bit-manipulation/bit-masks.html', links: ['dsa/bit-manipulation/common-tricks.html', 'dsa/bit-manipulation/counting-bits.html'] },
+          { title: 'Counting Bits', file: 'dsa/bit-manipulation/counting-bits.html', links: ['dsa/bit-manipulation/bit-masks.html', 'dsa/bit-manipulation/power-of-two.html'] },
+          { title: 'Powers of Two', file: 'dsa/bit-manipulation/power-of-two.html', links: ['dsa/bit-manipulation/counting-bits.html', 'dsa/bit-manipulation/xor-patterns.html'] },
+          { title: 'XOR Patterns', file: 'dsa/bit-manipulation/xor-patterns.html', links: ['dsa/bit-manipulation/power-of-two.html', 'dsa/bit-manipulation/bit-shifting.html'] },
+          { title: 'Bit Shifting', file: 'dsa/bit-manipulation/bit-shifting.html', links: ['dsa/bit-manipulation/xor-patterns.html', 'dsa/bit-manipulation/bitwise-dp.html'] },
+          { title: 'Bitmask DP', file: 'dsa/bit-manipulation/bitwise-dp.html', links: ['dsa/bit-manipulation/bit-shifting.html', 'dsa/bit-manipulation/interview-patterns.html'] },
+          { title: 'Interview Patterns', file: 'dsa/bit-manipulation/interview-patterns.html', links: ['dsa/bit-manipulation/bitwise-dp.html'] }
         ]
       }
     ]
