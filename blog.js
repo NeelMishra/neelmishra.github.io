@@ -54,15 +54,14 @@ var BLOG_TREE = [
             name: 'heap',
             label: 'Binary Heaps',
             children: [
-              { title: 'Binary Heaps & Priority Queues', file: 'dsa/trees/heap/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/segment-tree/index.html'] }
+              { title: 'Binary Heaps & Priority Queues', file: 'dsa/trees/heap/index.html', links: ['dsa/trees/avl/index.html', 'dsa/trees/segment-tree/intro.html'] }
             ]
           },
           {
             name: 'segment-tree',
             label: 'Segment Trees',
             children: [
-              { title: 'Overview', file: 'dsa/trees/segment-tree/index.html', links: ['dsa/trees/heap/index.html', 'dsa/trees/segment-tree/intro.html'] },
-              { title: 'Introduction', file: 'dsa/trees/segment-tree/intro.html', links: ['dsa/trees/segment-tree/index.html', 'dsa/trees/segment-tree/build-query.html'] },
+              { title: 'Introduction', file: 'dsa/trees/segment-tree/intro.html', links: ['dsa/trees/heap/index.html', 'dsa/trees/segment-tree/build-query.html'] },
               { title: 'Building & Querying', file: 'dsa/trees/segment-tree/build-query.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/segment-tree/updates.html'] },
               { title: 'Updates', file: 'dsa/trees/segment-tree/updates.html', links: ['dsa/trees/segment-tree/build-query.html', 'dsa/trees/segment-tree/lazy.html'] },
               { title: 'Lazy Propagation', file: 'dsa/trees/segment-tree/lazy.html', links: ['dsa/trees/segment-tree/updates.html', 'dsa/trees/segment-tree/patterns.html'] },
@@ -104,7 +103,7 @@ var BLOG_TREE = [
             children: [
               { title: 'Fundamentals', file: 'dsa/arrays/prefix-sum/index.html', links: ['dsa/arrays/prefix-sum/patterns.html'] },
               { title: 'Patterns', file: 'dsa/arrays/prefix-sum/patterns.html', links: ['dsa/arrays/prefix-sum/index.html', 'dsa/arrays/prefix-sum/advanced.html'] },
-              { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/index.html'] }
+              { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/intro.html'] }
             ]
           }
         ]
