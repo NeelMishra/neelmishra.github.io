@@ -142,6 +142,18 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'lld',
+    label: 'Low Level Design',
+    children: [
+      { title: 'Introduction', file: 'lld/intro.html', links: ['lld/design-patterns.html'] },
+      { title: 'Design Patterns', file: 'lld/design-patterns.html', links: ['lld/intro.html', 'lld/parking-lot.html'] },
+      { title: 'Design: Parking Lot', file: 'lld/parking-lot.html', links: ['lld/design-patterns.html', 'lld/elevator.html'] },
+      { title: 'Design: Elevator System', file: 'lld/elevator.html', links: ['lld/parking-lot.html', 'lld/splitwise.html'] },
+      { title: 'Design: Splitwise', file: 'lld/splitwise.html', links: ['lld/elevator.html', 'lld/patterns.html'] },
+      { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html'] }
+    ]
   }
 ];
 
