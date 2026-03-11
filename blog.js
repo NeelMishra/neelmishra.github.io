@@ -119,7 +119,25 @@ var BLOG_TREE = [
               { title: 'The Predecessor Problem', file: 'dsa/trees/veb-tree/intro.html', links: ['dsa/trees/veb-tree/index.html', 'dsa/trees/veb-tree/structure.html'] },
               { title: 'The Recursive Structure', file: 'dsa/trees/veb-tree/structure.html', links: ['dsa/trees/veb-tree/intro.html', 'dsa/trees/veb-tree/operations.html'] },
               { title: 'Operations', file: 'dsa/trees/veb-tree/operations.html', links: ['dsa/trees/veb-tree/structure.html', 'dsa/trees/veb-tree/patterns.html'] },
-              { title: 'Analysis & Patterns', file: 'dsa/trees/veb-tree/patterns.html', links: ['dsa/trees/veb-tree/operations.html'] }
+              { title: 'Analysis & Patterns', file: 'dsa/trees/veb-tree/patterns.html', links: ['dsa/trees/veb-tree/operations.html', 'dsa/trees/b-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'b-tree',
+            label: 'B-Trees',
+            children: [
+              { title: 'B-Trees Overview', file: 'dsa/trees/b-tree/index.html', links: ['dsa/trees/veb-tree/patterns.html', 'dsa/trees/b-tree/operations.html'] },
+              { title: 'Operations', file: 'dsa/trees/b-tree/operations.html', links: ['dsa/trees/b-tree/index.html', 'dsa/trees/b-tree/patterns.html'] },
+              { title: 'Patterns & Analysis', file: 'dsa/trees/b-tree/patterns.html', links: ['dsa/trees/b-tree/operations.html', 'dsa/trees/b-plus-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'b-plus-tree',
+            label: 'B+ Trees',
+            children: [
+              { title: 'B+ Trees Overview', file: 'dsa/trees/b-plus-tree/index.html', links: ['dsa/trees/b-tree/patterns.html', 'dsa/trees/b-plus-tree/operations.html'] },
+              { title: 'Operations', file: 'dsa/trees/b-plus-tree/operations.html', links: ['dsa/trees/b-plus-tree/index.html', 'dsa/trees/b-plus-tree/patterns.html'] },
+              { title: 'Patterns & Real-World', file: 'dsa/trees/b-plus-tree/patterns.html', links: ['dsa/trees/b-plus-tree/operations.html'] }
             ]
           }
         ]
