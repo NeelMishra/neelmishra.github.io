@@ -137,7 +137,17 @@ var BLOG_TREE = [
             children: [
               { title: 'B+ Trees Overview', file: 'dsa/trees/b-plus-tree/index.html', links: ['dsa/trees/b-tree/patterns.html', 'dsa/trees/b-plus-tree/operations.html'] },
               { title: 'Operations', file: 'dsa/trees/b-plus-tree/operations.html', links: ['dsa/trees/b-plus-tree/index.html', 'dsa/trees/b-plus-tree/patterns.html'] },
-              { title: 'Patterns & Real-World', file: 'dsa/trees/b-plus-tree/patterns.html', links: ['dsa/trees/b-plus-tree/operations.html'] }
+              { title: 'Patterns & Real-World', file: 'dsa/trees/b-plus-tree/patterns.html', links: ['dsa/trees/b-plus-tree/operations.html', 'dsa/trees/trie/index.html'] }
+            ]
+          },
+          {
+            name: 'trie',
+            label: 'Tries',
+            children: [
+              { title: 'Tries Overview', file: 'dsa/trees/trie/index.html', links: ['dsa/trees/b-plus-tree/patterns.html', 'dsa/trees/trie/operations.html'] },
+              { title: 'Operations', file: 'dsa/trees/trie/operations.html', links: ['dsa/trees/trie/index.html', 'dsa/trees/trie/variants.html'] },
+              { title: 'Variants', file: 'dsa/trees/trie/variants.html', links: ['dsa/trees/trie/operations.html', 'dsa/trees/trie/patterns.html'] },
+              { title: 'Patterns & Interview', file: 'dsa/trees/trie/patterns.html', links: ['dsa/trees/trie/variants.html'] }
             ]
           }
         ]
