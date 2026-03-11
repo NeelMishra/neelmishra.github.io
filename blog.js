@@ -65,7 +65,18 @@ var BLOG_TREE = [
               { title: 'Building & Querying', file: 'dsa/trees/segment-tree/build-query.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/segment-tree/updates.html'] },
               { title: 'Updates', file: 'dsa/trees/segment-tree/updates.html', links: ['dsa/trees/segment-tree/build-query.html', 'dsa/trees/segment-tree/lazy.html'] },
               { title: 'Lazy Propagation', file: 'dsa/trees/segment-tree/lazy.html', links: ['dsa/trees/segment-tree/updates.html', 'dsa/trees/segment-tree/patterns.html'] },
-              { title: 'Patterns & Practice', file: 'dsa/trees/segment-tree/patterns.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/algorithms/index.html'] }
+              { title: 'Patterns & Practice', file: 'dsa/trees/segment-tree/patterns.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/fenwick-tree/intro.html'] }
+            ]
+          },
+          {
+            name: 'fenwick-tree',
+            label: 'Fenwick Trees',
+            children: [
+              { title: 'Introduction', file: 'dsa/trees/fenwick-tree/intro.html', links: ['dsa/trees/segment-tree/patterns.html', 'dsa/trees/fenwick-tree/structure.html'] },
+              { title: 'Structure & lowbit', file: 'dsa/trees/fenwick-tree/structure.html', links: ['dsa/trees/fenwick-tree/intro.html', 'dsa/trees/fenwick-tree/point-query.html'] },
+              { title: 'Point Updates & Queries', file: 'dsa/trees/fenwick-tree/point-query.html', links: ['dsa/trees/fenwick-tree/structure.html', 'dsa/trees/fenwick-tree/range-operations.html'] },
+              { title: 'Range Operations', file: 'dsa/trees/fenwick-tree/range-operations.html', links: ['dsa/trees/fenwick-tree/point-query.html', 'dsa/trees/fenwick-tree/patterns.html'] },
+              { title: 'Patterns & Practice', file: 'dsa/trees/fenwick-tree/patterns.html', links: ['dsa/trees/fenwick-tree/range-operations.html', 'dsa/trees/algorithms/index.html'] }
             ]
           },
           {
