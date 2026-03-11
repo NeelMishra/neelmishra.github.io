@@ -147,7 +147,17 @@ var BLOG_TREE = [
               { title: 'Tries Overview', file: 'dsa/trees/trie/index.html', links: ['dsa/trees/b-plus-tree/patterns.html', 'dsa/trees/trie/operations.html'] },
               { title: 'Operations', file: 'dsa/trees/trie/operations.html', links: ['dsa/trees/trie/index.html', 'dsa/trees/trie/variants.html'] },
               { title: 'Variants', file: 'dsa/trees/trie/variants.html', links: ['dsa/trees/trie/operations.html', 'dsa/trees/trie/patterns.html'] },
-              { title: 'Patterns & Interview', file: 'dsa/trees/trie/patterns.html', links: ['dsa/trees/trie/variants.html'] }
+              { title: 'Patterns & Interview', file: 'dsa/trees/trie/patterns.html', links: ['dsa/trees/trie/variants.html', 'dsa/trees/red-black/index.html'] }
+            ]
+          },
+          {
+            name: 'red-black',
+            label: 'Red-Black Trees',
+            children: [
+              { title: 'Properties & Intuition', file: 'dsa/trees/red-black/index.html', links: ['dsa/trees/trie/patterns.html', 'dsa/trees/red-black/insertion.html'] },
+              { title: 'Insertion', file: 'dsa/trees/red-black/insertion.html', links: ['dsa/trees/red-black/index.html', 'dsa/trees/red-black/deletion.html'] },
+              { title: 'Deletion', file: 'dsa/trees/red-black/deletion.html', links: ['dsa/trees/red-black/insertion.html', 'dsa/trees/red-black/patterns.html'] },
+              { title: 'Analysis & Patterns', file: 'dsa/trees/red-black/patterns.html', links: ['dsa/trees/red-black/deletion.html'] }
             ]
           }
         ]
