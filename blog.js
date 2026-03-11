@@ -61,7 +61,12 @@ var BLOG_TREE = [
             name: 'segment-tree',
             label: 'Segment Trees',
             children: [
-              { title: 'Segment Trees', file: 'dsa/trees/segment-tree/index.html', links: ['dsa/trees/heap/index.html', 'dsa/trees/algorithms/index.html'] }
+              { title: 'Overview', file: 'dsa/trees/segment-tree/index.html', links: ['dsa/trees/heap/index.html', 'dsa/trees/segment-tree/intro.html'] },
+              { title: 'Introduction', file: 'dsa/trees/segment-tree/intro.html', links: ['dsa/trees/segment-tree/index.html', 'dsa/trees/segment-tree/build-query.html'] },
+              { title: 'Building & Querying', file: 'dsa/trees/segment-tree/build-query.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/segment-tree/updates.html'] },
+              { title: 'Updates', file: 'dsa/trees/segment-tree/updates.html', links: ['dsa/trees/segment-tree/build-query.html', 'dsa/trees/segment-tree/lazy.html'] },
+              { title: 'Lazy Propagation', file: 'dsa/trees/segment-tree/lazy.html', links: ['dsa/trees/segment-tree/updates.html', 'dsa/trees/segment-tree/patterns.html'] },
+              { title: 'Patterns & Practice', file: 'dsa/trees/segment-tree/patterns.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/algorithms/index.html'] }
             ]
           },
           {
@@ -72,9 +77,8 @@ var BLOG_TREE = [
               { title: 'Height', file: 'dsa/trees/algorithms/height.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/algorithms/lca.html'] },
               { title: 'LCA', file: 'dsa/trees/algorithms/lca.html', links: ['dsa/trees/algorithms/height.html', 'dsa/trees/algorithms/diameter.html'] },
               { title: 'Diameter', file: 'dsa/trees/algorithms/diameter.html', links: ['dsa/trees/algorithms/lca.html', 'dsa/trees/algorithms/serialize.html'] },
-              { title: 'Serialization', file: 'dsa/trees/algorithms/serialize.html', links: ['dsa/trees/algorithms/diameter.html', 'dsa/trees/algorithms/morris.html'] },
-              { title: 'Morris Traversal', file: 'dsa/trees/algorithms/morris.html', links: ['dsa/trees/algorithms/serialize.html', 'dsa/trees/algorithms/patterns.html'] },
-              { title: 'Interview Patterns', file: 'dsa/trees/algorithms/patterns.html', links: ['dsa/trees/algorithms/morris.html', 'dsa/trees/threaded/intro.html'] }
+              { title: 'Serialization', file: 'dsa/trees/algorithms/serialize.html', links: ['dsa/trees/algorithms/diameter.html', 'dsa/trees/algorithms/patterns.html'] },
+              { title: 'Interview Patterns', file: 'dsa/trees/algorithms/patterns.html', links: ['dsa/trees/algorithms/serialize.html', 'dsa/trees/threaded/intro.html'] }
             ]
           },
           {
@@ -83,8 +87,9 @@ var BLOG_TREE = [
             children: [
               { title: 'Introduction', file: 'dsa/trees/threaded/intro.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/threaded/construction.html'] },
               { title: 'Construction', file: 'dsa/trees/threaded/construction.html', links: ['dsa/trees/threaded/intro.html', 'dsa/trees/threaded/traversal.html'] },
-              { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/threaded/patterns.html'] },
-              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/traversal.html'] }
+              { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/threaded/morris.html'] },
+              { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/patterns.html'] },
+              { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris.html'] }
             ]
           }
         ]
@@ -102,6 +107,22 @@ var BLOG_TREE = [
               { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/index.html'] }
             ]
           }
+        ]
+      },
+      {
+        name: 'complexity',
+        label: 'Time & Space Complexity',
+        children: [
+          { title: 'Overview', file: 'dsa/complexity/index.html', links: ['dsa/complexity/intro.html'] },
+          { title: 'Introduction to Big-O', file: 'dsa/complexity/intro.html', links: ['dsa/complexity/index.html', 'dsa/complexity/asymptotic.html'] },
+          { title: 'Asymptotic Notation', file: 'dsa/complexity/asymptotic.html', links: ['dsa/complexity/intro.html', 'dsa/complexity/common.html'] },
+          { title: 'Common Complexities', file: 'dsa/complexity/common.html', links: ['dsa/complexity/asymptotic.html', 'dsa/complexity/recursion.html'] },
+          { title: 'Recurrence Relations', file: 'dsa/complexity/recursion.html', links: ['dsa/complexity/common.html', 'dsa/complexity/amortized.html'] },
+          { title: 'Amortized Analysis', file: 'dsa/complexity/amortized.html', links: ['dsa/complexity/recursion.html', 'dsa/complexity/space.html'] },
+          { title: 'Space Complexity', file: 'dsa/complexity/space.html', links: ['dsa/complexity/amortized.html', 'dsa/complexity/logarithmic.html'] },
+          { title: 'Why Logarithms Appear', file: 'dsa/complexity/logarithmic.html', links: ['dsa/complexity/space.html', 'dsa/complexity/sorting.html'] },
+          { title: 'Sorting Lower Bounds', file: 'dsa/complexity/sorting.html', links: ['dsa/complexity/logarithmic.html', 'dsa/complexity/patterns.html'] },
+          { title: 'Complexity Patterns', file: 'dsa/complexity/patterns.html', links: ['dsa/complexity/sorting.html'] }
         ]
       }
     ]
