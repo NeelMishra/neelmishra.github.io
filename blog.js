@@ -214,105 +214,125 @@ var BLOG_TREE = [
             name: 'two-pointers',
             label: 'Two Pointers',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/two-pointers/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/two-pointers/index.html', links: ['dsa/arrays/two-pointers/opposite-ends.html'] },
+              { title: 'Opposite-End Pointers', file: 'dsa/arrays/two-pointers/opposite-ends.html', links: ['dsa/arrays/two-pointers/index.html', 'dsa/arrays/two-pointers/same-direction.html'] },
+              { title: 'Same-Direction Pointers', file: 'dsa/arrays/two-pointers/same-direction.html', links: ['dsa/arrays/two-pointers/opposite-ends.html', 'dsa/arrays/two-pointers/patterns.html'] },
+              { title: 'Competition Patterns', file: 'dsa/arrays/two-pointers/patterns.html', links: ['dsa/arrays/two-pointers/same-direction.html'] }
             ]
           },
           {
             name: 'sliding-window',
             label: 'Sliding Window',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/sliding-window/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/sliding-window/index.html', links: ['dsa/arrays/sliding-window/fixed-size.html'] },
+              { title: 'Fixed-Size Window', file: 'dsa/arrays/sliding-window/fixed-size.html', links: ['dsa/arrays/sliding-window/index.html', 'dsa/arrays/sliding-window/variable-size.html'] },
+              { title: 'Variable-Size Window', file: 'dsa/arrays/sliding-window/variable-size.html', links: ['dsa/arrays/sliding-window/fixed-size.html', 'dsa/arrays/sliding-window/patterns.html'] },
+              { title: 'Competition Patterns', file: 'dsa/arrays/sliding-window/patterns.html', links: ['dsa/arrays/sliding-window/variable-size.html'] }
             ]
           },
           {
             name: 'kadanes-algorithm',
             label: 'Kadanes Algorithm',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/kadanes-algorithm/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/kadanes-algorithm/index.html', links: ['dsa/arrays/kadanes-algorithm/variants.html'] },
+              { title: 'Variants', file: 'dsa/arrays/kadanes-algorithm/variants.html', links: ['dsa/arrays/kadanes-algorithm/index.html', 'dsa/arrays/kadanes-algorithm/patterns.html'] },
+              { title: 'Competition Patterns', file: 'dsa/arrays/kadanes-algorithm/patterns.html', links: ['dsa/arrays/kadanes-algorithm/variants.html'] }
             ]
           },
           {
             name: 'binary-search',
             label: 'Binary Search',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/binary-search/index.html' }
+              { title: 'Fundamentals', file: 'dsa/arrays/binary-search/index.html', links: ['dsa/arrays/binary-search/advanced.html'] },
+              { title: 'Advanced', file: 'dsa/arrays/binary-search/advanced.html', links: ['dsa/arrays/binary-search/index.html', 'dsa/arrays/binary-search/patterns.html'] },
+              { title: 'Competition Patterns', file: 'dsa/arrays/binary-search/patterns.html', links: ['dsa/arrays/binary-search/advanced.html'] }
             ]
           },
           {
             name: 'sorting-techniques',
             label: 'Sorting Techniques',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/sorting-techniques/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/sorting-techniques/index.html', links: ['dsa/arrays/sorting-techniques/comparison-sorts.html'] },
+              { title: 'Comparison Sorts', file: 'dsa/arrays/sorting-techniques/comparison-sorts.html', links: ['dsa/arrays/sorting-techniques/index.html', 'dsa/arrays/sorting-techniques/linear-sorts.html'] },
+              { title: 'Linear Time Sorts', file: 'dsa/arrays/sorting-techniques/linear-sorts.html', links: ['dsa/arrays/sorting-techniques/comparison-sorts.html', 'dsa/arrays/sorting-techniques/patterns.html'] },
+              { title: 'Competition Patterns', file: 'dsa/arrays/sorting-techniques/patterns.html', links: ['dsa/arrays/sorting-techniques/linear-sorts.html'] }
             ]
           },
           {
             name: 'merge-intervals',
             label: 'Merge Intervals',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/merge-intervals/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/merge-intervals/index.html', links: ['dsa/arrays/merge-intervals/patterns.html'] },
+              { title: 'Interval Patterns', file: 'dsa/arrays/merge-intervals/patterns.html', links: ['dsa/arrays/merge-intervals/index.html'] }
             ]
           },
           {
             name: 'dutch-national-flag',
             label: 'Dutch National Flag',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/dutch-national-flag/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/dutch-national-flag/index.html', links: ['dsa/arrays/dutch-national-flag/patterns.html'] },
+              { title: 'Patterns', file: 'dsa/arrays/dutch-national-flag/patterns.html', links: ['dsa/arrays/dutch-national-flag/index.html'] }
             ]
           },
           {
             name: 'matrix',
             label: 'Matrix',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/matrix/index.html' }
+              { title: 'Fundamentals', file: 'dsa/arrays/matrix/index.html', links: ['dsa/arrays/matrix/patterns.html'] },
+              { title: 'Matrix Patterns', file: 'dsa/arrays/matrix/patterns.html', links: ['dsa/arrays/matrix/index.html'] }
             ]
           },
           {
             name: 'hashing',
             label: 'Hashing',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/hashing/index.html' }
+              { title: 'Fundamentals', file: 'dsa/arrays/hashing/index.html', links: ['dsa/arrays/hashing/patterns.html'] },
+              { title: 'Hashing Patterns', file: 'dsa/arrays/hashing/patterns.html', links: ['dsa/arrays/hashing/index.html'] }
             ]
           },
           {
             name: 'subarray-problems',
             label: 'Subarray Problems',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/subarray-problems/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/subarray-problems/index.html', links: ['dsa/arrays/subarray-problems/patterns.html'] },
+              { title: 'Subarray Patterns', file: 'dsa/arrays/subarray-problems/patterns.html', links: ['dsa/arrays/subarray-problems/index.html'] }
             ]
           },
           {
             name: 'greedy-on-arrays',
             label: 'Greedy on Arrays',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/greedy-on-arrays/index.html' }
+              { title: 'Overview', file: 'dsa/arrays/greedy-on-arrays/index.html', links: ['dsa/arrays/greedy-on-arrays/patterns.html'] },
+              { title: 'Greedy Patterns', file: 'dsa/arrays/greedy-on-arrays/patterns.html', links: ['dsa/arrays/greedy-on-arrays/index.html'] }
             ]
           },
           {
             name: 'cyclic-sort',
             label: 'Cyclic Sort',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/cyclic-sort/index.html' }
+              { title: 'Fundamentals', file: 'dsa/arrays/cyclic-sort/index.html', links: ['dsa/arrays/cyclic-sort/patterns.html'] },
+              { title: 'Patterns', file: 'dsa/arrays/cyclic-sort/patterns.html', links: ['dsa/arrays/cyclic-sort/index.html'] }
             ]
           },
           {
             name: 'next-permutation',
             label: 'Next Permutation',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/next-permutation/index.html' }
+              { title: 'Next Permutation', file: 'dsa/arrays/next-permutation/index.html' }
             ]
           },
           {
             name: 'stock-problems',
             label: 'Stock Problems',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/stock-problems/index.html' }
+              { title: 'Stock Problems', file: 'dsa/arrays/stock-problems/index.html' }
             ]
           },
           {
             name: 'trapping-rain-water',
             label: 'Trapping Rain Water',
             children: [
-              { title: 'Coming Soon', file: 'dsa/arrays/trapping-rain-water/index.html' }
+              { title: 'Trapping Rain Water', file: 'dsa/arrays/trapping-rain-water/index.html' }
             ]
           }
         ]
