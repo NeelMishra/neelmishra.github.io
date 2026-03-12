@@ -209,6 +209,111 @@ var BLOG_TREE = [
               { title: 'Patterns', file: 'dsa/arrays/prefix-sum/patterns.html', links: ['dsa/arrays/prefix-sum/index.html', 'dsa/arrays/prefix-sum/advanced.html'] },
               { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/intro.html'] }
             ]
+          },
+          {
+            name: 'two-pointers',
+            label: 'Two Pointers',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/two-pointers/index.html' }
+            ]
+          },
+          {
+            name: 'sliding-window',
+            label: 'Sliding Window',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/sliding-window/index.html' }
+            ]
+          },
+          {
+            name: 'kadanes-algorithm',
+            label: 'Kadanes Algorithm',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/kadanes-algorithm/index.html' }
+            ]
+          },
+          {
+            name: 'binary-search',
+            label: 'Binary Search',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/binary-search/index.html' }
+            ]
+          },
+          {
+            name: 'sorting-techniques',
+            label: 'Sorting Techniques',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/sorting-techniques/index.html' }
+            ]
+          },
+          {
+            name: 'merge-intervals',
+            label: 'Merge Intervals',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/merge-intervals/index.html' }
+            ]
+          },
+          {
+            name: 'dutch-national-flag',
+            label: 'Dutch National Flag',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/dutch-national-flag/index.html' }
+            ]
+          },
+          {
+            name: 'matrix',
+            label: 'Matrix',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/matrix/index.html' }
+            ]
+          },
+          {
+            name: 'hashing',
+            label: 'Hashing',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/hashing/index.html' }
+            ]
+          },
+          {
+            name: 'subarray-problems',
+            label: 'Subarray Problems',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/subarray-problems/index.html' }
+            ]
+          },
+          {
+            name: 'greedy-on-arrays',
+            label: 'Greedy on Arrays',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/greedy-on-arrays/index.html' }
+            ]
+          },
+          {
+            name: 'cyclic-sort',
+            label: 'Cyclic Sort',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/cyclic-sort/index.html' }
+            ]
+          },
+          {
+            name: 'next-permutation',
+            label: 'Next Permutation',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/next-permutation/index.html' }
+            ]
+          },
+          {
+            name: 'stock-problems',
+            label: 'Stock Problems',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/stock-problems/index.html' }
+            ]
+          },
+          {
+            name: 'trapping-rain-water',
+            label: 'Trapping Rain Water',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/arrays/trapping-rain-water/index.html' }
+            ]
           }
         ]
       },
@@ -258,6 +363,104 @@ var BLOG_TREE = [
               { title: 'DFS In Depth', file: 'dsa/graphs/traversal/dfs.html', links: ['dsa/graphs/traversal/bfs.html', 'dsa/graphs/traversal/multi-source-bfs.html'] },
               { title: 'Multi-source BFS', file: 'dsa/graphs/traversal/multi-source-bfs.html', links: ['dsa/graphs/traversal/dfs.html', 'dsa/graphs/traversal/dfs-applications.html'] },
               { title: 'DFS Applications', file: 'dsa/graphs/traversal/dfs-applications.html', links: ['dsa/graphs/traversal/multi-source-bfs.html'] }
+            ]
+          },
+          {
+            name: 'cycle-detection',
+            label: 'Cycle Detection',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/cycle-detection/index.html' }
+            ]
+          },
+          {
+            name: 'topological-sort',
+            label: 'Topological Sort',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/topological-sort/index.html' }
+            ]
+          },
+          {
+            name: 'shortest-path',
+            label: 'Shortest Path',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/shortest-path/index.html' }
+            ]
+          },
+          {
+            name: 'dijkstra',
+            label: 'Dijkstra',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/dijkstra/index.html' }
+            ]
+          },
+          {
+            name: 'bellman-ford',
+            label: 'Bellman Ford',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/bellman-ford/index.html' }
+            ]
+          },
+          {
+            name: 'floyd-warshall',
+            label: 'Floyd Warshall',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/floyd-warshall/index.html' }
+            ]
+          },
+          {
+            name: 'disjoint-set-union',
+            label: 'Disjoint Set Union',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/disjoint-set-union/index.html' }
+            ]
+          },
+          {
+            name: 'minimum-spanning-tree',
+            label: 'Minimum Spanning Tree',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/minimum-spanning-tree/index.html' }
+            ]
+          },
+          {
+            name: 'bipartite',
+            label: 'Bipartite',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/bipartite/index.html' }
+            ]
+          },
+          {
+            name: 'strongly-connected-components',
+            label: 'Strongly Connected Components',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/strongly-connected-components/index.html' }
+            ]
+          },
+          {
+            name: 'bridges-articulation-points',
+            label: 'Bridges & Articulation Points',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/bridges-articulation-points/index.html' }
+            ]
+          },
+          {
+            name: 'euler-path',
+            label: 'Euler Path',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/euler-path/index.html' }
+            ]
+          },
+          {
+            name: 'network-flow',
+            label: 'Network Flow',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/network-flow/index.html' }
+            ]
+          },
+          {
+            name: 'graph-coloring',
+            label: 'Graph Coloring',
+            children: [
+              { title: 'Coming Soon', file: 'dsa/graphs/graph-coloring/index.html' }
             ]
           }
         ]
