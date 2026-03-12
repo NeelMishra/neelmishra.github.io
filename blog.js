@@ -244,6 +244,23 @@ var BLOG_TREE = [
           { title: 'Bitmask DP', file: 'dsa/bit-manipulation/bitwise-dp.html', links: ['dsa/bit-manipulation/bit-shifting.html', 'dsa/bit-manipulation/interview-patterns.html'] },
           { title: 'Interview Patterns', file: 'dsa/bit-manipulation/interview-patterns.html', links: ['dsa/bit-manipulation/bitwise-dp.html'] }
         ]
+      },
+      {
+        name: 'graphs',
+        label: 'Graphs',
+        children: [
+          {
+            name: 'traversal',
+            label: 'Traversal',
+            children: [
+              { title: 'Overview', file: 'dsa/graphs/traversal/index.html', links: ['dsa/graphs/traversal/bfs.html'] },
+              { title: 'BFS In Depth', file: 'dsa/graphs/traversal/bfs.html', links: ['dsa/graphs/traversal/index.html', 'dsa/graphs/traversal/dfs.html'] },
+              { title: 'DFS In Depth', file: 'dsa/graphs/traversal/dfs.html', links: ['dsa/graphs/traversal/bfs.html', 'dsa/graphs/traversal/multi-source-bfs.html'] },
+              { title: 'Multi-source BFS', file: 'dsa/graphs/traversal/multi-source-bfs.html', links: ['dsa/graphs/traversal/dfs.html', 'dsa/graphs/traversal/dfs-applications.html'] },
+              { title: 'DFS Applications', file: 'dsa/graphs/traversal/dfs-applications.html', links: ['dsa/graphs/traversal/multi-source-bfs.html'] }
+            ]
+          }
+        ]
       }
     ]
   },
