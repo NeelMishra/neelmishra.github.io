@@ -129,8 +129,9 @@ var BLOG_TREE = [
               { title: 'Introduction', file: 'dsa/trees/threaded/intro.html', links: ['dsa/trees/algorithms/index.html', 'dsa/trees/threaded/construction.html'] },
               { title: 'Construction', file: 'dsa/trees/threaded/construction.html', links: ['dsa/trees/threaded/intro.html', 'dsa/trees/threaded/traversal.html'] },
               { title: 'Traversal', file: 'dsa/trees/threaded/traversal.html', links: ['dsa/trees/threaded/construction.html', 'dsa/trees/threaded/morris.html'] },
-              { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/morris-complexity.html'] },
-              { title: 'Morris Complexity', file: 'dsa/trees/threaded/morris-complexity.html', links: ['dsa/trees/threaded/morris.html', 'dsa/trees/threaded/patterns.html'] },
+              { title: 'Morris Traversal', file: 'dsa/trees/threaded/morris.html', links: ['dsa/trees/threaded/traversal.html', 'dsa/trees/threaded/morris-postorder.html'] },
+              { title: 'Morris Post-order', file: 'dsa/trees/threaded/morris-postorder.html', links: ['dsa/trees/threaded/morris.html', 'dsa/trees/threaded/morris-complexity.html'] },
+              { title: 'Morris Complexity', file: 'dsa/trees/threaded/morris-complexity.html', links: ['dsa/trees/threaded/morris-postorder.html', 'dsa/trees/threaded/patterns.html'] },
               { title: 'Patterns & Practice', file: 'dsa/trees/threaded/patterns.html', links: ['dsa/trees/threaded/morris-complexity.html', 'dsa/trees/veb-tree/index.html'] }
             ]
           },
