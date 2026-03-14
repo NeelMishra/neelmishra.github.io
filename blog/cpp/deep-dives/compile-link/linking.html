@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into C++ linking: symbol tables, external and internal linkage, static and dynamic linking, undefined references, weak symbols, and link-time optimization.">
+  <title>Linking Deep Dive | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="translation-units.html">Compilation &amp; Linking</a>
+      </div>
+
+      <h1>Linking Deep Dive</h1>
+      <p class="post-meta">March 2026 &middot; 20 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="what-the-linker-does">What the Linker Does</h2>
+      <p>In the <a href="translation-units.html">previous article</a>, we traced how a <code>.cpp</code> file becomes an object file (<code>.o</code> / <code>.obj</code>). Each object file contains compiled machine code, but it is <em>incomplete</em>: it references functions and variables that are defined in other translation units. The <strong>linker</strong> is the program that takes all the object files, resolves these cross-references, and produces a final executable (or shared library).</p>
+      <p>The linker is the least understood part of the C++ build pipeline, yet it is the source of some of the most confusing errors programmers encounter: "undefined reference to," "multiple definition of," "symbol not found." Understanding the linker transforms these cryptic messages into immediately diagnosable problems.</p>
+      <p>The linker operates in two fundamental phases: <strong>symbol resolution</strong> (matching every reference to a definition) and <strong>relocation</strong> (patching addresses now that the final layout is known). Everything the linker does serves one of these two purposes.</p>
+
+      <h2 id="symbol-tables">Symbol Tables</h2>
+      <p>Every object file contains a <strong>symbol table</strong>: a list of all symbols (functions and global variables) that the translation unit defines or references. Each entry in the symbol table records:</p>
+      <ul>
+        <li>The symbol's <strong>name</strong> (mangled, in C++; more on this below).</li>
+        <li>Whether the symbol is <strong>defined</strong> (has an address in this object file) or <strong>undefined</strong> (referenced but defined elsewhere).</li>
+        <li>The symbol's <strong>binding</strong>: global (visible to other TUs), local (visible only within this TU), or weak (a special category we discuss later).</li>
+        <li>The <strong>section</strong> the symbol lives in (<code>.text</code> for functions, <code>.data</code> for initialized globals, <code>.bss</code> for uninitialized globals).</li>
+        <li>The symbol's <strong>size</strong> and <strong>type</strong> (function vs. object).</li>
+      </ul>
+      <pre><code># Inspect symbol table with nm:
+$ nm -C main.o
+                 U _GLOBAL_OFFSET_TABLE_
+0000000000000000 T main
+                 U _ZN6Engine3runEv         # undefined: Engine::run()
+                 U _ZN6EngineC1Ev           # undefined: Engine::Engine()
+                 U _ZN6EngineD1Ev           # undefined: Engine::~Engine()
+
+$ nm -C engine.o
+0000000000000000 T _ZN6Engine3runEv         # defined: Engine::run()
+0000000000000030 T _ZN6EngineC1Ev           # defined: Engine::Engine()
+0000000000000050 T _ZN6EngineD1Ev           # defined: Engine::~Engine()</code></pre>
+      <p>In <code>main.o</code>, the symbols for <code>Engine::run()</code>, <code>Engine::Engine()</code>, and <code>Engine::~Engine()</code> are marked <code>U</code> (undefined). In <code>engine.o</code>, they are marked <code>T</code> (defined in the <code>.text</code> section). The linker's job is to match every <code>U</code> with a corresponding <code>T</code> across all object files.</p>
+
+      <h3 id="name-mangling">Name Mangling</h3>
+      <p>C++ supports function overloading, namespaces, templates, and classes, which means the same function name can refer to many different functions. To create unique linker symbols, the compiler <strong>mangles</strong> C++ names into a flat string that encodes the full signature:</p>
+      <pre><code>// C++ source                          // Mangled symbol (Itanium ABI)
+void foo(int)                        // _Z3fooi
+void foo(double)                     // _Z3food
+void foo(int, int)                   // _Z3fooii
+namespace ns { void foo(int); }      // _ZN2ns3fooEi
+class C { void bar(int); };          // _ZN1C3barEi
+template&lt;&gt; void func&lt;int&gt;(int)      // _Z4funcIiEvT_</code></pre>
+      <p>MSVC uses a different mangling scheme, which is why you cannot link GCC-compiled object files with MSVC-compiled ones (among other ABI differences).</p>
+      <p>The <code>nm -C</code> command <strong>demangles</strong> symbols, showing you the original C++ names. The <code>c++filt</code> utility also demangles interactively.</p>
+      <p>When you interface C++ with C, you use <code>extern "C"</code> to disable mangling:</p>
+      <pre><code>extern "C" {
+    void c_function(int x);    // mangled as just "c_function"
+    // Allows C code (or any language using the C ABI) to call this function
+}</code></pre>
+
+      <h2 id="linkage">External vs. Internal Linkage</h2>
+      <p><strong>Linkage</strong> determines whether a symbol is visible to other translation units. There are three kinds:</p>
+
+      <h3>External Linkage</h3>
+      <p>A symbol with external linkage can be seen and referenced by other TUs. By default, functions and non-const global variables have external linkage:</p>
+      <pre><code>// util.cpp
+int global_counter = 0;       // external linkage: visible to all TUs
+void helper() { /* ... */ }   // external linkage
+
+// main.cpp
+extern int global_counter;    // declaration: references the same symbol
+void helper();                // declaration: references the same function</code></pre>
+
+      <h3>Internal Linkage</h3>
+      <p>A symbol with internal linkage is visible only within its own TU. Other TUs cannot see or reference it. You get internal linkage with the <code>static</code> keyword (at namespace scope) or by placing code in an anonymous namespace:</p>
+      <pre><code>// util.cpp
+static int counter = 0;          // internal linkage: only util.cpp can see this
+static void helper() { /* ... */ } // internal linkage
+
+// Equivalent using anonymous namespace:
+namespace {
+    int counter2 = 0;             // internal linkage
+    void helper2() { /* ... */ }  // internal linkage
+}</code></pre>
+      <p>The linker never sees internally-linked symbols from other TUs. This is how you avoid name collisions between TUs: two different TUs can each define a <code>static int counter</code>, and they are completely independent symbols.</p>
+
+      <h3>No Linkage</h3>
+      <p>Local variables (inside functions) have no linkage. They exist only within their scope and have no symbol table entry at all.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> <code>static</code> at namespace scope means "internal linkage" (invisible to other TUs). <code>static</code> inside a class means "class-level, not per-instance." <code>static</code> inside a function means "persists across calls." The keyword is overloaded with three different meanings depending on context.
+      </div>
+
+      <h3 id="const-linkage">Special Case: const and constexpr</h3>
+      <p>In C++, a <code>const</code> global variable has <strong>internal linkage</strong> by default (unlike in C, where it has external linkage). A <code>constexpr</code> variable also has internal linkage. This means each TU that includes a header defining a <code>const</code> global gets its own private copy:</p>
+      <pre><code>// constants.h
+#pragma once
+const int MAX_SIZE = 1024;         // internal linkage in each TU
+constexpr double PI = 3.14159;     // internal linkage in each TU
+inline constexpr int VERSION = 5;  // external linkage (inline permits multiple defs)</code></pre>
+      <p>If you want a <code>const</code> with external linkage (one shared definition across all TUs), you must explicitly say <code>extern const</code>:</p>
+      <pre><code>// constants.h
+extern const int MAX_SIZE;         // declaration (external linkage)
+
+// constants.cpp
+extern const int MAX_SIZE = 1024;  // definition</code></pre>
+
+      <h2 id="symbol-resolution">Symbol Resolution</h2>
+      <p>Symbol resolution is the linker's core task: for every undefined symbol in every object file, find exactly one definition. The linker maintains a global table of all symbols it has seen, and processes object files one by one:</p>
+      <ol>
+        <li>For each object file, scan its symbol table.</li>
+        <li>For each <strong>defined</strong> symbol, add it to the global table. If the symbol is already defined (from another object file), report a "multiple definition" error.</li>
+        <li>For each <strong>undefined</strong> symbol, note that it needs to be resolved.</li>
+        <li>After all object files are processed, check that every undefined symbol has been matched to a definition. If any remain unresolved, report "undefined reference" errors.</li>
+      </ol>
+
+      <h3 id="undefined-reference">The "Undefined Reference" Error Explained</h3>
+      <p>This is the most common linker error. It means the linker found a reference to a symbol but could not find a definition in any of the provided object files or libraries:</p>
+      <pre><code>$ g++ main.o -o app
+/usr/bin/ld: main.o: undefined reference to `Engine::run()'
+collect2: error: ld returned 1 exit status</code></pre>
+      <p>Common causes:</p>
+      <ul>
+        <li><strong>Forgot to compile a source file:</strong> You compiled <code>main.cpp</code> but not <code>engine.cpp</code>. Fix: <code>g++ main.o engine.o -o app</code>.</li>
+        <li><strong>Forgot to link a library:</strong> The function is in a library you did not specify. Fix: add <code>-lname</code> to the linker command.</li>
+        <li><strong>Declaration but no definition:</strong> You declared a function in a header but never wrote the body in any <code>.cpp</code> file.</li>
+        <li><strong>Mismatched signatures:</strong> The declaration and definition have different parameter types, so the mangled names do not match.</li>
+        <li><strong>Missing <code>extern "C"</code>:</strong> C++ code calling a C library without <code>extern "C"</code>, so the compiler mangles the name but the C library has unmangled symbols.</li>
+        <li><strong>Template not instantiated:</strong> A template function's definition is in a <code>.cpp</code> file and was never instantiated for the needed type (we cover this in the <a href="odr.html">ODR article</a>).</li>
+      </ul>
+
+      <h3 id="multiple-definition">The "Multiple Definition" Error</h3>
+      <p>This error means two or more object files define the same externally-linked symbol:</p>
+      <pre><code>$ g++ a.o b.o -o app
+/usr/bin/ld: b.o: multiple definition of `helper()'; a.o: first defined here</code></pre>
+      <p>Common causes:</p>
+      <ul>
+        <li><strong>Function definition in a header:</strong> If a non-inline function is defined in a header, every TU that includes it gets a definition. Fix: make it <code>inline</code>, or move the definition to a <code>.cpp</code> file.</li>
+        <li><strong>Global variable defined in a header:</strong> Fix: use <code>inline</code> (C++17), <code>extern</code> with a separate definition, or use internal linkage (<code>static</code>, anonymous namespace, <code>const</code>).</li>
+        <li><strong>Two source files accidentally defining the same function.</strong></li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The "undefined reference" and "multiple definition" errors are two sides of the same coin. The linker requires <em>exactly one</em> definition for each externally-linked symbol: zero definitions is "undefined reference," two or more is "multiple definition."
+      </div>
+
+      <h2 id="static-linking">Static Linking</h2>
+      <p>A <strong>static library</strong> is simply an archive of object files, bundled together for convenience. On Unix, the tool is <code>ar</code> (archiver), producing <code>.a</code> files. On Windows/MSVC, the tool is <code>lib.exe</code>, producing <code>.lib</code> files.</p>
+      <pre><code># Create a static library from object files:
+ar rcs libengine.a engine.o physics.o renderer.o
+
+# Link against it:
+g++ main.o -L. -lengine -o app
+
+# MSVC equivalent:
+lib /out:engine.lib engine.obj physics.obj renderer.obj
+cl main.obj engine.lib /Fe:app.exe</code></pre>
+      <p>When the linker processes a static library, it does <strong>not</strong> include all object files from the archive. It only pulls in those object files that define symbols that are currently unresolved. This is a critical detail: the linker is <em>selective</em>.</p>
+
+      <h3 id="library-order">Library Ordering Matters</h3>
+      <p>On Unix linkers (GNU ld, gold, lld), the order of libraries on the command line matters. The linker processes inputs left to right. When it encounters a library, it scans for symbols that resolve current unresolved references. If a library is listed <em>before</em> the object file that needs it, the linker cannot go back:</p>
+      <pre><code># This may FAIL:
+g++ -lengine main.o -o app
+# The linker processes libengine.a first, but main.o hasn't been seen yet,
+# so no symbols are unresolved, and no object files are pulled from the library.
+
+# This WORKS:
+g++ main.o -lengine -o app
+# main.o is processed first, creating unresolved references.
+# Then libengine.a is scanned, and the needed object files are pulled in.</code></pre>
+      <p>The rule: <strong>libraries go after the object files that reference them</strong>. For mutual dependencies between libraries, you may need to list a library twice or use linker groups (<code>--start-group</code>, <code>--end-group</code>). The lld linker (used by Clang) is more forgiving and rescans by default.</p>
+
+      <h3 id="static-advantages">Advantages and Disadvantages of Static Linking</h3>
+      <ul>
+        <li><strong>Advantages:</strong> Self-contained executable (no runtime dependencies), no DLL hell, slightly faster startup (no dynamic symbol resolution), all code is available for LTO.</li>
+        <li><strong>Disadvantages:</strong> Larger executable size (each program includes its own copy of the library), no shared memory between processes using the same library, updates require recompiling and redistributing the application.</li>
+      </ul>
+
+      <h2 id="dynamic-linking">Dynamic Linking</h2>
+      <p>A <strong>dynamic library</strong> (shared library) is a compiled binary that is loaded at runtime rather than baked into the executable. On Unix, these are <code>.so</code> (shared object) files. On Windows, they are <code>.dll</code> (Dynamic Link Library) files. On macOS, <code>.dylib</code>.</p>
+      <pre><code># Create a shared library:
+g++ -shared -fPIC -o libengine.so engine.o physics.o renderer.o
+
+# Link against it:
+g++ main.o -L. -lengine -o app
+# At runtime, the dynamic linker (ld-linux.so / dyld / ntdll) loads libengine.so
+
+# MSVC equivalent:
+cl /LD engine.cpp physics.cpp renderer.cpp    # produces engine.dll + engine.lib (import lib)
+cl main.cpp engine.lib /Fe:app.exe</code></pre>
+      <p>The <code>-fPIC</code> flag (Position-Independent Code) is essential for shared libraries on most Unix platforms. It tells the compiler to generate code that works regardless of where in memory the library is loaded, using relative addresses instead of absolute ones.</p>
+
+      <h3 id="dynamic-symbol-resolution">Runtime Symbol Resolution</h3>
+      <p>When you run an executable that depends on shared libraries, the operating system's <strong>dynamic linker</strong> (also called the runtime linker or loader) takes over before your <code>main()</code> runs:</p>
+      <ol>
+        <li>Read the executable's list of required shared libraries (stored in the ELF <code>NEEDED</code> entries).</li>
+        <li>Find each library on the filesystem (using <code>LD_LIBRARY_PATH</code>, <code>/etc/ld.so.conf</code>, rpath, etc.).</li>
+        <li>Map each library into the process's address space.</li>
+        <li>Resolve all undefined symbols against the loaded libraries.</li>
+        <li>Perform relocations (patch addresses).</li>
+        <li>Call library initializers (<code>__attribute__((constructor))</code> functions, C++ global constructors).</li>
+        <li>Finally, call <code>main()</code>.</li>
+      </ol>
+      <pre><code># See what shared libraries an executable needs:
+ldd ./app
+# Output:
+#   libengine.so =&gt; /usr/local/lib/libengine.so (0x7f...)
+#   libstdc++.so.6 =&gt; /usr/lib/x86_64-linux-gnu/libstdc++.so.6 (0x7f...)
+#   libc.so.6 =&gt; /usr/lib/x86_64-linux-gnu/libc.so.6 (0x7f...)</code></pre>
+
+      <h3 id="plt-got">The PLT and GOT: How Dynamic Calls Work</h3>
+      <p>Dynamic linking uses two data structures to resolve function calls efficiently:</p>
+      <ul>
+        <li><strong>GOT (Global Offset Table):</strong> A table in the data segment containing pointers to external symbols. Initially filled with placeholder addresses by the dynamic linker.</li>
+        <li><strong>PLT (Procedure Linkage Table):</strong> A table of small code stubs in the text segment. The first call to an external function goes through the PLT, which triggers the dynamic linker to look up the real address and patch the GOT. Subsequent calls jump directly through the GOT (a fast, single indirect jump).</li>
+      </ul>
+      <p>This mechanism is called <strong>lazy binding</strong>: symbols are resolved on first use, not at load time. It speeds up startup at the cost of a small overhead on the first call. You can force eager binding with <code>LD_BIND_NOW=1</code> or by linking with <code>-z now</code>.</p>
+
+      <h3 id="dynamic-advantages">Advantages and Disadvantages of Dynamic Linking</h3>
+      <ul>
+        <li><strong>Advantages:</strong> Smaller executable size, shared memory (multiple processes share one copy of the library in RAM), library updates without recompiling applications, plugin architectures.</li>
+        <li><strong>Disadvantages:</strong> Runtime dependency management ("DLL hell"), slight performance overhead (indirect calls through PLT/GOT), versioning complexity, harder to deploy (must ship libraries alongside the executable).</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Static linking resolves all symbols at build time and bakes them into the executable. Dynamic linking defers resolution to load time (or even first-call time with lazy binding). The choice affects executable size, deployment complexity, and performance characteristics.
+      </div>
+
+      <h2 id="weak-symbols">Weak Symbols</h2>
+      <p>A <strong>weak symbol</strong> is a symbol that can be overridden by a strong (regular) definition without causing a "multiple definition" error. If no strong definition exists, the weak definition is used. If neither exists, the symbol resolves to zero/null (for weak undefined references).</p>
+      <pre><code>// Default implementation (weak):
+__attribute__((weak)) void on_error(int code) {
+    std::cerr &lt;&lt; "Error: " &lt;&lt; code &lt;&lt; "\n";
+    std::abort();
+}
+
+// User can override with a strong definition:
+void on_error(int code) {
+    // Custom error handler: log and continue
+    log_error(code);
+}</code></pre>
+      <p>Weak symbols are used extensively in the C++ runtime and linker infrastructure:</p>
+      <ul>
+        <li><strong>Inline functions:</strong> When an inline function is defined in a header and included in multiple TUs, each TU emits a copy. These copies are emitted as weak symbols (or COMDAT groups on Windows). The linker keeps one and discards the rest. No "multiple definition" error.</li>
+        <li><strong>Template instantiations:</strong> Same mechanism. Each TU that instantiates <code>std::vector&lt;int&gt;</code> emits a weak copy. The linker deduplicates.</li>
+        <li><strong>Virtual tables:</strong> The vtable for a polymorphic class is emitted as a weak symbol in every TU that needs it (unless the compiler uses the "key function" heuristic).</li>
+        <li><strong>Plugin hooks:</strong> A library can define weak default implementations that applications override with strong definitions.</li>
+      </ul>
+
+      <h3 id="comdat">COMDAT: The Windows/COFF Equivalent</h3>
+      <p>On Windows (COFF object format), the equivalent of weak symbols for inline functions and templates is <strong>COMDAT sections</strong>. Each inline function or template instantiation is placed in its own COMDAT section. The linker is instructed to keep only one copy and discard duplicates. On ELF (Linux), COMDAT groups serve the same purpose.</p>
+
+      <h2 id="relocation">Relocation</h2>
+      <p>After symbol resolution, the linker knows the final address of every symbol. But the machine code in each object file uses <strong>placeholder addresses</strong> (often zero) for external symbols. The linker must patch these placeholders with the real addresses. This process is called <strong>relocation</strong>.</p>
+      <p>Each object file contains a <strong>relocation table</strong> listing every location in the code or data that needs patching:</p>
+      <pre><code># View relocations:
+$ readelf -r main.o
+Relocation section '.rela.text':
+  Offset          Type           Symbol
+  000000000015    R_X86_64_PLT32 _ZN6Engine3runEv - 4
+  000000000020    R_X86_64_PLT32 _ZN6EngineC1Ev - 4
+  000000000028    R_X86_64_PLT32 _ZN6EngineD1Ev - 4</code></pre>
+      <p>Each relocation entry says: "at offset 0x15 in the <code>.text</code> section, insert the address of <code>Engine::run()</code>." The linker computes the final address of <code>Engine::run()</code> in the output executable and patches the instruction at offset 0x15.</p>
+
+      <h2 id="linker-scripts">Linker Output: Executables and Memory Layout</h2>
+      <p>The linker combines all the sections from all input object files into a single output file. It merges all <code>.text</code> sections into one, all <code>.data</code> sections into one, and so on. The linker also assigns virtual memory addresses to each section, creates the program header table (which tells the OS how to load the executable into memory), and writes the entry point address (the address of <code>_start</code>, which eventually calls <code>main</code>).</p>
+      <pre><code># View the sections and layout of an executable:
+readelf -S app
+
+# View program headers (loading instructions for the OS):
+readelf -l app
+
+# On MSVC:
+dumpbin /headers app.exe</code></pre>
+      <p>On Linux, the default linker script places sections in a standard order: <code>.text</code> (code), <code>.rodata</code> (read-only data), <code>.data</code> (initialized data), <code>.bss</code> (uninitialized data). You can customize this with a linker script, though this is rare outside embedded systems.</p>
+
+      <div class="anim-container" id="linker-merge-anim">
+        <h4>&#9654; Linker: Resolving Symbols Between Two Object Files</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the linking process: two .o files with symbol tables are merged into a final executable.</p>
+        <svg id="linker-merge-svg" width="700" height="400" viewBox="0 0 700 400"></svg>
+        <div id="linker-merge-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="linker-merge-step">Step &rarr;</button>
+          <button class="anim-btn" id="linker-merge-reset">Reset</button>
+          <span class="anim-output" id="linker-merge-output"></span>
+        </div>
+      </div>
+
+      <h2 id="lto">Link-Time Optimization (LTO)</h2>
+      <p>Traditionally, the compiler optimizes each TU independently. It cannot inline a function from <code>engine.cpp</code> into <code>main.cpp</code>, because when compiling <code>main.cpp</code>, the compiler has no access to <code>engine.cpp</code>'s code. The linker sees only machine code, not the high-level IR needed for optimization.</p>
+      <p><strong>Link-Time Optimization</strong> changes this. With LTO enabled, the compiler writes its intermediate representation (IR) into the object files instead of (or in addition to) machine code. The linker then invokes the optimizer on the combined IR of the entire program, enabling cross-TU optimizations:</p>
+      <ul>
+        <li><strong>Cross-TU inlining:</strong> A small function defined in <code>util.cpp</code> can be inlined into callers in <code>main.cpp</code>.</li>
+        <li><strong>Cross-TU devirtualization:</strong> The optimizer can prove that a virtual function is never overridden and replace indirect calls with direct ones.</li>
+        <li><strong>Whole-program dead code elimination:</strong> Functions that are never called from anywhere in the program are removed entirely.</li>
+        <li><strong>Interprocedural constant propagation:</strong> If a function is always called with the same constant argument, the optimizer can specialize it.</li>
+      </ul>
+      <pre><code># Enable LTO with GCC:
+g++ -flto -O2 main.cpp engine.cpp -o app
+
+# Enable LTO with Clang (thin LTO for faster builds):
+clang++ -flto=thin -O2 main.cpp engine.cpp -o app
+
+# Enable LTO with MSVC:
+cl /GL main.cpp engine.cpp    # /GL = whole-program optimization
+link /LTCG main.obj engine.obj /out:app.exe</code></pre>
+
+      <h3 id="thin-lto">Thin LTO vs. Full LTO</h3>
+      <p>Full LTO merges all IR into one giant module and optimizes it as a whole. This gives the best optimization results but can be very slow and memory-hungry on large projects.</p>
+      <p><strong>Thin LTO</strong> (introduced by LLVM/Clang) is a compromise: it does cross-module analysis (builds a summary of all functions and their call relationships) but optimizes each module independently, guided by the global summary. Thin LTO is parallelizable and much faster than full LTO, with most of the optimization benefit (typically 80-90% of full LTO's gains).</p>
+      <p>For most projects, Thin LTO is the recommended choice. Full LTO is reserved for final release builds where every last percent of performance matters.</p>
+
+      <h3 id="lto-costs">LTO Costs</h3>
+      <ul>
+        <li><strong>Build time:</strong> LTO adds significant time to the link step (which becomes an optimization step). A link that took 2 seconds might take 30 seconds with full LTO.</li>
+        <li><strong>Memory:</strong> Full LTO may require many gigabytes of RAM for large projects.</li>
+        <li><strong>Debugging:</strong> LTO can make debugging harder because code has been aggressively transformed. Use <code>-g</code> with LTO to preserve debug info.</li>
+        <li><strong>Incremental builds:</strong> LTO defeats incremental linking. Any change to any source file requires a full re-link with LTO. Thin LTO mitigates this somewhat.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> LTO breaks down the walls between translation units at optimization time. It enables the optimizer to see the whole program and make decisions that are impossible when each TU is compiled in isolation. For performance-critical applications, LTO is one of the highest-impact optimizations you can enable.
+      </div>
+
+      <h2 id="so-versioning">Shared Library Versioning</h2>
+      <p>Shared libraries need versioning because multiple applications may depend on different versions of the same library. On Linux, the convention uses <strong>soname</strong> versioning:</p>
+      <pre><code># Real file:        libengine.so.2.3.1
+# Soname (symlink): libengine.so.2       -> libengine.so.2.3.1
+# Linker name:      libengine.so         -> libengine.so.2
+
+# The version numbers mean:
+# 2 = major version (ABI-breaking changes)
+# 3 = minor version (backward-compatible additions)
+# 1 = patch version (bug fixes, no API/ABI changes)
+
+# Set the soname when building:
+g++ -shared -Wl,-soname,libengine.so.2 -o libengine.so.2.3.1 *.o
+
+# Create symlinks:
+ln -s libengine.so.2.3.1 libengine.so.2
+ln -s libengine.so.2 libengine.so</code></pre>
+      <p>The soname is embedded in the executable. At runtime, the dynamic linker looks for the soname (<code>libengine.so.2</code>), not the full filename. This means you can upgrade to <code>libengine.so.2.4.0</code> by updating the symlink without changing any executables.</p>
+      <p>On Windows, versioning is less formalized. DLLs are identified by name, and "DLL hell" (conflicting versions of the same DLL) was historically a major problem. Modern Windows mitigates this with side-by-side assemblies and the WinSxS directory.</p>
+
+      <h2 id="dlopen">Runtime Loading: dlopen and LoadLibrary</h2>
+      <p>You can also load shared libraries at runtime, without specifying them at link time. This is the foundation of plugin systems:</p>
+      <pre><code>// POSIX (Linux/macOS):
+#include &lt;dlfcn.h&gt;
+void* handle = dlopen("./libplugin.so", RTLD_LAZY);
+if (!handle) { /* error: dlerror() */ }
+
+using CreateFunc = Plugin* (*)();
+auto create = reinterpret_cast&lt;CreateFunc&gt;(dlsym(handle, "create_plugin"));
+Plugin* p = create();
+// ... use plugin ...
+dlclose(handle);
+
+// Windows:
+#include &lt;windows.h&gt;
+HMODULE h = LoadLibrary(TEXT("plugin.dll"));
+auto create = (CreateFunc)GetProcAddress(h, "create_plugin");
+Plugin* p = create();
+// ... use plugin ...
+FreeLibrary(h);</code></pre>
+      <p>The functions loaded via <code>dlsym</code>/<code>GetProcAddress</code> must be exported with <code>extern "C"</code> to avoid name mangling issues.</p>
+
+      <h2 id="common-linker-errors">Diagnosing Common Linker Errors</h2>
+      <pre><code>// "undefined reference to `vtable for Foo'"
+// Cause: a virtual function is declared but not defined
+// Fix: define all virtual functions (even if body is empty)
+
+// "undefined reference to `typeinfo for Foo'"
+// Cause: same as above, or RTTI is disabled for one TU but not another
+// Fix: define all virtual functions; use consistent -fno-rtti flag
+
+// "multiple definition of `helper()'"
+// Cause: non-inline function defined in a header, included in multiple TUs
+// Fix: make it inline, or move to a .cpp file
+
+// "relocation R_X86_64_32 against `.text' can not be used; recompile with -fPIC"
+// Cause: trying to put non-PIC code into a shared library
+// Fix: recompile with -fPIC
+
+// "cannot find -lfoo"
+// Cause: library libfoo.so / libfoo.a not found in search paths
+// Fix: install the library or add -L/path to the link command</code></pre>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li>The linker takes object files, resolves cross-TU symbol references, performs relocations, and produces an executable or shared library.</li>
+        <li>Symbol tables record what each TU defines and what it needs from others. Name mangling encodes C++ signatures into unique flat strings.</li>
+        <li>External linkage makes symbols visible across TUs; internal linkage (<code>static</code>, anonymous namespaces) hides them.</li>
+        <li>Static libraries are archives of object files; the linker selectively pulls what it needs. Library order matters on GNU ld.</li>
+        <li>Dynamic libraries are loaded at runtime via the dynamic linker, using the PLT/GOT mechanism for lazy symbol resolution.</li>
+        <li>Weak symbols and COMDAT handle inline functions, templates, and vtables that are defined in multiple TUs.</li>
+        <li>LTO enables cross-TU optimization by deferring optimization to link time. Thin LTO balances speed and quality.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a href="translation-units.html">
+          <span>Previous</span>
+          <span>&#8592; Translation Units</span>
+        </a>
+        <a class="next" href="odr.html">
+          <span>Next</span>
+          <span>One Definition Rule &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs,parent){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
+    function txt(str,attrs,parent){var t=el('text',attrs,parent);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    var svg=document.getElementById('linker-merge-svg');
+    var info=document.getElementById('linker-merge-info');
+    var out=document.getElementById('linker-merge-output');
+    var step=0;
+
+    var C1='#0a8f6a',C2='#3498db',C3='#9b59b6',C4='#ff6b35',C5='#c0392b';
+
+    var phases=[
+      {label:'Initial state: two object files (main.o and engine.o), each with its own symbol table.'},
+      {label:'Step 1: Linker reads main.o. Finds defined symbol "main" (T) and undefined symbols Engine::Engine, Engine::run, Engine::~Engine (U).'},
+      {label:'Step 2: Linker reads engine.o. Finds defined symbols Engine::Engine (T), Engine::run (T), Engine::~Engine (T). Adds them to the global table.'},
+      {label:'Step 3: Symbol resolution: every U in main.o matches a T in engine.o. All references resolved successfully.'},
+      {label:'Step 4: Relocation: the linker patches call instructions in main.o to point to the final addresses of Engine functions.'},
+      {label:'Step 5: The linker merges .text sections, writes program headers, sets entry point, and outputs the final executable.'},
+      {label:'Done. The executable contains all code with resolved addresses, ready to run.'}
+    ];
+
+    function draw(s){
+      clearSvg(svg);
+      var defs=el('defs',{},svg);
+      var cols=[C1,C2,C3,C4,C5];
+      ['A','B','C','D','E'].forEach(function(id,i){
+        var mkr=el('marker',{id:'lnk'+id,viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:6,markerHeight:6,orient:'auto'},defs);
+        el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:cols[i]},mkr);
+      });
+
+      // main.o box
+      var mx=20,my=20,mw=200,mh=160;
+      el('rect',{x:mx,y:my,width:mw,height:mh,rx:10,fill:s>=1?'#eef5ff':'#f5f5f5',stroke:s>=1?C2:'#ccc','stroke-width':s>=1?2.5:1.5},svg);
+      txt('main.o',{x:mx+mw/2,y:my+20,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'13','font-weight':'700',fill:s>=1?C2:'#666'},svg);
+      // Symbol table
+      var syms=[{n:'main',t:'T',c:C1},{n:'Engine::Engine()',t:'U',c:C5},{n:'Engine::run()',t:'U',c:C5},{n:'Engine::~Engine()',t:'U',c:C5}];
+      syms.forEach(function(sym,i){
+        var y=my+36+i*28;
+        var resolved=s>=3&&sym.t==='U';
+        el('rect',{x:mx+8,y:y,width:mw-16,height:22,rx:4,fill:resolved?'#e8f8f0':(sym.t==='T'?'#e8f5e8':'#fde8e8'),stroke:resolved?C1:(sym.t==='T'?C1:C5),'stroke-width':1},svg);
+        txt(sym.t+' '+sym.n,{x:mx+mw/2,y:y+15,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:resolved?C1:(sym.t==='T'?C1:C5)},svg);
+      });
+
+      // engine.o box
+      var ex=260,ey=20,ew=200,eh=160;
+      el('rect',{x:ex,y:ey,width:ew,height:eh,rx:10,fill:s>=2?'#f5f0ff':'#f5f5f5',stroke:s>=2?C3:'#ccc','stroke-width':s>=2?2.5:1.5},svg);
+      txt('engine.o',{x:ex+ew/2,y:ey+20,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'13','font-weight':'700',fill:s>=2?C3:'#666'},svg);
+      var esyms=[{n:'Engine::Engine()',t:'T'},{n:'Engine::run()',t:'T'},{n:'Engine::~Engine()',t:'T'}];
+      esyms.forEach(function(sym,i){
+        var y=ey+36+i*28;
+        el('rect',{x:ex+8,y:y,width:ew-16,height:22,rx:4,fill:'#f0e8f8',stroke:C3,'stroke-width':1},svg);
+        txt(sym.t+' '+sym.n,{x:ex+ew/2,y:y+15,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:C3},svg);
+      });
+
+      // Resolution arrows
+      if(s>=3){
+        for(var i=0;i<3;i++){
+          var y1=my+36+(i+1)*28+11;
+          var y2=ey+36+i*28+11;
+          el('line',{x1:mx+mw,y1:y1,x2:ex,y2:y2,stroke:C4,'stroke-width':2,'stroke-dasharray':'5,3','marker-end':'url(#lnkD)'},svg);
+        }
+        txt('Symbol Resolution',{x:(mx+mw+ex)/2,y:my+mh+10,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'10','font-weight':'700',fill:C4},svg);
+      }
+
+      // Relocation visual
+      if(s>=4){
+        el('rect',{x:20,y:210,width:440,height:50,rx:8,fill:'#fff8f0',stroke:C4,'stroke-width':1.5},svg);
+        txt('Relocation: patching call instructions with final addresses',{x:240,y:230,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:C4},svg);
+        txt('call 0x0000 -> call 0x4520 (Engine::run)',{x:240,y:248,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#888'},svg);
+      }
+
+      // Final executable
+      if(s>=5){
+        var fx=500,fy=30,fw=180,fh=220;
+        el('rect',{x:fx,y:fy,width:fw,height:fh,rx:10,fill:C1,stroke:C1,'stroke-width':2},svg);
+        txt('app (executable)',{x:fx+fw/2,y:fy+22,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:'#fff'},svg);
+        var secs=['.text (all code)','.rodata (constants)','.data (globals)','.bss (zeroed)','symbol table','program headers','entry: _start'];
+        secs.forEach(function(sec,i){
+          txt(sec,{x:fx+fw/2,y:fy+44+i*24,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'rgba(255,255,255,0.85)'},svg);
+        });
+        el('line',{x1:460,y1:100,x2:fx,y2:100,stroke:C1,'stroke-width':2,'marker-end':'url(#lnkA)'},svg);
+      }
+
+      // Done label
+      if(s>=6){
+        el('rect',{x:500,y:280,width:180,height:36,rx:8,fill:C2,stroke:C2,'stroke-width':2},svg);
+        txt('Ready to execute!',{x:590,y:303,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'13','font-weight':'700',fill:'#fff'},svg);
+      }
+
+      info.textContent=phases[s].label;
+      out.textContent='Step '+(s+1)+' of '+phases.length;
+    }
+
+    draw(0);
+
+    document.getElementById('linker-merge-step').addEventListener('click',function(){
+      if(step<phases.length-1){step++;draw(step);}
+    });
+    document.getElementById('linker-merge-reset').addEventListener('click',function(){
+      step=0;draw(0);
+    });
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

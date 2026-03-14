@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="C++ type erasure deep dive: std::function internals, std::any, custom type-erased wrappers, small buffer optimization, and performance implications.">
+  <title>Type Erasure in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="type-deduction.html">Type System</a>
+      </div>
+
+      <h1>Type Erasure in C++</h1>
+      <p class="post-meta">March 2026 &middot; 22 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="what-is-type-erasure">What Is Type Erasure?</h2>
+      <p>Type erasure is a technique that hides the concrete type of an object behind a uniform, non-templated interface. The caller works with a single type (like <code>std::function&lt;int(int)&gt;</code>) without knowing whether it wraps a lambda, a function pointer, a functor object, or a bound member function. The concrete type is "erased" at the point of storage and recovered only through a virtual dispatch mechanism.</p>
+      <p>This solves a fundamental tension in C++: templates give you zero-overhead polymorphism but infect every interface with template parameters. Virtual functions give you runtime polymorphism but require inheritance hierarchies. Type erasure gives you <strong>value-semantic polymorphism</strong>: different types, same interface, stored in a single non-template type, without requiring the stored types to inherit from anything.</p>
+
+      <h3>Where You Already Use It</h3>
+      <ul>
+        <li><code>std::function</code> &mdash; erases any callable matching a signature.</li>
+        <li><code>std::any</code> &mdash; erases literally any copyable type.</li>
+        <li><code>std::shared_ptr</code>'s deleter &mdash; erases the deleter type.</li>
+        <li><code>std::move_only_function</code> (C++23) &mdash; erases move-only callables.</li>
+        <li><code>std::format_args</code> &mdash; erases format argument types.</li>
+      </ul>
+
+      <!-- ===== HOW STD::FUNCTION WORKS ===== -->
+      <h2 id="std-function-internals">How std::function Works Internally</h2>
+      <p>Let us build <code>std::function</code> from scratch to understand the type erasure mechanism. The key ingredients are:</p>
+      <ol>
+        <li>An <strong>abstract base class</strong> that defines the callable interface.</li>
+        <li>A <strong>templated derived class</strong> that wraps the actual callable.</li>
+        <li>A <strong>non-template wrapper</strong> that owns a pointer to the base class.</li>
+      </ol>
+
+      <h3>Step 1: The Abstract Interface</h3>
+      <pre><code>// The concept: something callable with signature R(Args...)
+template &lt;typename R, typename... Args&gt;
+class CallableBase {
+public:
+    virtual ~CallableBase() = default;
+    virtual R invoke(Args... args) = 0;
+    virtual std::unique_ptr&lt;CallableBase&gt; clone() const = 0;
+};</code></pre>
+
+      <h3>Step 2: The Concrete Wrapper</h3>
+      <pre><code>// Wraps any callable F that matches the signature
+template &lt;typename F, typename R, typename... Args&gt;
+class CallableImpl : public CallableBase&lt;R, Args...&gt; {
+    F func_;
+public:
+    explicit CallableImpl(F f) : func_(std::move(f)) {}
+
+    R invoke(Args... args) override {
+        return func_(std::forward&lt;Args&gt;(args)...);
+    }
+
+    std::unique_ptr&lt;CallableBase&lt;R, Args...&gt;&gt; clone() const override {
+        return std::make_unique&lt;CallableImpl&gt;(func_);
+    }
+};</code></pre>
+
+      <h3>Step 3: The Type-Erased Wrapper</h3>
+      <pre><code>template &lt;typename&gt; class Function;  // primary template
+
+template &lt;typename R, typename... Args&gt;
+class Function&lt;R(Args...)&gt; {
+    std::unique_ptr&lt;CallableBase&lt;R, Args...&gt;&gt; callable_;
+public:
+    Function() = default;
+
+    // Constructor: accepts ANY callable matching the signature
+    template &lt;typename F&gt;
+    Function(F f)
+        : callable_(std::make_unique&lt;CallableImpl&lt;F, R, Args...&gt;&gt;(std::move(f)))
+    {}
+
+    // Copy constructor
+    Function(const Function&amp; other)
+        : callable_(other.callable_ ? other.callable_-&gt;clone() : nullptr)
+    {}
+
+    // Call operator: delegates through the virtual interface
+    R operator()(Args... args) {
+        if (!callable_) throw std::bad_function_call();
+        return callable_-&gt;invoke(std::forward&lt;Args&gt;(args)...);
+    }
+
+    explicit operator bool() const { return callable_ != nullptr; }
+};</code></pre>
+
+      <p>Now the magic happens:</p>
+      <pre><code>// Lambda, function pointer, functor: all stored in the same type!
+Function&lt;int(int)&gt; f1 = [](int x) { return x * 2; };         // lambda
+Function&lt;int(int)&gt; f2 = &amp;square;                              // function pointer
+Function&lt;int(int)&gt; f3 = Multiplier{3};                        // functor
+
+// The caller sees only Function&lt;int(int)&gt;. The concrete type is erased.
+std::vector&lt;Function&lt;int(int)&gt;&gt; transforms = {f1, f2, f3};
+for (auto&amp; fn : transforms) {
+    std::cout &lt;&lt; fn(10) &lt;&lt; "\n";  // 20, 100, 30
+}</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The templated constructor <code>Function(F f)</code> is where type erasure happens. The concrete type <code>F</code> is captured in the <code>CallableImpl&lt;F,...&gt;</code> object at construction time, then accessed only through the <code>CallableBase</code> virtual interface. The type <code>F</code> never appears in <code>Function</code>'s own template parameters.
+      </div>
+
+      <!-- ===== SVG ANIMATION 1: type erasure mechanism ===== -->
+      <h2 id="erasure-anim">Animation: Type Erasure Mechanism</h2>
+      <p>Step through to see how a lambda, a function pointer, and a functor are all stored in a <code>std::function</code> through the type erasure mechanism, with virtual dispatch through the base class.</p>
+
+      <div class="anim-container" id="erasure-anim">
+        <h4>How std::function Stores Different Callables</h4>
+        <svg id="erasure-svg" width="700" height="380" viewBox="0 0 700 380" style="max-width:100%;height:auto"></svg>
+        <div class="anim-controls">
+          <button id="erasure-step">Step &rarr;</button>
+          <button id="erasure-reset">Reset</button>
+          <span id="erasure-info" style="margin-left:1rem;font-size:0.88rem;color:var(--ink-muted)"></span>
+        </div>
+      </div>
+
+      <!-- ===== STD::ANY ===== -->
+      <h2 id="std-any">std::any: Type Erasure for Any Type</h2>
+      <p>While <code>std::function</code> erases callable types behind a specific signature, <code>std::any</code> erases <em>any</em> copyable type behind a completely opaque wrapper. You can store anything, but you need to know the type to retrieve it:</p>
+
+      <pre><code>std::any a = 42;                        // stores int
+std::any b = std::string("hello");     // stores string
+std::any c = std::vector&lt;int&gt;{1,2,3};  // stores vector
+
+// Retrieval: must specify the exact type
+int val = std::any_cast&lt;int&gt;(a);                  // OK: 42
+std::string s = std::any_cast&lt;std::string&gt;(b);    // OK: "hello"
+
+// Wrong type throws:
+try {
+    double d = std::any_cast&lt;double&gt;(a);  // throws std::bad_any_cast
+} catch (const std::bad_any_cast&amp; e) {
+    // a holds int, not double
+}
+
+// Type checking:
+if (a.type() == typeid(int)) {
+    int* p = std::any_cast&lt;int&gt;(&amp;a);  // pointer version: returns nullptr on failure
+}</code></pre>
+
+      <h3>std::any Internals</h3>
+      <p>Internally, <code>std::any</code> uses the same pattern as our <code>Function</code> above, but with operations like copy, move, destroy, and type_info instead of invoke:</p>
+
+      <pre><code>// Simplified std::any internals (conceptual)
+class Any {
+    struct Base {
+        virtual ~Base() = default;
+        virtual std::unique_ptr&lt;Base&gt; clone() const = 0;
+        virtual const std::type_info&amp; type() const = 0;
+    };
+
+    template &lt;typename T&gt;
+    struct Holder : Base {
+        T value;
+        explicit Holder(T v) : value(std::move(v)) {}
+        std::unique_ptr&lt;Base&gt; clone() const override {
+            return std::make_unique&lt;Holder&gt;(value);
+        }
+        const std::type_info&amp; type() const override {
+            return typeid(T);
+        }
+    };
+
+    std::unique_ptr&lt;Base&gt; held_;
+
+public:
+    template &lt;typename T&gt;
+    Any(T value) : held_(std::make_unique&lt;Holder&lt;T&gt;&gt;(std::move(value))) {}
+    // ... copy, move, any_cast as friend ...
+};</code></pre>
+
+      <!-- ===== CUSTOM TYPE ERASURE ===== -->
+      <h2 id="custom-erasure">Building a Custom Type-Erased Wrapper</h2>
+      <p>Let us build a type-erased <code>Drawable</code> that can hold any object with a <code>draw()</code> method, without requiring inheritance:</p>
+
+      <pre><code>class Drawable {
+    struct Concept {
+        virtual ~Concept() = default;
+        virtual void draw(std::ostream&amp; out) const = 0;
+        virtual std::unique_ptr&lt;Concept&gt; clone() const = 0;
+    };
+
+    template &lt;typename T&gt;
+    struct Model : Concept {
+        T object_;
+        explicit Model(T obj) : object_(std::move(obj)) {}
+
+        void draw(std::ostream&amp; out) const override {
+            object_.draw(out);  // duck typing: T must have draw()
+        }
+        std::unique_ptr&lt;Concept&gt; clone() const override {
+            return std::make_unique&lt;Model&gt;(object_);
+        }
+    };
+
+    std::unique_ptr&lt;Concept&gt; self_;
+
+public:
+    template &lt;typename T&gt;
+    Drawable(T obj) : self_(std::make_unique&lt;Model&lt;T&gt;&gt;(std::move(obj))) {}
+
+    Drawable(const Drawable&amp; other) : self_(other.self_-&gt;clone()) {}
+    Drawable(Drawable&amp;&amp;) = default;
+    Drawable&amp; operator=(Drawable other) {
+        self_ = std::move(other.self_);
+        return *this;
+    }
+
+    void draw(std::ostream&amp; out) const { self_-&gt;draw(out); }
+};</code></pre>
+
+      <p>Now any type with a <code>draw()</code> method works, no base class needed:</p>
+
+      <pre><code>struct Circle {
+    double radius;
+    void draw(std::ostream&amp; out) const {
+        out &lt;&lt; "Circle(r=" &lt;&lt; radius &lt;&lt; ")";
+    }
+};
+
+struct Square {
+    double side;
+    void draw(std::ostream&amp; out) const {
+        out &lt;&lt; "Square(s=" &lt;&lt; side &lt;&lt; ")";
+    }
+};
+
+// No inheritance relationship between Circle and Square!
+std::vector&lt;Drawable&gt; shapes;
+shapes.push_back(Circle{5.0});
+shapes.push_back(Square{3.0});
+
+for (const auto&amp; shape : shapes) {
+    shape.draw(std::cout);  // polymorphic dispatch, value semantics
+}</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> This pattern is called the <strong>External Polymorphism</strong> or <strong>Sean Parent pattern</strong> (after his famous "Inheritance Is the Base Class of Evil" talk). It separates the polymorphic interface from the types that satisfy it, enabling polymorphism without coupling. The types stored do not need to know about the wrapper.
+      </div>
+
+      <!-- ===== SBO ===== -->
+      <h2 id="small-buffer-optimization">Small Buffer Optimization (SBO)</h2>
+      <p>The naive implementation above allocates heap memory for every stored object via <code>std::make_unique</code>. For small objects (like a function pointer or a small lambda), this is wasteful. The <strong>Small Buffer Optimization</strong> (SBO) stores small objects inline within the wrapper itself, avoiding heap allocation entirely.</p>
+
+      <p>Most standard library implementations of <code>std::function</code> use SBO. The typical inline buffer size varies by implementation:</p>
+      <ul>
+        <li><strong>libstdc++ (GCC):</strong> 16 bytes (2 pointers on 64-bit)</li>
+        <li><strong>libc++ (Clang):</strong> 24 bytes (3 pointers on 64-bit)</li>
+        <li><strong>MSVC STL:</strong> 48 bytes (can fit quite large captures)</li>
+      </ul>
+
+      <h3>SBO Implementation</h3>
+      <pre><code>template &lt;typename R, typename... Args&gt;
+class SmallFunction {
+    static constexpr size_t BufferSize = 32;  // inline storage
+
+    struct Base {
+        virtual ~Base() = default;
+        virtual R invoke(Args...) = 0;
+        virtual void clone_to(void* buffer) const = 0;
+        virtual void move_to(void* buffer) = 0;
+    };
+
+    template &lt;typename F&gt;
+    struct Impl : Base {
+        F func;
+        explicit Impl(F f) : func(std::move(f)) {}
+        R invoke(Args... args) override { return func(std::forward&lt;Args&gt;(args)...); }
+        void clone_to(void* buf) const override { new(buf) Impl(func); }
+        void move_to(void* buf) override { new(buf) Impl(std::move(func)); }
+    };
+
+    // Storage: either inline buffer or heap pointer
+    alignas(std::max_align_t) char buffer_[BufferSize];
+    bool uses_heap_ = false;
+
+    Base* get_base() {
+        return uses_heap_
+            ? *reinterpret_cast&lt;Base**&gt;(buffer_)
+            : reinterpret_cast&lt;Base*&gt;(buffer_);
+    }
+
+public:
+    template &lt;typename F&gt;
+    SmallFunction(F f) {
+        if constexpr (sizeof(Impl&lt;F&gt;) &lt;= BufferSize) {
+            // Small object: store inline (no heap allocation)
+            new(buffer_) Impl&lt;F&gt;(std::move(f));
+            uses_heap_ = false;
+        } else {
+            // Large object: heap allocate
+            auto* ptr = new Impl&lt;F&gt;(std::move(f));
+            std::memcpy(buffer_, &amp;ptr, sizeof(ptr));
+            uses_heap_ = true;
+        }
+    }
+
+    R operator()(Args... args) {
+        return get_base()-&gt;invoke(std::forward&lt;Args&gt;(args)...);
+    }
+
+    ~SmallFunction() {
+        if (uses_heap_) delete get_base();
+        else get_base()-&gt;~Base();
+    }
+};</code></pre>
+
+      <!-- ===== SVG ANIMATION 2: SBO ===== -->
+      <h2 id="sbo-anim">Animation: Small Buffer Optimization</h2>
+      <p>Step through to see how small callables are stored inline within the function object (avoiding heap allocation), while large callables spill to the heap.</p>
+
+      <div class="anim-container" id="sbo-anim">
+        <h4>Small Buffer Optimization (SBO)</h4>
+        <svg id="sbo-svg" width="700" height="360" viewBox="0 0 700 360" style="max-width:100%;height:auto"></svg>
+        <div class="anim-controls">
+          <button id="sbo-step">Step &rarr;</button>
+          <button id="sbo-reset">Reset</button>
+          <span id="sbo-info" style="margin-left:1rem;font-size:0.88rem;color:var(--ink-muted)"></span>
+        </div>
+      </div>
+
+      <!-- ===== PERFORMANCE ===== -->
+      <h2 id="performance">Performance Implications</h2>
+      <p>Type erasure is not free. Understanding the costs helps you decide when to use it versus alternatives.</p>
+
+      <h3>Virtual Call Overhead</h3>
+      <p>Every invocation through <code>std::function</code> involves an indirect function call (through a vtable pointer or function pointer). This prevents inlining and disrupts branch prediction. For tight loops calling small functions millions of times, this overhead is measurable.</p>
+
+      <pre><code>// Direct call: compiler can inline square()
+int sum = 0;
+for (int i = 0; i &lt; N; ++i) sum += square(i);
+
+// Through std::function: cannot inline, indirect call each iteration
+std::function&lt;int(int)&gt; fn = square;
+int sum2 = 0;
+for (int i = 0; i &lt; N; ++i) sum2 += fn(i);
+
+// Typical overhead: 2x to 5x slower for trivial callables in tight loops</code></pre>
+
+      <h3>Heap Allocation Overhead</h3>
+      <p>If the callable exceeds the SBO buffer, <code>std::function</code> heap-allocates. This means a <code>new</code> on construction and <code>delete</code> on destruction. For frequently created/destroyed function objects, this adds up.</p>
+
+      <pre><code>// Likely SBO (small capture, fits in buffer):
+auto small = [x = 0](int n) { return n + x; };
+std::function&lt;int(int)&gt; f1 = small;  // no heap allocation
+
+// Likely heap-allocated (large capture):
+std::array&lt;int, 100&gt; big_capture{};
+auto large = [big_capture](int n) { return n + big_capture[0]; };
+std::function&lt;int(int)&gt; f2 = large;  // heap allocation!</code></pre>
+
+      <h3>Alternatives</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.92rem">
+        <thead>
+          <tr style="border-bottom:2px solid var(--line)">
+            <th style="text-align:left;padding:0.5rem">Approach</th>
+            <th style="text-align:left;padding:0.5rem">Overhead</th>
+            <th style="text-align:left;padding:0.5rem">Trade-off</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">Templates</td>
+            <td style="padding:0.5rem">Zero</td>
+            <td style="padding:0.5rem">Type is part of the interface</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><code>std::function</code></td>
+            <td style="padding:0.5rem">Virtual call + possible heap</td>
+            <td style="padding:0.5rem">Type-erased, copyable</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><code>function_ref</code> (C++26)</td>
+            <td style="padding:0.5rem">Indirect call only</td>
+            <td style="padding:0.5rem">Non-owning, no heap</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><code>move_only_function</code> (C++23)</td>
+            <td style="padding:0.5rem">Virtual call + possible heap</td>
+            <td style="padding:0.5rem">Move-only, no copy overhead</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem">Function pointer</td>
+            <td style="padding:0.5rem">Indirect call</td>
+            <td style="padding:0.5rem">No captures, no state</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Use <code>std::function</code> when you need to <em>store</em> a callable (in a container, member variable, or callback registry). Use templates when you can accept the callable type as a template parameter. Use <code>function_ref</code> (C++26) or a hand-rolled non-owning wrapper when you only need to <em>pass</em> a callable without storing it.
+      </div>
+
+      <!-- ===== ADVANCED PATTERNS ===== -->
+      <h2 id="advanced-patterns">Advanced Type Erasure Patterns</h2>
+
+      <h3>Function Table Approach (No Virtual Functions)</h3>
+      <p>Instead of virtual dispatch, you can store function pointers directly. This avoids vtable indirection and is slightly faster:</p>
+
+      <pre><code>template &lt;typename R, typename... Args&gt;
+class LightFunction {
+    using InvokeFn = R(*)(void*, Args...);
+    using DestroyFn = void(*)(void*);
+
+    void* object_ = nullptr;
+    InvokeFn invoke_ = nullptr;
+    DestroyFn destroy_ = nullptr;
+
+public:
+    template &lt;typename F&gt;
+    LightFunction(F f) {
+        object_ = new F(std::move(f));
+        invoke_ = [](void* obj, Args... args) -&gt; R {
+            return (*static_cast&lt;F*&gt;(obj))(std::forward&lt;Args&gt;(args)...);
+        };
+        destroy_ = [](void* obj) { delete static_cast&lt;F*&gt;(obj); };
+    }
+
+    R operator()(Args... args) {
+        return invoke_(object_, std::forward&lt;Args&gt;(args)...);
+    }
+
+    ~LightFunction() { if (destroy_) destroy_(object_); }
+};</code></pre>
+
+      <h3>Non-Owning Type Erasure (function_ref)</h3>
+      <pre><code>template &lt;typename&gt; class FunctionRef;
+
+template &lt;typename R, typename... Args&gt;
+class FunctionRef&lt;R(Args...)&gt; {
+    void* object_;
+    R(*invoke_)(void*, Args...);
+
+public:
+    template &lt;typename F&gt;
+    FunctionRef(F&amp;&amp; f) noexcept
+        : object_(const_cast&lt;void*&gt;(static_cast&lt;const void*&gt;(std::addressof(f))))
+        , invoke_([](void* obj, Args... args) -&gt; R {
+            return (*static_cast&lt;std::remove_reference_t&lt;F&gt;*&gt;(obj))(
+                std::forward&lt;Args&gt;(args)...);
+          })
+    {}
+
+    R operator()(Args... args) const {
+        return invoke_(object_, std::forward&lt;Args&gt;(args)...);
+    }
+};
+
+// Usage: zero overhead, non-owning
+void process(FunctionRef&lt;int(int)&gt; callback) {
+    std::cout &lt;&lt; callback(5);
+}
+process([](int x) { return x * 2; });  // no heap, no copy</code></pre>
+
+      <!-- ===== SUMMARY ===== -->
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li>Type erasure hides concrete types behind a uniform, non-template interface using an abstract base + templated derived pattern.</li>
+        <li><code>std::function</code> erases callable types, using virtual dispatch and optionally SBO to avoid heap allocation for small callables.</li>
+        <li><code>std::any</code> erases any copyable type, retrievable only with <code>std::any_cast</code> and the exact type.</li>
+        <li>Custom type-erased wrappers (the Sean Parent pattern) enable value-semantic polymorphism without inheritance.</li>
+        <li>SBO stores small objects inline, avoiding heap allocation. Buffer sizes vary by implementation.</li>
+        <li>Performance costs include indirect calls (preventing inlining) and potential heap allocation. Use templates when you can; type erasure when you must.</li>
+      </ul>
+      <p>In the final article of this series, we explore strong types and phantom types, which use the type system itself to prevent entire categories of bugs at compile time.</p>
+
+      <nav class="post-nav">
+        <a href="casts.html"><span>Previous</span><span>&#8592; C++ Casts Explained</span></a>
+        <a class="next" href="strong-types.html"><span>Next</span><span>Strong Types &amp; Phantom Types &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  /* ===== Animation 1: Type erasure mechanism ===== */
+  (function(){
+    var svg = document.getElementById('erasure-svg');
+    var ns = 'http://www.w3.org/2000/svg';
+    var stepBtn = document.getElementById('erasure-step');
+    var resetBtn = document.getElementById('erasure-reset');
+    var infoEl = document.getElementById('erasure-info');
+    var step = -1;
+
+    var steps = [
+      {title:'Three Different Callables',
+       desc:'A lambda, a function pointer, and a functor. Completely different types.',
+       phase:'callables'},
+      {title:'Assignment: Lambda to std::function',
+       desc:'The lambda is wrapped in CallableImpl<Lambda>. Concrete type captured at construction.',
+       phase:'lambda', active:0},
+      {title:'Virtual Base Pointer Stored',
+       desc:'std::function stores a CallableBase* pointing to CallableImpl<Lambda>. Type erased.',
+       phase:'stored-lambda', active:0},
+      {title:'Assignment: Function Pointer',
+       desc:'A function pointer is wrapped in CallableImpl<int(*)(int)>. Same wrapper type.',
+       phase:'funcptr', active:1},
+      {title:'Assignment: Functor Object',
+       desc:'A struct with operator() is wrapped in CallableImpl<Multiplier>. Same wrapper type.',
+       phase:'functor', active:2},
+      {title:'Invocation: Virtual Dispatch',
+       desc:'operator() calls callable_->invoke(). Virtual dispatch routes to the correct implementation.',
+       phase:'invoke'},
+      {title:'All Three Through Same Interface',
+       desc:'vector<Function<int(int)>> stores all three. The concrete types are invisible to the caller.',
+       phase:'unified'}
+    ];
+
+    var callables = [
+      {name:'Lambda', color:'#0a8f6a', code:'[](int x){ return x*2; }', type:'__lambda_0'},
+      {name:'Function Ptr', color:'#3498db', code:'&square', type:'int(*)(int)'},
+      {name:'Functor', color:'#9b59b6', code:'Multiplier{3}', type:'Multiplier'}
+    ];
+
+    function clear(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
+    function el(tag,attrs){
+      var e = document.createElementNS(ns,tag);
+      for(var k in attrs) e.setAttribute(k,attrs[k]);
+      return e;
+    }
+    function addText(x,y,text,fill,size,bold){
+      var t = el('text',{x:x,y:y,fill:fill||'#e0e0e0','font-family':'Consolas,monospace','font-size':size||'13'});
+      if(bold) t.setAttribute('font-weight','bold');
+      t.textContent = text; svg.appendChild(t);
+    }
+    function addRect(x,y,w,h,fill,r){
+      svg.appendChild(el('rect',{x:x,y:y,width:w,height:h,fill:fill,rx:r||6}));
+    }
+
+    function render(idx){
+      clear();
+      var s = steps[idx];
+      addRect(0,0,700,380,'#1a1e22',10);
+      addText(20,25,s.title,'#a8e6cf',14,true);
+      addText(20,45,s.desc,'#888',11);
+
+      /* Callable sources */
+      for(var c=0;c<callables.length;c++){
+        var cx = 20 + c*230;
+        var isActive = s.active===c || s.phase==='callables' || s.phase==='invoke' || s.phase==='unified';
+        addRect(cx,60,215,55, isActive?'#222830':'#1a1a1a', 8);
+        addRect(cx,60,5,55, isActive?callables[c].color:'#333', 0);
+        addText(cx+15,80, callables[c].name, isActive?callables[c].color:'#444', 12, true);
+        addText(cx+15,100, callables[c].code, isActive?'#b0b0b0':'#333', 10);
+      }
+
+      /* Type erasure layer */
+      if(s.phase!=='callables'){
+        addRect(20,135,660,70,'#222830',8);
+        addText(30,155,'CallableBase<int(int)>*','#ff6b35',12,true);
+        addText(30,175,'Abstract interface: virtual invoke(int) = 0','#aa8866',10);
+
+        /* Arrow from active callable to base */
+        if(typeof s.active==='number'){
+          var ax = 127 + s.active*230;
+          var arrowG = el('g',{});
+          arrowG.appendChild(el('line',{x1:ax,y1:115,x2:ax,y2:133,stroke:callables[s.active].color,'stroke-width':'2'}));
+          arrowG.appendChild(el('polygon',{points:(ax-5)+',130 '+(ax+5)+',130 '+ax+',138',fill:callables[s.active].color}));
+          svg.appendChild(arrowG);
+          addText(ax+10,128,'CallableImpl<'+callables[s.active].type+'>',callables[s.active].color,9);
+        }
+
+        /* std::function wrapper */
+        addRect(20,225,660,70,'#1a2a3a',8);
+        addText(30,245,'std::function<int(int)>','#3498db',14,true);
+        addText(30,265,'Owns CallableBase* pointer. Concrete type invisible.','#6688aa',10);
+
+        if(s.phase==='invoke'){
+          addRect(20,315,660,50,'#1a3a2a',8);
+          addText(30,340,'fn(10)  \u2192  callable_->invoke(10)  \u2192  virtual dispatch  \u2192  result','#0a8f6a',12,true);
+        }
+
+        if(s.phase==='unified'){
+          addRect(20,315,660,50,'#2a2a1a',8);
+          addText(30,335,'vector<Function<int(int)>> stores all 3. Caller sees ONE type.','#ff6b35',12,true);
+          addText(30,353,'No inheritance between Lambda, FuncPtr, Functor!','#aa8866',10);
+        }
+      }
+
+      infoEl.textContent = 'Step '+(idx+1)+'/'+steps.length;
+    }
+
+    function doStep(){ step++; if(step>=steps.length) step=0; render(step); }
+    function doReset(){
+      step=-1; clear();
+      addRect(0,0,700,380,'#1a1e22',10);
+      addText(200,195,'Click "Step \u2192" to begin','#5a6a7a',16);
+      infoEl.textContent='';
+    }
+    stepBtn.addEventListener('click',doStep);
+    resetBtn.addEventListener('click',doReset);
+    doReset();
+  })();
+
+  /* ===== Animation 2: Small Buffer Optimization ===== */
+  (function(){
+    var svg = document.getElementById('sbo-svg');
+    var ns = 'http://www.w3.org/2000/svg';
+    var stepBtn = document.getElementById('sbo-step');
+    var resetBtn = document.getElementById('sbo-reset');
+    var infoEl = document.getElementById('sbo-info');
+    var step = -1;
+
+    var steps = [
+      {title:'std::function Memory Layout',
+       desc:'A std::function object has an inline buffer (typically 16 to 48 bytes) and a vtable pointer.',
+       phase:'layout'},
+      {title:'Small Lambda (8 bytes)',
+       desc:'Lambda captures one int (8 bytes). Fits in the inline buffer. No heap allocation.',
+       phase:'small',
+       callable:'[x](int n){ return n+x; }', size:'8 bytes', fits:true},
+      {title:'Small: Stored Inline',
+       desc:'The callable is constructed directly in the inline buffer using placement new.',
+       phase:'small-stored',
+       callable:'[x](int n){ return n+x; }', size:'8 bytes', fits:true},
+      {title:'Function Pointer (8 bytes)',
+       desc:'A bare function pointer is just 8 bytes. Easily fits inline.',
+       phase:'fptr',
+       callable:'&square', size:'8 bytes', fits:true},
+      {title:'Large Lambda (400 bytes)',
+       desc:'Lambda captures a large array. Does NOT fit in the inline buffer.',
+       phase:'large',
+       callable:'[arr](int n){ return arr[n]; }', size:'400 bytes', fits:false},
+      {title:'Large: Heap Allocated',
+       desc:'std::function calls new to heap-allocate. The inline buffer stores a pointer to the heap.',
+       phase:'large-stored',
+       callable:'[arr](int n){ return arr[n]; }', size:'400 bytes', fits:false},
+      {title:'Performance Comparison',
+       desc:'SBO avoids heap allocation for small callables. No new/delete overhead.',
+       phase:'compare'}
+    ];
+
+    function clear(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
+    function el(tag,attrs){
+      var e = document.createElementNS(ns,tag);
+      for(var k in attrs) e.setAttribute(k,attrs[k]);
+      return e;
+    }
+    function addText(x,y,text,fill,size,bold){
+      var t = el('text',{x:x,y:y,fill:fill||'#e0e0e0','font-family':'Consolas,monospace','font-size':size||'13'});
+      if(bold) t.setAttribute('font-weight','bold');
+      t.textContent = text; svg.appendChild(t);
+    }
+    function addRect(x,y,w,h,fill,r){
+      svg.appendChild(el('rect',{x:x,y:y,width:w,height:h,fill:fill,rx:r||6}));
+    }
+
+    function drawFunctionObj(x, y, fillState, heapPtr){
+      /* std::function object outline */
+      addRect(x, y, 300, 120, '#222830', 8);
+      svg.appendChild(el('rect',{x:x,y:y,width:300,height:120,rx:8,fill:'none',stroke:'#3498db','stroke-width':'1.5'}));
+      addText(x+10, y+18, 'std::function<int(int)>', '#3498db', 11, true);
+
+      /* vtable pointer */
+      addRect(x+10, y+28, 120, 25, '#2c3e50', 4);
+      addText(x+15, y+45, 'vtable ptr', '#6688aa', 10);
+
+      /* Inline buffer */
+      var bufColor = fillState==='filled' ? '#1a3a2a' : fillState==='pointer' ? '#3a2a1a' : '#1e2228';
+      addRect(x+10, y+58, 280, 45, bufColor, 4);
+      if(fillState==='filled'){
+        addText(x+20, y+75, 'INLINE BUFFER', '#6aaa7a', 9);
+        addText(x+20, y+93, 'callable stored HERE', '#0a8f6a', 11, true);
+      } else if(fillState==='pointer'){
+        addText(x+20, y+75, 'INLINE BUFFER (stores pointer)', '#aa8866', 9);
+        addText(x+20, y+93, 'ptr \u2192 heap', '#ff6b35', 11, true);
+      } else {
+        addText(x+20, y+80, 'INLINE BUFFER (32 bytes)', '#555', 10);
+      }
+    }
+
+    function render(idx){
+      clear();
+      var s = steps[idx];
+      addRect(0,0,700,360,'#1a1e22',10);
+      addText(20,25,s.title,'#a8e6cf',14,true);
+      addText(20,45,s.desc,'#888',11);
+
+      if(s.phase==='layout'){
+        drawFunctionObj(200, 80, 'empty');
+        addText(200,230,'32-byte inline buffer (SBO region)','#666',11);
+        addText(200,250,'If callable fits: stored inline (no heap)','#0a8f6a',11);
+        addText(200,270,'If callable too large: heap-allocated','#ff6b35',11);
+      }
+      else if(s.phase==='small' || s.phase==='small-stored' || s.phase==='fptr'){
+        var filled = (s.phase==='small-stored' || s.phase==='fptr') ? 'filled' : 'empty';
+        drawFunctionObj(30, 70, filled);
+        /* Callable info */
+        addRect(370, 70, 310, 70, '#1a3a2a', 8);
+        addText(380, 90, s.callable, '#0a8f6a', 11, true);
+        addText(380, 110, 'Size: '+s.size, '#6aaa7a', 11);
+        addText(380, 128, '\u2713 Fits in inline buffer!', '#0a8f6a', 11, true);
+
+        if(filled==='filled'){
+          addRect(30, 210, 650, 40, '#1a3a2a', 8);
+          addText(40, 235, '\u2713 No heap allocation. Zero cost at construction. Cache-friendly.', '#0a8f6a', 12, true);
+        }
+      }
+      else if(s.phase==='large' || s.phase==='large-stored'){
+        var isStored = s.phase==='large-stored';
+        drawFunctionObj(30, 70, isStored?'pointer':'empty');
+
+        /* Large callable info */
+        addRect(370, 70, 310, 70, '#3a1a1a', 8);
+        addText(380, 90, s.callable, '#ff6b35', 11, true);
+        addText(380, 110, 'Size: '+s.size, '#aa6666', 11);
+        addText(380, 128, '\u2717 Too large for inline buffer!', '#c0392b', 11, true);
+
+        if(isStored){
+          /* Heap block */
+          addRect(400, 200, 270, 60, '#2a2a1a', 8);
+          svg.appendChild(el('rect',{x:400,y:200,width:270,height:60,rx:8,fill:'none',stroke:'#ff6b35','stroke-width':'1.5'}));
+          addText(410, 220, 'HEAP ALLOCATION', '#ff6b35', 10, true);
+          addText(410, 240, 'callable stored on heap', '#aa8866', 11);
+          addText(410, 255, '(400 bytes via new)', '#886644', 10);
+
+          /* Arrow from inline to heap */
+          svg.appendChild(el('line',{x1:310,y1:178,x2:398,y2:225,stroke:'#ff6b35','stroke-width':'2','stroke-dasharray':'5,3'}));
+
+          addRect(30, 280, 650, 40, '#3a2a1a', 8);
+          addText(40, 305, '\u2717 Heap allocation at construction. Cache miss on invoke.', '#ff6b35', 12, true);
+        }
+      }
+      else if(s.phase==='compare'){
+        /* Side by side comparison */
+        addRect(20, 70, 320, 130, '#1a3a2a', 8);
+        addRect(20,70,5,130,'#0a8f6a',0);
+        addText(35, 90, 'Small Callable (SBO)', '#0a8f6a', 13, true);
+        addText(35, 115, '\u2713 No heap allocation', '#a8e6cf', 11);
+        addText(35, 135, '\u2713 Cache-friendly (inline)', '#a8e6cf', 11);
+        addText(35, 155, '\u2713 No new/delete overhead', '#a8e6cf', 11);
+        addText(35, 175, '\u2713 Construction: ~1ns', '#a8e6cf', 11);
+
+        addRect(360, 70, 320, 130, '#3a1a1a', 8);
+        addRect(360,70,5,130,'#c0392b',0);
+        addText(375, 90, 'Large Callable (Heap)', '#c0392b', 13, true);
+        addText(375, 115, '\u2717 Heap allocation per copy', '#ff8888', 11);
+        addText(375, 135, '\u2717 Pointer indirection', '#ff8888', 11);
+        addText(375, 155, '\u2717 Cache miss likely', '#ff8888', 11);
+        addText(375, 175, '\u2717 Construction: ~50ns+', '#ff8888', 11);
+
+        addRect(20, 220, 660, 50, '#222830', 8);
+        addText(30, 245, 'Tip: Keep lambda captures small!', '#ff6b35', 13, true);
+        addText(30, 265, 'Capture by reference, or store large data on the heap and capture a shared_ptr.', '#888', 11);
+      }
+
+      infoEl.textContent = 'Step '+(idx+1)+'/'+steps.length;
+    }
+
+    function doStep(){ step++; if(step>=steps.length) step=0; render(step); }
+    function doReset(){
+      step=-1; clear();
+      addRect(0,0,700,360,'#1a1e22',10);
+      addText(200,185,'Click "Step \u2192" to begin','#5a6a7a',16);
+      infoEl.textContent='';
+    }
+    stepBtn.addEventListener('click',doStep);
+    resetBtn.addEventListener('click',doReset);
+    doReset();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

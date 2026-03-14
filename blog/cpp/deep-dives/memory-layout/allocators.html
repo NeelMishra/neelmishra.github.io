@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="C++ Custom Allocators: std::allocator, pmr, arena allocators, pool allocators, stack allocators, and why custom allocators matter for performance.">
+  <title>Custom Allocators | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="object-lifetime.html">Memory Layout</a>
+      </div>
+
+      <h1>Custom Allocators</h1>
+      <p class="post-meta">March 2026 &middot; 22 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="why-custom-allocators">Why Custom Allocators?</h2>
+      <p>The default heap allocator (<code>malloc</code>/<code>new</code>) is a general-purpose tool. It handles any allocation size, any deallocation order, and any thread. That generality comes at a cost: each call involves bookkeeping, potential system calls, mutex contention, and cache-unfriendly memory layouts.</p>
+      <p>When you know something about your allocation pattern&mdash;all objects are the same size, or allocations happen in a burst and are freed all at once, or allocations only happen on one thread&mdash;you can exploit that knowledge with a custom allocator that is dramatically faster.</p>
+      <p>Game engines, trading systems, embedded systems, and database engines all use custom allocators to achieve deterministic, low-latency memory management. In this article, we will build up from the <code>std::allocator</code> interface through polymorphic memory resources (pmr) and implement four allocator strategies from scratch.</p>
+
+      <h2 id="std-allocator">The std::allocator Interface</h2>
+      <p>Every STL container takes an allocator as a template parameter. The default is <code>std::allocator&lt;T&gt;</code>, which calls <code>::operator new</code> and <code>::operator delete</code>:</p>
+
+      <pre><code>template&lt;typename T&gt;
+class allocator {
+public:
+    using value_type = T;
+
+    T* allocate(std::size_t n) {
+        return static_cast&lt;T*&gt;(::operator new(n * sizeof(T)));
+    }
+
+    void deallocate(T* p, std::size_t n) {
+        ::operator delete(p);
+    }
+};
+
+// Usage is implicit:
+std::vector&lt;int&gt; v;  // uses std::allocator&lt;int&gt; by default
+std::vector&lt;int, MyAlloc&lt;int&gt;&gt; v2;  // custom allocator</code></pre>
+
+      <h3 id="allocator-requirements">Allocator Requirements</h3>
+      <p>A conforming allocator must provide:</p>
+      <ul>
+        <li><code>value_type</code> typedef</li>
+        <li><code>allocate(n)</code> returning a pointer to uninitialized storage for <code>n</code> objects</li>
+        <li><code>deallocate(p, n)</code> releasing that storage</li>
+        <li>Equality comparable (two allocators are equal if memory from one can be deallocated by the other)</li>
+      </ul>
+
+      <p>Since C++17, the requirements have been simplified. Many older requirements (<code>rebind</code>, <code>construct</code>, <code>destroy</code>) are now handled by <code>std::allocator_traits</code> defaults.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Allocators allocate <em>raw memory</em>. They do not construct objects. The container calls <code>std::allocator_traits&lt;Alloc&gt;::construct()</code> separately, which by default uses placement new.
+      </div>
+
+      <h2 id="pmr">Polymorphic Memory Resources (C++17)</h2>
+      <p>The classic allocator model has a major usability problem: the allocator type is baked into the container type. A <code>vector&lt;int, ArenaAlloc&lt;int&gt;&gt;</code> is a <em>different type</em> from <code>vector&lt;int, PoolAlloc&lt;int&gt;&gt;</code>. You cannot assign one to the other, pass one to a function expecting the other, or store them in the same collection.</p>
+      <p>C++17 introduced <code>&lt;memory_resource&gt;</code> to solve this with runtime polymorphism:</p>
+
+      <pre><code>#include &lt;memory_resource&gt;
+
+// All pmr containers use the same type regardless of allocator:
+std::pmr::vector&lt;int&gt; v1;   // uses default resource
+std::pmr::vector&lt;int&gt; v2;   // can use a different resource
+
+// The resource is passed at construction:
+std::pmr::monotonic_buffer_resource pool(1024);
+std::pmr::vector&lt;int&gt; v3(&amp;pool);
+
+// v1, v2, v3 are ALL the same type: std::pmr::vector&lt;int&gt;</code></pre>
+
+      <h3 id="memory-resource">std::pmr::memory_resource</h3>
+      <p>The base class for all memory resources. It defines three virtual functions:</p>
+
+      <pre><code>class memory_resource {
+public:
+    void* allocate(std::size_t bytes, std::size_t alignment);
+    void  deallocate(void* p, std::size_t bytes, std::size_t alignment);
+    bool  is_equal(const memory_resource&amp; other) const noexcept;
+
+private:
+    virtual void* do_allocate(std::size_t bytes, std::size_t align) = 0;
+    virtual void  do_deallocate(void* p, std::size_t bytes, std::size_t align) = 0;
+    virtual bool  do_is_equal(const memory_resource&amp; other) const noexcept = 0;
+};</code></pre>
+
+      <h3 id="standard-resources">Standard Memory Resources</h3>
+      <p>The standard library provides several built-in resources:</p>
+      <ul>
+        <li><code>std::pmr::new_delete_resource()</code> &mdash; Calls <code>::operator new</code>/<code>delete</code>. The default.</li>
+        <li><code>std::pmr::null_memory_resource()</code> &mdash; Always throws <code>bad_alloc</code>. Useful as an upstream sentinel.</li>
+        <li><code>std::pmr::monotonic_buffer_resource</code> &mdash; A fast bump allocator. Never reuses freed memory until the entire resource is destroyed.</li>
+        <li><code>std::pmr::unsynchronized_pool_resource</code> &mdash; A pool allocator for single-threaded use.</li>
+        <li><code>std::pmr::synchronized_pool_resource</code> &mdash; Thread-safe version of the pool resource.</li>
+      </ul>
+
+      <h2 id="arena-allocator">Arena / Monotonic Allocator</h2>
+      <p>The simplest and fastest custom allocator. It maintains a large block of memory and a pointer that only moves forward. Deallocation is a no-op; everything is freed at once when the arena is destroyed or reset.</p>
+
+      <pre><code>class Arena {
+    char*       buffer_;
+    std::size_t capacity_;
+    std::size_t offset_;
+
+public:
+    explicit Arena(std::size_t capacity)
+        : buffer_(static_cast&lt;char*&gt;(std::malloc(capacity)))
+        , capacity_(capacity)
+        , offset_(0)
+    {
+        if (!buffer_) throw std::bad_alloc();
+    }
+
+    ~Arena() { std::free(buffer_); }
+
+    void* allocate(std::size_t size, std::size_t align = alignof(std::max_align_t)) {
+        // Align the current offset
+        std::size_t aligned = (offset_ + align - 1) &amp; ~(align - 1);
+        if (aligned + size &gt; capacity_) throw std::bad_alloc();
+        void* ptr = buffer_ + aligned;
+        offset_ = aligned + size;
+        return ptr;
+    }
+
+    void deallocate(void*, std::size_t) noexcept {
+        // No-op: memory is freed when the arena is destroyed
+    }
+
+    void reset() noexcept { offset_ = 0; }
+
+    std::size_t used() const noexcept { return offset_; }
+    std::size_t remaining() const noexcept { return capacity_ - offset_; }
+};</code></pre>
+
+      <p>Performance characteristics:</p>
+      <ul>
+        <li><strong>Allocate:</strong> O(1). A pointer bump, possibly with alignment adjustment.</li>
+        <li><strong>Deallocate:</strong> O(1). Literally a no-op.</li>
+        <li><strong>Reset:</strong> O(1). Set the offset back to zero.</li>
+        <li><strong>Memory overhead:</strong> Near zero (no per-allocation headers).</li>
+        <li><strong>Cache behaviour:</strong> Excellent. Allocations are sequential in memory.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Arena allocators are ideal for request-scoped work: parse a request, do all allocations from the arena, send the response, then reset. Game engines use per-frame arenas for exactly this pattern.
+      </div>
+
+      <!-- ANIMATION 1: Monotonic Arena Allocator -->
+      <div class="anim-container" id="arena-anim">
+        <h4>&#9654; Monotonic Arena Allocator</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch the bump pointer move forward with each allocation. Deallocations are no-ops until the arena is reset.</p>
+        <svg id="arena-svg" width="700" height="180" viewBox="0 0 700 180"></svg>
+        <div id="arena-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="arena-step">Step &rarr;</button>
+          <button class="anim-btn" id="arena-reset">Reset</button>
+          <span class="anim-output" id="arena-output"></span>
+        </div>
+      </div>
+
+      <h3 id="arena-pmr">Arena as a pmr Resource</h3>
+      <p>Wrapping the arena as a <code>std::pmr::memory_resource</code> lets you use it with any pmr container:</p>
+
+      <pre><code>class ArenaResource : public std::pmr::memory_resource {
+    Arena arena_;
+
+public:
+    explicit ArenaResource(std::size_t capacity) : arena_(capacity) {}
+
+protected:
+    void* do_allocate(std::size_t bytes, std::size_t align) override {
+        return arena_.allocate(bytes, align);
+    }
+
+    void do_deallocate(void* p, std::size_t bytes, std::size_t align) override {
+        arena_.deallocate(p, bytes);  // no-op
+    }
+
+    bool do_is_equal(const memory_resource&amp; other) const noexcept override {
+        return this == &amp;other;
+    }
+};
+
+// Usage:
+ArenaResource resource(1024 * 1024);  // 1 MB arena
+std::pmr::vector&lt;std::pmr::string&gt; names(&amp;resource);
+names.push_back("Alice");
+names.push_back("Bob");</code></pre>
+
+      <h2 id="pool-allocator">Pool Allocator</h2>
+      <p>A pool allocator pre-divides memory into fixed-size blocks. Allocation pops a block from a free list; deallocation pushes it back. Every operation is O(1), and there is zero fragmentation (all blocks are the same size).</p>
+
+      <pre><code>class Pool {
+    struct FreeBlock { FreeBlock* next; };
+
+    char*       buffer_;
+    std::size_t blockSize_;
+    std::size_t blockCount_;
+    FreeBlock*  freeList_;
+
+public:
+    Pool(std::size_t blockSize, std::size_t blockCount)
+        : buffer_(static_cast&lt;char*&gt;(std::malloc(blockSize * blockCount)))
+        , blockSize_(blockSize)
+        , blockCount_(blockCount)
+        , freeList_(nullptr)
+    {
+        if (!buffer_) throw std::bad_alloc();
+        // Build the free list (each block points to the next)
+        for (std::size_t i = 0; i &lt; blockCount; ++i) {
+            auto* block = reinterpret_cast&lt;FreeBlock*&gt;(buffer_ + i * blockSize);
+            block-&gt;next = freeList_;
+            freeList_ = block;
+        }
+    }
+
+    ~Pool() { std::free(buffer_); }
+
+    void* allocate() {
+        if (!freeList_) throw std::bad_alloc();
+        FreeBlock* block = freeList_;
+        freeList_ = block-&gt;next;
+        return block;
+    }
+
+    void deallocate(void* ptr) noexcept {
+        auto* block = static_cast&lt;FreeBlock*&gt;(ptr);
+        block-&gt;next = freeList_;
+        freeList_ = block;
+    }
+
+    std::size_t available() const noexcept {
+        std::size_t count = 0;
+        for (auto* b = freeList_; b; b = b-&gt;next) ++count;
+        return count;
+    }
+};</code></pre>
+
+      <p>Pool allocators excel when you have many objects of the same type being rapidly created and destroyed: network connections, game entities, AST nodes, small message objects.</p>
+
+      <!-- ANIMATION 2: Pool Allocator -->
+      <div class="anim-container" id="pool-anim">
+        <h4>&#9654; Pool Allocator with Fixed-Size Blocks</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch blocks get allocated from the free list and returned. Each operation is O(1).</p>
+        <svg id="pool-svg" width="700" height="200" viewBox="0 0 700 200"></svg>
+        <div id="pool-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="pool-step">Step &rarr;</button>
+          <button class="anim-btn" id="pool-reset">Reset</button>
+          <span class="anim-output" id="pool-output"></span>
+        </div>
+      </div>
+
+      <h2 id="stack-allocator">Stack Allocator</h2>
+      <p>A stack allocator is like an arena but allows deallocation in <strong>LIFO order</strong>. You can only free the most recently allocated block. This is perfect for recursive algorithms and temporary buffers that are allocated and freed in strict nesting order.</p>
+
+      <pre><code>class StackAllocator {
+    char*       buffer_;
+    std::size_t capacity_;
+    std::size_t offset_;
+
+    struct Header {
+        std::size_t prevOffset;
+    };
+
+public:
+    explicit StackAllocator(std::size_t capacity)
+        : buffer_(static_cast&lt;char*&gt;(std::malloc(capacity)))
+        , capacity_(capacity)
+        , offset_(0)
+    {
+        if (!buffer_) throw std::bad_alloc();
+    }
+
+    ~StackAllocator() { std::free(buffer_); }
+
+    void* allocate(std::size_t size, std::size_t align = alignof(std::max_align_t)) {
+        // Space for header + alignment + payload
+        std::size_t headerStart = offset_;
+        std::size_t payloadStart = (headerStart + sizeof(Header) + align - 1) &amp; ~(align - 1);
+        std::size_t newOffset = payloadStart + size;
+
+        if (newOffset &gt; capacity_) throw std::bad_alloc();
+
+        // Store header just before the aligned payload
+        auto* hdr = reinterpret_cast&lt;Header*&gt;(buffer_ + payloadStart - sizeof(Header));
+        hdr-&gt;prevOffset = offset_;
+
+        offset_ = newOffset;
+        return buffer_ + payloadStart;
+    }
+
+    void deallocate(void* ptr) noexcept {
+        auto* hdr = reinterpret_cast&lt;Header*&gt;(static_cast&lt;char*&gt;(ptr) - sizeof(Header));
+        offset_ = hdr-&gt;prevOffset;
+    }
+
+    void reset() noexcept { offset_ = 0; }
+};</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Stack allocators combine the speed of arenas with the ability to reclaim memory. The constraint is strict LIFO ordering. Deallocating out of order corrupts the allocator state.
+      </div>
+
+      <h2 id="free-list-allocator">Free-List Allocator</h2>
+      <p>The most general custom allocator. It maintains a linked list of free blocks and can handle arbitrary allocation sizes and deallocation orders. It trades some speed for flexibility:</p>
+
+      <pre><code>class FreeListAllocator {
+    struct Block {
+        std::size_t size;
+        Block*      next;
+    };
+
+    char*       buffer_;
+    std::size_t capacity_;
+    Block*      freeList_;
+
+public:
+    explicit FreeListAllocator(std::size_t capacity)
+        : buffer_(static_cast&lt;char*&gt;(std::malloc(capacity)))
+        , capacity_(capacity)
+    {
+        if (!buffer_) throw std::bad_alloc();
+        freeList_ = reinterpret_cast&lt;Block*&gt;(buffer_);
+        freeList_-&gt;size = capacity;
+        freeList_-&gt;next = nullptr;
+    }
+
+    ~FreeListAllocator() { std::free(buffer_); }
+
+    void* allocate(std::size_t size) {
+        // First-fit search
+        Block** prev = &amp;freeList_;
+        for (Block* curr = freeList_; curr; prev = &amp;curr-&gt;next, curr = curr-&gt;next) {
+            if (curr-&gt;size &gt;= size + sizeof(Block)) {
+                // Split the block
+                auto* alloc = reinterpret_cast&lt;Block*&gt;(
+                    reinterpret_cast&lt;char*&gt;(curr) + curr-&gt;size - size);
+                curr-&gt;size -= size + sizeof(Block);
+                alloc-&gt;size = size;
+                alloc-&gt;next = nullptr;
+                return reinterpret_cast&lt;char*&gt;(alloc) + sizeof(Block);
+            }
+            if (curr-&gt;size &gt;= size) {
+                *prev = curr-&gt;next;
+                return reinterpret_cast&lt;char*&gt;(curr) + sizeof(Block);
+            }
+        }
+        throw std::bad_alloc();
+    }
+
+    void deallocate(void* ptr) noexcept {
+        auto* block = reinterpret_cast&lt;Block*&gt;(static_cast&lt;char*&gt;(ptr) - sizeof(Block));
+        block-&gt;next = freeList_;
+        freeList_ = block;
+        // A production allocator would coalesce adjacent free blocks here
+    }
+};</code></pre>
+
+      <h2 id="choosing">Choosing the Right Allocator</h2>
+      <table>
+        <thead>
+          <tr><th>Allocator</th><th>Alloc</th><th>Dealloc</th><th>Fragmentation</th><th>Use Case</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Arena</td><td>O(1)</td><td>No-op</td><td>None (until reset)</td><td>Per-frame, per-request</td></tr>
+          <tr><td>Pool</td><td>O(1)</td><td>O(1)</td><td>None (fixed size)</td><td>Many same-size objects</td></tr>
+          <tr><td>Stack</td><td>O(1)</td><td>O(1) LIFO</td><td>None</td><td>Recursive, nested scopes</td></tr>
+          <tr><td>Free-list</td><td>O(n)</td><td>O(1)</td><td>Possible</td><td>General purpose, custom</td></tr>
+          <tr><td>Default (new)</td><td>O(?)td><td>O(?)</td><td>Possible</td><td>Any</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="benchmarking">Benchmarking Allocators</h2>
+      <p>The difference can be dramatic. Here is a typical benchmark allocating and deallocating 1 million 64-byte objects:</p>
+
+      <pre><code>// Pseudocode benchmark results (lower is better):
+// Default new/delete:    45 ms
+// Pool allocator:         3 ms   (15x faster)
+// Arena allocator:        1.5 ms (30x faster)
+// Arena + bulk free:      0.8 ms (56x faster)</code></pre>
+
+      <p>The speed comes from three sources:</p>
+      <ol>
+        <li><strong>No system calls:</strong> Custom allocators work in pre-allocated memory.</li>
+        <li><strong>No bookkeeping:</strong> Arenas and pools need minimal per-allocation metadata.</li>
+        <li><strong>Cache locality:</strong> Sequential allocation produces sequential memory access patterns.</li>
+      </ol>
+
+      <h2 id="real-world">Real-World Allocator Usage</h2>
+
+      <h3 id="game-engines">Game Engines</h3>
+      <p>Game engines typically use a hierarchy of allocators:</p>
+      <ul>
+        <li><strong>Global arena:</strong> Large initial allocation from the OS at startup.</li>
+        <li><strong>Per-frame arena:</strong> Reset every frame. All transient allocations go here.</li>
+        <li><strong>Pool allocators:</strong> For specific object types (particles, entities, components).</li>
+        <li><strong>Stack allocator:</strong> For the rendering pipeline's temporary buffers.</li>
+      </ul>
+
+      <h3 id="trading-systems">Trading Systems</h3>
+      <p>In high-frequency trading, <code>malloc</code> latency spikes are unacceptable. Pre-allocated pools ensure every allocation completes in constant time with no system calls. Some systems even pre-fault all memory pages at startup to avoid page fault latency.</p>
+
+      <h3 id="databases">Database Engines</h3>
+      <p>Database query executors use per-query arenas. Each query allocates intermediate results, hash tables, and sort buffers from its arena. When the query completes, the entire arena is released&mdash;no individual deallocation needed.</p>
+
+      <h2 id="pitfalls">Common Pitfalls</h2>
+      <ul>
+        <li><strong>Lifetime mismatch:</strong> The allocator must outlive all objects allocated from it. Destroying an arena while references to its memory exist is undefined behaviour.</li>
+        <li><strong>Alignment neglect:</strong> Custom allocators must respect alignment requirements. The arena allocator above uses alignment masking; skipping this causes hardware faults on strict architectures.</li>
+        <li><strong>Thread safety:</strong> Unless your allocator is explicitly thread-safe, confine it to a single thread. Adding a mutex to a fast allocator can negate all performance gains.</li>
+        <li><strong>Over-engineering:</strong> Profile first. If the default allocator is not a bottleneck, a custom one adds complexity for no gain.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Custom allocators shine when allocation patterns are predictable. If your allocations are unpredictable in size and lifetime, the default allocator is usually the right choice&mdash;it has decades of optimization behind it.
+      </div>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><code>std::allocator</code> is the default. It delegates to <code>::operator new</code>.</li>
+        <li><strong>pmr</strong> (C++17) decouples the allocator from the container type, enabling runtime polymorphism.</li>
+        <li><strong>Arena allocators</strong> bump a pointer forward. O(1) allocation, zero fragmentation, bulk free.</li>
+        <li><strong>Pool allocators</strong> manage fixed-size blocks via a free list. O(1) allocation and deallocation.</li>
+        <li><strong>Stack allocators</strong> allow LIFO deallocation, combining arena speed with some reclamation.</li>
+        <li><strong>Free-list allocators</strong> handle arbitrary sizes but are slower and can fragment.</li>
+        <li>Custom allocators can provide 10x to 50x speedups in allocation-heavy workloads.</li>
+        <li>Profile before optimizing. Use pmr to switch allocators without changing container types.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a href="alignment.html">
+          <span>Previous</span>
+          <span>&#8592; Alignment &amp; Padding</span>
+        </a>
+        <a class="next" href="placement-new.html">
+          <span>Next</span>
+          <span>Placement New &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  /* ===== Animation 1: Monotonic Arena Allocator ===== */
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('arena-svg');
+    var info=document.getElementById('arena-info');
+    var out=document.getElementById('arena-output');
+    var stepIdx=0;
+
+    var totalBytes=512;
+    var barX=60,barY=50,barW=580,barH=50;
+    var colors=['#0a8f6a','#3498db','#9b59b6','#ff6b35','#0a8f6a'];
+
+    var steps=[
+      {allocs:[],ptr:0,msg:'Arena initialized with 512 bytes. Bump pointer at offset 0.'},
+      {allocs:[{size:64,label:'A (64B)',color:colors[0]}],ptr:64,msg:'allocate(64): pointer bumps from 0 to 64.'},
+      {allocs:[{size:64,label:'A (64B)',color:colors[0]},{size:128,label:'B (128B)',color:colors[1]}],ptr:192,msg:'allocate(128): pointer bumps from 64 to 192.'},
+      {allocs:[{size:64,label:'A (64B)',color:colors[0]},{size:128,label:'B (128B)',color:colors[1]},{size:48,label:'C (48B)',color:colors[2]}],ptr:240,msg:'allocate(48): pointer bumps from 192 to 240.'},
+      {allocs:[{size:64,label:'A (64B)',color:colors[0]},{size:128,label:'B (128B)',color:colors[1]},{size:48,label:'C (48B)',color:colors[2]}],ptr:240,msg:'deallocate(B): NO-OP. Pointer stays at 240. Memory is not reclaimed.', dealloc:'B'},
+      {allocs:[{size:64,label:'A (64B)',color:colors[0]},{size:128,label:'B (128B)',color:colors[1]},{size:48,label:'C (48B)',color:colors[2]},{size:96,label:'D (96B)',color:colors[3]}],ptr:336,msg:'allocate(96): pointer bumps from 240 to 336.'},
+      {allocs:[],ptr:0,msg:'reset(): Pointer returns to 0. All memory reclaimed at once.'}
+    ];
+
+    function draw(si){
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+      var s=steps[si];
+
+      /* Title */
+      var tt=document.createElementNS(NS,'text');tt.setAttribute('x',350);tt.setAttribute('y',25);
+      tt.setAttribute('text-anchor','middle');tt.setAttribute('font-family','Syne,sans-serif');
+      tt.setAttribute('font-weight','800');tt.setAttribute('font-size','14');tt.setAttribute('fill','#d4e8dc');
+      tt.textContent='Arena (512 bytes)';svg.appendChild(tt);
+
+      /* Background bar */
+      var bg=document.createElementNS(NS,'rect');bg.setAttribute('x',barX);bg.setAttribute('y',barY);
+      bg.setAttribute('width',barW);bg.setAttribute('height',barH);bg.setAttribute('rx',8);
+      bg.setAttribute('fill','#1a2b22');bg.setAttribute('stroke','#3a4a43');bg.setAttribute('stroke-width','2');
+      svg.appendChild(bg);
+
+      /* Allocation blocks */
+      var offset=0;
+      for(var i=0;i<s.allocs.length;i++){
+        var a=s.allocs[i];
+        var bx=barX+(offset/totalBytes)*barW;
+        var bw=(a.size/totalBytes)*barW;
+        var isDealloced=s.dealloc&&a.label.indexOf(s.dealloc)===0;
+
+        var r=document.createElementNS(NS,'rect');r.setAttribute('x',bx);r.setAttribute('y',barY+2);
+        r.setAttribute('width',bw);r.setAttribute('height',barH-4);r.setAttribute('rx',6);
+        r.setAttribute('fill',isDealloced?'rgba(192,57,43,0.2)':hexToRgba(a.color,0.3));
+        r.setAttribute('stroke',isDealloced?'#c0392b':a.color);r.setAttribute('stroke-width','2');
+        if(isDealloced){r.setAttribute('stroke-dasharray','4,3');}
+        svg.appendChild(r);
+
+        if(bw>40){
+          var lt=document.createElementNS(NS,'text');lt.setAttribute('x',bx+bw/2);lt.setAttribute('y',barY+barH/2+1);
+          lt.setAttribute('text-anchor','middle');lt.setAttribute('dominant-baseline','central');
+          lt.setAttribute('font-family','Consolas,monospace');lt.setAttribute('font-weight','700');
+          lt.setAttribute('font-size','10');lt.setAttribute('fill',isDealloced?'#c0392b':'#d4e8dc');
+          lt.textContent=a.label;svg.appendChild(lt);
+        }
+        offset+=a.size;
+      }
+
+      /* Bump pointer */
+      var px=barX+(s.ptr/totalBytes)*barW;
+      var ptr=document.createElementNS(NS,'line');ptr.setAttribute('x1',px);ptr.setAttribute('y1',barY-5);
+      ptr.setAttribute('x2',px);ptr.setAttribute('y2',barY+barH+5);
+      ptr.setAttribute('stroke','#ff6b35');ptr.setAttribute('stroke-width','3');svg.appendChild(ptr);
+      var pt=document.createElementNS(NS,'text');pt.setAttribute('x',px);pt.setAttribute('y',barY-10);
+      pt.setAttribute('text-anchor','middle');pt.setAttribute('font-family','Consolas,monospace');
+      pt.setAttribute('font-weight','700');pt.setAttribute('font-size','11');pt.setAttribute('fill','#ff6b35');
+      pt.textContent='ptr @ '+s.ptr;svg.appendChild(pt);
+
+      /* Remaining label */
+      var rem=totalBytes-s.ptr;
+      var rt=document.createElementNS(NS,'text');rt.setAttribute('x',barX+barW+5);rt.setAttribute('y',barY+barH/2);
+      rt.setAttribute('font-family','Consolas,monospace');rt.setAttribute('font-size','10');rt.setAttribute('fill','#5a6e64');
+      rt.textContent=rem+' free';svg.appendChild(rt);
+
+      info.textContent=s.msg;
+      out.textContent='Step '+(si+1)+' / '+steps.length;
+    }
+
+    function hexToRgba(hex,a){var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);return 'rgba('+r+','+g+','+b+','+a+')';}
+
+    function reset(){stepIdx=0;draw(0);info.textContent='';out.textContent='';}
+    draw(0);
+
+    document.getElementById('arena-step').addEventListener('click',function(){
+      if(stepIdx<steps.length-1) stepIdx++;
+      draw(stepIdx);
+    });
+    document.getElementById('arena-reset').addEventListener('click',reset);
+  })();
+
+  /* ===== Animation 2: Pool Allocator ===== */
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('pool-svg');
+    var info=document.getElementById('pool-info');
+    var out=document.getElementById('pool-output');
+    var stepIdx=0;
+
+    var blockCount=8;
+    var bw=70,bh=40,gap=6,startX=40,startY=60;
+
+    /* States: 'free', 'used', 'returned' */
+    var steps=[
+      {states:['free','free','free','free','free','free','free','free'],
+       freeHead:0,msg:'Pool initialized: 8 blocks, all free. Free list: 0 \u2192 1 \u2192 2 \u2192 ... \u2192 7.'},
+      {states:['used','free','free','free','free','free','free','free'],
+       freeHead:1,msg:'allocate(): Block 0 taken from free list head. Free list: 1 \u2192 2 \u2192 ... \u2192 7.'},
+      {states:['used','used','free','free','free','free','free','free'],
+       freeHead:2,msg:'allocate(): Block 1 taken. Free list: 2 \u2192 3 \u2192 ... \u2192 7.'},
+      {states:['used','used','used','free','free','free','free','free'],
+       freeHead:3,msg:'allocate(): Block 2 taken. Free list: 3 \u2192 4 \u2192 ... \u2192 7.'},
+      {states:['used','used','used','used','free','free','free','free'],
+       freeHead:4,msg:'allocate(): Block 3 taken. Free list: 4 \u2192 5 \u2192 6 \u2192 7.'},
+      {states:['free','used','used','used','free','free','free','free'],
+       freeHead:0,msg:'deallocate(0): Block 0 returned to free list head. Free list: 0 \u2192 4 \u2192 5 \u2192 ... \u2192 7.', returned:0},
+      {states:['free','used','free','used','free','free','free','free'],
+       freeHead:2,msg:'deallocate(2): Block 2 returned. Free list: 2 \u2192 0 \u2192 4 \u2192 5 \u2192 ... \u2192 7.', returned:2},
+      {states:['free','used','used_again','used','free','free','free','free'],
+       freeHead:0,msg:'allocate(): Block 2 reused from free list head. Blocks can be reused in any order.', reused:2},
+      {states:['free','free','used_again','free','free','free','free','free'],
+       freeHead:1,msg:'deallocate(1,3): Blocks returned. Pool has 6 of 8 blocks free.'}
+    ];
+
+    function draw(si){
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+      var s=steps[si];
+
+      /* Title */
+      var tt=document.createElementNS(NS,'text');tt.setAttribute('x',350);tt.setAttribute('y',30);
+      tt.setAttribute('text-anchor','middle');tt.setAttribute('font-family','Syne,sans-serif');
+      tt.setAttribute('font-weight','800');tt.setAttribute('font-size','14');tt.setAttribute('fill','#d4e8dc');
+      tt.textContent='Pool (8 blocks of 64 bytes each)';svg.appendChild(tt);
+
+      /* Blocks */
+      for(var i=0;i<blockCount;i++){
+        var x=startX+i*(bw+gap);
+        var y=startY;
+        var state=s.states[i];
+        var fill,stroke,label;
+
+        if(state==='free'){fill='#1a2b22';stroke='#0a8f6a';label='FREE';}
+        else if(state==='used'){fill='rgba(52,152,219,0.25)';stroke='#3498db';label='USED';}
+        else if(state==='used_again'){fill='rgba(155,89,182,0.25)';stroke='#9b59b6';label='REUSED';}
+        else{fill='#1a2b22';stroke='#3a4a43';label='';}
+
+        var r=document.createElementNS(NS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);
+        r.setAttribute('width',bw);r.setAttribute('height',bh);r.setAttribute('rx',8);
+        r.setAttribute('fill',fill);r.setAttribute('stroke',stroke);r.setAttribute('stroke-width','2');
+        svg.appendChild(r);
+
+        /* Block number */
+        var nt=document.createElementNS(NS,'text');nt.setAttribute('x',x+bw/2);nt.setAttribute('y',y-8);
+        nt.setAttribute('text-anchor','middle');nt.setAttribute('font-family','Consolas,monospace');
+        nt.setAttribute('font-size','10');nt.setAttribute('fill','#a0b8ac');nt.textContent='['+i+']';
+        svg.appendChild(nt);
+
+        /* Label */
+        var lt=document.createElementNS(NS,'text');lt.setAttribute('x',x+bw/2);lt.setAttribute('y',y+bh/2+1);
+        lt.setAttribute('text-anchor','middle');lt.setAttribute('dominant-baseline','central');
+        lt.setAttribute('font-family','Consolas,monospace');lt.setAttribute('font-weight','700');
+        lt.setAttribute('font-size','10');lt.setAttribute('fill',state==='free'?'#0a8f6a':state==='used'?'#3498db':'#9b59b6');
+        lt.textContent=label;svg.appendChild(lt);
+
+        /* Highlight returned/reused */
+        if(s.returned===i){
+          var hr=document.createElementNS(NS,'rect');hr.setAttribute('x',x-2);hr.setAttribute('y',y-2);
+          hr.setAttribute('width',bw+4);hr.setAttribute('height',bh+4);hr.setAttribute('rx',10);
+          hr.setAttribute('fill','none');hr.setAttribute('stroke','#0a8f6a');hr.setAttribute('stroke-width','3');
+          hr.setAttribute('stroke-dasharray','5,3');svg.appendChild(hr);
+        }
+        if(s.reused===i){
+          var hr2=document.createElementNS(NS,'rect');hr2.setAttribute('x',x-2);hr2.setAttribute('y',y-2);
+          hr2.setAttribute('width',bw+4);hr2.setAttribute('height',bh+4);hr2.setAttribute('rx',10);
+          hr2.setAttribute('fill','none');hr2.setAttribute('stroke','#9b59b6');hr2.setAttribute('stroke-width','3');
+          hr2.setAttribute('stroke-dasharray','5,3');svg.appendChild(hr2);
+        }
+      }
+
+      /* Free list head pointer */
+      if(s.freeHead!==null&&s.freeHead<blockCount){
+        var fx=startX+s.freeHead*(bw+gap)+bw/2;
+        var fy=startY+bh+15;
+        var ft=document.createElementNS(NS,'text');ft.setAttribute('x',fx);ft.setAttribute('y',fy+12);
+        ft.setAttribute('text-anchor','middle');ft.setAttribute('font-family','Consolas,monospace');
+        ft.setAttribute('font-weight','700');ft.setAttribute('font-size','10');ft.setAttribute('fill','#ff6b35');
+        ft.textContent='\u25B2 freeList head';svg.appendChild(ft);
+      }
+
+      info.textContent=s.msg;
+      out.textContent='Step '+(si+1)+' / '+steps.length;
+    }
+
+    function reset(){stepIdx=0;draw(0);info.textContent='';out.textContent='';}
+    draw(0);
+
+    document.getElementById('pool-step').addEventListener('click',function(){
+      if(stepIdx<steps.length-1) stepIdx++;
+      draw(stepIdx);
+    });
+    document.getElementById('pool-reset').addEventListener('click',reset);
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

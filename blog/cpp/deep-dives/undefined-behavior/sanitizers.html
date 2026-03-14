@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="C++ Sanitizers in depth: AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan), ThreadSanitizer (TSan), MemorySanitizer (MSan), shadow memory, performance overhead, and CI best practices.">
+  <title>Sanitizers: Detecting UB at Runtime | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="what-is-ub.html">Undefined Behavior</a>
+      </div>
+
+      <h1>Sanitizers: Detecting UB at Runtime</h1>
+      <p class="post-meta">March 2026 &middot; 18 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="why-sanitizers">Why Sanitizers Exist</h2>
+      <p>Undefined behavior is invisible. A program with UB can pass every test, produce correct output, run for years in production, and then break catastrophically when the compiler is upgraded or the code is compiled on a different platform. Static analysis catches some UB at compile time, but the vast majority of UB depends on runtime values and cannot be detected without executing the code.</p>
+      <p><strong>Sanitizers</strong> are compiler instrumentation tools that insert runtime checks into your program to detect UB, memory errors, data races, and other bugs as they happen. They are the single most effective tool for finding bugs in C++ code, and every serious C++ project should use them in its test infrastructure.</p>
+      <p>The major sanitizers are:</p>
+      <ul>
+        <li><strong>AddressSanitizer (ASan):</strong> Detects memory errors (buffer overflow, use-after-free, stack-use-after-return, memory leaks)</li>
+        <li><strong>UndefinedBehaviorSanitizer (UBSan):</strong> Detects undefined behavior (signed overflow, null dereference, misaligned access, shift errors)</li>
+        <li><strong>ThreadSanitizer (TSan):</strong> Detects data races between threads</li>
+        <li><strong>MemorySanitizer (MSan):</strong> Detects use of uninitialized memory</li>
+        <li><strong>LeakSanitizer (LSan):</strong> Detects memory leaks (often bundled with ASan)</li>
+      </ul>
+      <p>All of these are built into GCC and Clang. MSVC supports ASan and some subset of UBSan. They are enabled with simple compiler flags and require no source code changes.</p>
+
+      <h2 id="asan">AddressSanitizer (ASan)</h2>
+      <p>AddressSanitizer is the most widely used sanitizer. It detects a broad range of memory errors with a relatively modest performance overhead (typically 2x slowdown and 2-3x memory increase). It was developed at Google and has found tens of thousands of bugs in Chrome, the Linux kernel, LLVM itself, and countless other projects.</p>
+
+      <h3>What ASan detects</h3>
+      <ul>
+        <li><strong>Heap buffer overflow:</strong> Reading or writing past the end of a heap allocation</li>
+        <li><strong>Stack buffer overflow:</strong> Reading or writing past the end of a stack variable</li>
+        <li><strong>Global buffer overflow:</strong> Reading or writing past the end of a global variable</li>
+        <li><strong>Use-after-free:</strong> Accessing heap memory after it has been freed</li>
+        <li><strong>Use-after-return:</strong> Accessing stack memory of a returned function (optional, with <code>ASAN_OPTIONS=detect_stack_use_after_return=1</code>)</li>
+        <li><strong>Use-after-scope:</strong> Accessing a local variable outside its scope</li>
+        <li><strong>Double free:</strong> Freeing the same memory twice</li>
+        <li><strong>Memory leaks:</strong> Via the integrated LeakSanitizer (enabled by default on Linux)</li>
+      </ul>
+
+      <h3>How to enable ASan</h3>
+      <pre><code># GCC or Clang:
+g++ -fsanitize=address -fno-omit-frame-pointer -g -O1 program.cpp -o program
+clang++ -fsanitize=address -fno-omit-frame-pointer -g -O1 program.cpp -o program
+
+# -fno-omit-frame-pointer: better stack traces
+# -g: include debug information for readable output
+# -O1: recommended optimization level (fast enough, but preserves stack frames)
+
+# MSVC:
+cl /fsanitize=address /Zi program.cpp</code></pre>
+      <p>You must compile <strong>all</strong> translation units with the sanitizer flags. If you link sanitized code with non-sanitized code, the sanitizer may miss bugs or produce false positives.</p>
+
+      <h3>How ASan works: shadow memory</h3>
+      <p>ASan uses a technique called <strong>shadow memory</strong>. For every 8 bytes of application memory, ASan maintains 1 byte of shadow memory that records where the application memory is accessible. A shadow byte value of 0 means all 8 application bytes are accessible. A value of <code>k</code> (1-7) means only the first <code>k</code> bytes are accessible. A negative value means the memory is entirely inaccessible (freed, part of a redzone, or beyond the stack frame).</p>
+      <p>When the program allocates memory, ASan inserts <strong>redzones</strong> (poisoned regions) around the allocation. A heap allocation of N bytes is padded with redzones before and after:</p>
+      <pre><code>// Logical view of a heap allocation with ASan:
+[LEFT REDZONE] [USER DATA: N bytes] [RIGHT REDZONE]
+   poisoned        accessible           poisoned
+
+// Shadow memory for this region:
+  0xff 0xff    0x00 0x00 0x00 ...    0xff 0xff
+  (poison)      (accessible)          (poison)</code></pre>
+      <p>Every memory access in the program is instrumented: before the load or store executes, ASan checks the corresponding shadow byte. If the shadow byte indicates the memory is inaccessible, ASan reports the error with a detailed stack trace showing where the access occurred and where the memory was allocated (and freed, if applicable).</p>
+      <p>For use-after-free detection, ASan does not immediately return freed memory to the system. Instead, it places freed memory in a <strong>quarantine</strong> and poisons it. If the program accesses this quarantined memory, ASan catches it. The quarantine is bounded in size; when it fills up, the oldest memory is actually freed and can be reused by new allocations.</p>
+
+      <h3>Reading ASan output</h3>
+      <p>When ASan detects an error, it produces a detailed report:</p>
+      <pre><code>=================================================================
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014
+READ of size 4 at 0x602000000014 thread T0
+    #0 0x4a3b2c in main /home/user/example.cpp:8:15
+    #1 0x7f8a3b2c in __libc_start_main
+
+0x602000000014 is located 0 bytes after 20-byte region [0x602000000000,0x602000000014)
+allocated by thread T0 here:
+    #0 0x493e7c in operator new[](unsigned long)
+    #1 0x4a3b0a in main /home/user/example.cpp:6:14
+
+Shadow bytes around the buggy address:
+  0x0c047fff7fb0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c047fff7fc0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=&gt;0x0c047fff7fd0: fa fa 00 04[fa]fa fa fa fa fa fa fa fa fa fa fa
+  0x0c047fff7fe0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend:
+  Addressable:           00
+  Heap left redzone:     fa
+  Freed heap region:     fd
+  Stack left redzone:    f1</code></pre>
+      <p>The key information in this report:</p>
+      <ul>
+        <li><strong>Error type:</strong> heap-buffer-overflow</li>
+        <li><strong>Access type and size:</strong> READ of size 4</li>
+        <li><strong>Stack trace of the access:</strong> main at example.cpp:8</li>
+        <li><strong>Stack trace of the allocation:</strong> main at example.cpp:6</li>
+        <li><strong>Shadow memory dump:</strong> The <code>[fa]</code> marker shows the access hit a heap redzone</li>
+      </ul>
+      <p>The shadow memory dump uses single-character codes: <code>00</code> = addressable, <code>fa</code> = heap redzone, <code>fd</code> = freed heap, <code>f1</code> = stack left redzone, <code>f3</code> = stack right redzone. The brackets <code>[fa]</code> indicate the shadow byte corresponding to the bad access.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> ASan reports include stack traces for both the bad access and the allocation (and deallocation, for use-after-free). This makes root-cause analysis much faster than debugging a crash dump.
+      </div>
+
+      <!-- ===== SVG ANIMATION ===== -->
+      <div class="anim-container" id="asan-shadow-anim">
+        <h4>&#9654; ASan Shadow Memory: Step-by-Step</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how ASan uses redzones and shadow memory to catch an out-of-bounds access.</p>
+        <svg id="asan-shadow-svg" width="680" height="380" viewBox="0 0 680 380"></svg>
+        <div id="asan-shadow-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="asan-shadow-step">Step &rarr;</button>
+          <button class="anim-btn" id="asan-shadow-reset">Reset</button>
+          <span class="anim-output" id="asan-shadow-output"></span>
+        </div>
+      </div>
+
+      <h2 id="ubsan">UndefinedBehaviorSanitizer (UBSan)</h2>
+      <p>UBSan detects undefined behavior at runtime. Unlike ASan (which focuses on memory), UBSan catches UB in arithmetic, type conversions, control flow, and other non-memory categories.</p>
+
+      <h3>What UBSan detects</h3>
+      <ul>
+        <li>Signed integer overflow (and unsigned overflow, with a separate flag)</li>
+        <li>Shift by too much or by negative amount</li>
+        <li>Division by zero and <code>INT_MIN / -1</code></li>
+        <li>Null pointer dereference</li>
+        <li>Misaligned pointer access</li>
+        <li>Out-of-bounds array indexing (for some array types)</li>
+        <li>Reaching <code>__builtin_unreachable()</code></li>
+        <li>Invalid bool value (a bool that is not 0 or 1)</li>
+        <li>Invalid enum value</li>
+        <li>Floating-point overflow in cast to integer</li>
+        <li>Calling a function through a pointer of the wrong type</li>
+        <li>Returning from a value-returning function without a return statement</li>
+      </ul>
+
+      <h3>How to enable UBSan</h3>
+      <pre><code># Enable all UBSan checks:
+clang++ -fsanitize=undefined -g -O1 program.cpp -o program
+
+# Enable specific checks:
+clang++ -fsanitize=signed-integer-overflow,null,alignment -g program.cpp
+
+# Combine with ASan (they are compatible):
+clang++ -fsanitize=address,undefined -g -O1 program.cpp</code></pre>
+      <p>UBSan can operate in two modes:</p>
+      <ul>
+        <li><strong>Trap mode</strong> (<code>-fsanitize-trap=undefined</code>): Each UB triggers a trap instruction (equivalent to <code>abort()</code>). The program terminates immediately. Minimal overhead, no runtime library needed.</li>
+        <li><strong>Report mode</strong> (default): UBSan prints a diagnostic message and continues execution. This finds more bugs per run but may produce cascading errors.</li>
+      </ul>
+
+      <h3>UBSan output example</h3>
+      <pre><code>program.cpp:10:15: runtime error: signed integer overflow:
+2147483647 + 1 cannot be represented in type 'int'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior program.cpp:10:15</code></pre>
+      <p>UBSan output includes the file, line, column, the exact expression, the values involved, and the type. This is usually sufficient to understand and fix the bug immediately.</p>
+
+      <h3>Performance overhead</h3>
+      <p>UBSan is very lightweight. Most checks add a single comparison and branch per instrumented operation. Typical overhead is 10-20% runtime increase with negligible memory increase. This makes UBSan suitable for deployment in some production environments, especially in trap mode.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> ASan and UBSan are compatible and can be enabled simultaneously. This combination catches both memory errors and arithmetic/logic UB. It is the recommended "first line of defense" configuration for CI testing.
+      </div>
+
+      <h2 id="tsan">ThreadSanitizer (TSan)</h2>
+      <p>ThreadSanitizer detects data races in multithreaded programs. A data race occurs when two threads access the same memory location, at least one access is a write, and there is no synchronization between them. Data races are undefined behavior in C++11 and later.</p>
+
+      <h3>How to enable TSan</h3>
+      <pre><code>clang++ -fsanitize=thread -g -O1 program.cpp -o program -lpthread</code></pre>
+      <p><strong>Important:</strong> TSan cannot be combined with ASan. They use different shadow memory layouts that conflict. Run separate builds for ASan and TSan testing.</p>
+
+      <h3>How TSan works</h3>
+      <p>TSan maintains a <strong>vector clock</strong> for every thread and a <strong>shadow state</strong> for every memory location (8 bytes of shadow per byte of application memory). The shadow state records the most recent access to each location: which thread, what kind of access (read or write), and the thread's vector clock at the time.</p>
+      <p>On every memory access, TSan:</p>
+      <ol>
+        <li>Checks if the current access conflicts with a previous access recorded in the shadow state</li>
+        <li>Two accesses conflict if they are from different threads, at least one is a write, and they are not ordered by a happens-before relationship (detected via vector clock comparison)</li>
+        <li>If a conflict is found, TSan reports the data race with stack traces for both accesses</li>
+      </ol>
+
+      <h3>TSan output example</h3>
+      <pre><code>WARNING: ThreadSanitizer: data race (pid=12345)
+  Write of size 4 at 0x7f9a3c000000 by thread T1:
+    #0 increment /home/user/example.cpp:8:5
+    #1 thread_func /home/user/example.cpp:15:5
+
+  Previous read of size 4 at 0x7f9a3c000000 by thread T2:
+    #0 read_value /home/user/example.cpp:20:12
+    #1 thread_func2 /home/user/example.cpp:25:5
+
+  Location is global 'counter' of size 4 at 0x7f9a3c000000
+  Thread T1 (running) created at:
+    #0 pthread_create
+    #1 main /home/user/example.cpp:30:5</code></pre>
+      <p>The report shows both accesses (including their stack traces), identifies the memory location, and shows where each thread was created. This is usually enough to identify and fix the race condition.</p>
+
+      <h3>Performance overhead</h3>
+      <p>TSan is the most expensive sanitizer: typically 5-15x slowdown and 5-10x memory increase. This is because it must record metadata for every memory access. Despite the overhead, TSan is invaluable for concurrent code because data races are extremely difficult to find by other means.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Data races are nearly impossible to find via testing alone because they depend on thread scheduling, which is non-deterministic. TSan detects them deterministically by tracking happens-before relationships. If your code uses threads, run TSan.
+      </div>
+
+      <h2 id="msan">MemorySanitizer (MSan)</h2>
+      <p>MemorySanitizer detects reads of uninitialized memory. It tracks the "initialized" status of every byte in the program using shadow memory. When an uninitialized value is used in a way that affects program behavior (a branch condition, an output operation, a system call argument), MSan reports the error.</p>
+
+      <h3>How to enable MSan</h3>
+      <pre><code># Clang only (GCC does not support MSan):
+clang++ -fsanitize=memory -fno-omit-frame-pointer -g -O1 program.cpp -o program
+
+# With origin tracking (slower but shows where the uninitialized value came from):
+clang++ -fsanitize=memory -fsanitize-memory-track-origins=2 -g program.cpp</code></pre>
+      <p><strong>Important:</strong> MSan requires that the <em>entire</em> program (including all libraries) be compiled with MSan. Any non-instrumented code will be treated as producing initialized values, leading to false negatives. In practice, this means you need MSan-instrumented versions of your standard library and all dependencies. This makes MSan harder to deploy than ASan or UBSan.</p>
+
+      <h3>What MSan detects</h3>
+      <pre><code>int x;          // uninitialized
+if (x &gt; 0) {   // MSan reports: use of uninitialized value
+    // ...
+}
+
+int arr[10];
+int sum = 0;
+for (int i = 0; i &lt; 10; i++) {
+    sum += arr[i];  // MSan reports: use of uninitialized value
+}
+std::cout &lt;&lt; sum;</code></pre>
+      <p>MSan is precise about when to report: it does not report merely reading an uninitialized value into a register. It reports when the uninitialized value <em>influences program behavior</em>. This reduces false positives from code that copies uninitialized padding bytes without using them.</p>
+
+      <h3>Performance overhead</h3>
+      <p>MSan typically imposes 2-3x slowdown and 2-3x memory increase, similar to ASan. The origin tracking mode adds additional overhead (3-5x total).</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> MSan cannot be combined with ASan or TSan. You need separate builds. MSan also requires all dependencies to be instrumented, making it the hardest sanitizer to deploy. Use <code>-fsanitize-memory-track-origins=2</code> for the most useful diagnostics.
+      </div>
+
+      <h2 id="lsan">LeakSanitizer (LSan)</h2>
+      <p>LeakSanitizer detects memory leaks at program exit. On Linux, LSan is integrated into ASan and enabled by default. It can also be used standalone.</p>
+
+      <h3>How to enable LSan</h3>
+      <pre><code># Integrated with ASan (automatic on Linux):
+clang++ -fsanitize=address -g program.cpp
+
+# Standalone:
+clang++ -fsanitize=leak -g program.cpp</code></pre>
+
+      <h3>How LSan works</h3>
+      <p>At program exit, LSan performs a conservative garbage collection scan. It marks all heap allocations as potentially leaked. Then it scans the stack, registers, and global variables for pointers into the heap. Any allocation that is reachable through a chain of pointers from the roots is marked as "reachable" (not leaked). The remaining allocations are reported as leaks.</p>
+      <p>LSan classifies leaks into three categories:</p>
+      <ul>
+        <li><strong>Definitely lost:</strong> No pointer to the allocation exists anywhere in the program</li>
+        <li><strong>Indirectly lost:</strong> The allocation is reachable only through definitely-lost allocations</li>
+        <li><strong>Possibly lost:</strong> A pointer to the interior (not the start) of the allocation exists</li>
+      </ul>
+
+      <h3>LSan output example</h3>
+      <pre><code>=================================================================
+==12345==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 40 byte(s) in 1 object(s) allocated from:
+    #0 0x493e7c in operator new[](unsigned long)
+    #1 0x4a3b0a in main /home/user/example.cpp:5:14
+
+SUMMARY: AddressSanitizer: 40 byte(s) leaked in 1 allocation(s).</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> LSan adds virtually zero overhead because it only runs at program exit. It is enabled by default with ASan on Linux, so if you are using ASan, you get leak detection for free.
+      </div>
+
+      <h2 id="sanitizer-comparison">Sanitizer Comparison</h2>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem">
+        <thead>
+          <tr style="border-bottom:2px solid #333">
+            <th style="text-align:left;padding:0.5rem">Sanitizer</th>
+            <th style="text-align:left;padding:0.5rem">Detects</th>
+            <th style="text-align:left;padding:0.5rem">Overhead</th>
+            <th style="text-align:left;padding:0.5rem">Combine?</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem"><strong>ASan</strong></td>
+            <td style="padding:0.5rem">Memory errors</td>
+            <td style="padding:0.5rem">~2x CPU, ~3x RAM</td>
+            <td style="padding:0.5rem">+ UBSan, + LSan</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem"><strong>UBSan</strong></td>
+            <td style="padding:0.5rem">Undefined behavior</td>
+            <td style="padding:0.5rem">~1.2x CPU, ~1x RAM</td>
+            <td style="padding:0.5rem">+ ASan, + TSan, + MSan</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem"><strong>TSan</strong></td>
+            <td style="padding:0.5rem">Data races</td>
+            <td style="padding:0.5rem">~5-15x CPU, ~5-10x RAM</td>
+            <td style="padding:0.5rem">+ UBSan only</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem"><strong>MSan</strong></td>
+            <td style="padding:0.5rem">Uninitialized reads</td>
+            <td style="padding:0.5rem">~3x CPU, ~3x RAM</td>
+            <td style="padding:0.5rem">+ UBSan only</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem"><strong>LSan</strong></td>
+            <td style="padding:0.5rem">Memory leaks</td>
+            <td style="padding:0.5rem">~0 (runs at exit)</td>
+            <td style="padding:0.5rem">Bundled with ASan</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="ci-best-practices">Best Practices for CI</h2>
+      <p>Integrating sanitizers into your continuous integration pipeline is one of the highest-leverage improvements you can make to a C++ project's quality. Here is the recommended approach:</p>
+
+      <h3>Minimum viable setup: two builds</h3>
+      <p>At minimum, maintain two CI builds:</p>
+      <ol>
+        <li><strong>ASan + UBSan build:</strong> Catches memory errors and undefined behavior. Covers the most common bug categories with moderate overhead.</li>
+        <li><strong>TSan build:</strong> Catches data races. Required for any code that uses threads.</li>
+      </ol>
+      <pre><code># Build 1: ASan + UBSan
+CXX=clang++ CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1"
+
+# Build 2: TSan
+CXX=clang++ CXXFLAGS="-fsanitize=thread -g -O1"</code></pre>
+
+      <h3>Full setup: three builds</h3>
+      <p>If your project can afford the CI time, add MSan:</p>
+      <pre><code># Build 3: MSan (requires instrumented libc++)
+CXX=clang++ CXXFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -g -O1"</code></pre>
+      <p>The MSan build requires a custom-built instrumented standard library, which adds complexity. Many projects skip MSan and rely on Valgrind or code review for uninitialized value detection.</p>
+
+      <h3>Environment variables</h3>
+      <p>Sanitizer behavior can be tuned via environment variables:</p>
+      <pre><code># Abort on first error (useful in CI to get a clear failure):
+ASAN_OPTIONS=halt_on_error=1:detect_stack_use_after_return=1
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+
+# Suppress known issues (use sparingly):
+ASAN_OPTIONS=suppressions=asan_suppressions.txt
+LSAN_OPTIONS=suppressions=lsan_suppressions.txt</code></pre>
+
+      <h3>Suppressing false positives</h3>
+      <p>Sanitizers have very low false positive rates, but they do occur, especially with older or exotic code. Each sanitizer supports suppression files that list known false positives by function name or file. Use suppressions sparingly and always document why each suppression exists.</p>
+
+      <h3>Fuzzing with sanitizers</h3>
+      <p>Combining sanitizers with fuzzing is the most powerful bug-finding combination available. libFuzzer (built into Clang) and AFL++ can generate inputs that explore code paths your test suite never reaches. When a fuzzed input triggers a sanitizer error, you get a minimal reproducer and a precise error report.</p>
+      <pre><code># Build with ASan + UBSan + libFuzzer:
+clang++ -fsanitize=address,undefined,fuzzer -g -O1 fuzz_target.cpp -o fuzzer
+./fuzzer corpus/</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Sanitizers find bugs that tests miss. Tests verify expected behavior on expected inputs. Sanitizers verify the absence of UB and memory errors on whatever inputs you provide. Combine them: run your tests with sanitizers enabled, and fuzz with sanitizers for maximum coverage.
+      </div>
+
+      <h2 id="shadow-memory-deep-dive">Shadow Memory: The Mechanism Behind Sanitizers</h2>
+      <p>The shadow memory technique is central to how ASan and MSan work. Understanding it helps you reason about sanitizer performance and limitations.</p>
+      <p>The core idea: for every byte (or group of bytes) of application memory, maintain a "shadow" byte that stores metadata. The mapping from application address to shadow address must be fast (constant time), so it is computed via a simple formula:</p>
+      <pre><code>// ASan shadow memory mapping (typical):
+ShadowAddr = (AppAddr &gt;&gt; 3) + ShadowOffset
+
+// Each shadow byte covers 8 application bytes.
+// ShadowOffset is a fixed constant (e.g., 0x7fff8000 on Linux x86-64).
+
+// The shadow byte encodes:
+//   0:    all 8 bytes are addressable
+//   1-7:  only the first k bytes are addressable
+//   negative: entire 8-byte region is poisoned (redzone, freed, etc.)</code></pre>
+      <p>This mapping divides the virtual address space into two halves: the application half and the shadow half. The shadow half is mmap'd on demand and never grows beyond 1/8th of the application's virtual address space usage.</p>
+      <p>Every memory access instruction is instrumented with a check:</p>
+      <pre><code>// For a load of N bytes at address A:
+shadow_value = *(char*)(A &gt;&gt; 3 + SHADOW_OFFSET);
+if (shadow_value != 0) {
+    // Check if specifically our access is in the poisoned region
+    if ((A &amp; 7) + N &gt; shadow_value || shadow_value &lt; 0) {
+        __asan_report_load(A, N);
+    }
+}</code></pre>
+      <p>This check adds approximately 3-4 instructions per memory access. For aligned 8-byte accesses, the check simplifies to a single comparison. This is why ASan overhead is typically 2x rather than something larger: the checks are cheap and the branch predictor learns quickly (almost all accesses are valid).</p>
+
+      <h2 id="valgrind">Valgrind vs Sanitizers</h2>
+      <p>Before sanitizers, <strong>Valgrind</strong> (specifically its Memcheck tool) was the primary tool for detecting memory errors in C/C++. Valgrind runs the program on a virtual CPU and instruments every memory access dynamically. How do sanitizers compare?</p>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem">
+        <thead>
+          <tr style="border-bottom:2px solid #333">
+            <th style="text-align:left;padding:0.5rem">Aspect</th>
+            <th style="text-align:left;padding:0.5rem">Sanitizers</th>
+            <th style="text-align:left;padding:0.5rem">Valgrind</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem">Overhead</td>
+            <td style="padding:0.5rem">2x (ASan)</td>
+            <td style="padding:0.5rem">10-50x</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem">Recompilation</td>
+            <td style="padding:0.5rem">Required</td>
+            <td style="padding:0.5rem">Not required</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem">Stack errors</td>
+            <td style="padding:0.5rem">Detected (ASan)</td>
+            <td style="padding:0.5rem">Limited detection</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem">Global errors</td>
+            <td style="padding:0.5rem">Detected (ASan)</td>
+            <td style="padding:0.5rem">Not detected</td>
+          </tr>
+          <tr style="border-bottom:1px solid #ddd">
+            <td style="padding:0.5rem">Platform</td>
+            <td style="padding:0.5rem">Linux, macOS, Windows</td>
+            <td style="padding:0.5rem">Linux, macOS</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem">Uninit values</td>
+            <td style="padding:0.5rem">MSan (Clang only)</td>
+            <td style="padding:0.5rem">Detected</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>For new projects, sanitizers are generally preferred because of their much lower overhead and broader detection of stack and global errors. Valgrind remains useful when recompilation is not possible (e.g., debugging a third-party binary without source code).</p>
+
+      <h2 id="limitations">Limitations of Sanitizers</h2>
+      <p>Sanitizers are powerful but not omniscient. Understanding their limitations ensures you do not develop a false sense of security:</p>
+      <ul>
+        <li><strong>Runtime coverage dependent:</strong> Sanitizers only detect UB that is actually triggered during execution. If your test suite does not exercise a particular code path, sanitizers will not find bugs on that path. Combine sanitizers with fuzzing and high test coverage.</li>
+        <li><strong>False negatives:</strong> ASan can miss certain intra-object overflows (e.g., overflowing one field into another field of the same struct). UBSan cannot detect all forms of UB (e.g., strict aliasing violations are not fully covered).</li>
+        <li><strong>Mutual exclusion:</strong> ASan, TSan, and MSan cannot be combined. You need separate builds.</li>
+        <li><strong>MSan requires full instrumentation:</strong> Any uninstrumented code (including system libraries) is a blind spot for MSan.</li>
+        <li><strong>Overhead:</strong> While modest for ASan/UBSan, TSan's overhead can make some test suites impractically slow. Prioritize TSan testing for concurrent code.</li>
+        <li><strong>No compile-time detection:</strong> Sanitizers catch UB at runtime, not at compile time. Use <code>-Wall -Wextra</code> and static analyzers for compile-time detection.</li>
+      </ul>
+
+      <h2 id="summary">Summary</h2>
+      <p>Sanitizers are the most effective runtime tools for detecting undefined behavior and memory errors in C++. The practical advice is simple:</p>
+      <ul>
+        <li><strong>Always run ASan + UBSan</strong> in your CI pipeline. The overhead is modest and the bug-finding power is enormous.</li>
+        <li><strong>Add TSan</strong> if your code uses threads. Data races are nearly impossible to find otherwise.</li>
+        <li><strong>Add MSan</strong> if you can manage the instrumented-everything requirement. Uninitialized value bugs are subtle and dangerous.</li>
+        <li><strong>Combine with fuzzing</strong> for maximum effectiveness. Fuzzing generates the unusual inputs that trigger UB.</li>
+        <li><strong>Treat sanitizer findings as real bugs.</strong> Sanitizers have very low false positive rates. If a sanitizer reports an issue, fix it.</li>
+      </ul>
+      <p>The next and final article in this series explores <a href="compiler-exploits.html">how compilers exploit undefined behavior</a> for optimization, with real-world examples of code that breaks when the optimizer applies UB-based reasoning.</p>
+
+      <nav class="post-nav">
+        <a href="common-ub.html"><span>Previous</span><span>&#8592; Common Sources of UB</span></a>
+        <a class="next" href="compiler-exploits.html"><span>Next</span><span>How Compilers Exploit UB &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var svg=document.getElementById('asan-shadow-svg');
+    var info=document.getElementById('asan-shadow-info');
+    var out=document.getElementById('asan-shadow-output');
+    var step=0;
+    var C1='#0a8f6a',C2='#3498db',C3='#9b59b6',C4='#ff6b35',C5='#c0392b';
+
+    var phases=[
+      {label:'Program calls: int* buf = new int[5]; (20 bytes)'},
+      {label:'ASan allocates buffer with LEFT and RIGHT redzones'},
+      {label:'Shadow memory updated: redzones poisoned (0xfa), buffer accessible (0x00)'},
+      {label:'Program accesses buf[3] (valid): shadow byte = 0x00, access allowed'},
+      {label:'Program accesses buf[7] (out-of-bounds): shadow byte = 0xfa (redzone!)'},
+      {label:'ASan detects redzone hit: reports heap-buffer-overflow with stack trace'}
+    ];
+
+    function el(tag,attrs,parent){
+      var e=document.createElementNS('http://www.w3.org/2000/svg',tag);
+      for(var k in attrs) e.setAttribute(k,attrs[k]);
+      if(parent) parent.appendChild(e);
+      return e;
+    }
+    function txt(text,attrs,parent){
+      var t=el('text',attrs,parent);
+      t.textContent=text;
+      return t;
+    }
+
+    function draw(s){
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+
+      var defs=el('defs',{},svg);
+      var mkr=el('marker',{id:'arrSan',viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:6,markerHeight:6,orient:'auto'},defs);
+      el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:C2},mkr);
+
+      // Title
+      txt('Heap Memory Layout',{x:340,y:22,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:'#333'},svg);
+
+      // Memory blocks layout
+      var mx=30,my=40,bw=44,bh=50;
+      // Left redzone: 2 blocks
+      // Buffer: 5 blocks (int[5] = 20 bytes, 3 full 8-byte groups = ceil(20/8)=3 shadow bytes)
+      // Right redzone: 2 blocks
+      var blocks=[
+        {label:'RZ',type:'rz'},{label:'RZ',type:'rz'},
+        {label:'[0]',type:'buf'},{label:'[1]',type:'buf'},{label:'[2]',type:'buf'},{label:'[3]',type:'buf'},{label:'[4]',type:'buf'},
+        {label:'RZ',type:'rz'},{label:'RZ',type:'rz'},{label:'RZ',type:'rz'}
+      ];
+
+      for(var i=0;i<blocks.length;i++){
+        var bx=mx+i*(bw+4);
+        var b=blocks[i];
+        var fill='#e8e8e8',stroke='#ccc',textFill='#999';
+        if(s>=1){
+          if(b.type==='rz'){fill='#ffe0e0';stroke=C5;textFill=C5;}
+          if(b.type==='buf'){fill='#e0ffe8';stroke=C1;textFill=C1;}
+        }
+        // Highlight valid access
+        if(s>=3&&i===5){fill=C1;stroke=C1;textFill='#fff';}
+        // Highlight invalid access
+        if(s>=4&&i===9){fill=C5;stroke=C5;textFill='#fff';}
+
+        el('rect',{x:bx,y:my,width:bw,height:bh,rx:6,fill:fill,stroke:stroke,'stroke-width':1.5},svg);
+        txt(b.label,{x:bx+bw/2,y:my+bh/2+4,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:textFill},svg);
+      }
+
+      // Labels
+      if(s>=1){
+        txt('Left Redzone',{x:mx+bw,y:my+bh+16,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:C5},svg);
+        txt('User Buffer (int[5])',{x:mx+4*(bw+4),y:my+bh+16,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:C1},svg);
+        txt('Right Redzone',{x:mx+8.5*(bw+4),y:my+bh+16,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:C5},svg);
+      }
+
+      // Shadow memory section
+      var sy=140;
+      txt('Shadow Memory',{x:340,y:sy,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:C3},svg);
+
+      if(s>=2){
+        var shadowVals=['fa','fa','00','00','00','04','fa','fa','fa','fa'];
+        var shadowColors=[];
+        for(var j=0;j<shadowVals.length;j++){
+          shadowColors.push(shadowVals[j]==='fa'?C5:(shadowVals[j]==='00'?C1:C4));
+        }
+        for(var k=0;k<shadowVals.length;k++){
+          var sx2=mx+k*(bw+4);
+          var active=(s>=3&&k===5)||(s>=4&&k===9);
+          el('rect',{x:sx2,y:sy+10,width:bw,height:34,rx:6,fill:active?shadowColors[k]:'#f8f4ff',stroke:shadowColors[k],'stroke-width':active?2.5:1.5},svg);
+          txt('0x'+shadowVals[k],{x:sx2+bw/2,y:sy+31,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:active?'#fff':shadowColors[k]},svg);
+        }
+
+        // Arrow from memory to shadow
+        el('line',{x1:340,y1:my+bh+22,x2:340,y2:sy+8,stroke:C3,'stroke-width':1.5,'stroke-dasharray':'4,3','marker-end':'url(#arrSan)'},svg);
+        txt('>> 3 + offset',{x:350,y:my+bh+38,'font-family':'Consolas,monospace','font-size':'9',fill:C3},svg);
+      }
+
+      // Access marker for buf[3]
+      if(s>=3&&s<4){
+        var ax=mx+5*(bw+4)+bw/2;
+        txt('buf[3]',{x:ax,y:my-8,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:C1},svg);
+        el('line',{x1:ax,y1:my-4,x2:ax,y2:my,stroke:C1,'stroke-width':2},svg);
+      }
+
+      // Access marker for buf[7] (out of bounds)
+      if(s>=4){
+        var ax2=mx+9*(bw+4)+bw/2;
+        txt('buf[7]',{x:ax2,y:my-8,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:C5},svg);
+        el('line',{x1:ax2,y1:my-4,x2:ax2,y2:my,stroke:C5,'stroke-width':2},svg);
+      }
+
+      // Error report
+      if(s>=5){
+        var ey=200;
+        el('rect',{x:40,y:ey,width:600,height:160,rx:10,fill:'#1a1520',stroke:C5,'stroke-width':2},svg);
+        txt('ASan Error Report',{x:340,y:ey+20,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:C5},svg);
+        var report=[
+          '==PID==ERROR: AddressSanitizer: heap-buffer-overflow',
+          'READ of size 4 at 0x60200000001c thread T0',
+          '  #0 main example.cpp:8:15',
+          '',
+          '0x60200000001c is located 8 bytes after 20-byte region',
+          'allocated by thread T0 here:',
+          '  #0 operator new[](unsigned long)',
+          '  #1 main example.cpp:5:14'
+        ];
+        for(var r=0;r<report.length;r++){
+          var rc=r===0?C5:(r<3?'#e8d0ff':'#aaa');
+          txt(report[r],{x:60,y:ey+40+r*15,'font-family':'Consolas,monospace','font-size':'9.5',fill:rc},svg);
+        }
+      }
+
+      info.textContent=phases[s].label;
+      out.textContent='Step '+(s+1)+' of '+phases.length;
+    }
+
+    draw(0);
+
+    document.getElementById('asan-shadow-step').addEventListener('click',function(){
+      if(step<phases.length-1){step++;draw(step);}
+    });
+    document.getElementById('asan-shadow-reset').addEventListener('click',function(){
+      step=0;draw(0);
+    });
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

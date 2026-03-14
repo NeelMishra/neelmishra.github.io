@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="shared_ptr internals: control block anatomy, make_shared optimization, aliasing constructor, weak_ptr, enable_shared_from_this, atomic reference counting.">
+  <title>shared_ptr Internals | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="unique-ptr.html">Advanced Smart Pointers</a></div>
+
+      <h1>shared_ptr Internals</h1>
+      <p class="post-meta">March 2026 &middot; 22 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="what-is-shared-ptr">What Is shared_ptr?</h2>
+      <p><code>std::shared_ptr</code> models <strong>shared ownership</strong>: multiple <code>shared_ptr</code> instances can own the same object, and the object is destroyed only when the last owner is gone. It achieves this through <strong>reference counting</strong>, which is the mechanism that tracks how many owners exist at any given time.</p>
+      <p>Unlike <code>unique_ptr</code>, which is essentially a zero-overhead wrapper around a raw pointer, <code>shared_ptr</code> carries real runtime cost: it allocates a control block, performs atomic reference count operations, and stores extra metadata. This makes it essential to understand <em>when</em> shared ownership is truly necessary and <em>how</em> the internals work, so you can make informed decisions about performance.</p>
+
+      <div class="callout">
+        <strong>When to use shared_ptr:</strong> Only when ownership is genuinely shared across multiple independent owners whose lifetimes are not hierarchically related. If one owner clearly outlives the others, <code>unique_ptr</code> with raw-pointer observers is simpler and faster.
+      </div>
+
+      <!-- ===== SIZE ===== -->
+      <h2 id="size">The Size of shared_ptr</h2>
+      <p>Every <code>shared_ptr</code> is <strong>two pointers wide</strong>: one pointer to the managed object, and one pointer to the control block. This is true regardless of the deleter type, because the deleter is stored inside the control block (type-erased), not in the <code>shared_ptr</code> itself.</p>
+
+      <pre><code>static_assert(sizeof(std::shared_ptr&lt;int&gt;) == 2 * sizeof(void*),
+              "shared_ptr is always two pointers");
+
+// Compare with unique_ptr:
+static_assert(sizeof(std::unique_ptr&lt;int&gt;) == sizeof(void*),
+              "unique_ptr is one pointer with default deleter");</code></pre>
+
+      <p>Why two pointers? Because the object pointer and the control block pointer can point to different addresses. This is critical for the aliasing constructor (discussed below) and for <code>make_shared</code>'s single-allocation optimization.</p>
+
+      <!-- ===== CONTROL BLOCK ===== -->
+      <h2 id="control-block">Control Block Anatomy</h2>
+      <p>The control block is the backbone of <code>shared_ptr</code>. It is a heap-allocated structure that contains everything needed to manage the object's lifetime. Conceptually, it looks like this:</p>
+
+      <pre><code>struct ControlBlock {
+    std::atomic&lt;long&gt; strong_count;  // number of shared_ptr owners
+    std::atomic&lt;long&gt; weak_count;    // number of weak_ptr + (strong_count &gt; 0 ? 1 : 0)
+    Deleter deleter;                 // type-erased deleter
+    Allocator allocator;             // type-erased allocator (if custom)
+    // For make_shared: the managed object is embedded here
+};</code></pre>
+
+      <p>The actual implementation varies between library vendors, but the conceptual structure is the same. Let us examine each component:</p>
+
+      <h3 id="strong-count">Strong Count</h3>
+      <p>The strong count tracks the number of <code>shared_ptr</code> instances pointing to the managed object. When a <code>shared_ptr</code> is copied, the strong count is atomically incremented. When a <code>shared_ptr</code> is destroyed or reassigned, the strong count is atomically decremented. When the strong count reaches zero, the <strong>managed object is destroyed</strong> (the deleter is called).</p>
+
+      <pre><code>auto a = std::make_shared&lt;Widget&gt;(42);  // strong_count = 1
+{
+    auto b = a;                          // strong_count = 2
+    auto c = a;                          // strong_count = 3
+}                                        // b, c destroyed: strong_count = 1
+// a destroyed later: strong_count = 0, Widget deleted</code></pre>
+
+      <h3 id="weak-count">Weak Count</h3>
+      <p>The weak count is more subtle. It tracks the number of <code>weak_ptr</code> instances, plus one extra if the strong count is greater than zero. This "plus one" ensures that the control block itself is not deallocated while any <code>shared_ptr</code> still exists. The control block is freed only when <em>both</em> the strong count and the weak count reach zero.</p>
+
+      <pre><code>auto sp = std::make_shared&lt;Widget&gt;(42);  // strong=1, weak=1 (the "+1")
+std::weak_ptr&lt;Widget&gt; wp = sp;           // strong=1, weak=2
+sp.reset();                               // strong=0, Widget destroyed
+                                          // weak=1 (the "+1" removed, wp keeps 1)
+                                          // control block still alive!
+wp.reset();                               // weak=0, control block freed</code></pre>
+
+      <h3 id="type-erased-deleter">Type-Erased Deleter</h3>
+      <p>Unlike <code>unique_ptr</code> where the deleter is a template parameter, <code>shared_ptr</code>'s deleter is <strong>type-erased</strong> and stored inside the control block. This means the deleter type does not affect the type of the <code>shared_ptr</code> itself:</p>
+
+      <pre><code>// Both have the same type: shared_ptr&lt;Widget&gt;
+auto a = std::shared_ptr&lt;Widget&gt;(new Widget(), std::default_delete&lt;Widget&gt;());
+auto b = std::shared_ptr&lt;Widget&gt;(new Widget(), [](Widget* p) {
+    logDestruction(p);
+    delete p;
+});
+
+// a and b can be stored in the same container, assigned to each other, etc.
+std::vector&lt;std::shared_ptr&lt;Widget&gt;&gt; v;
+v.push_back(std::move(a));
+v.push_back(std::move(b));  // different deleters, same vector</code></pre>
+
+      <p>Type erasure is powerful but comes at a cost: the deleter call goes through a virtual function or function pointer, which prevents inlining in some cases. This is one reason <code>shared_ptr</code> has more overhead than <code>unique_ptr</code>.</p>
+
+      <div class="anim-container" id="control-block-anim">
+        <h4>&#9654; Control Block Animation</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch shared_ptr copies increment the strong count, destructors decrement it, and weak_ptr extend the control block lifetime.</p>
+        <svg id="cb-svg" width="540" height="260" viewBox="0 0 540 260"></svg>
+        <div id="cb-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="cb-step">Step &rarr;</button>
+          <button class="anim-btn" id="cb-reset">Reset</button>
+          <span class="anim-output" id="cb-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== make_shared ===== -->
+      <h2 id="make-shared">make_shared: The Single-Allocation Optimization</h2>
+      <p><code>std::make_shared</code> is the preferred way to create a <code>shared_ptr</code>. It performs a <strong>single heap allocation</strong> for both the control block and the managed object, placing them in contiguous memory:</p>
+
+      <pre><code>// Two allocations: one for Widget, one for control block
+auto p1 = std::shared_ptr&lt;Widget&gt;(new Widget(42));
+
+// One allocation: control block + Widget in one block
+auto p2 = std::make_shared&lt;Widget&gt;(42);</code></pre>
+
+      <p>The benefits of single allocation are significant:</p>
+      <ul>
+        <li><strong>Performance:</strong> One allocation instead of two. Allocation is often the most expensive operation in constructing a <code>shared_ptr</code>.</li>
+        <li><strong>Cache locality:</strong> The control block and the object are adjacent in memory, improving cache performance when accessing both.</li>
+        <li><strong>Exception safety:</strong> Before C++17, <code>shared_ptr&lt;T&gt;(new T(args))</code> in a function argument could leak if another argument threw. <code>make_shared</code> avoids this.</li>
+        <li><strong>Reduced fragmentation:</strong> One allocation means one chunk of memory to manage instead of two.</li>
+      </ul>
+
+      <h3 id="make-shared-layout">Memory Layout: make_shared vs. new</h3>
+      <p>With <code>new</code>:</p>
+      <pre><code>// shared_ptr&lt;Widget&gt;(new Widget(42))
+//
+// Heap allocation 1:          Heap allocation 2:
+// +------------------+        +------------------+
+// | strong_count = 1 |        | Widget data      |
+// | weak_count   = 1 |        | (42)             |
+// | deleter          |        +------------------+
+// | allocator        |
+// +------------------+
+// shared_ptr holds pointers to both</code></pre>
+
+      <p>With <code>make_shared</code>:</p>
+      <pre><code>// make_shared&lt;Widget&gt;(42)
+//
+// Single heap allocation:
+// +------------------+
+// | strong_count = 1 |
+// | weak_count   = 1 |
+// | deleter          |
+// | allocator        |
+// | Widget data      |   &lt;-- object embedded in control block
+// | (42)             |
+// +------------------+
+// shared_ptr holds two pointers to different offsets within this block</code></pre>
+
+      <div class="callout">
+        <strong>Caveat:</strong> <code>make_shared</code> cannot use custom deleters. If you need a custom deleter, you must construct the <code>shared_ptr</code> directly: <code>shared_ptr&lt;T&gt;(ptr, deleter)</code>. Also, <code>make_shared</code> has a memory retention issue with <code>weak_ptr</code> (discussed in the pitfalls article).
+      </div>
+
+      <h3 id="allocate-shared">allocate_shared</h3>
+      <p>If you need a custom allocator, use <code>std::allocate_shared</code>. It works the same as <code>make_shared</code> but uses the provided allocator for the single combined allocation:</p>
+
+      <pre><code>my_allocator&lt;Widget&gt; alloc;
+auto p = std::allocate_shared&lt;Widget&gt;(alloc, 42);
+// Single allocation using alloc for control block + Widget</code></pre>
+
+      <!-- ===== ALIASING ===== -->
+      <h2 id="aliasing-constructor">The Aliasing Constructor</h2>
+      <p>One of the most powerful and least-known features of <code>shared_ptr</code> is the <strong>aliasing constructor</strong>. It creates a <code>shared_ptr</code> that shares ownership with an existing <code>shared_ptr</code> but points to a <em>different</em> object (typically a member of the owned object).</p>
+
+      <pre><code>struct Pair {
+    int first;
+    int second;
+};
+
+auto pair = std::make_shared&lt;Pair&gt;(10, 20);
+
+// Aliasing constructor: shares ownership with pair, but points to pair-&gt;first
+std::shared_ptr&lt;int&gt; first(pair, &amp;pair-&gt;first);
+
+// pair and first share the same control block (strong_count = 2)
+// pair.get()  == &amp;(*pair)        (points to Pair)
+// first.get() == &amp;pair-&gt;first    (points to int member)
+
+pair.reset();    // strong_count = 1 (first still holds Pair alive)
+int val = *first;  // safe: val == 10</code></pre>
+
+      <p>The aliasing constructor is why <code>shared_ptr</code> stores two pointers: the object pointer (which can be anything) and the control block pointer (which tracks the actual owned resource). Without the aliasing constructor, a single pointer would suffice.</p>
+
+      <h3 id="aliasing-use-cases">Use Cases for Aliasing</h3>
+      <ul>
+        <li><strong>Sharing sub-objects:</strong> Pass a <code>shared_ptr</code> to a member of a larger structure, keeping the parent alive.</li>
+        <li><strong>Type-safe casting:</strong> <code>static_pointer_cast</code>, <code>dynamic_pointer_cast</code>, and <code>const_pointer_cast</code> are all implemented using the aliasing constructor.</li>
+        <li><strong>Adapting interfaces:</strong> A function expects <code>shared_ptr&lt;Base&gt;</code> but you have <code>shared_ptr&lt;Derived&gt;</code>.</li>
+      </ul>
+
+      <pre><code>// How static_pointer_cast is implemented (conceptually)
+template &lt;typename T, typename U&gt;
+std::shared_ptr&lt;T&gt; static_pointer_cast(const std::shared_ptr&lt;U&gt;&amp; r) noexcept {
+    auto p = static_cast&lt;T*&gt;(r.get());
+    return std::shared_ptr&lt;T&gt;(r, p);  // aliasing constructor
+}</code></pre>
+
+      <!-- ===== weak_ptr ===== -->
+      <h2 id="weak-ptr">weak_ptr: The Non-Owning Observer</h2>
+      <p><code>std::weak_ptr</code> is a non-owning smart pointer that observes a <code>shared_ptr</code>-managed object without contributing to the strong count. It solves a critical problem: how do you observe an object that might be destroyed?</p>
+      <p>A raw pointer cannot tell you whether the pointed-to object still exists. A <code>weak_ptr</code> can, through its <code>expired()</code> method or by attempting to <code>lock()</code> it into a <code>shared_ptr</code>.</p>
+
+      <pre><code>auto sp = std::make_shared&lt;Widget&gt;(42);
+std::weak_ptr&lt;Widget&gt; wp = sp;
+
+// Check if the object exists
+if (!wp.expired()) {
+    // Promote to shared_ptr for safe access
+    if (auto locked = wp.lock()) {
+        locked-&gt;doWork();  // safe: locked keeps the object alive
+    }
+}
+
+sp.reset();  // Widget destroyed
+// wp.expired() == true
+// wp.lock() returns empty shared_ptr</code></pre>
+
+      <h3 id="weak-ptr-lock">The lock() Pattern</h3>
+      <p>Always use <code>lock()</code> rather than checking <code>expired()</code> and then accessing. The check-then-act pattern has a race condition in multithreaded code:</p>
+
+      <pre><code>// BAD: race condition between expired() and lock()
+if (!wp.expired()) {
+    // Object could be destroyed RIGHT HERE by another thread
+    auto sp = wp.lock();  // might return empty
+    sp-&gt;doWork();         // undefined behavior if sp is empty
+}
+
+// GOOD: atomic promote-or-fail
+if (auto sp = wp.lock()) {
+    sp-&gt;doWork();  // guaranteed safe
+}</code></pre>
+
+      <h3 id="weak-ptr-internals">weak_ptr Internals</h3>
+      <p>A <code>weak_ptr</code> is also two pointers: one to the managed object and one to the control block (same as <code>shared_ptr</code>). The difference is that <code>weak_ptr</code> only increments the <em>weak count</em>, not the <em>strong count</em>. This means:</p>
+      <ul>
+        <li>Creating or copying a <code>weak_ptr</code> increments the weak count.</li>
+        <li>Destroying a <code>weak_ptr</code> decrements the weak count.</li>
+        <li>The managed object is destroyed when the strong count hits zero (not affected by weak count).</li>
+        <li>The control block is freed when both counts hit zero.</li>
+      </ul>
+
+      <p>This separation is crucial: <code>weak_ptr</code> needs the control block to exist (to check the strong count via <code>lock()</code>), but it should not keep the managed object alive. The weak count keeps the <em>control block</em> alive, while the strong count keeps the <em>object</em> alive.</p>
+
+      <!-- ===== enable_shared_from_this ===== -->
+      <h2 id="enable-shared-from-this">enable_shared_from_this</h2>
+      <p>Sometimes, a member function of an object managed by <code>shared_ptr</code> needs to obtain a <code>shared_ptr</code> to <code>this</code>. You cannot simply write <code>shared_ptr&lt;Widget&gt;(this)</code> because that creates a <em>second</em> control block, leading to double-free. The solution is <code>std::enable_shared_from_this</code>:</p>
+
+      <pre><code>class Widget : public std::enable_shared_from_this&lt;Widget&gt; {
+public:
+    std::shared_ptr&lt;Widget&gt; getPtr() {
+        return shared_from_this();  // returns shared_ptr sharing the existing control block
+    }
+
+    void startAsync() {
+        // Capture shared_ptr to keep *this alive during async operation
+        auto self = shared_from_this();
+        std::thread([self]() {
+            self-&gt;doWork();
+        }).detach();
+    }
+};</code></pre>
+
+      <h3 id="esft-implementation">How It Works</h3>
+      <p>The base class stores a <code>weak_ptr</code> to itself. When a <code>shared_ptr</code> is first created for the object, the <code>shared_ptr</code> constructor detects the <code>enable_shared_from_this</code> base and initializes the internal <code>weak_ptr</code>. Subsequent calls to <code>shared_from_this()</code> lock that <code>weak_ptr</code>:</p>
+
+      <pre><code>// Simplified implementation
+template &lt;typename T&gt;
+class enable_shared_from_this {
+    mutable std::weak_ptr&lt;T&gt; weak_this_;
+
+    template &lt;typename U&gt; friend class shared_ptr;  // shared_ptr sets weak_this_
+
+public:
+    std::shared_ptr&lt;T&gt; shared_from_this() {
+        return std::shared_ptr&lt;T&gt;(weak_this_);  // throws if no shared_ptr exists
+    }
+
+    std::shared_ptr&lt;const T&gt; shared_from_this() const {
+        return std::shared_ptr&lt;const T&gt;(weak_this_);
+    }
+
+    std::weak_ptr&lt;T&gt; weak_from_this() noexcept {  // C++17
+        return weak_this_;
+    }
+};</code></pre>
+
+      <div class="callout">
+        <strong>Precondition:</strong> <code>shared_from_this()</code> can only be called on an object that is <em>already managed</em> by at least one <code>shared_ptr</code>. Calling it on a stack object or a <code>unique_ptr</code>-managed object is undefined behavior (or throws <code>bad_weak_ptr</code> since C++17).
+      </div>
+
+      <!-- ===== CUSTOM DELETERS ===== -->
+      <h2 id="custom-deleters">Custom Deleters with shared_ptr</h2>
+      <p>Unlike <code>unique_ptr</code>, the deleter for <code>shared_ptr</code> is not a template parameter. It is passed as a constructor argument and stored inside the control block via type erasure:</p>
+
+      <pre><code>// Custom deleter: does not change the type of shared_ptr&lt;FILE&gt;
+auto file = std::shared_ptr&lt;FILE&gt;(
+    fopen("data.txt", "r"),
+    [](FILE* fp) { if (fp) fclose(fp); }
+);
+
+// Another shared_ptr&lt;FILE&gt; with a different deleter
+auto file2 = std::shared_ptr&lt;FILE&gt;(
+    fopen("log.txt", "w"),
+    &amp;fclose
+);
+
+// Both can coexist in the same container
+std::vector&lt;std::shared_ptr&lt;FILE&gt;&gt; files;
+files.push_back(std::move(file));
+files.push_back(std::move(file2));</code></pre>
+
+      <p>This flexibility is powerful: you can mix objects with different cleanup strategies in the same collection. The price is the type-erased virtual call at destruction time.</p>
+
+      <!-- ===== ATOMIC REF COUNTING ===== -->
+      <h2 id="atomic-ref-counting">Atomic Reference Counting and Thread Safety</h2>
+      <p>The reference counts in the control block are <code>std::atomic&lt;long&gt;</code>. This means the following operations are thread-safe:</p>
+      <ul>
+        <li>Copying a <code>shared_ptr</code> (incrementing the strong count)</li>
+        <li>Destroying a <code>shared_ptr</code> (decrementing the strong count)</li>
+        <li>Creating a <code>weak_ptr</code> from a <code>shared_ptr</code></li>
+        <li>Locking a <code>weak_ptr</code></li>
+      </ul>
+
+      <p>However, <code>shared_ptr</code> is <strong>not</strong> fully thread-safe. Specifically:</p>
+
+      <pre><code>std::shared_ptr&lt;Widget&gt; global;
+
+// Thread 1: reads global
+auto local = global;  // OK: atomic increment of strong count
+
+// Thread 2: reads global
+auto local2 = global;  // OK: atomic increment of strong count
+
+// Thread 3: WRITES global
+global = std::make_shared&lt;Widget&gt;(99);  // DATA RACE with reads!
+
+// The control block operations are atomic, but the shared_ptr object
+// itself (the two pointers) is NOT atomic. Reading and writing the
+// same shared_ptr variable from different threads requires synchronization.</code></pre>
+
+      <div class="callout">
+        <strong>Thread safety summary:</strong> Multiple threads can safely read the same <code>shared_ptr</code>. Multiple threads can safely use <em>different copies</em> of a <code>shared_ptr</code> (pointing to the same object). But if any thread <em>writes</em> (assigns, resets) a <code>shared_ptr</code> object that other threads read, you need a mutex or <code>std::atomic&lt;std::shared_ptr&gt;</code> (C++20).
+      </div>
+
+      <h3 id="atomic-overhead">The Cost of Atomics</h3>
+      <p>Atomic reference counting is not free. On x86, an atomic increment is an <code>lock inc</code> or <code>lock xadd</code> instruction, which flushes the store buffer and bounces the cache line between cores. Benchmarks typically show that copying a <code>shared_ptr</code> is 10x to 40x slower than copying a raw pointer. This is why you should:</p>
+      <ul>
+        <li>Pass <code>shared_ptr</code> by <code>const&amp;</code> when you do not need a new owner.</li>
+        <li>Pass by value only in sink functions that actually store the <code>shared_ptr</code>.</li>
+        <li>Avoid gratuitous copies in tight loops.</li>
+      </ul>
+
+      <pre><code>// BAD: unnecessary atomic increment/decrement
+void process(std::shared_ptr&lt;Widget&gt; w) { w-&gt;doWork(); }
+
+// GOOD: no reference count change
+void process(const std::shared_ptr&lt;Widget&gt;&amp; w) { w-&gt;doWork(); }
+
+// BEST: if you do not need ownership semantics at all
+void process(const Widget&amp; w) { w.doWork(); }</code></pre>
+
+      <!-- ===== COPYING VS MOVING ===== -->
+      <h2 id="copy-vs-move">Copying vs Moving shared_ptr</h2>
+      <p>Moving a <code>shared_ptr</code> is <em>much</em> cheaper than copying it. A copy increments the atomic reference count. A move just transfers the two pointers and nulls the source, with zero atomic operations:</p>
+
+      <pre><code>auto a = std::make_shared&lt;Widget&gt;(42);  // strong=1
+
+// Copy: atomic increment (expensive)
+auto b = a;                              // strong=2
+
+// Move: pointer swap (cheap, no atomics)
+auto c = std::move(a);                   // strong=2 (a is now null)
+
+// b and c share the Widget. a is empty.</code></pre>
+
+      <p>This is why <code>std::move</code> is important when storing <code>shared_ptr</code> into containers or passing to sink functions:</p>
+
+      <pre><code>std::vector&lt;std::shared_ptr&lt;Widget&gt;&gt; widgets;
+
+auto w = std::make_shared&lt;Widget&gt;(42);
+// Move into vector: no atomic operations
+widgets.push_back(std::move(w));</code></pre>
+
+      <!-- ===== use_count ===== -->
+      <h2 id="use-count">use_count() and Why You Should Avoid It</h2>
+      <p><code>shared_ptr::use_count()</code> returns the current strong count. However, in multithreaded code, this value is <em>immediately stale</em>: another thread might increment or decrement the count between your call to <code>use_count()</code> and your next action.</p>
+
+      <pre><code>auto sp = std::make_shared&lt;Widget&gt;(42);
+long count = sp.use_count();  // 1 right now
+
+// In another thread:
+auto copy = sp;               // count is now 2, but our variable says 1
+
+// use_count() is useful for debugging only, never for logic.</code></pre>
+
+      <div class="callout">
+        <strong>Rule:</strong> Never use <code>use_count()</code> for control flow. It is intended for debugging and diagnostics only. If you find yourself checking <code>use_count() == 1</code> to see if you are the sole owner, that is a code smell: consider <code>unique_ptr</code> instead.
+      </div>
+
+      <!-- ===== CREATION PATTERNS ===== -->
+      <h2 id="creation-patterns">Creation Patterns Compared</h2>
+      <p>There are three ways to create a <code>shared_ptr</code>, each with different trade-offs:</p>
+
+      <pre><code>// 1. make_shared (preferred for most cases)
+auto a = std::make_shared&lt;Widget&gt;(42);
+// + Single allocation
+// + Exception safe
+// + Best cache locality
+// - Cannot use custom deleter
+// - Memory retained by weak_ptr (see pitfalls)
+
+// 2. new + shared_ptr constructor
+auto b = std::shared_ptr&lt;Widget&gt;(new Widget(42));
+// + Works with custom deleters
+// + Object memory freed when strong count hits 0
+// - Two allocations
+// - Slightly less cache-friendly
+
+// 3. shared_ptr constructor with custom deleter
+auto c = std::shared_ptr&lt;Widget&gt;(new Widget(42), CustomDeleter{});
+// + Full control over destruction
+// - Two allocations
+// - Type-erased deleter has virtual call overhead</code></pre>
+
+      <!-- ===== INTERNAL IMPLEMENTATION ===== -->
+      <h2 id="implementation">Simplified Implementation</h2>
+      <p>Here is a highly simplified <code>shared_ptr</code> that illustrates the core mechanics (omitting thread safety, allocator support, and many edge cases):</p>
+
+      <pre><code>template &lt;typename T&gt;
+class SharedPtr {
+    T* ptr_;
+    ControlBlock* cb_;
+
+    struct ControlBlock {
+        long strong;
+        long weak;
+        virtual void destroy() = 0;   // calls deleter
+        virtual void deallocate() = 0; // frees control block
+    };
+
+    template &lt;typename D&gt;
+    struct ControlBlockImpl : ControlBlock {
+        D deleter;
+        ControlBlockImpl(D d) : deleter(std::move(d)) { strong = 1; weak = 1; }
+        void destroy() override { deleter(/* ptr */); }
+        void deallocate() override { delete this; }
+    };
+
+public:
+    explicit SharedPtr(T* p)
+        : ptr_(p), cb_(new ControlBlockImpl&lt;std::default_delete&lt;T&gt;&gt;({})) {}
+
+    SharedPtr(const SharedPtr&amp; other)
+        : ptr_(other.ptr_), cb_(other.cb_) {
+        if (cb_) ++cb_-&gt;strong;
+    }
+
+    SharedPtr(SharedPtr&amp;&amp; other) noexcept
+        : ptr_(other.ptr_), cb_(other.cb_) {
+        other.ptr_ = nullptr;
+        other.cb_ = nullptr;
+    }
+
+    ~SharedPtr() {
+        if (!cb_) return;
+        if (--cb_-&gt;strong == 0) {
+            cb_-&gt;destroy();  // call deleter
+            if (--cb_-&gt;weak == 0) cb_-&gt;deallocate();
+        }
+    }
+
+    T&amp; operator*() const { return *ptr_; }
+    T* operator-&gt;() const { return ptr_; }
+};</code></pre>
+
+      <!-- ===== SUMMARY ===== -->
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><code>shared_ptr</code> is <strong>two pointers wide</strong>: one to the object, one to the control block.</li>
+        <li>The control block contains the <strong>strong count</strong>, <strong>weak count</strong>, type-erased deleter, and optionally the object itself.</li>
+        <li><code>make_shared</code> performs a <strong>single allocation</strong> for the control block and object together.</li>
+        <li>The <strong>aliasing constructor</strong> lets a <code>shared_ptr</code> point to a sub-object while sharing ownership of the parent.</li>
+        <li><code>weak_ptr</code> observes without owning. It keeps the <strong>control block alive</strong> (not the object) and can be promoted to <code>shared_ptr</code> via <code>lock()</code>.</li>
+        <li><code>enable_shared_from_this</code> lets an object safely produce <code>shared_ptr</code> instances to itself.</li>
+        <li>Reference counting is <strong>atomic</strong>, making control block operations thread-safe. But the <code>shared_ptr</code> variable itself requires external synchronization for concurrent writes.</li>
+        <li>Prefer passing by <code>const&amp;</code> or raw reference to avoid unnecessary atomic operations.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a href="unique-ptr.html">
+          <span>Previous</span>
+          <span>&#8592; unique_ptr Internals</span>
+        </a>
+        <a class="next" href="ownership.html">
+          <span>Next</span>
+          <span>Ownership Patterns &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function txt(svg,x,y,text,opts){
+      var t=document.createElementNS(NS,'text');t.setAttribute('x',x);t.setAttribute('y',y);
+      t.setAttribute('font-family',opts.ff||'Consolas,monospace');t.setAttribute('font-size',opts.fs||'11');
+      t.setAttribute('font-weight',opts.fw||'600');t.setAttribute('fill',opts.fill||'#13201a');
+      if(opts.anchor)t.setAttribute('text-anchor',opts.anchor);
+      if(opts.dy)t.setAttribute('dominant-baseline',opts.dy);
+      t.textContent=text;svg.appendChild(t);return t;
+    }
+    function rect(svg,x,y,w,h,opts){
+      var r=document.createElementNS(NS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);
+      r.setAttribute('width',w);r.setAttribute('height',h);r.setAttribute('rx',opts.rx||6);
+      r.setAttribute('fill',opts.fill||'#e8e8e8');
+      if(opts.stroke){r.setAttribute('stroke',opts.stroke);r.setAttribute('stroke-width',opts.sw||'2');}
+      svg.appendChild(r);return r;
+    }
+    function line(svg,x1,y1,x2,y2,color,dash){
+      var l=document.createElementNS(NS,'line');l.setAttribute('x1',x1);l.setAttribute('y1',y1);
+      l.setAttribute('x2',x2);l.setAttribute('y2',y2);l.setAttribute('stroke',color||'#0a8f6a');
+      l.setAttribute('stroke-width','2');if(dash)l.setAttribute('stroke-dasharray',dash);
+      svg.appendChild(l);return l;
+    }
+
+    /* ====== Control Block Animation ====== */
+    (function(){
+      var svg=document.getElementById('cb-svg'),info=document.getElementById('cb-info'),out=document.getElementById('cb-output');
+      var steps=[
+        {msg:'auto sp1 = make_shared<Widget>(42);',owners:['sp1'],strong:1,weak:1,objAlive:true,cbAlive:true,weakPtrs:[],phase:'create'},
+        {msg:'auto sp2 = sp1; // copy: strong count incremented atomically',owners:['sp1','sp2'],strong:2,weak:1,objAlive:true,cbAlive:true,weakPtrs:[],phase:'copy1'},
+        {msg:'auto sp3 = sp1; // another copy',owners:['sp1','sp2','sp3'],strong:3,weak:1,objAlive:true,cbAlive:true,weakPtrs:[],phase:'copy2'},
+        {msg:'weak_ptr<Widget> wp = sp1; // weak count incremented',owners:['sp1','sp2','sp3'],strong:3,weak:2,objAlive:true,cbAlive:true,weakPtrs:['wp'],phase:'weak'},
+        {msg:'sp1 goes out of scope: strong count decremented to 2',owners:['sp2','sp3'],strong:2,weak:2,objAlive:true,cbAlive:true,weakPtrs:['wp'],phase:'destroy1'},
+        {msg:'sp2 goes out of scope: strong count decremented to 1',owners:['sp3'],strong:1,weak:2,objAlive:true,cbAlive:true,weakPtrs:['wp'],phase:'destroy2'},
+        {msg:'sp3 goes out of scope: strong=0, OBJECT DESTROYED! Control block survives.',owners:[],strong:0,weak:1,objAlive:false,cbAlive:true,weakPtrs:['wp'],phase:'destroy3'},
+        {msg:'wp goes out of scope: weak=0, CONTROL BLOCK FREED. All memory reclaimed.',owners:[],strong:0,weak:0,objAlive:false,cbAlive:false,weakPtrs:[],phase:'final'}
+      ];
+      var idx=0;
+
+      function draw(s){
+        clearSvg(svg);
+        // Control block
+        var cbX=200,cbY=10,cbW=160,cbH=100;
+        if(s.cbAlive){
+          rect(svg,cbX,cbY,cbW,cbH,{fill:'#f8f4ee',stroke:'#d9cfba',rx:10,sw:'2'});
+          txt(svg,cbX+cbW/2,cbY+16,'Control Block',{ff:'Manrope,sans-serif',fs:'11',fw:'800',anchor:'middle',fill:'#555'});
+          // Strong count
+          var scColor=s.strong>0?'#0a8f6a':'#c0392b';
+          rect(svg,cbX+10,cbY+28,cbW-20,22,{fill:scColor,rx:5});
+          txt(svg,cbX+cbW/2,cbY+39,'strong_count = '+s.strong,{anchor:'middle',dy:'central',fill:'#fff',fw:'700',fs:'11'});
+          // Weak count
+          var wcColor=s.weak>0?'#3498db':'#c0392b';
+          rect(svg,cbX+10,cbY+56,cbW-20,22,{fill:wcColor,rx:5});
+          txt(svg,cbX+cbW/2,cbY+67,'weak_count = '+s.weak,{anchor:'middle',dy:'central',fill:'#fff',fw:'700',fs:'11'});
+          // Deleter
+          rect(svg,cbX+10,cbY+82,cbW-20,14,{fill:'#eee',rx:3});
+          txt(svg,cbX+cbW/2,cbY+89,'deleter',{anchor:'middle',dy:'central',fill:'#888',fw:'500',fs:'9'});
+        }else{
+          rect(svg,cbX,cbY,cbW,cbH,{fill:'#f5f5f5',stroke:'#ddd',rx:10});
+          txt(svg,cbX+cbW/2,cbY+50,'(freed)',{anchor:'middle',dy:'central',fill:'#bbb',fw:'600',fs:'13'});
+        }
+        // Widget object
+        var objX=410,objY=30,objW=110,objH=50;
+        if(s.objAlive){
+          rect(svg,objX,objY,objW,objH,{fill:'#3498db',stroke:'#2980b9',rx:8});
+          txt(svg,objX+objW/2,objY+18,'Widget(42)',{anchor:'middle',fill:'#fff',fw:'700',fs:'12'});
+          txt(svg,objX+objW/2,objY+36,'ALIVE',{anchor:'middle',fill:'rgba(255,255,255,0.8)',fw:'600',fs:'9'});
+          // Arrow from CB to object
+          line(svg,cbX+cbW,cbY+cbH/2,objX,objY+objH/2,'#3498db','6,3');
+        }else{
+          rect(svg,objX,objY,objW,objH,{fill:'#f5f5f5',stroke:'#ddd',rx:8});
+          txt(svg,objX+objW/2,objY+30,'DESTROYED',{anchor:'middle',fill:'#c0392b',fw:'700',fs:'11'});
+        }
+        // shared_ptr owners
+        var ownerY=150;
+        for(var i=0;i<s.owners.length;i++){
+          var ox=20+i*120;
+          rect(svg,ox,ownerY,110,36,{fill:'#0a8f6a',stroke:'#078a5e',rx:8});
+          txt(svg,ox+55,ownerY+12,'shared_ptr',{anchor:'middle',fill:'#fff',fw:'700',fs:'10'});
+          txt(svg,ox+55,ownerY+27,s.owners[i],{anchor:'middle',fill:'rgba(255,255,255,0.8)',fw:'600',fs:'10'});
+          // Arrow to CB
+          line(svg,ox+55,ownerY,cbX+40,cbY+cbH,'#0a8f6a','4,2');
+        }
+        // weak_ptr
+        for(var j=0;j<s.weakPtrs.length;j++){
+          var wx=20+s.owners.length*120+j*120;
+          if(wx>420)wx=420;
+          var wy=ownerY;
+          rect(svg,wx,wy,110,36,{fill:'#9b59b6',stroke:'#8e44ad',rx:8});
+          txt(svg,wx+55,wy+12,'weak_ptr',{anchor:'middle',fill:'#fff',fw:'700',fs:'10'});
+          txt(svg,wx+55,wy+27,s.weakPtrs[j],{anchor:'middle',fill:'rgba(255,255,255,0.8)',fw:'600',fs:'10'});
+          line(svg,wx+55,wy,cbX+120,cbY+cbH,'#9b59b6','4,2');
+        }
+        // Phase label
+        var labelY=220;
+        if(s.phase==='destroy3'){
+          txt(svg,270,labelY,'Object destroyed! Control block kept alive by weak_ptr.',{ff:'Manrope,sans-serif',fs:'11',fw:'700',anchor:'middle',fill:'#c0392b'});
+        }else if(s.phase==='final'){
+          txt(svg,270,labelY,'All memory reclaimed. Zero leaks.',{ff:'Manrope,sans-serif',fs:'11',fw:'700',anchor:'middle',fill:'#0a8f6a'});
+        }
+        info.textContent=s.msg;
+      }
+
+      function reset(){idx=0;draw(steps[0]);out.textContent='';}
+      reset();
+      document.getElementById('cb-step').addEventListener('click',function(){
+        if(idx>=steps.length)return;draw(steps[idx]);idx++;
+        if(idx>=steps.length)out.textContent='\u2714 Full shared_ptr lifecycle demonstrated.';
+      });
+      document.getElementById('cb-reset').addEventListener('click',function(){reset();});
+    })();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

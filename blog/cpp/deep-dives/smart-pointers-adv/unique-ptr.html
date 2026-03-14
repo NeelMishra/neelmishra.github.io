@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="unique_ptr internals: zero-overhead principle, custom deleters, empty base optimization, array specialization, make_unique, and the factory pattern.">
+  <title>unique_ptr Internals | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="unique-ptr.html">Advanced Smart Pointers</a></div>
+
+      <h1>unique_ptr Internals</h1>
+      <p class="post-meta">March 2026 &middot; 18 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="zero-overhead">The Zero-Overhead Principle</h2>
+      <p><code>std::unique_ptr</code> is the poster child for the C++ zero-overhead principle: <strong>you don't pay for what you don't use, and what you do use, you couldn't hand-code any better.</strong> A <code>unique_ptr</code> with a stateless deleter compiles down to the exact same machine code as a raw pointer with manual <code>delete</code>. No extra memory. No extra indirection. No extra branches.</p>
+      <p>This is not an accident. It is the result of several deliberate design decisions in the standard library: the choice to store the deleter as a compressed pair, the use of empty base optimization, and the requirement that ownership transfer happens exclusively through <code>std::move</code>. Understanding these decisions will make you a better C++ programmer, even if you never write your own smart pointer.</p>
+
+      <div class="callout">
+        <strong>Core guarantee:</strong> <code>sizeof(std::unique_ptr&lt;T&gt;) == sizeof(T*)</code> when the deleter is stateless. This means zero memory overhead compared to a raw pointer.
+      </div>
+
+      <p>Why does this matter? Because every abstraction has a cost in most languages. Java's <code>Optional</code> allocates. Python's context managers add overhead. Rust's <code>Box</code> is zero-cost like <code>unique_ptr</code>, but this is the exception rather than the rule across programming languages. In C++, the standard library is engineered so that the safe, correct abstraction is also the fastest one.</p>
+
+      <!-- ===== IMPLEMENTATION ===== -->
+      <h2 id="implementation">How unique_ptr Is Implemented</h2>
+      <p>At its heart, <code>unique_ptr</code> is astonishingly simple. If you strip away all the SFINAE, conditional <code>noexcept</code>, and compatibility machinery, the core looks like this:</p>
+
+      <pre><code>template &lt;typename T, typename Deleter = std::default_delete&lt;T&gt;&gt;
+class unique_ptr {
+    T* ptr_;           // the raw pointer
+    Deleter deleter_;  // the deleter (often zero bytes!)
+
+public:
+    explicit unique_ptr(T* p = nullptr) noexcept : ptr_(p) {}
+
+    ~unique_ptr() {
+        if (ptr_) deleter_(ptr_);
+    }
+
+    // Move constructor: steal the pointer
+    unique_ptr(unique_ptr&amp;&amp; other) noexcept
+        : ptr_(other.release()), deleter_(std::move(other.deleter_)) {}
+
+    // Move assignment
+    unique_ptr&amp; operator=(unique_ptr&amp;&amp; other) noexcept {
+        reset(other.release());
+        deleter_ = std::move(other.deleter_);
+        return *this;
+    }
+
+    // No copies
+    unique_ptr(const unique_ptr&amp;) = delete;
+    unique_ptr&amp; operator=(const unique_ptr&amp;) = delete;
+
+    T* release() noexcept {
+        T* old = ptr_;
+        ptr_ = nullptr;
+        return old;
+    }
+
+    void reset(T* p = nullptr) noexcept {
+        T* old = ptr_;
+        ptr_ = p;
+        if (old) deleter_(old);
+    }
+
+    T&amp; operator*() const { return *ptr_; }
+    T* operator-&gt;() const noexcept { return ptr_; }
+    T* get() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+};</code></pre>
+
+      <p>That is the entire mechanism. There is no reference counting, no control block, no atomic operations, no heap allocation beyond the managed object itself. The destructor calls the deleter on the raw pointer. The move constructor steals the pointer and nulls the source. Copy operations are deleted entirely.</p>
+
+      <h3 id="default-delete">std::default_delete</h3>
+      <p>The default deleter is even simpler:</p>
+
+      <pre><code>template &lt;typename T&gt;
+struct default_delete {
+    void operator()(T* ptr) const { delete ptr; }
+};
+
+// Array specialization
+template &lt;typename T&gt;
+struct default_delete&lt;T[]&gt; {
+    void operator()(T* ptr) const { delete[] ptr; }
+};</code></pre>
+
+      <p>Notice that <code>default_delete</code> has no data members. It is an <em>empty class</em>. Its <code>sizeof</code> is 1 (C++ requires every object to have a unique address), but the compiler can optimize this away when it appears as a base class or member of a compressed pair. This is where empty base optimization enters the picture.</p>
+
+      <!-- ===== EBO ===== -->
+      <h2 id="ebo">Empty Base Optimization (EBO)</h2>
+      <p>Empty base optimization (EBO) is a compiler optimization that allows an empty base class to occupy zero bytes in the derived class layout. The C++ standard mandates that a standalone object must have <code>sizeof &gt;= 1</code>, but a base class subobject with no data members can be compressed to zero bytes.</p>
+
+      <p>Real standard library implementations (libstdc++, libc++, MSVC STL) store the pointer and deleter together in a <strong>compressed pair</strong> that exploits EBO:</p>
+
+      <pre><code>// Simplified compressed_pair using EBO
+template &lt;typename T, typename D&gt;
+class compressed_pair : private D {  // D as base (EBO applies if empty)
+    T ptr_;
+
+public:
+    T&amp; first() { return ptr_; }
+    D&amp; second() { return *this; }
+};
+
+// When D is empty (like default_delete):
+// sizeof(compressed_pair&lt;T*, D&gt;) == sizeof(T*)
+// The empty deleter base contributes zero bytes.</code></pre>
+
+      <p>This is why <code>sizeof(unique_ptr&lt;int&gt;)</code> equals <code>sizeof(int*)</code> on every major implementation. The deleter is there in the type system, but it contributes no runtime storage. The compiler can verify this at compile time:</p>
+
+      <pre><code>// Verify zero overhead at compile time
+static_assert(sizeof(std::unique_ptr&lt;int&gt;) == sizeof(int*),
+              "unique_ptr should be pointer-sized with default deleter");
+
+// With a stateful deleter, it grows
+struct LoggingDeleter {
+    std::string logFile;
+    void operator()(int* p) const { /* log, then delete */ delete p; }
+};
+static_assert(sizeof(std::unique_ptr&lt;int, LoggingDeleter&gt;) &gt; sizeof(int*),
+              "Stateful deleter adds to size");</code></pre>
+
+      <div class="callout">
+        <strong>C++20 improvement:</strong> The <code>[[no_unique_address]]</code> attribute provides EBO-like behavior for non-static data members, so implementations no longer need the compressed_pair trick. The deleter member can be declared with <code>[[no_unique_address]]</code> and the compiler will compress it if empty.
+      </div>
+
+      <div class="anim-container" id="layout-anim">
+        <h4>&#9654; unique_ptr Memory Layout</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through to compare the memory layout of unique_ptr with a stateless deleter vs. a function-pointer deleter.</p>
+        <svg id="layout-svg" width="520" height="200" viewBox="0 0 520 200"></svg>
+        <div id="layout-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="layout-step">Step &rarr;</button>
+          <button class="anim-btn" id="layout-reset">Reset</button>
+          <span class="anim-output" id="layout-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== CUSTOM DELETERS ===== -->
+      <h2 id="custom-deleters">Custom Deleters</h2>
+      <p>The true power of <code>unique_ptr</code> is that you can replace the deleter. This lets you wrap <em>any</em> C API, third-party library, or custom allocation scheme. The deleter is a template parameter, so the compiler knows its type at compile time and can inline the call.</p>
+
+      <h3 id="deleter-function-pointer">Function Pointer Deleter</h3>
+      <p>The simplest custom deleter is a function pointer. This is common when wrapping C APIs:</p>
+
+      <pre><code>// Wrap a C FILE* with automatic fclose
+auto file = std::unique_ptr&lt;FILE, decltype(&amp;fclose)&gt;(
+    fopen("data.txt", "r"), fclose
+);
+// file goes out of scope: fclose(ptr) called automatically
+
+// Wrap an SDL surface
+auto surface = std::unique_ptr&lt;SDL_Surface, decltype(&amp;SDL_FreeSurface)&gt;(
+    SDL_LoadBMP("image.bmp"), SDL_FreeSurface
+);</code></pre>
+
+      <p>The downside: a function pointer is stateful (it holds the address of the function), so <code>sizeof(unique_ptr)</code> grows to two pointers. The compiler also cannot inline through a function pointer as easily as through a direct call.</p>
+
+      <h3 id="deleter-lambda">Lambda Deleter</h3>
+      <p>A captureless lambda is a stateless type (EBO applies!), and the compiler can inline the call. This is often the best option:</p>
+
+      <pre><code>// Stateless lambda deleter: sizeof remains one pointer
+auto deleter = [](FILE* fp) { if (fp) fclose(fp); };
+auto file = std::unique_ptr&lt;FILE, decltype(deleter)&gt;(
+    fopen("data.txt", "r"), deleter
+);
+
+static_assert(sizeof(file) == sizeof(FILE*),
+              "Captureless lambda deleter is zero-overhead");</code></pre>
+
+      <p>In C++20, you can use a lambda directly in an unevaluated context, making the syntax even cleaner. In C++17 and earlier, you need a named variable for the lambda because lambdas are not allowed in <code>decltype</code> of template arguments in some contexts.</p>
+
+      <h3 id="deleter-functor">Functor Deleter</h3>
+      <p>For complex cleanup logic, a functor class gives you full control. Stateless functors get EBO, stateful ones add to the size:</p>
+
+      <pre><code>// Stateless functor: zero overhead (EBO applies)
+struct FCloseDeleter {
+    void operator()(FILE* fp) const {
+        if (fp) fclose(fp);
+    }
+};
+auto file = std::unique_ptr&lt;FILE, FCloseDeleter&gt;(fopen("data.txt", "r"));
+static_assert(sizeof(file) == sizeof(FILE*));
+
+// Stateful functor: adds to size
+struct PoolDeleter {
+    MemoryPool* pool;
+    void operator()(Widget* p) const {
+        p-&gt;~Widget();
+        pool-&gt;deallocate(p);
+    }
+};
+auto w = std::unique_ptr&lt;Widget, PoolDeleter&gt;(
+    pool.allocate&lt;Widget&gt;(), PoolDeleter{&amp;pool}
+);
+// sizeof(w) == sizeof(Widget*) + sizeof(MemoryPool*)</code></pre>
+
+      <div class="callout">
+        <strong>Rule of thumb:</strong> Prefer captureless lambdas or stateless functors as deleters. They give you zero overhead. Use function pointers only when wrapping C APIs where the function address is the natural deleter. Use stateful deleters only when the cleanup truly depends on runtime state (like a pool allocator).
+      </div>
+
+      <!-- ===== ARRAY SPEC ===== -->
+      <h2 id="array-specialization">Array Specialization: unique_ptr&lt;T[]&gt;</h2>
+      <p><code>unique_ptr</code> has a partial specialization for arrays. Instead of <code>operator*</code> and <code>operator-&gt;</code>, it provides <code>operator[]</code>. Instead of calling <code>delete</code>, it calls <code>delete[]</code>.</p>
+
+      <pre><code>// Single object
+auto single = std::make_unique&lt;int&gt;(42);
+int val = *single;  // operator* works
+
+// Array of 100 ints, value-initialized to 0
+auto arr = std::make_unique&lt;int[]&gt;(100);
+arr[0] = 42;        // operator[] works
+// *arr;             // ERROR: operator* not available for arrays</code></pre>
+
+      <p>The array specialization exists because <code>delete</code> and <code>delete[]</code> are fundamentally different operations. Calling <code>delete</code> on an array pointer is undefined behavior. By encoding the "this is an array" information in the type, <code>unique_ptr&lt;T[]&gt;</code> makes it impossible to get this wrong.</p>
+
+      <pre><code>// What the specializations look like internally
+template &lt;typename T&gt;
+class unique_ptr&lt;T[]&gt; {
+    T* ptr_;
+
+public:
+    T&amp; operator[](size_t i) const { return ptr_[i]; }
+    // No operator* or operator-&gt;
+
+    ~unique_ptr() { delete[] ptr_; }
+    // Other members similar to primary template
+};</code></pre>
+
+      <h3 id="array-vs-vector">When to Use unique_ptr&lt;T[]&gt; vs std::vector</h3>
+      <p>In most cases, prefer <code>std::vector</code>. It knows its size, supports iteration, and can grow. Use <code>unique_ptr&lt;T[]&gt;</code> only when:</p>
+      <ul>
+        <li>You receive a dynamically allocated array from a C API and need RAII management.</li>
+        <li>You need a fixed-size heap buffer and cannot afford the three-word overhead of <code>vector</code> (pointer + size + capacity).</li>
+        <li>You are interfacing with a library that returns owning <code>T*</code> arrays.</li>
+      </ul>
+
+      <!-- ===== make_unique ===== -->
+      <h2 id="make-unique">make_unique: The Right Way to Create</h2>
+      <p><code>std::make_unique</code> (C++14) is the preferred way to create a <code>unique_ptr</code>. It is exception-safe, avoids repeating the type, and clearly communicates intent:</p>
+
+      <pre><code>// Prefer this:
+auto widget = std::make_unique&lt;Widget&gt;(42, "hello");
+
+// Over this:
+std::unique_ptr&lt;Widget&gt; widget(new Widget(42, "hello"));</code></pre>
+
+      <h3 id="exception-safety">Exception Safety</h3>
+      <p>Before C++17, function arguments could be evaluated in any order. Consider:</p>
+
+      <pre><code>void process(std::unique_ptr&lt;Widget&gt; w, std::unique_ptr&lt;Gadget&gt; g);
+
+// DANGEROUS before C++17: possible leak!
+process(
+    std::unique_ptr&lt;Widget&gt;(new Widget()),
+    std::unique_ptr&lt;Gadget&gt;(new Gadget())
+);
+
+// The compiler might evaluate in this order:
+//   1. new Widget()         &lt;-- allocates
+//   2. new Gadget()         &lt;-- throws! Widget leaked!
+//   3. unique_ptr&lt;Widget&gt;() &lt;-- never reached
+
+// SAFE: make_unique bundles allocation and construction
+process(std::make_unique&lt;Widget&gt;(), std::make_unique&lt;Gadget&gt;());</code></pre>
+
+      <p>C++17 fixed the evaluation order for function arguments (each argument is fully evaluated before the next), so the raw <code>new</code> version is technically safe from C++17 onward. But <code>make_unique</code> is still preferred for clarity and consistency.</p>
+
+      <h3 id="make-unique-impl">Implementation of make_unique</h3>
+      <p>The implementation is trivial, which is exactly the point:</p>
+
+      <pre><code>template &lt;typename T, typename... Args&gt;
+std::unique_ptr&lt;T&gt; make_unique(Args&amp;&amp;... args) {
+    return std::unique_ptr&lt;T&gt;(new T(std::forward&lt;Args&gt;(args)...));
+}
+
+// Array version (C++14)
+template &lt;typename T&gt;
+std::unique_ptr&lt;T&gt; make_unique(size_t size) {
+    return std::unique_ptr&lt;T&gt;(new std::remove_extent_t&lt;T&gt;[size]());
+}</code></pre>
+
+      <div class="callout">
+        <strong>Limitation:</strong> <code>make_unique</code> cannot use custom deleters. If you need a custom deleter, you must construct the <code>unique_ptr</code> directly. But for the common case of <code>new</code>/<code>delete</code>, always prefer <code>make_unique</code>.
+      </div>
+
+      <!-- ===== OWNERSHIP TRANSFER ===== -->
+      <h2 id="ownership-transfer">Ownership Transfer with std::move</h2>
+      <p><code>unique_ptr</code> models <strong>exclusive ownership</strong>. There can be exactly one owner at any time. Ownership transfer requires an explicit <code>std::move</code>, which makes transferring ownership visible in the source code. This is a deliberate design choice: ownership transfers are important events and should not happen silently.</p>
+
+      <pre><code>auto a = std::make_unique&lt;Widget&gt;(42);  // a owns the Widget
+
+// auto b = a;                  // ERROR: copy deleted
+auto b = std::move(a);          // OK: a transfers to b
+
+// After move:
+assert(a == nullptr);           // a is empty
+assert(b != nullptr);           // b owns the Widget</code></pre>
+
+      <h3 id="passing-unique-ptr">Passing unique_ptr to Functions</h3>
+      <p>How you pass a <code>unique_ptr</code> communicates ownership intent:</p>
+
+      <pre><code>// 1. Transfer ownership (sink): take by value
+void consume(std::unique_ptr&lt;Widget&gt; w) {
+    // w owns the Widget. It will be destroyed when consume() returns.
+}
+consume(std::move(myWidget));  // caller gives up ownership
+
+// 2. Use without transferring: pass the raw pointer or reference
+void observe(const Widget&amp; w) {
+    // Does not affect ownership. Cannot store or delete w.
+}
+observe(*myWidget);
+
+// 3. Reseat (maybe swap/replace): take by reference
+void reseat(std::unique_ptr&lt;Widget&gt;&amp; w) {
+    w = std::make_unique&lt;Widget&gt;(99);  // replaces the held object
+}</code></pre>
+
+      <div class="anim-container" id="transfer-anim">
+        <h4>&#9654; Ownership Transfer via std::move</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through to see how unique_ptr ownership moves from one variable to another, and what happens to the source.</p>
+        <svg id="transfer-svg" width="520" height="170" viewBox="0 0 520 170"></svg>
+        <div id="transfer-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="transfer-step">Step &rarr;</button>
+          <button class="anim-btn" id="transfer-reset">Reset</button>
+          <span class="anim-output" id="transfer-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== FACTORY PATTERN ===== -->
+      <h2 id="factory-pattern">Factory Pattern with unique_ptr</h2>
+      <p>Returning <code>unique_ptr</code> from factory functions is the idiomatic way to create objects in modern C++. The factory owns the object during construction and transfers ownership to the caller. This pattern is exception-safe, makes ownership explicit, and works seamlessly with polymorphism.</p>
+
+      <pre><code>class Shape {
+public:
+    virtual ~Shape() = default;
+    virtual double area() const = 0;
+};
+
+class Circle : public Shape {
+    double radius_;
+public:
+    explicit Circle(double r) : radius_(r) {}
+    double area() const override { return 3.14159 * radius_ * radius_; }
+};
+
+class Rectangle : public Shape {
+    double w_, h_;
+public:
+    Rectangle(double w, double h) : w_(w), h_(h) {}
+    double area() const override { return w_ * h_; }
+};
+
+// Factory returns unique_ptr&lt;Shape&gt;: caller picks up ownership
+std::unique_ptr&lt;Shape&gt; createShape(const std::string&amp; type) {
+    if (type == "circle")    return std::make_unique&lt;Circle&gt;(5.0);
+    if (type == "rectangle") return std::make_unique&lt;Rectangle&gt;(4.0, 3.0);
+    return nullptr;
+}
+
+// Usage
+auto shape = createShape("circle");
+double a = shape-&gt;area();  // polymorphic call</code></pre>
+
+      <p>The key insight is that <code>unique_ptr&lt;Derived&gt;</code> implicitly converts to <code>unique_ptr&lt;Base&gt;</code>. The standard library defines this conversion, and it has zero overhead: it simply moves the pointer. No slicing, no extra allocation.</p>
+
+      <h3 id="factory-to-shared">Converting Factory Output to shared_ptr</h3>
+      <p>If the caller needs shared ownership, they can convert the <code>unique_ptr</code> to a <code>shared_ptr</code>. This conversion is implicit and efficient:</p>
+
+      <pre><code>// Factory returns unique_ptr
+auto shape = createShape("circle");
+
+// Convert to shared_ptr if shared ownership is needed
+std::shared_ptr&lt;Shape&gt; shared = std::move(shape);
+
+// This works because shared_ptr has a constructor that accepts unique_ptr&amp;&amp;</code></pre>
+
+      <p>The reverse conversion (shared_ptr to unique_ptr) is not possible because you cannot establish exclusive ownership over something that might have multiple owners.</p>
+
+      <div class="callout">
+        <strong>Design principle:</strong> Always return <code>unique_ptr</code> from factories. It gives the caller maximum flexibility: they can keep it as <code>unique_ptr</code> for exclusive ownership, convert to <code>shared_ptr</code> for shared ownership, or even release the raw pointer for legacy APIs. Starting with <code>shared_ptr</code> would lock the caller into reference counting whether they need it or not.
+      </div>
+
+      <!-- ===== MOVE SEMANTICS DETAILS ===== -->
+      <h2 id="move-internals">Move Internals: What Actually Happens</h2>
+      <p>When you <code>std::move</code> a <code>unique_ptr</code>, the compiler generates code equivalent to:</p>
+
+      <pre><code>// Conceptual move constructor
+unique_ptr(unique_ptr&amp;&amp; other) noexcept
+    : ptr_(other.ptr_)       // copy the raw pointer
+{
+    other.ptr_ = nullptr;    // null the source
+}
+// That's it. No heap allocation. No deallocation.
+// Just two pointer assignments.</code></pre>
+
+      <p>In optimized builds, the compiler often eliminates even these assignments through copy elision (guaranteed in C++17 for return values). A function returning <code>make_unique&lt;T&gt;(...)</code> often compiles to direct construction at the call site with zero moves.</p>
+
+      <h3 id="release-vs-reset">release() vs reset()</h3>
+      <p>Two methods that are often confused:</p>
+
+      <pre><code>auto p = std::make_unique&lt;int&gt;(42);
+
+// release(): gives up ownership, returns raw pointer. No deletion.
+int* raw = p.release();  // p is now nullptr. Caller must delete raw.
+delete raw;              // manual cleanup required
+
+// reset(): replaces the managed object. Old one is deleted.
+auto q = std::make_unique&lt;int&gt;(10);
+q.reset(new int(20));    // deletes the 10, now manages 20
+q.reset();               // deletes the 20, now manages nothing</code></pre>
+
+      <p>Use <code>release()</code> when you need to hand a raw pointer to a C API or legacy code that takes ownership. Use <code>reset()</code> when you want to replace or clear the managed object.</p>
+
+      <!-- ===== COMPILER OUTPUT ===== -->
+      <h2 id="compiler-output">What the Compiler Actually Generates</h2>
+      <p>Let us compare the generated assembly for raw pointer management vs <code>unique_ptr</code>:</p>
+
+      <pre><code>// Version A: raw pointer
+void rawVersion() {
+    int* p = new int(42);
+    use(*p);
+    delete p;
+}
+
+// Version B: unique_ptr
+void smartVersion() {
+    auto p = std::make_unique&lt;int&gt;(42);
+    use(*p);
+}</code></pre>
+
+      <p>With optimizations enabled (<code>-O2</code>), both produce identical assembly. The <code>unique_ptr</code> destructor call is inlined, the <code>default_delete</code> functor call is inlined, and what remains is a bare <code>delete</code>. The abstraction truly costs nothing.</p>
+      <p>You can verify this yourself on Compiler Explorer (godbolt.org). Compile both with <code>-O2</code> and compare the output. The instructions are identical.</p>
+
+      <!-- ===== INCOMPLETE TYPES ===== -->
+      <h2 id="incomplete-types">unique_ptr and Incomplete Types</h2>
+      <p><code>unique_ptr</code> can hold a pointer to an incomplete type, but the type must be complete at the point where the deleter is invoked (typically the destructor of the owning class). This is crucial for the Pimpl idiom:</p>
+
+      <pre><code>// widget.h
+class Widget {
+    struct Impl;                      // forward declaration (incomplete)
+    std::unique_ptr&lt;Impl&gt; pimpl_;    // OK: Impl is incomplete here
+public:
+    Widget();
+    ~Widget();                        // declared, defined in .cpp
+    Widget(Widget&amp;&amp;) noexcept;
+    Widget&amp; operator=(Widget&amp;&amp;) noexcept;
+};
+
+// widget.cpp
+struct Widget::Impl {
+    int data;
+    std::string name;
+};
+
+Widget::Widget() : pimpl_(std::make_unique&lt;Impl&gt;()) {}
+Widget::~Widget() = default;  // Impl is complete here, default_delete works
+Widget::Widget(Widget&amp;&amp;) noexcept = default;
+Widget&amp; Widget::operator=(Widget&amp;&amp;) noexcept = default;</code></pre>
+
+      <p>The key rule: you must define the destructor (even if defaulted) in the <code>.cpp</code> file where <code>Impl</code> is complete. If you let the compiler generate the destructor in the header, it will try to instantiate <code>default_delete&lt;Impl&gt;</code> where <code>Impl</code> is incomplete, and the code will fail to compile.</p>
+
+      <!-- ===== COMPARISONS ===== -->
+      <h2 id="comparisons">unique_ptr Comparison and Hashing</h2>
+      <p><code>unique_ptr</code> supports comparison operators and can be used in ordered and unordered containers:</p>
+
+      <pre><code>auto a = std::make_unique&lt;int&gt;(10);
+auto b = std::make_unique&lt;int&gt;(20);
+
+if (a != nullptr) { /* a owns something */ }
+if (a &lt; b)        { /* compares pointer values */ }
+if (!a)           { /* a is empty */ }
+
+// Can be stored in sets (ordered by pointer value)
+std::set&lt;std::unique_ptr&lt;int&gt;&gt; s;
+s.insert(std::make_unique&lt;int&gt;(1));
+s.insert(std::make_unique&lt;int&gt;(2));
+
+// Can be stored in unordered containers
+std::unordered_set&lt;std::unique_ptr&lt;int&gt;&gt; us;
+us.insert(std::make_unique&lt;int&gt;(1));</code></pre>
+
+      <!-- ===== SUMMARY ===== -->
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><code>unique_ptr</code> models <strong>exclusive ownership</strong> with zero overhead for stateless deleters.</li>
+        <li>Internally, it is a raw pointer plus a deleter, stored in a compressed pair that exploits <strong>empty base optimization</strong>.</li>
+        <li><strong>Custom deleters</strong> let you wrap any resource. Captureless lambdas and stateless functors maintain zero overhead.</li>
+        <li><code>unique_ptr&lt;T[]&gt;</code> provides safe array management with <code>operator[]</code> and <code>delete[]</code>.</li>
+        <li>Always use <code>make_unique</code> for exception safety and clarity.</li>
+        <li>Return <code>unique_ptr</code> from <strong>factories</strong> to give callers maximum flexibility.</li>
+        <li>Ownership transfer is explicit via <code>std::move</code>, making ownership flow visible in the code.</li>
+        <li>With optimizations, <code>unique_ptr</code> compiles to the <strong>exact same machine code</strong> as raw pointer management.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a href="../../../../blog.html">
+          <span>All Posts</span>
+          <span>&#8592; Blog</span>
+        </a>
+        <a class="next" href="shared-ptr.html">
+          <span>Next</span>
+          <span>shared_ptr Internals &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function txt(svg,x,y,text,opts){
+      var t=document.createElementNS(NS,'text');t.setAttribute('x',x);t.setAttribute('y',y);
+      t.setAttribute('font-family',opts.ff||'Consolas,monospace');t.setAttribute('font-size',opts.fs||'11');
+      t.setAttribute('font-weight',opts.fw||'600');t.setAttribute('fill',opts.fill||'#13201a');
+      if(opts.anchor)t.setAttribute('text-anchor',opts.anchor);
+      if(opts.dy)t.setAttribute('dominant-baseline',opts.dy);
+      t.textContent=text;svg.appendChild(t);return t;
+    }
+    function rect(svg,x,y,w,h,opts){
+      var r=document.createElementNS(NS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);
+      r.setAttribute('width',w);r.setAttribute('height',h);r.setAttribute('rx',opts.rx||6);
+      r.setAttribute('fill',opts.fill||'#e8e8e8');
+      if(opts.stroke){r.setAttribute('stroke',opts.stroke);r.setAttribute('stroke-width',opts.sw||'2');}
+      svg.appendChild(r);return r;
+    }
+    function arrow(svg,x1,y1,x2,y2,color){
+      var l=document.createElementNS(NS,'line');l.setAttribute('x1',x1);l.setAttribute('y1',y1);
+      l.setAttribute('x2',x2);l.setAttribute('y2',y2);l.setAttribute('stroke',color||'#0a8f6a');
+      l.setAttribute('stroke-width','2');l.setAttribute('marker-end','url(#arrowG)');svg.appendChild(l);
+    }
+    function ensureArrowMarker(svg,id,color){
+      var defs=svg.querySelector('defs');if(!defs){defs=document.createElementNS(NS,'defs');svg.insertBefore(defs,svg.firstChild);}
+      if(document.getElementById(id))return;
+      var m=document.createElementNS(NS,'marker');m.setAttribute('id',id);m.setAttribute('viewBox','0 0 10 10');
+      m.setAttribute('refX','9');m.setAttribute('refY','5');m.setAttribute('markerWidth','6');m.setAttribute('markerHeight','6');m.setAttribute('orient','auto-start-reverse');
+      var p=document.createElementNS(NS,'path');p.setAttribute('d','M 0 0 L 10 5 L 0 10 z');p.setAttribute('fill',color);
+      m.appendChild(p);defs.appendChild(m);
+    }
+
+    /* ====== Memory Layout Animation ====== */
+    (function(){
+      var svg=document.getElementById('layout-svg'),info=document.getElementById('layout-info'),out=document.getElementById('layout-output');
+      var steps=[
+        {msg:'unique_ptr<int> with default_delete (stateless deleter)',phase:'intro'},
+        {msg:'sizeof(default_delete<int>) is 1, but EBO compresses it to 0',phase:'stateless-explain'},
+        {msg:'Memory layout: just a single pointer (8 bytes on 64-bit)',phase:'stateless-draw'},
+        {msg:'unique_ptr<int, void(*)(int*)> with function pointer deleter',phase:'stateful-explain'},
+        {msg:'Function pointer is 8 bytes: total size is 2 pointers (16 bytes)',phase:'stateful-draw'},
+        {msg:'Comparison: stateless = 1 pointer, function pointer deleter = 2 pointers',phase:'compare'}
+      ];
+      var idx=0;
+      function draw(s){
+        clearSvg(svg);
+        var phase=s.phase;
+        // Title
+        txt(svg,260,18,s.msg,{ff:'Manrope,sans-serif',fs:'12',fw:'700',anchor:'middle',fill:'#13201a'});
+        if(phase==='stateless-draw'||phase==='compare'){
+          // Stateless layout
+          var bx=30,by=40;
+          txt(svg,bx,by,'unique_ptr<int>',{ff:'Manrope,sans-serif',fs:'11',fw:'700',fill:'#0a8f6a'});
+          txt(svg,bx,by+16,'sizeof = 8 bytes (1 pointer)',{fs:'10',fw:'500',fill:'#666'});
+          rect(svg,bx,by+24,200,36,{fill:'#0a8f6a',stroke:'#078a5e',rx:8});
+          txt(svg,bx+100,by+42,'T* ptr_',{anchor:'middle',dy:'central',fill:'#fff',fw:'700',fs:'12'});
+          txt(svg,bx+100,by+72,'deleter: 0 bytes (EBO)',{anchor:'middle',fs:'10',fw:'500',fill:'#888'});
+        }
+        if(phase==='stateful-draw'||phase==='compare'){
+          var bx2=phase==='compare'?280:30, by2=phase==='compare'?40:40;
+          txt(svg,bx2,by2,'unique_ptr<int, void(*)(int*)>',{ff:'Manrope,sans-serif',fs:'11',fw:'700',fill:'#ff6b35'});
+          txt(svg,bx2,by2+16,'sizeof = 16 bytes (2 pointers)',{fs:'10',fw:'500',fill:'#666'});
+          rect(svg,bx2,by2+24,200,36,{fill:'#ff6b35',stroke:'#e55a20',rx:8});
+          txt(svg,bx2+100,by2+42,'T* ptr_',{anchor:'middle',dy:'central',fill:'#fff',fw:'700',fs:'12'});
+          rect(svg,bx2,by2+66,200,36,{fill:'#c0392b',stroke:'#a5311f',rx:8});
+          txt(svg,bx2+100,by2+84,'void(*deleter_)(int*)',{anchor:'middle',dy:'central',fill:'#fff',fw:'700',fs:'11'});
+        }
+        if(phase==='stateless-explain'){
+          rect(svg,60,50,400,80,{fill:'#f0faf5',stroke:'#0a8f6a',rx:10});
+          txt(svg,260,75,'default_delete<T> has no data members',{anchor:'middle',ff:'Manrope,sans-serif',fs:'13',fw:'700',fill:'#0a8f6a'});
+          txt(svg,260,100,'Empty Base Optimization makes it occupy 0 bytes',{anchor:'middle',fs:'11',fw:'500',fill:'#555'});
+        }
+        if(phase==='stateful-explain'){
+          rect(svg,60,50,400,80,{fill:'#fff5f0',stroke:'#ff6b35',rx:10});
+          txt(svg,260,75,'A function pointer stores an address (8 bytes)',{anchor:'middle',ff:'Manrope,sans-serif',fs:'13',fw:'700',fill:'#ff6b35'});
+          txt(svg,260,100,'No EBO possible: the deleter has state',{anchor:'middle',fs:'11',fw:'500',fill:'#555'});
+        }
+        if(phase==='intro'){
+          rect(svg,60,50,400,100,{fill:'#f5f5f5',stroke:'#ccc',rx:10});
+          txt(svg,260,85,'How much memory does unique_ptr use?',{anchor:'middle',ff:'Syne,sans-serif',fs:'16',fw:'700',fill:'#13201a'});
+          txt(svg,260,110,'Step through to find out.',{anchor:'middle',fs:'12',fw:'500',fill:'#888'});
+        }
+        if(phase==='compare'){
+          // Arrow and label
+          txt(svg,260,170,'Zero-overhead with stateless deleter. One pointer extra with function pointer.',{anchor:'middle',fs:'10',fw:'600',fill:'#333'});
+        }
+        info.textContent=s.msg;
+      }
+      function reset(){idx=0;draw(steps[0]);out.textContent='';}
+      reset();
+      document.getElementById('layout-step').addEventListener('click',function(){
+        if(idx>=steps.length)return;draw(steps[idx]);idx++;
+        if(idx>=steps.length)out.textContent='\u2714 Layout comparison complete.';
+      });
+      document.getElementById('layout-reset').addEventListener('click',function(){reset();});
+    })();
+
+    /* ====== Ownership Transfer Animation ====== */
+    (function(){
+      var svg=document.getElementById('transfer-svg'),info=document.getElementById('transfer-info'),out=document.getElementById('transfer-output');
+      ensureArrowMarker(svg,'arrowG','#0a8f6a');
+      var heapX=220,heapY=20,heapW=80,heapH=40;
+      var steps=[
+        {msg:'auto a = make_unique<Widget>(42);',aOwns:true,bOwns:false,bExists:false,phase:'create'},
+        {msg:'a owns the Widget on the heap. b does not exist yet.',aOwns:true,bOwns:false,bExists:false,phase:'explain-a'},
+        {msg:'auto b = std::move(a);  // transfer ownership',aOwns:false,bOwns:true,bExists:true,phase:'move'},
+        {msg:'a is now nullptr. b owns the Widget.',aOwns:false,bOwns:true,bExists:true,phase:'after-move'},
+        {msg:'b goes out of scope: destructor deletes the Widget.',aOwns:false,bOwns:false,bExists:true,phase:'destroy'},
+        {msg:'Memory freed. No leak, no double-free.',aOwns:false,bOwns:false,bExists:true,phase:'done'}
+      ];
+      var idx=0;
+      function draw(s){
+        clearSvg(svg);
+        ensureArrowMarker(svg,'arrowG','#0a8f6a');
+        ensureArrowMarker(svg,'arrowR','#c0392b');
+        ensureArrowMarker(svg,'arrowB','#3498db');
+        // Heap object
+        var heapAlive=s.aOwns||s.bOwns;
+        if(s.phase!=='done'){
+          rect(svg,heapX,heapY,heapW,heapH,{fill:heapAlive?'#3498db':'#ddd',stroke:heapAlive?'#2980b9':'#bbb',rx:8});
+          txt(svg,heapX+heapW/2,heapY+15,'Widget(42)',{anchor:'middle',fill:heapAlive?'#fff':'#999',fw:'700',fs:'11'});
+          txt(svg,heapX+heapW/2,heapY+32,heapAlive?'ALIVE':'FREED',{anchor:'middle',fill:heapAlive?'rgba(255,255,255,0.8)':'#bbb',fw:'600',fs:'9'});
+        }else{
+          rect(svg,heapX,heapY,heapW,heapH,{fill:'#f5f5f5',stroke:'#ddd',rx:8});
+          txt(svg,heapX+heapW/2,heapY+25,'(freed)',{anchor:'middle',fill:'#bbb',fw:'600',fs:'11'});
+        }
+        // Variable a
+        var aX=40,aY=110,aW=140,aH=40;
+        rect(svg,aX,aY,aW,aH,{fill:s.aOwns?'#0a8f6a':'#e8e8e8',stroke:s.aOwns?'#078a5e':'#ccc',rx:8});
+        txt(svg,aX+aW/2,aY+15,'unique_ptr a',{anchor:'middle',fill:s.aOwns?'#fff':'#999',fw:'700',fs:'11'});
+        txt(svg,aX+aW/2,aY+32,s.aOwns?'owns Widget':'nullptr',{anchor:'middle',fill:s.aOwns?'rgba(255,255,255,0.8)':'#bbb',fw:'600',fs:'9'});
+        if(s.aOwns){
+          var l=document.createElementNS(NS,'line');l.setAttribute('x1',aX+aW/2);l.setAttribute('y1',aY);
+          l.setAttribute('x2',heapX+heapW/2);l.setAttribute('y2',heapY+heapH);
+          l.setAttribute('stroke','#0a8f6a');l.setAttribute('stroke-width','2');l.setAttribute('stroke-dasharray','6,3');
+          l.setAttribute('marker-end','url(#arrowG)');svg.appendChild(l);
+        }
+        // Variable b
+        if(s.bExists){
+          var bX=340,bY=110,bW=140,bH=40;
+          rect(svg,bX,bY,bW,bH,{fill:s.bOwns?'#9b59b6':'#e8e8e8',stroke:s.bOwns?'#8e44ad':'#ccc',rx:8});
+          txt(svg,bX+bW/2,bY+15,'unique_ptr b',{anchor:'middle',fill:s.bOwns?'#fff':'#999',fw:'700',fs:'11'});
+          txt(svg,bX+bW/2,bY+32,s.bOwns?'owns Widget':'nullptr',{anchor:'middle',fill:s.bOwns?'rgba(255,255,255,0.8)':'#bbb',fw:'600',fs:'9'});
+          if(s.bOwns){
+            var l2=document.createElementNS(NS,'line');l2.setAttribute('x1',bX+bW/2);l2.setAttribute('y1',bY);
+            l2.setAttribute('x2',heapX+heapW/2);l2.setAttribute('y2',heapY+heapH);
+            l2.setAttribute('stroke','#9b59b6');l2.setAttribute('stroke-width','2');l2.setAttribute('stroke-dasharray','6,3');
+            l2.setAttribute('marker-end','url(#arrowB)');svg.appendChild(l2);
+          }
+        }
+        // Move arrow
+        if(s.phase==='move'){
+          var ma=document.createElementNS(NS,'line');ma.setAttribute('x1',aX+aW);ma.setAttribute('y1',aY+aH/2);
+          ma.setAttribute('x2',340);ma.setAttribute('y2',aY+aH/2);
+          ma.setAttribute('stroke','#ff6b35');ma.setAttribute('stroke-width','3');ma.setAttribute('marker-end','url(#arrowR)');
+          ma.setAttribute('stroke-dasharray','8,4');svg.appendChild(ma);
+          txt(svg,260,aY+aH/2-8,'std::move',{anchor:'middle',ff:'Syne,sans-serif',fs:'13',fw:'800',fill:'#ff6b35'});
+        }
+        info.textContent=s.msg;
+      }
+      function reset(){idx=0;draw(steps[0]);out.textContent='';}
+      reset();
+      document.getElementById('transfer-step').addEventListener('click',function(){
+        if(idx>=steps.length)return;draw(steps[idx]);idx++;
+        if(idx>=steps.length)out.textContent='\u2714 Ownership transferred and resource freed cleanly.';
+      });
+      document.getElementById('transfer-reset').addEventListener('click',function(){reset();});
+    })();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

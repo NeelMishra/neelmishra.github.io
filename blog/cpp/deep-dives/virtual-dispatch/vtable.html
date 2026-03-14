@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="How C++ vtables work: the vptr/vtable mechanism, vtable layout in memory, virtual call overhead, and compiler devirtualization optimizations.">
+  <title>How vtables Work | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="vtable.html">Virtual Dispatch</a>
+      </div>
+
+      <h1>How vtables Work</h1>
+      <p class="post-meta">March 2026 &middot; 20 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="runtime-polymorphism">Runtime Polymorphism in C++</h2>
+      <p>When you call a virtual function through a base-class pointer or reference, the program must decide <em>at runtime</em> which function to invoke. The object might be a <code>Base</code>, or it might be a <code>Derived</code>, or a <code>MoreDerived</code>. The caller cannot know at compile time. This is what people mean by <strong>runtime polymorphism</strong>: the actual function that runs depends on the <em>dynamic type</em> of the object, not the <em>static type</em> of the pointer.</p>
+      <p>How does the compiler make this work? It cannot just hardcode the function address into the call site, because the dynamic type is unknown until the program actually runs. Instead, every major C++ compiler uses a mechanism called a <strong>virtual table</strong>, or <strong>vtable</strong> for short. The C++ standard does not mandate vtables, but every compiler you will encounter (GCC, Clang, MSVC, ICC) uses them. Understanding the vtable is understanding how virtual dispatch really works.</p>
+
+      <h2 id="the-vptr">The vptr: A Hidden Pointer in Every Polymorphic Object</h2>
+      <p>When a class declares or inherits at least one virtual function, the compiler adds a hidden member to every instance of that class: a pointer that points to the class's vtable. This pointer is called the <strong>vptr</strong> (virtual table pointer). You never see it in your source code, but it is always there, silently occupying space in your objects.</p>
+      <pre><code>class Base {
+public:
+    virtual void speak() { std::cout &lt;&lt; "Base\n"; }
+    virtual void greet() { std::cout &lt;&lt; "Hello from Base\n"; }
+    int value = 42;
+};
+
+// sizeof(Base) on a 64-bit system:
+//   8 bytes (hidden vptr) + 4 bytes (int value) + 4 bytes (padding) = 16 bytes</code></pre>
+      <p>The vptr is typically the first member in the object layout (though the standard permits any placement). When you create a <code>Base</code> object, the compiler-generated constructor sets the vptr to point to <code>Base</code>'s vtable. When you create a <code>Derived</code> object, the <code>Derived</code> constructor overwrites the vptr to point to <code>Derived</code>'s vtable. This overwrite happens automatically, during construction, before your constructor body runs.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The vptr costs exactly one pointer per object (typically 8 bytes on 64-bit systems). This is the only per-object cost of virtual functions. The vtable itself is stored once per class, not once per object.
+      </div>
+
+      <h2 id="vtable-layout">The vtable: One Table Per Class</h2>
+      <p>A vtable is a static array of function pointers, one entry per virtual function, stored in the read-only data segment of your binary. The compiler generates one vtable per polymorphic class. Every object of that class shares the same vtable; the per-object vptr simply points to it.</p>
+      <p>Consider this hierarchy:</p>
+      <pre><code>class Base {
+public:
+    virtual void speak() { std::cout &lt;&lt; "Base::speak\n"; }
+    virtual void greet() { std::cout &lt;&lt; "Base::greet\n"; }
+    virtual ~Base() = default;
+};
+
+class Derived : public Base {
+public:
+    void speak() override { std::cout &lt;&lt; "Derived::speak\n"; }
+    // greet() is NOT overridden, so it inherits Base::greet
+};</code></pre>
+      <p>The compiler generates two vtables:</p>
+      <ul>
+        <li><strong>Base's vtable:</strong> <code>[&amp;Base::speak, &amp;Base::greet, &amp;Base::~Base]</code></li>
+        <li><strong>Derived's vtable:</strong> <code>[&amp;Derived::speak, &amp;Base::greet, &amp;Derived::~Derived]</code></li>
+      </ul>
+      <p>Notice: the slot for <code>speak()</code> in Derived's vtable points to <code>Derived::speak</code>, because Derived overrides it. The slot for <code>greet()</code> still points to <code>Base::greet</code>, because Derived does not override it. The destructor slot points to each class's own destructor.</p>
+      <p>The key invariant is that <strong>corresponding virtual functions always occupy the same slot index</strong> in both tables. <code>speak()</code> is always slot 0, <code>greet()</code> is always slot 1, and the destructor is always slot 2. This fixed layout makes the dispatch mechanism extremely efficient.</p>
+
+      <h2 id="dispatch-mechanism">How a Virtual Call Works</h2>
+      <p>Let us trace exactly what happens at the machine level when you write:</p>
+      <pre><code>Base* ptr = new Derived();
+ptr-&gt;speak();  // Which speak() gets called?</code></pre>
+      <p>The compiler translates <code>ptr-&gt;speak()</code> into roughly this sequence of operations:</p>
+      <ol>
+        <li><strong>Load the vptr:</strong> Read the hidden pointer from the object. On x86-64, this is something like <code>mov rax, [rdi]</code> where <code>rdi</code> holds the object address.</li>
+        <li><strong>Index into the vtable:</strong> <code>speak()</code> is at slot 0, so add <code>0 * sizeof(pointer)</code> to the vtable address. For slot 1 it would be <code>1 * 8 = 8</code> bytes.</li>
+        <li><strong>Load the function pointer:</strong> Read the function address from the vtable slot. Something like <code>mov rax, [rax + 0]</code>.</li>
+        <li><strong>Call through the pointer:</strong> <code>call rax</code>. The CPU jumps to whatever function address the vtable held.</li>
+      </ol>
+      <p>Because the vptr points to <code>Derived</code>'s vtable (since the actual object is a <code>Derived</code>), slot 0 contains <code>&amp;Derived::speak</code>. So <code>Derived::speak()</code> runs. If the object had been a <code>Base</code>, the vptr would point to <code>Base</code>'s vtable, slot 0 would contain <code>&amp;Base::speak</code>, and <code>Base::speak()</code> would run.</p>
+      <p>This entire mechanism is <strong>exactly two pointer dereferences and one indirect call</strong>. There is no string comparison, no hash lookup, no dictionary search. It is fast.</p>
+
+      <div class="anim-container" id="vtable-dispatch-anim">
+        <h4>&#9654; vtable Dispatch: Step-by-Step</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through a virtual call to see how the vptr resolves to the correct function at runtime.</p>
+        <svg id="vtable-dispatch-svg" width="620" height="340" viewBox="0 0 620 340"></svg>
+        <div id="vtable-dispatch-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="vtable-dispatch-step">Step &rarr;</button>
+          <button class="anim-btn" id="vtable-dispatch-reset">Reset</button>
+          <span class="anim-output" id="vtable-dispatch-output"></span>
+        </div>
+      </div>
+
+      <h2 id="vptr-during-construction">The vptr During Construction and Destruction</h2>
+      <p>A subtle but critical detail: the vptr changes during the construction of an object. When you construct a <code>Derived</code> object, the process works like this:</p>
+      <ol>
+        <li>Memory is allocated for the full <code>Derived</code> object.</li>
+        <li>The <code>Base</code> constructor runs. At this point, the vptr is set to point to <strong>Base's vtable</strong>.</li>
+        <li>The <code>Derived</code> constructor runs. The vptr is overwritten to point to <strong>Derived's vtable</strong>.</li>
+      </ol>
+      <p>This means that if you call a virtual function inside the <code>Base</code> constructor, it will call <code>Base</code>'s version, not <code>Derived</code>'s. This is intentional: the <code>Derived</code> part of the object has not been constructed yet, so calling <code>Derived</code>'s overrides would access uninitialized state.</p>
+      <pre><code>class Base {
+public:
+    Base() {
+        speak();  // Calls Base::speak, NOT Derived::speak!
+    }
+    virtual void speak() { std::cout &lt;&lt; "Base\n"; }
+};
+
+class Derived : public Base {
+public:
+    Derived() : data_(42) {}
+    void speak() override {
+        std::cout &lt;&lt; "Derived: " &lt;&lt; data_ &lt;&lt; "\n";  // data_ not yet init in Base ctor
+    }
+private:
+    int data_;
+};</code></pre>
+      <p>The same applies in reverse during destruction: when <code>Derived</code>'s destructor finishes, the vptr is reset to point to <code>Base</code>'s vtable before <code>Base</code>'s destructor runs. So virtual calls inside destructors also dispatch to the current class's version, not the most-derived class.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Never call virtual functions from constructors or destructors expecting polymorphic behavior. During construction, the object "is" the class currently being constructed. During destruction, it "is" the class currently being destroyed.
+      </div>
+
+      <h2 id="pure-virtual">Pure Virtual Functions and Abstract Classes</h2>
+      <p>When you declare a function <code>= 0</code>, you create a <strong>pure virtual function</strong>. The class becomes <strong>abstract</strong> and cannot be instantiated directly.</p>
+      <pre><code>class Shape {
+public:
+    virtual double area() const = 0;   // pure virtual
+    virtual void draw() const = 0;     // pure virtual
+    virtual ~Shape() = default;
+};
+
+class Circle : public Shape {
+    double radius_;
+public:
+    explicit Circle(double r) : radius_(r) {}
+    double area() const override { return 3.14159265 * radius_ * radius_; }
+    void draw() const override { std::cout &lt;&lt; "Drawing circle\n"; }
+};</code></pre>
+      <p>What does the vtable look like for an abstract class? The compiler still generates a vtable for <code>Shape</code>, but the slots for pure virtual functions typically contain a pointer to a special function (often called <code>__cxa_pure_virtual</code> on GCC/Clang) that aborts the program if called. This acts as a safety net: if somehow a pure virtual function is invoked (usually through a bug in constructor/destructor code), the program crashes immediately with a clear error rather than silently doing the wrong thing.</p>
+      <p>A class can even have a <strong>pure virtual function with a definition</strong>:</p>
+      <pre><code>class Base {
+public:
+    virtual void prepare() = 0;  // pure virtual, but with a body below
+};
+
+void Base::prepare() {
+    std::cout &lt;&lt; "Base preparation steps\n";
+}
+
+class Derived : public Base {
+public:
+    void prepare() override {
+        Base::prepare();  // explicitly call the base implementation
+        std::cout &lt;&lt; "Derived-specific preparation\n";
+    }
+};</code></pre>
+      <p>The class is still abstract (you cannot instantiate <code>Base</code> directly), but derived classes can explicitly call the base implementation using the fully qualified name <code>Base::prepare()</code>. This pattern is useful when you want to mandate overriding but also provide a shared "default" implementation that derived classes can opt into.</p>
+
+      <h2 id="vtable-in-binaries">Inspecting vtables in Real Binaries</h2>
+      <p>You can see vtables in compiled binaries using common tools. On Linux/macOS with GCC or Clang:</p>
+      <pre><code># Dump class layout with vtable info (Clang)
+clang++ -cc1 -fdump-record-layouts -emit-llvm example.cpp
+
+# See vtable symbols in the compiled binary
+nm -C a.out | grep vtable
+
+# GCC: dump class hierarchy
+g++ -fdump-lang-class example.cpp</code></pre>
+      <p>For a simple hierarchy, <code>nm -C</code> reveals entries like:</p>
+      <pre><code>vtable for Base
+vtable for Derived</code></pre>
+      <p>And the class layout dump shows exactly where the vptr sits and how much space it takes. On MSVC, the equivalent is the <code>/d1reportAllClassLayout</code> flag:</p>
+      <pre><code>cl /d1reportAllClassLayout example.cpp</code></pre>
+      <p>This prints detailed object layouts including vptr offsets, vtable contents, and padding bytes. These tools are invaluable when debugging performance issues or understanding the memory footprint of your class hierarchies.</p>
+
+      <h2 id="overhead">Virtual Call Overhead: Reality Check</h2>
+      <p>Virtual function calls have measurable overhead compared to direct (non-virtual) calls, but the magnitude is often overstated. Let us quantify it.</p>
+      <h3>Direct costs</h3>
+      <ul>
+        <li><strong>Memory indirection:</strong> Two extra pointer loads (object &rarr; vtable &rarr; function pointer) compared to a direct call where the function address is baked into the instruction stream.</li>
+        <li><strong>Indirect branch:</strong> The <code>call [reg]</code> instruction is an indirect branch. Modern CPUs predict indirect branches, but mispredictions cost 10-20 cycles on typical hardware. For a tight inner loop calling the same virtual function on objects of varying types, the branch predictor may struggle.</li>
+        <li><strong>Cache effects:</strong> The vtable must be in the data cache. For a single class hierarchy used frequently, this is almost always the case. For code that touches many unrelated vtables, the extra cache lines matter.</li>
+      </ul>
+      <h3>Indirect costs (the bigger deal)</h3>
+      <ul>
+        <li><strong>Lost inlining:</strong> The compiler cannot inline a virtual call in the general case, because it does not know which function will be called. Inlining is one of the most powerful optimizations (it enables constant folding, dead code elimination, register allocation across the call boundary, and more). Losing it often matters far more than the two pointer loads.</li>
+        <li><strong>Lost interprocedural optimizations:</strong> Without knowing the callee, the optimizer must assume the worst about side effects, aliasing, and exception behavior.</li>
+      </ul>
+      <h3>Numbers</h3>
+      <p>On a modern x86-64 CPU, a correctly predicted virtual call adds roughly 1-3 nanoseconds compared to a direct call. A mispredicted virtual call costs 10-25 nanoseconds. These numbers are dwarfed by a cache miss (50-100 ns) or a heap allocation (50-200 ns). For most applications, virtual call overhead is lost in the noise.</p>
+      <p>Where it matters: tight inner loops processing millions of objects per frame (game engines, physics simulations, signal processing), or latency-critical paths in trading systems. Outside those domains, measure before optimizing away virtual dispatch.</p>
+
+      <h2 id="devirtualization">Devirtualization: When the Compiler Knows Better</h2>
+      <p>Sometimes the compiler can prove at compile time which function a virtual call will invoke. When it can, it replaces the indirect call with a direct call (or even inlines it). This optimization is called <strong>devirtualization</strong>.</p>
+      <h3>Trivial devirtualization</h3>
+      <p>When you call a virtual function on an object with a known concrete type, the compiler devirtualizes immediately:</p>
+      <pre><code>Derived d;
+d.speak();        // Compiler knows d is exactly Derived, calls Derived::speak directly
+
+Derived* dp = &amp;d;
+dp-&gt;speak();      // Compiler can often prove dp points to exactly a Derived</code></pre>
+      <p>This case is straightforward because the compiler can see the exact type. No vtable lookup is generated at all.</p>
+      <h3>Speculative devirtualization</h3>
+      <p>Modern compilers (especially with profile-guided optimization, or PGO) can speculatively devirtualize: they emit a type check followed by a direct call for the common case, with a fallback to the vtable lookup for other types:</p>
+      <pre><code>// What the compiler might generate (pseudocode):
+if (ptr-&gt;vptr == &amp;Derived_vtable) {
+    Derived::speak(ptr);    // direct call, inlineable
+} else {
+    ptr-&gt;vptr[0](ptr);     // fallback: full virtual dispatch
+}</code></pre>
+      <p>This trades a cheap comparison for the ability to inline the hot path. With PGO, the compiler knows which type appears most often and optimizes for it.</p>
+      <h3>Final-based devirtualization</h3>
+      <p>If a class or method is marked <code>final</code>, the compiler knows no further overriding is possible and can devirtualize aggressively. We cover this in detail in the <a href="override-final.html">override and final</a> article.</p>
+      <h3>Link-time optimization (LTO)</h3>
+      <p>With LTO enabled, the compiler sees the entire program. If it can prove that a class has no derived classes (even without <code>final</code>), it can devirtualize. LTO dramatically increases devirtualization opportunities because the compiler can analyze the full class hierarchy across all translation units.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The best optimization for virtual call overhead is not rewriting your code to avoid virtual functions. It is enabling LTO and PGO so the compiler can devirtualize automatically where it matters.
+      </div>
+
+      <h2 id="real-world-vtable-layout">Real-World vtable Layout Details</h2>
+      <p>The vtable is more than just function pointers. In the Itanium C++ ABI (used by GCC and Clang on Linux, macOS, and most Unix-like systems), the vtable contains additional metadata:</p>
+      <ul>
+        <li><strong>Offset-to-top:</strong> The distance from the vtable pointer to the top (most-derived) object. This is 0 for single inheritance but non-zero for secondary base classes in multiple inheritance.</li>
+        <li><strong>RTTI pointer:</strong> A pointer to the <code>type_info</code> object for the class. This is how <code>dynamic_cast</code> and <code>typeid</code> work: they read the RTTI pointer from the vtable and walk the type hierarchy.</li>
+        <li><strong>Virtual function pointers:</strong> One entry per virtual function, in declaration order.</li>
+        <li><strong>Virtual base offsets:</strong> For virtual inheritance, additional entries encode the offset from the object to each virtual base subobject.</li>
+      </ul>
+      <p>A simplified Itanium vtable layout for a class with two virtual functions:</p>
+      <pre><code>// Memory layout of vtable (simplified):
+//   [-16] offset-to-top (ptrdiff_t)
+//   [-8]  RTTI pointer (typeinfo*)
+//   [0]   &amp;Class::first_virtual_function    &lt;-- vptr points here
+//   [8]   &amp;Class::second_virtual_function
+//   [16]  &amp;Class::destructor</code></pre>
+      <p>The vptr in the object points to the first virtual function entry (offset 0), not to the beginning of the vtable. The RTTI pointer and offset-to-top are at negative offsets from where the vptr points.</p>
+      <p>MSVC uses a different ABI. It stores RTTI separately in a "Complete Object Locator" structure, and the vtable layout differs in details (especially for virtual inheritance), but the fundamental concept is the same: a per-class static table of function pointers, indexed by a hidden per-object pointer.</p>
+
+      <h2 id="sizeof-impact">Impact on sizeof and Alignment</h2>
+      <p>Adding a single virtual function to a class that previously had none increases <code>sizeof</code> by the size of one pointer (8 bytes on 64-bit, 4 bytes on 32-bit). This is the vptr. It also changes the alignment requirements of the class.</p>
+      <pre><code>class NoVirtual {
+    int x;  // sizeof = 4
+};
+
+class OneVirtual {
+    virtual void f();
+    int x;
+    // sizeof = 16 on 64-bit: 8 (vptr) + 4 (x) + 4 (padding)
+};
+
+class TwoVirtual {
+    virtual void f();
+    virtual void g();
+    int x;
+    // sizeof = 16 on 64-bit: still 16! Same vptr, same padding.
+    // Additional virtual functions don't increase object size.
+};</code></pre>
+      <p>This is important: the per-object cost of virtual functions is constant regardless of how many virtual functions the class has. Whether you have 1 or 100 virtual functions, each object still contains exactly one vptr. Only the vtable (a per-class structure) grows, and that is in static storage, not on the heap or stack.</p>
+      <p>However, for small, frequently allocated objects (such as nodes in a tree or a linked list), that extra 8 bytes per object can have real cache-line and memory-bandwidth implications. If you have a million small objects, the vptr adds 8 MB of overhead. This is why performance-critical code sometimes avoids virtual functions for tiny objects.</p>
+
+      <h2 id="multi-level">Multi-Level Inheritance</h2>
+      <p>vtables compose naturally through multi-level inheritance:</p>
+      <pre><code>class A {
+public:
+    virtual void f();
+    virtual void g();
+};
+
+class B : public A {
+public:
+    void f() override;   // overrides A::f
+    virtual void h();    // new virtual function in B
+};
+
+class C : public B {
+public:
+    void g() override;   // overrides A::g (skipping B)
+    void h() override;   // overrides B::h
+};</code></pre>
+      <p>The vtable for <code>C</code> must contain entries for all virtual functions reachable from <code>C</code>: <code>f</code>, <code>g</code>, and <code>h</code>. The layout:</p>
+      <ul>
+        <li><strong>A's vtable:</strong> <code>[&amp;A::f, &amp;A::g]</code></li>
+        <li><strong>B's vtable:</strong> <code>[&amp;B::f, &amp;A::g, &amp;B::h]</code></li>
+        <li><strong>C's vtable:</strong> <code>[&amp;B::f, &amp;C::g, &amp;C::h]</code></li>
+      </ul>
+      <p>Notice that <code>C</code>'s slot for <code>f()</code> points to <code>B::f</code>, because <code>C</code> does not override <code>f()</code>. The vtable always reflects the most-derived override for each function.</p>
+
+      <h2 id="calling-base">Calling Base-Class Versions Explicitly</h2>
+      <p>You can bypass virtual dispatch entirely using the fully qualified name:</p>
+      <pre><code>Derived d;
+Base* bp = &amp;d;
+
+bp-&gt;speak();          // virtual dispatch: Derived::speak
+bp-&gt;Base::speak();    // NOT virtual: always Base::speak</code></pre>
+      <p>The syntax <code>bp-&gt;Base::speak()</code> tells the compiler to call <code>Base::speak</code> directly, regardless of the dynamic type. This generates a direct call with no vtable lookup. This is commonly used inside overriding functions when you want to call the parent's implementation before or after your own logic:</p>
+      <pre><code>class Derived : public Base {
+public:
+    void speak() override {
+        Base::speak();            // call parent first
+        std::cout &lt;&lt; "...and Derived extras\n";
+    }
+};</code></pre>
+
+      <h2 id="virtual-vs-nonvirtual">Virtual vs Non-Virtual Functions: Compilation Differences</h2>
+      <p>Understanding the assembly gives intuition for the cost difference. Here is a simplified comparison on x86-64:</p>
+      <pre><code>// Non-virtual call: ptr-&gt;nonVirtual()
+// Assembly:
+//   call Base::nonVirtual        ; direct call, address known at link time
+
+// Virtual call: ptr-&gt;speak()
+// Assembly:
+//   mov rax, [rdi]               ; load vptr from object
+//   mov rax, [rax + SLOT*8]      ; load function pointer from vtable
+//   call rax                     ; indirect call through register</code></pre>
+      <p>The non-virtual call is a single instruction with a fixed target. The virtual call is three instructions with a data-dependent target. The indirect call through <code>rax</code> is harder for the CPU's branch predictor, and the extra loads can miss in the cache (though they rarely do for hot paths).</p>
+
+      <h2 id="pitfalls">Common vtable Pitfalls</h2>
+      <h3>Slicing destroys the vptr</h3>
+      <p>Assignment by value copies the data members but uses the target type's constructor. The vptr of the target is set by the target's constructor, not copied from the source. This is why passing a <code>Derived</code> by value to a function expecting a <code>Base</code> "slices" the object: the copy is a genuine <code>Base</code> with <code>Base</code>'s vptr.</p>
+      <pre><code>void process(Base b) {     // b is a copy: a Base, not a Derived
+    b.speak();             // always calls Base::speak
+}
+
+Derived d;
+process(d);   // sliced! Derived part is lost.</code></pre>
+      <p>To preserve polymorphism, always pass by pointer or reference.</p>
+
+      <h3>Forgetting the virtual destructor</h3>
+      <p>If you delete a derived object through a base pointer and the base destructor is not virtual, the derived destructor never runs. This is undefined behavior and usually a resource leak. We cover this in detail in <a href="virtual-destructors.html">the next article</a>.</p>
+
+      <h3>Virtual functions in constructors</h3>
+      <p>As discussed, virtual calls in constructors dispatch to the current class, not the most-derived class. This often surprises developers who expect polymorphic behavior from constructors. The workaround is a two-phase initialization: construct first, then call a virtual "init" method. But this pattern has its own problems (callers can forget the second call), so prefer using RAII and designing your constructors to not need virtual dispatch.</p>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li>vtables are per-class static arrays of function pointers. The vptr is a hidden per-object pointer to the class's vtable.</li>
+        <li>Virtual dispatch is two pointer loads and one indirect call. It is cheap in isolation but prevents inlining, which is the larger cost.</li>
+        <li>The vptr is set during construction and changes as each base constructor runs. Virtual calls in constructors and destructors are not polymorphic.</li>
+        <li>Compilers devirtualize when they can prove the dynamic type: local objects, <code>final</code> classes, LTO, and PGO all help.</li>
+        <li>Object slicing destroys virtual dispatch. Always use pointers or references for polymorphism.</li>
+        <li>Adding the first virtual function to a class adds one pointer of overhead per object. Subsequent virtual functions add no additional per-object cost.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a href="../../../../blog.html">
+          <span>Series</span>
+          <span>&#8592; All Posts</span>
+        </a>
+        <a class="next" href="virtual-destructors.html">
+          <span>Next</span>
+          <span>Virtual Destructors &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs,parent){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
+    function txt(str,attrs,parent){var t=el('text',attrs,parent);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    var svg=document.getElementById('vtable-dispatch-svg');
+    var info=document.getElementById('vtable-dispatch-info');
+    var out=document.getElementById('vtable-dispatch-output');
+    var step=0;
+
+    var C1='#0a8f6a',C2='#3498db',C3='#9b59b6',C4='#ff6b35',C5='#c0392b';
+
+    var phases=[
+      {label:'Initial state: Base* ptr points to a Derived object on the heap.'},
+      {label:'Step 1: The compiler reads the hidden vptr from the object (first 8 bytes).'},
+      {label:'Step 2: The vptr points to Derived\'s vtable (a static table in .rodata).'},
+      {label:'Step 3: Index into vtable slot 0 to get the address of Derived::speak.'},
+      {label:'Step 4: Indirect call through the function pointer. Derived::speak() executes.'},
+      {label:'Done. The virtual call resolved to Derived::speak at runtime.'}
+    ];
+
+    function draw(s){
+      clearSvg(svg);
+      // --- ptr box ---
+      el('rect',{x:10,y:20,width:110,height:50,rx:8,fill:s>=0?C2:'#ddd',stroke:'#333','stroke-width':1.5},svg);
+      txt('ptr (Base*)',{x:65,y:40,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:'#fff'},svg);
+      txt('0x7ffd..a0',{x:65,y:58,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'rgba(255,255,255,0.8)'},svg);
+
+      // --- object on heap ---
+      var ox=180,oy=10;
+      el('rect',{x:ox,y:oy,width:160,height:90,rx:8,fill:'#f5f5f5',stroke:s>=1?C4:'#bbb','stroke-width':s>=1?2.5:1.5},svg);
+      txt('Derived object',{x:ox+80,y:oy+16,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'11','font-weight':'700',fill:'#333'},svg);
+      // vptr field
+      el('rect',{x:ox+8,y:oy+26,width:144,height:24,rx:4,fill:s>=1?C4:'#e8e8e8',stroke:s>=1?C4:'#ccc','stroke-width':1},svg);
+      txt('vptr',{x:ox+40,y:oy+42,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:s>=1?'#fff':'#666'},svg);
+      // value field
+      el('rect',{x:ox+8,y:oy+56,width:144,height:24,rx:4,fill:'#e8e8e8',stroke:'#ccc','stroke-width':1},svg);
+      txt('int value = 42',{x:ox+80,y:oy+72,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#666'},svg);
+
+      // Arrow ptr -> object
+      el('line',{x1:120,y1:45,x2:ox,y2:45,stroke:C2,'stroke-width':2,'marker-end':'url(#arrowB)'},svg);
+
+      // --- Derived vtable ---
+      var vx=420,vy=10;
+      el('rect',{x:vx,y:vy,width:190,height:130,rx:8,fill:'#f0f0ff',stroke:s>=2?C3:'#bbb','stroke-width':s>=2?2.5:1.5},svg);
+      txt('Derived vtable',{x:vx+95,y:vy+18,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'11','font-weight':'700',fill:'#333'},svg);
+      // slot 0
+      var slotH=28,slotY=vy+28;
+      el('rect',{x:vx+8,y:slotY,width:174,height:slotH,rx:4,fill:s>=3?C1:'#e8e8e8',stroke:s>=3?C1:'#ccc','stroke-width':1},svg);
+      txt('[0] Derived::speak',{x:vx+95,y:slotY+17,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:s>=3?'#fff':'#555'},svg);
+      // slot 1
+      el('rect',{x:vx+8,y:slotY+slotH+4,width:174,height:slotH,rx:4,fill:'#e8e8e8',stroke:'#ccc','stroke-width':1},svg);
+      txt('[1] Base::greet',{x:vx+95,y:slotY+slotH+4+17,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#555'},svg);
+      // slot 2
+      el('rect',{x:vx+8,y:slotY+2*(slotH+4),width:174,height:slotH,rx:4,fill:'#e8e8e8',stroke:'#ccc','stroke-width':1},svg);
+      txt('[2] Derived::~Derived',{x:vx+95,y:slotY+2*(slotH+4)+17,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#555'},svg);
+
+      // Arrow vptr -> vtable
+      if(s>=2){
+        el('line',{x1:ox+152,y1:oy+38,x2:vx,y2:vy+40,stroke:C4,'stroke-width':2,'marker-end':'url(#arrowO)'},svg);
+      }
+
+      // --- Function box ---
+      var fx=420,fy=170;
+      if(s>=4){
+        el('rect',{x:fx,y:fy,width:190,height:44,rx:8,fill:C1,stroke:C1,'stroke-width':2},svg);
+        txt('Derived::speak()',{x:fx+95,y:fy+18,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12','font-weight':'700',fill:'#fff'},svg);
+        txt('"Derived::speak\\n"',{x:fx+95,y:fy+35,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'rgba(255,255,255,0.85)'},svg);
+        // arrow from slot 0 to function
+        el('line',{x1:vx+95,y1:slotY+slotH,x2:fx+95,y2:fy,stroke:C1,'stroke-width':2,'stroke-dasharray':'5,3','marker-end':'url(#arrowG)'},svg);
+      }
+
+      // --- Base vtable (ghost for comparison) ---
+      var bvx=420,bvy=240;
+      el('rect',{x:bvx,y:bvy,width:190,height:90,rx:8,fill:'#fafafa',stroke:'#ddd','stroke-width':1.5},svg);
+      txt('Base vtable (not used)',{x:bvx+95,y:bvy+16,'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'10','font-weight':'700',fill:'#999'},svg);
+      el('rect',{x:bvx+8,y:bvy+24,width:174,height:24,rx:4,fill:'#f0f0f0',stroke:'#ddd','stroke-width':1},svg);
+      txt('[0] Base::speak',{x:bvx+95,y:bvy+40,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#999'},svg);
+      el('rect',{x:bvx+8,y:bvy+52,width:174,height:24,rx:4,fill:'#f0f0f0',stroke:'#ddd','stroke-width':1},svg);
+      txt('[1] Base::greet',{x:bvx+95,y:bvy+68,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#999'},svg);
+
+      // Marker definitions
+      var defs=el('defs',{},svg);
+      var mkr=el('marker',{id:'arrowB',viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:6,markerHeight:6,orient:'auto'},defs);
+      el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:C2},mkr);
+      var mkr2=el('marker',{id:'arrowO',viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:6,markerHeight:6,orient:'auto'},defs);
+      el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:C4},mkr2);
+      var mkr3=el('marker',{id:'arrowG',viewBox:'0 0 10 10',refX:10,refY:5,markerWidth:6,markerHeight:6,orient:'auto'},defs);
+      el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:C1},mkr3);
+
+      info.textContent=phases[s].label;
+      out.textContent='Step '+(s+1)+' of '+phases.length;
+    }
+
+    draw(0);
+
+    document.getElementById('vtable-dispatch-step').addEventListener('click',function(){
+      if(step<phases.length-1){step++;draw(step);}
+    });
+    document.getElementById('vtable-dispatch-reset').addEventListener('click',function(){
+      step=0;draw(0);
+    });
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

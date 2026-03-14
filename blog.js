@@ -21,7 +21,17 @@ var BLOG_TREE = [
         label: 'Deep Dives',
         children: [
           { title: 'RAII', file: 'cpp/deep-dives/raii.html', links: ['cpp/stl/smart-pointers.html', 'cpp/deep-dives/operator-overloading.html'] },
-          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html', 'cpp/concurrency/index.html'] }
+          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html', 'cpp/deep-dives/compile-link/translation-units.html'] },
+          {
+            name: 'compile-link',
+            label: 'Compilation & Linking',
+            children: [
+              { title: 'Translation Units', file: 'cpp/deep-dives/compile-link/translation-units.html', links: ['cpp/deep-dives/operator-overloading.html', 'cpp/deep-dives/compile-link/linking.html'] },
+              { title: 'Linking Deep Dive', file: 'cpp/deep-dives/compile-link/linking.html', links: ['cpp/deep-dives/compile-link/translation-units.html', 'cpp/deep-dives/compile-link/odr.html'] },
+              { title: 'One Definition Rule', file: 'cpp/deep-dives/compile-link/odr.html', links: ['cpp/deep-dives/compile-link/linking.html', 'cpp/deep-dives/compile-link/build-systems.html'] },
+              { title: 'Build Systems & CMake', file: 'cpp/deep-dives/compile-link/build-systems.html', links: ['cpp/deep-dives/compile-link/odr.html', 'cpp/concurrency/index.html'] }
+            ]
+          }
         ]
       },
       {

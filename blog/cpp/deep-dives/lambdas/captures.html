@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into C++ lambda captures: by value, by reference, default captures, init-captures, capturing this vs *this, dangling references, and move-only types.">
+  <title>Lambda Captures Deep Dive | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ Deep Dives</a> &raquo; <a href="basics.html">Lambdas</a>
+      </div>
+
+      <h1>Lambda Captures Deep Dive</h1>
+      <p class="post-meta">March 2026 &middot; 20 min read</p>
+
+      <!-- ===== INTRO ===== -->
+      <h2 id="why-captures-matter">Why Captures Matter</h2>
+      <p>Captures are what elevate lambdas from mere inline functions to <em>closures</em>: functions that carry state from their environment. Every time you write a lambda that references a local variable, you are making a decision about <strong>ownership, lifetime, and mutability</strong>. Getting captures wrong leads to some of the most insidious bugs in C++: dangling references, unexpected mutations, and performance pitfalls from accidental deep copies.</p>
+      <p>In the previous article, we saw that the compiler transforms each capture into a data member of the closure class. In this article, we will examine every capture mode in detail, explore their interactions, and catalog the bugs that arise from each.</p>
+
+      <!-- ===== CAPTURE BY VALUE ===== -->
+      <h2 id="capture-by-value">Capture by Value</h2>
+      <p>When you capture a variable by value, the closure stores a <strong>copy</strong> of the variable at the point where the lambda expression is evaluated. Changes to the original variable after the lambda is created do not affect the captured copy, and vice versa (unless you use <code>mutable</code>).</p>
+
+      <pre><code>int factor = 10;
+auto scale = [factor](int x) { return x * factor; };
+
+factor = 20;        // modifying original
+scale(5);           // returns 50, not 100 — uses the captured copy (10)</code></pre>
+
+      <h3>Const by Default</h3>
+      <p>The captured copy is accessed through a <code>const</code> member in the generated <code>operator()</code>. You cannot modify it unless you declare the lambda <code>mutable</code>.</p>
+
+      <pre><code>int n = 0;
+// auto inc = [n]() { return ++n; };  // ERROR: n is const in operator()
+auto inc = [n]() mutable { return ++n; };  // OK
+
+inc();  // returns 1
+inc();  // returns 2
+// n is still 0 — the original is untouched</code></pre>
+
+      <h3>Copy Cost</h3>
+      <p>Capturing by value invokes the copy constructor. For lightweight types like <code>int</code> or <code>double</code>, this is trivial. For heavy types like <code>std::vector</code>, <code>std::string</code>, or <code>std::map</code>, the copy can be expensive.</p>
+
+      <pre><code>std::vector&lt;int&gt; big_data(1'000'000);
+
+// This copies the entire million-element vector into the closure
+auto process = [big_data]() {
+    return std::accumulate(big_data.begin(), big_data.end(), 0LL);
+};
+
+// Better: capture by reference if the lambda won't outlive big_data
+auto process_ref = [&amp;big_data]() {
+    return std::accumulate(big_data.begin(), big_data.end(), 0LL);
+};
+
+// Or: use init-capture to move (covered later in this article)
+auto process_move = [data = std::move(big_data)]() {
+    return std::accumulate(data.begin(), data.end(), 0LL);
+};</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Capture by value creates a copy at lambda creation time, not at each call. The copy constructor runs once. If the type is expensive to copy, consider capture by reference (if safe) or move-capture (C++14).
+      </div>
+
+      <h3>When to Use Capture by Value</h3>
+      <ul>
+        <li>When the lambda <strong>outlives</strong> the captured variable (returned from a function, stored in a member, passed to an async operation).</li>
+        <li>When you need a <strong>snapshot</strong> of the variable's state at lambda creation time.</li>
+        <li>When the variable is <strong>cheap to copy</strong> (fundamental types, small structs).</li>
+        <li>When you want <strong>thread safety</strong>: each thread's lambda gets its own independent copy.</li>
+      </ul>
+
+      <!-- ===== CAPTURE BY REFERENCE ===== -->
+      <h2 id="capture-by-reference">Capture by Reference</h2>
+      <p>When you capture by reference, the closure stores a <strong>reference</strong> (internally, a pointer) to the original variable. Every access inside the lambda reads or writes the original. No copy is made.</p>
+
+      <pre><code>int total = 0;
+auto accumulate = [&amp;total](int x) { total += x; };
+
+accumulate(10);
+accumulate(20);
+accumulate(30);
+// total == 60 — the original was modified</code></pre>
+
+      <h3>Reference Captures and const</h3>
+      <p>Even though the lambda's <code>operator()</code> is <code>const</code>, you can still modify variables captured by reference. The <code>const</code> applies to the closure's members (the references themselves), and a <code>const</code> reference cannot be reseated but can still modify the referenced object.</p>
+
+      <pre><code>int x = 1;
+auto f = [&amp;x]() { x = 42; };  // OK: modifies x through reference
+// f's operator() is const, but x is accessed through a reference member
+// The reference itself doesn't change (it can't be reseated), only the value does</code></pre>
+
+      <h3>The Dangling Reference Trap</h3>
+      <p>This is the single most dangerous aspect of lambda captures. If the original variable is destroyed while the lambda still holds a reference to it, you get <strong>undefined behavior</strong>. The reference dangles, and any access through it reads or writes garbage memory.</p>
+
+      <pre><code>std::function&lt;int()&gt; make_adder(int base) {
+    return [&amp;base](int x) { return base + x; };
+    // BUG: 'base' is a parameter — destroyed when make_adder returns
+    // The returned lambda holds a dangling reference
+}
+
+auto add5 = make_adder(5);
+add5(10);  // UNDEFINED BEHAVIOR: reading destroyed stack memory</code></pre>
+
+      <p>The fix is straightforward: capture by value when the lambda escapes its scope.</p>
+
+      <pre><code>std::function&lt;int(int)&gt; make_adder(int base) {
+    return [base](int x) { return base + x; };  // SAFE: captures a copy
+}</code></pre>
+
+      <h3>When to Use Capture by Reference</h3>
+      <ul>
+        <li>When the lambda <strong>does not outlive</strong> the captured variable (used immediately, passed to an algorithm that completes before the scope ends).</li>
+        <li>When you need to <strong>mutate the original</strong> variable from inside the lambda.</li>
+        <li>When the variable is <strong>expensive to copy</strong> and a reference is safe.</li>
+        <li>When collecting results: the lambda writes into a container owned by the calling scope.</li>
+      </ul>
+
+      <!-- ===== DEFAULT CAPTURES ===== -->
+      <h2 id="default-captures">Default Captures: <code>[=]</code> and <code>[&amp;]</code></h2>
+      <p>Default captures tell the compiler to automatically capture any local variable that the lambda body references. <code>[=]</code> captures everything by value; <code>[&amp;]</code> captures everything by reference.</p>
+
+      <pre><code>int a = 1, b = 2, c = 3;
+
+auto by_val = [=]() { return a + b + c; };   // copies a, b, c
+auto by_ref = [&amp;]() { return a + b + c; };   // references a, b, c</code></pre>
+
+      <p>You can mix default with explicit captures to override the default for specific variables:</p>
+
+      <pre><code>int x = 10, y = 20, z = 30;
+
+auto mix1 = [=, &amp;z]() { return x + y + z; };
+// x, y captured by value; z captured by reference
+
+auto mix2 = [&amp;, x]() { return x + y + z; };
+// y, z captured by reference; x captured by value</code></pre>
+
+      <h3>Problems with Default Captures</h3>
+      <p>Default captures are convenient but hide important information. They make it unclear which variables are being captured and how. This leads to several categories of bugs:</p>
+
+      <h4>1. Accidental Capture of Large Objects</h4>
+      <pre><code>void process(const std::vector&lt;int&gt;&amp; data, int threshold) {
+    // Developer intends to capture only 'threshold'
+    // But [=] also copies 'data' — an expensive deep copy
+    auto filter = [=](int x) { return x &gt; threshold; };
+    // Wait — 'data' is not used in the body, so it's NOT captured
+    // But this only works because the compiler is smart about it
+    // A slight change to the body could accidentally pull in data
+}</code></pre>
+
+      <h4>2. Implicit Capture of <code>this</code></h4>
+      <pre><code>class Widget {
+    int value_ = 42;
+public:
+    auto get_checker() {
+        return [=]() { return value_ &gt; 0; };
+        // Looks safe — "everything by value"
+        // But [=] captures 'this' pointer, NOT value_
+        // If Widget is destroyed, the lambda has a dangling this
+    }
+};</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Inside a member function, <code>[=]</code> captures <code>this</code> by pointer, not by copying each member. This is one of the most common sources of dangling pointer bugs with lambdas. Always prefer explicit captures in member functions.
+      </div>
+
+      <h4>3. Readability Problems</h4>
+      <pre><code>// Which variables does this lambda actually use?
+auto result = [&amp;]() {
+    auto filtered = filter(data, threshold);
+    transform(filtered, output, mapper);
+    return summarize(output);
+};
+// Without reading the body carefully, you can't know what's captured
+// Or whether the captures are safe</code></pre>
+
+      <p>The C++ Core Guidelines recommend avoiding default captures and preferring explicit capture lists. This makes the lambda's dependencies visible at a glance.</p>
+
+      <!-- ===== CAPTURE THIS vs *THIS ===== -->
+      <h2 id="capture-this">Capturing <code>this</code> vs <code>*this</code></h2>
+      <p>Inside a member function, you often need the lambda to access the object's members. There are two ways to do this, and the difference is critical for correctness.</p>
+
+      <h3>Capturing <code>this</code> (Pointer Capture)</h3>
+      <p>Capturing <code>this</code> stores the raw pointer to the current object. The lambda can access all members through this pointer. But if the object is destroyed before the lambda runs, the pointer dangles.</p>
+
+      <pre><code>class Sensor {
+    double last_reading_ = 0.0;
+    std::string name_;
+public:
+    auto make_callback() {
+        return [this]() {
+            // Accesses members through the captured 'this' pointer
+            std::cout &lt;&lt; name_ &lt;&lt; ": " &lt;&lt; last_reading_ &lt;&lt; "\n";
+        };
+    }
+};
+
+Sensor s;
+auto cb = s.make_callback();
+// If 's' is destroyed here...
+cb();  // UNDEFINED BEHAVIOR: dangling this pointer</code></pre>
+
+      <h3>Capturing <code>*this</code> (Copy Capture, C++17)</h3>
+      <p>C++17 introduced <code>[*this]</code>, which captures a <strong>copy of the entire object</strong>. The lambda holds its own independent copy, so it is safe even if the original object is destroyed.</p>
+
+      <pre><code>class Sensor {
+    double last_reading_ = 0.0;
+    std::string name_;
+public:
+    auto make_safe_callback() {
+        return [*this]() {   // C++17: copies the entire Sensor object
+            std::cout &lt;&lt; name_ &lt;&lt; ": " &lt;&lt; last_reading_ &lt;&lt; "\n";
+        };
+    }
+};</code></pre>
+
+      <p>The tradeoff is obvious: <code>[*this]</code> copies the entire object, which can be expensive for large objects. But it eliminates the dangling pointer problem entirely.</p>
+
+      <h3>Comparison Table</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0">
+        <thead>
+          <tr style="border-bottom:2px solid var(--ink-faint)">
+            <th style="text-align:left;padding:0.5rem">Capture</th>
+            <th style="text-align:left;padding:0.5rem">What is stored</th>
+            <th style="text-align:left;padding:0.5rem">Safety</th>
+            <th style="text-align:left;padding:0.5rem">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="padding:0.4rem"><code>[this]</code></td><td style="padding:0.4rem">Pointer to object</td><td style="padding:0.4rem">Dangling if object dies</td><td style="padding:0.4rem">8 bytes</td></tr>
+          <tr><td style="padding:0.4rem"><code>[*this]</code></td><td style="padding:0.4rem">Copy of entire object</td><td style="padding:0.4rem">Always safe</td><td style="padding:0.4rem">sizeof(Object)</td></tr>
+          <tr><td style="padding:0.4rem"><code>[=]</code> inside member</td><td style="padding:0.4rem">Pointer to object (same as [this])</td><td style="padding:0.4rem">Dangling if object dies</td><td style="padding:0.4rem">8 bytes</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>class Timer {
+    int interval_;
+    std::string label_;
+public:
+    // DANGEROUS: [=] inside a member captures 'this', not copies of members
+    auto make_callback_v1() {
+        return [=]() { std::cout &lt;&lt; label_ &lt;&lt; ": " &lt;&lt; interval_ &lt;&lt; "\n"; };
+    }
+
+    // SAFE (C++17): [*this] copies the entire object
+    auto make_callback_v2() {
+        return [*this]() { std::cout &lt;&lt; label_ &lt;&lt; ": " &lt;&lt; interval_ &lt;&lt; "\n"; };
+    }
+
+    // SAFE (C++11): explicitly copy the members you need
+    auto make_callback_v3() {
+        auto lbl = label_;
+        auto intv = interval_;
+        return [lbl, intv]() { std::cout &lt;&lt; lbl &lt;&lt; ": " &lt;&lt; intv &lt;&lt; "\n"; };
+    }
+};</code></pre>
+
+      <!-- ===== INIT CAPTURE ===== -->
+      <h2 id="init-capture">Init-Capture (Generalized Lambda Capture, C++14)</h2>
+      <p>C++14 introduced <strong>init-captures</strong> (also called generalized lambda captures), which let you create new variables inside the capture list and initialize them with arbitrary expressions. The syntax is <code>[name = expression]</code>.</p>
+
+      <pre><code>// Create a new capture variable initialized from an expression
+auto f = [x = compute_value()](int n) { return x + n; };
+
+// The capture 'x' is a new variable in the closure, distinct from any outer 'x'
+// It is initialized by calling compute_value() when the lambda is created</code></pre>
+
+      <h3>Moving into Captures</h3>
+      <p>The most important use of init-captures is moving objects into the closure. Before C++14, there was no way to move a variable into a lambda; you could only copy or reference.</p>
+
+      <pre><code>auto ptr = std::make_unique&lt;Widget&gt;();
+
+// Can't capture unique_ptr by value — it's move-only
+// auto f = [ptr]() { ptr-&gt;do_something(); };  // ERROR: unique_ptr is not copyable
+
+// Init-capture with std::move: transfers ownership into the closure
+auto f = [p = std::move(ptr)]() { p-&gt;do_something(); };
+
+// ptr is now null — ownership transferred to the lambda</code></pre>
+
+      <h3>Renaming Captures</h3>
+      <pre><code>int data = 42;
+auto f = [captured_data = data](int x) { return x + captured_data; };
+// 'captured_data' is the name inside the lambda; 'data' is the original</code></pre>
+
+      <h3>Computed Init-Captures</h3>
+      <pre><code>auto f = [sum = a + b, product = a * b]() {
+    return sum &gt; product;
+};
+
+// More complex expressions
+auto g = [config = load_config("settings.json")]() {
+    return config.get("debug_mode");
+};</code></pre>
+
+      <h3>Init-Capture for Move-Only Types</h3>
+      <pre><code>// Move a vector into the lambda
+std::vector&lt;int&gt; data = {1, 2, 3, 4, 5};
+auto process = [d = std::move(data)]() {
+    int sum = 0;
+    for (int x : d) sum += x;
+    return sum;
+};
+// data is now empty — contents moved into the closure
+
+// Move a unique_ptr into the lambda
+auto connection = std::make_unique&lt;DbConnection&gt;("localhost");
+auto query = [conn = std::move(connection)](const std::string&amp; sql) {
+    return conn-&gt;execute(sql);
+};</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Init-captures solve two problems at once: they allow moving non-copyable objects into lambdas, and they allow you to name captured values differently from their source. The expression on the right side of <code>=</code> is evaluated once, when the lambda is created.
+      </div>
+
+      <!-- ===== ANIMATION: CAPTURE MODES ===== -->
+      <div class="anim-container" id="capture-modes-anim">
+        <h4>&#9654; Capture Modes: Value, Reference, and Move</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through to see how a lambda captures three variables: by value (copy), by reference (arrow to original), and by move (ownership transfer).</p>
+        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start">
+          <svg id="capture-modes-svg" width="540" height="300" viewBox="0 0 540 300"></svg>
+        </div>
+        <div id="capture-modes-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="capture-modes-step">Step &rarr;</button>
+          <button class="anim-btn" id="capture-modes-reset">Reset</button>
+          <span class="anim-output" id="capture-modes-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== DANGLING CAPTURE PATTERNS ===== -->
+      <h2 id="dangling-captures">Dangling Capture Patterns</h2>
+      <p>Dangling captures are the most dangerous class of lambda bugs. They cause undefined behavior, which can manifest as crashes, corrupted data, or (worst of all) seemingly correct behavior that breaks unpredictably.</p>
+
+      <h3>Pattern 1: Returning a Lambda with Reference Captures</h3>
+      <pre><code>// BUG: lambda outlives the captured reference
+auto make_multiplier(int factor) {
+    return [&amp;factor](int x) { return x * factor; };
+    // 'factor' is a function parameter — destroyed at return
+}
+
+auto mul5 = make_multiplier(5);
+mul5(10);  // UNDEFINED BEHAVIOR</code></pre>
+
+      <h3>Pattern 2: Async Operations with Reference Captures</h3>
+      <pre><code>void start_task() {
+    std::string filename = "data.csv";
+
+    // BUG: filename destroyed when start_task returns
+    // but the async operation still holds a reference to it
+    std::async(std::launch::async, [&amp;filename]() {
+        process_file(filename);  // UNDEFINED BEHAVIOR
+    });
+}
+
+// FIX: capture by value
+void start_task_safe() {
+    std::string filename = "data.csv";
+    std::async(std::launch::async, [filename]() {
+        process_file(filename);  // SAFE: lambda owns a copy
+    });
+}</code></pre>
+
+      <h3>Pattern 3: Capturing Loop Variables by Reference</h3>
+      <pre><code>std::vector&lt;std::function&lt;int()&gt;&gt; getters;
+for (int i = 0; i &lt; 5; ++i) {
+    getters.push_back([&amp;i]() { return i; });
+    // All lambdas reference the SAME 'i'
+}
+// After the loop, 'i' is out of scope
+// Calling any getter is UNDEFINED BEHAVIOR
+
+// FIX: capture by value
+for (int i = 0; i &lt; 5; ++i) {
+    getters.push_back([i]() { return i; });
+    // Each lambda gets its own copy: 0, 1, 2, 3, 4
+}</code></pre>
+
+      <h3>Pattern 4: Capturing Temporaries</h3>
+      <pre><code>auto make_greeter() {
+    // BUG: reference to temporary string
+    const auto&amp; name = get_name();  // if get_name returns by value,
+                                     // this extends the temporary's lifetime...
+    return [&amp;name]() {
+        std::cout &lt;&lt; "Hello " &lt;&lt; name;
+    };
+    // ...but only until the end of this function
+    // The returned lambda holds a dangling reference
+}</code></pre>
+
+      <!-- ===== DANGLING ANIMATION ===== -->
+      <div class="anim-container" id="dangling-anim">
+        <h4>&#9654; Dangling Reference Capture</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through to see how a lambda escapes its scope while holding a dangling reference.</p>
+        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start">
+          <svg id="dangling-svg" width="480" height="250" viewBox="0 0 480 250"></svg>
+        </div>
+        <div id="dangling-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="dangling-step">Step &rarr;</button>
+          <button class="anim-btn" id="dangling-reset">Reset</button>
+          <span class="anim-output" id="dangling-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== CAPTURING MOVE-ONLY TYPES ===== -->
+      <h2 id="move-only-captures">Capturing Move-Only Types</h2>
+      <p>Some types in C++ cannot be copied: <code>std::unique_ptr</code>, <code>std::thread</code>, <code>std::promise</code>, and any custom type with a deleted copy constructor. To capture these in a lambda, you must use init-captures with <code>std::move</code>.</p>
+
+      <pre><code>auto ptr = std::make_unique&lt;Resource&gt;();
+
+// Compile error: unique_ptr is not copyable
+// auto f = [ptr]() { ptr-&gt;use(); };
+
+// Solution: move into the capture
+auto f = [p = std::move(ptr)]() { p-&gt;use(); };
+// ptr is now nullptr — the lambda owns the Resource</code></pre>
+
+      <h3>Moving Multiple Objects</h3>
+      <pre><code>auto conn = std::make_unique&lt;Connection&gt;();
+auto buffer = std::make_unique&lt;Buffer&gt;(4096);
+std::thread worker;
+
+auto task = [
+    c = std::move(conn),
+    b = std::move(buffer)
+]() mutable {
+    c-&gt;send(b-&gt;data(), b-&gt;size());
+};</code></pre>
+
+      <h3>The <code>mutable</code> Interaction</h3>
+      <p>When you move a <code>unique_ptr</code> into a lambda, calling methods on it does not require <code>mutable</code> because you are calling methods on the pointee, not modifying the pointer itself. But if you want to <em>reset</em> or <em>reassign</em> the pointer, you need <code>mutable</code>.</p>
+
+      <pre><code>auto f = [p = std::make_unique&lt;Widget&gt;()]() {
+    p-&gt;display();  // OK: const unique_ptr allows calling non-const methods on pointee
+};
+
+auto g = [p = std::make_unique&lt;Widget&gt;()]() mutable {
+    p-&gt;display();
+    p.reset();     // Needs mutable: modifying the unique_ptr itself
+    p = std::make_unique&lt;Widget&gt;();  // Also needs mutable
+};</code></pre>
+
+      <!-- ===== CAPTURE PACKING AND OPTIMIZATION ===== -->
+      <h2 id="capture-optimization">Capture Packing and Compiler Optimizations</h2>
+      <p>The compiler packs captures into the closure object like struct members, with alignment and padding rules. Understanding this helps you reason about closure sizes and cache performance.</p>
+
+      <pre><code>char a = 'x';
+int b = 42;
+double c = 3.14;
+
+auto f1 = [a, b, c]() { return a + b + c; };
+// Likely layout: char a (1 byte) + 3 padding + int b (4 bytes) + double c (8 bytes)
+// sizeof(f1) is likely 16
+
+auto f2 = [c, b, a]() { return a + b + c; };
+// Compiler may reorder: double c (8 bytes) + int b (4 bytes) + char a (1 byte) + 3 padding
+// sizeof(f2) is also likely 16
+
+// The compiler can reorder captures for optimal packing
+// Do NOT rely on any specific capture ordering in memory</code></pre>
+
+      <h3>Empty Closure Optimization</h3>
+      <p>A lambda with no captures has an empty closure type. The compiler applies the empty base optimization (EBO), so <code>sizeof</code> is 1 (the minimum for any C++ object). When such a lambda is passed to a template, the compiler often eliminates the closure object entirely and inlines the body.</p>
+
+      <pre><code>auto cmp = [](int a, int b) { return a &lt; b; };
+static_assert(sizeof(cmp) == 1);
+
+// When passed to std::sort, the closure object is optimized away
+// The comparison becomes a direct inline operation
+std::sort(v.begin(), v.end(), cmp);</code></pre>
+
+      <!-- ===== STRUCTURED BINDINGS AND CAPTURES ===== -->
+      <h2 id="structured-bindings">Structured Bindings and Captures (C++17/C++20)</h2>
+      <p>C++17 introduced structured bindings, but initially you could not capture them in lambdas. C++20 fixed this limitation.</p>
+
+      <pre><code>std::pair&lt;int, std::string&gt; p = {42, "hello"};
+auto [num, text] = p;
+
+// C++17: Cannot capture structured bindings — compile error
+// auto f = [num, text]() { return text + std::to_string(num); };
+
+// C++20: This is now allowed
+auto f = [num, text]() { return text + std::to_string(num); };
+
+// Workaround for C++17:
+auto g = [n = num, t = text]() { return t + std::to_string(n); };</code></pre>
+
+      <!-- ===== CAPTURE SCOPE AND VISIBILITY ===== -->
+      <h2 id="capture-scope">Capture Scope and Visibility Rules</h2>
+      <p>Only variables with automatic storage duration (local variables and function parameters) can be captured. The following cannot be captured:</p>
+      <ul>
+        <li><strong>Global variables:</strong> Accessible directly, no capture needed.</li>
+        <li><strong>Static local variables:</strong> Accessible directly.</li>
+        <li><strong>Constexpr variables:</strong> Accessible directly (the value is a compile-time constant).</li>
+        <li><strong>Thread-local variables:</strong> Accessible directly on the same thread.</li>
+      </ul>
+
+      <pre><code>int global = 100;
+static int file_scope = 200;
+
+void example() {
+    static int func_static = 300;
+    constexpr int compile_const = 400;
+    int local = 500;
+
+    auto f = [local]() {
+        // global: accessible without capture
+        // file_scope: accessible without capture
+        // func_static: accessible without capture
+        // compile_const: accessible without capture (value substituted)
+        // local: must be captured
+        return global + file_scope + func_static + compile_const + local;
+    };
+}</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> If a variable does not need to be captured (globals, statics, constexpr), it is not stored in the closure and does not affect the closure's size. Only automatic (stack) variables from the enclosing scope become closure members.
+      </div>
+
+      <!-- ===== ADVANCED PATTERNS ===== -->
+      <h2 id="advanced-patterns">Advanced Capture Patterns</h2>
+
+      <h3>Capturing Parameter Packs (C++20)</h3>
+      <pre><code>template &lt;typename... Args&gt;
+auto make_tuple_printer(Args... args) {
+    // C++20: capture a parameter pack by value
+    return [... captured = std::move(args)]() {
+        ((std::cout &lt;&lt; captured &lt;&lt; " "), ...);
+        std::cout &lt;&lt; "\n";
+    };
+}
+
+auto printer = make_tuple_printer(1, 3.14, std::string("hello"));
+printer();  // "1 3.14 hello"</code></pre>
+
+      <h3>Self-Referencing Captures</h3>
+      <pre><code>// Capturing a shared_ptr to enable shared ownership
+auto shared = std::make_shared&lt;Widget&gt;();
+
+auto callback = [shared]() {
+    shared-&gt;process();
+};
+// The lambda keeps the Widget alive through shared ownership
+// Even if the original shared_ptr is reset, the lambda's copy keeps it alive
+
+shared.reset();    // Widget still alive — lambda holds a copy of the shared_ptr
+callback();        // SAFE: Widget still exists</code></pre>
+
+      <h3>Capture and Forward</h3>
+      <pre><code>// Perfect forwarding with init-captures
+template &lt;typename T&gt;
+auto wrap(T&amp;&amp; arg) {
+    return [val = std::forward&lt;T&gt;(arg)]() mutable {
+        return process(std::move(val));
+    };
+}
+
+// If called with an lvalue: val is copy-constructed
+// If called with an rvalue: val is move-constructed</code></pre>
+
+      <!-- ===== BEST PRACTICES ===== -->
+      <h2 id="best-practices">Best Practices for Captures</h2>
+      <ol>
+        <li><strong>Prefer explicit captures</strong> over default captures. Write <code>[x, &amp;y]</code> instead of <code>[=]</code> or <code>[&amp;]</code>. This documents the lambda's dependencies.</li>
+        <li><strong>Capture by value when the lambda might escape.</strong> Any lambda returned from a function, stored in a member, or passed to an async operation should capture by value.</li>
+        <li><strong>Use init-captures to move</strong> when capturing expensive or non-copyable types.</li>
+        <li><strong>In member functions, avoid <code>[=]</code>.</strong> It captures <code>this</code> by pointer, not by copying members. Use <code>[*this]</code> (C++17) or explicitly copy the members you need.</li>
+        <li><strong>Watch for loop variable captures.</strong> Capturing a loop variable by reference is almost always a bug when the lambda outlives the loop iteration.</li>
+        <li><strong>Consider closure size.</strong> Each value capture adds to the closure's footprint. For hot paths, prefer reference captures (if safe) to avoid copies.</li>
+        <li><strong>Use <code>std::shared_ptr</code> for shared ownership.</strong> When multiple lambdas need access to the same resource, capture a <code>shared_ptr</code> by value.</li>
+      </ol>
+
+      <!-- ===== SUMMARY ===== -->
+      <h2 id="summary">Summary</h2>
+      <p>Lambda captures define the relationship between a closure and its environment. Capture by value creates independent copies; capture by reference creates aliases to the originals. Default captures hide dependencies and invite bugs, especially the implicit capture of <code>this</code> inside member functions. Init-captures (C++14) and <code>*this</code> capture (C++17) filled critical gaps: moving non-copyable types into closures and safely copying the enclosing object.</p>
+      <p>The cardinal rule is simple: if the lambda outlives the captured variable, capture by value. If you need the variable alive and the lambda is short-lived, capture by reference. When in doubt, capture by value.</p>
+      <p>In the next article, we will explore generic lambdas: how <code>auto</code> parameters create template functions, template lambdas in C++20, constexpr lambdas, and the IIFE pattern.</p>
+
+      <nav class="post-nav">
+        <a href="basics.html"><span>Previous</span><span>&#8592; Lambda Basics</span></a>
+        <a class="next" href="generic-lambdas.html"><span>Next</span><span>Generic &amp; Template Lambdas &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script src="../../../../anim-speed.js"></script>
+
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function el(tag,attrs,parent){
+      var e=document.createElementNS(NS,tag);
+      for(var k in attrs)e.setAttribute(k,attrs[k]);
+      if(parent)parent.appendChild(e);
+      return e;
+    }
+    function txt(parent,x,y,text,opts){
+      opts=opts||{};
+      var t=el('text',{x:x,y:y,'font-family':opts.font||'Consolas,monospace','font-size':opts.size||'12','font-weight':opts.weight||'400',fill:opts.fill||'#d4e8dc'},parent);
+      if(opts.anchor)t.setAttribute('text-anchor',opts.anchor);
+      t.textContent=text;
+      return t;
+    }
+    function box(parent,x,y,w,h,opts){
+      opts=opts||{};
+      return el('rect',{x:x,y:y,width:w,height:h,rx:opts.rx||6,fill:opts.fill||'#1a2b22',stroke:opts.stroke||'none','stroke-width':opts.sw||1},parent);
+    }
+
+    /* ===== Animation 1: Capture Modes ===== */
+    (function(){
+      var svg=document.getElementById('capture-modes-svg');
+      var info=document.getElementById('capture-modes-info');
+      var out=document.getElementById('capture-modes-output');
+
+      var defs=el('defs',{},svg);
+      var marker=el('marker',{id:'cap-arrow',markerWidth:8,markerHeight:6,refX:8,refY:3,orient:'auto'},defs);
+      el('polygon',{points:'0 0,8 3,0 6',fill:'#3498db'},marker);
+
+      var steps=[
+        {id:'start',msg:'Lambda: [count, &name, data = std::move(vec)](...) { ... }'},
+        {id:'show-scope',msg:'Three variables exist in the enclosing scope: count (int), name (string), vec (vector).'},
+        {id:'capture-value',msg:'count is captured BY VALUE: a copy (42) is stored inside the closure.'},
+        {id:'capture-ref',msg:'name is captured BY REFERENCE: the closure stores a pointer to the original.'},
+        {id:'capture-move',msg:'vec is captured BY MOVE: ownership transfers from vec into the closure. vec is now empty.'},
+        {id:'final',msg:'The closure now holds: a copy of count, a reference to name, and ownership of the moved vector.'}
+      ];
+
+      var stepIdx=0;
+
+      function draw(idx){
+        clearSvg(svg);
+        /* Re-add defs */
+        var d=el('defs',{},svg);
+        var m=el('marker',{id:'cap-arrow',markerWidth:8,markerHeight:6,refX:8,refY:3,orient:'auto'},d);
+        el('polygon',{points:'0 0,8 3,0 6',fill:'#3498db'},m);
+
+        var s=steps[idx];
+        var scopeX=10,scopeY=20,scopeW=180,scopeH=250;
+        var closureX=310,closureY=20,closureW=210,closureH=250;
+
+        if(idx===0){
+          box(svg,100,80,340,80,{fill:'#1a2b22',stroke:'#0a8f6a',sw:2});
+          txt(svg,270,115,'Click "Step" to see capture modes',{size:'14',weight:'600',fill:'#0a8f6a',anchor:'middle'});
+          info.textContent=s.msg;
+          return;
+        }
+
+        /* Scope box */
+        box(svg,scopeX,scopeY,scopeW,scopeH,{fill:'#1a2b22',stroke:'#4a5a53',sw:1});
+        txt(svg,scopeX+scopeW/2,scopeY+18,'Enclosing Scope',{size:'12',weight:'700',fill:'#4a5a53',anchor:'middle'});
+
+        /* Scope variables */
+        var varY=scopeY+35;
+        box(svg,scopeX+10,varY,160,36,{fill:'#0a8f6a',rx:5});
+        txt(svg,scopeX+90,varY+22,'count = 42',{size:'12',weight:'700',fill:'#fff',anchor:'middle'});
+
+        box(svg,scopeX+10,varY+48,160,36,{fill:'#3498db',rx:5});
+        txt(svg,scopeX+90,varY+70,'name = "Alice"',{size:'12',weight:'700',fill:'#fff',anchor:'middle'});
+
+        var vecFill=(idx>=4)?'#555':'#9b59b6';
+        box(svg,scopeX+10,varY+96,160,36,{fill:vecFill,rx:5});
+        var vecText=(idx>=4)?'vec = (moved)':'vec = {1,2,3}';
+        txt(svg,scopeX+90,varY+118,vecText,{size:'12',weight:'700',fill:'#fff',anchor:'middle'});
+
+        /* Closure box */
+        box(svg,closureX,closureY,closureW,closureH,{fill:'#1a2222',stroke:'#9b59b6',sw:2});
+        txt(svg,closureX+closureW/2,closureY+18,'Closure Object',{size:'12',weight:'700',fill:'#9b59b6',anchor:'middle'});
+
+        if(idx>=2){
+          /* Value capture: count */
+          box(svg,closureX+10,closureY+35,190,36,{fill:'#0a8f6a',rx:5});
+          txt(svg,closureX+105,closureY+57,'count: 42 (copy)',{size:'11',weight:'700',fill:'#fff',anchor:'middle'});
+        }
+        if(idx>=3){
+          /* Reference capture: name */
+          box(svg,closureX+10,closureY+83,190,36,{fill:'#1a2a33',stroke:'#3498db',sw:2,rx:5});
+          txt(svg,closureX+105,closureY+105,'&name (reference)',{size:'11',weight:'700',fill:'#3498db',anchor:'middle'});
+
+          /* Arrow from closure ref to scope variable */
+          el('line',{x1:closureX+10,y1:closureY+101,x2:scopeX+170,y2:varY+66,stroke:'#3498db','stroke-width':2,'stroke-dasharray':'5,3','marker-end':'url(#cap-arrow)'},svg);
+        }
+        if(idx>=4){
+          /* Move capture: data */
+          box(svg,closureX+10,closureY+131,190,36,{fill:'#9b59b6',rx:5});
+          txt(svg,closureX+105,closureY+153,'data: {1,2,3} (owned)',{size:'11',weight:'700',fill:'#fff',anchor:'middle'});
+
+          /* Arrow showing move direction */
+          el('line',{x1:scopeX+170,y1:varY+114,x2:closureX+10,y2:closureY+149,stroke:'#ff6b35','stroke-width':2,'marker-end':'url(#cap-arrow)'},svg);
+          txt(svg,240,closureY+148,'move',{size:'10',weight:'700',fill:'#ff6b35',anchor:'middle'});
+        }
+
+        if(idx>=5){
+          /* Summary labels */
+          box(svg,closureX+10,closureY+185,190,50,{fill:'#0a8f6a',rx:5});
+          txt(svg,closureX+105,closureY+205,'Closure is self-contained',{size:'10',weight:'700',fill:'#fff',anchor:'middle'});
+          txt(svg,closureX+105,closureY+222,'with all captured state',{size:'10',weight:'600',fill:'#d4e8dc',anchor:'middle'});
+        }
+
+        info.textContent=s.msg;
+      }
+
+      function reset(){stepIdx=0;draw(0);out.textContent='';}
+      reset();
+
+      document.getElementById('capture-modes-step').addEventListener('click',function(){
+        if(stepIdx>=steps.length)return;
+        draw(stepIdx);stepIdx++;
+        if(stepIdx>=steps.length)out.textContent='All three capture modes illustrated.';
+      });
+      document.getElementById('capture-modes-reset').addEventListener('click',function(){reset();});
+    })();
+
+    /* ===== Animation 2: Dangling Reference ===== */
+    (function(){
+      var svg=document.getElementById('dangling-svg');
+      var info=document.getElementById('dangling-info');
+      var out=document.getElementById('dangling-output');
+
+      var steps=[
+        {id:'start',msg:'Function make_adder(int base) creates a lambda capturing &base.'},
+        {id:'scope-active',msg:'Inside make_adder: base=5 exists on the stack. Lambda captures &base.'},
+        {id:'return-lambda',msg:'make_adder returns the lambda. The stack frame (including base) is destroyed.'},
+        {id:'dangling',msg:'The returned lambda still holds a reference to base, but base no longer exists.'},
+        {id:'call',msg:'Calling the lambda reads the dangling reference: UNDEFINED BEHAVIOR.'},
+        {id:'fix',msg:'Fix: capture by value [base] instead of [&base]. The lambda owns a copy.'}
+      ];
+
+      var stepIdx=0;
+
+      function draw(idx){
+        clearSvg(svg);
+        var s=steps[idx];
+
+        if(idx===0){
+          box(svg,80,70,320,80,{fill:'#1a2b22',stroke:'#c0392b',sw:2});
+          txt(svg,240,105,'Click "Step" to see the dangling',{size:'14',weight:'600',fill:'#c0392b',anchor:'middle'});
+          txt(svg,240,128,'reference problem',{size:'14',weight:'600',fill:'#c0392b',anchor:'middle'});
+          info.textContent=s.msg;
+          return;
+        }
+
+        var stackX=10,stackY=20,stackW=160,stackH=140;
+        var lambdaX=280,lambdaY=20,lambdaW=180,lambdaH=140;
+
+        /* Stack frame */
+        var stackAlive=(idx<=2);
+        var stackFill=stackAlive?'#1a2b22':'#2a1515';
+        var stackStroke=stackAlive?'#0a8f6a':'#c0392b';
+        box(svg,stackX,stackY,stackW,stackH,{fill:stackFill,stroke:stackStroke,sw:2});
+        txt(svg,stackX+stackW/2,stackY+18,'Stack Frame',{size:'12',weight:'700',fill:stackStroke,anchor:'middle'});
+
+        if(stackAlive){
+          box(svg,stackX+10,stackY+30,140,36,{fill:'#0a8f6a',rx:5});
+          txt(svg,stackX+80,stackY+52,'base = 5',{size:'13',weight:'700',fill:'#fff',anchor:'middle'});
+        }else{
+          box(svg,stackX+10,stackY+30,140,36,{fill:'#555',rx:5});
+          txt(svg,stackX+80,stackY+52,'(destroyed)',{size:'13',weight:'700',fill:'#aaa',anchor:'middle'});
+
+          if(idx<=4){
+            /* Red X */
+            txt(svg,stackX+80,stackY+95,'DESTROYED',{size:'16',weight:'800',fill:'#c0392b',anchor:'middle',font:'Syne,sans-serif'});
+          }
+        }
+
+        /* Lambda box */
+        var lambdaStroke=(idx>=5)?'#0a8f6a':'#9b59b6';
+        box(svg,lambdaX,lambdaY,lambdaW,lambdaH,{fill:'#1a2222',stroke:lambdaStroke,sw:2});
+        txt(svg,lambdaX+lambdaW/2,lambdaY+18,'Lambda Closure',{size:'12',weight:'700',fill:lambdaStroke,anchor:'middle'});
+
+        if(idx>=5){
+          box(svg,lambdaX+10,lambdaY+30,160,36,{fill:'#0a8f6a',rx:5});
+          txt(svg,lambdaX+90,lambdaY+52,'base: 5 (copy)',{size:'12',weight:'700',fill:'#fff',anchor:'middle'});
+          txt(svg,lambdaX+90,lambdaY+100,'SAFE',{size:'18',weight:'800',fill:'#0a8f6a',anchor:'middle',font:'Syne,sans-serif'});
+        }else{
+          box(svg,lambdaX+10,lambdaY+30,160,36,{fill:'#1a2a33',stroke:'#3498db',sw:2,rx:5});
+          txt(svg,lambdaX+90,lambdaY+52,'&base (ref)',{size:'12',weight:'700',fill:'#3498db',anchor:'middle'});
+
+          /* Arrow from lambda to stack */
+          var arrowColor=(idx>=3)?'#c0392b':'#3498db';
+          var dashArr=(idx>=3)?'5,3':'none';
+          var defs2=el('defs',{},svg);
+          var m2=el('marker',{id:'dang-arr',markerWidth:8,markerHeight:6,refX:8,refY:3,orient:'auto'},defs2);
+          el('polygon',{points:'0 0,8 3,0 6',fill:arrowColor},m2);
+          el('line',{x1:lambdaX+10,y1:lambdaY+52,x2:stackX+150,y2:stackY+48,stroke:arrowColor,'stroke-width':2,'stroke-dasharray':dashArr,'marker-end':'url(#dang-arr)'},svg);
+
+          if(idx>=4){
+            txt(svg,240,stackY+stackH+30,'UNDEFINED BEHAVIOR',{size:'16',weight:'800',fill:'#c0392b',anchor:'middle',font:'Syne,sans-serif'});
+          }
+        }
+
+        /* Bottom info */
+        if(idx>=2 && idx<5){
+          txt(svg,240,stackH+stackY+60,'Function returned. Stack frame cleaned up.',{size:'11',weight:'600',fill:'#888',anchor:'middle'});
+        }
+
+        info.textContent=s.msg;
+      }
+
+      function reset(){stepIdx=0;draw(0);out.textContent='';}
+      reset();
+
+      document.getElementById('dangling-step').addEventListener('click',function(){
+        if(stepIdx>=steps.length)return;
+        draw(stepIdx);stepIdx++;
+        if(stepIdx>=steps.length)out.textContent='Always capture by value when the lambda escapes its scope.';
+      });
+      document.getElementById('dangling-reset').addEventListener('click',function(){reset();});
+    })();
+  })();
+  </script>
+
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count"
+          async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
