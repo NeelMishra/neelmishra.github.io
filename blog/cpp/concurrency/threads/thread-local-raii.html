@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into thread_local storage, RAII thread guards, std::jthread with stop_token (C++20), and hardware_concurrency in C++ concurrency.">
+  <title>thread_local, RAII Guards &amp; jthread | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#thread-local">thread_local Storage</a></li>
+          <li><a href="#tl-initialization">Initialization and Destruction</a></li>
+          <li><a href="#tl-use-cases">Practical Use Cases</a></li>
+          <li><a href="#raii-guards">RAII Thread Guards</a></li>
+          <li><a href="#scoped-thread">A Scoped Thread Class</a></li>
+          <li><a href="#jthread">std::jthread (C++20)</a></li>
+          <li><a href="#stop-token">Stop Tokens and Cancellation</a></li>
+          <li><a href="#stop-callback">Stop Callbacks</a></li>
+          <li><a href="#hardware-concurrency">hardware_concurrency</a></li>
+          <li><a href="#putting-it-together">Putting It All Together</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ &middot; Concurrency &middot; Threads</a>
+      </div>
+
+      <h1>thread_local, RAII Guards &amp; jthread</h1>
+      <p class="post-meta">March 2026</p>
+
+      <p>
+        This page covers three important topics that round out low-level thread usage in C++:
+        per-thread storage with <code>thread_local</code>, safe automatic thread cleanup via
+        RAII guards, and the modern <code>std::jthread</code> introduced in C++20 with its
+        cooperative cancellation mechanism.
+      </p>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  thread_local Storage                                     -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="thread-local">thread_local Storage</h2>
+      <p>
+        The <code>thread_local</code> storage specifier declares a variable with
+        <em>thread storage duration</em>: each thread gets its own independent copy of the
+        variable. The variable is created when the thread starts (or on first use) and
+        destroyed when the thread exits.
+      </p>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+thread_local int call_count = 0;
+
+void increment() {
+    ++call_count;
+    std::cout &lt;&lt; "Thread " &lt;&lt; std::this_thread::get_id()
+              &lt;&lt; ": call_count = " &lt;&lt; call_count &lt;&lt; "\n";
+}
+
+int main() {
+    std::thread t1([]{ increment(); increment(); increment(); });
+    std::thread t2([]{ increment(); increment(); });
+    t1.join();
+    t2.join();
+    // t1 sees call_count go 1, 2, 3
+    // t2 sees call_count go 1, 2
+    // Each thread has its own independent copy
+}</code></pre>
+
+      <h3 id="tl-initialization">Initialization and Destruction</h3>
+      <p>
+        <code>thread_local</code> variables follow specific initialization rules:
+      </p>
+      <ul>
+        <li><strong>Static initialization:</strong> Zero or constant initialization happens before any code runs.</li>
+        <li><strong>Dynamic initialization:</strong> Constructor calls happen the first time the thread accesses the variable (for function-local <code>thread_local</code>) or when the thread starts (for namespace-scope <code>thread_local</code>).</li>
+        <li><strong>Destruction:</strong> Destructors run in reverse construction order when the thread exits.</li>
+      </ul>
+
+<pre><code>thread_local std::string session_id;
+
+// Namespace-scope: constructed when each thread starts,
+// destroyed when each thread exits.
+
+void handle_request() {
+    thread_local std::vector&lt;int&gt; cache;
+    // Function-scope: constructed on first call by each thread,
+    // persists across calls within the same thread,
+    // destroyed when the thread exits.
+
+    cache.push_back(42);
+    std::cout &lt;&lt; "Cache size: " &lt;&lt; cache.size() &lt;&lt; "\n";
+}
+
+int main() {
+    std::thread t1([]{ handle_request(); handle_request(); });
+    std::thread t2([]{ handle_request(); handle_request(); handle_request(); });
+    t1.join();
+    t2.join();
+    // t1: Cache size: 1, Cache size: 2
+    // t2: Cache size: 1, Cache size: 2, Cache size: 3
+}</code></pre>
+
+      <div class="callout">
+        <strong>Destruction ordering.</strong> If <code>thread_local</code> variable A is
+        constructed before B on a given thread, B is destroyed before A. This follows the
+        standard C++ rule of reverse destruction order.
+      </div>
+
+      <h3 id="tl-use-cases">Practical Use Cases</h3>
+
+      <h4>1. Per-thread random number generators</h4>
+<pre><code>#include &lt;random&gt;
+
+int thread_safe_random(int min, int max) {
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution&lt;int&gt; dist(min, max);
+    return dist(gen);
+}
+// No mutex needed. Each thread has its own generator.</code></pre>
+
+      <h4>2. Per-thread error context</h4>
+<pre><code>thread_local std::string last_error;
+
+void set_error(const std::string&amp; msg) { last_error = msg; }
+std::string get_error() { return last_error; }
+// Similar to errno, but type-safe and per-thread.</code></pre>
+
+      <h4>3. Per-thread memory allocator cache</h4>
+<pre><code>thread_local std::vector&lt;void*&gt; free_list;
+
+void* fast_alloc(size_t size) {
+    if (!free_list.empty()) {
+        void* p = free_list.back();
+        free_list.pop_back();
+        return p;
+    }
+    return ::operator new(size);
+}
+
+void fast_dealloc(void* p) {
+    free_list.push_back(p);  // no lock needed
+}</code></pre>
+
+      <h4>4. Per-thread logging buffer</h4>
+<pre><code>thread_local std::ostringstream log_buffer;
+
+void log(const std::string&amp; msg) {
+    log_buffer &lt;&lt; "[" &lt;&lt; std::this_thread::get_id() &lt;&lt; "] " &lt;&lt; msg &lt;&lt; "\n";
+}
+
+void flush_log() {
+    // Flush to shared sink under a lock
+    std::lock_guard&lt;std::mutex&gt; lock(global_log_mutex);
+    std::cout &lt;&lt; log_buffer.str();
+    log_buffer.str("");
+}</code></pre>
+
+      <div class="callout">
+        <strong>When to use thread_local.</strong> Use it to eliminate synchronization overhead
+        when each thread can work with its own copy of mutable state. Avoid it for large objects
+        if you spawn many short-lived threads, since each thread pays the construction cost.
+      </div>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  RAII Thread Guards                                       -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="raii-guards">RAII Thread Guards</h2>
+      <p>
+        The core problem: if an exception is thrown between thread creation and the
+        <code>join()</code> call, the thread destructor fires on a joinable thread and
+        <code>std::terminate</code> is called. RAII solves this by tying the join to object
+        lifetime.
+      </p>
+
+      <h3>The problem in detail</h3>
+<pre><code>void risky() {
+    std::thread t(long_task);
+    do_something_that_might_throw();  // if this throws...
+    t.join();                          // ...this line never executes
+}   // t's destructor runs on a joinable thread: std::terminate!</code></pre>
+
+      <h3>Basic thread guard (join on destruction)</h3>
+<pre><code>class thread_guard {
+public:
+    explicit thread_guard(std::thread&amp; t) : t_(t) {}
+
+    ~thread_guard() {
+        if (t_.joinable()) {
+            t_.join();
+        }
+    }
+
+    thread_guard(const thread_guard&amp;) = delete;
+    thread_guard&amp; operator=(const thread_guard&amp;) = delete;
+
+private:
+    std::thread&amp; t_;
+};
+
+void safe() {
+    std::thread t(long_task);
+    thread_guard guard(t);
+
+    do_something_that_might_throw();
+    // If exception thrown: guard destructor joins t. No terminate.
+    // If no exception: guard destructor joins t. Same result.
+}</code></pre>
+
+      <h3 id="scoped-thread">A Scoped Thread Class</h3>
+      <p>
+        A more robust approach is an owning wrapper that takes the thread by move:
+      </p>
+<pre><code>class scoped_thread {
+public:
+    explicit scoped_thread(std::thread t) : t_(std::move(t)) {
+        if (!t_.joinable()) {
+            throw std::logic_error("No thread to guard");
+        }
+    }
+
+    ~scoped_thread() {
+        t_.join();
+    }
+
+    scoped_thread(const scoped_thread&amp;) = delete;
+    scoped_thread&amp; operator=(const scoped_thread&amp;) = delete;
+
+    // Allow move
+    scoped_thread(scoped_thread&amp;&amp; other) noexcept : t_(std::move(other.t_)) {}
+    scoped_thread&amp; operator=(scoped_thread&amp;&amp;) = delete;
+
+private:
+    std::thread t_;
+};
+
+void safe_v2() {
+    scoped_thread worker(std::thread(long_task));
+    do_something_that_might_throw();
+    // join is guaranteed by scoped_thread destructor
+}</code></pre>
+
+      <h3>Choosing the action: join or detach</h3>
+      <p>
+        You can generalize the guard to choose the cleanup action:
+      </p>
+<pre><code>enum class thread_action { join, detach };
+
+class flexible_thread_guard {
+public:
+    flexible_thread_guard(std::thread t, thread_action action)
+        : t_(std::move(t)), action_(action) {
+        if (!t_.joinable()) {
+            throw std::logic_error("No thread to guard");
+        }
+    }
+
+    ~flexible_thread_guard() {
+        if (t_.joinable()) {
+            if (action_ == thread_action::join) t_.join();
+            else t_.detach();
+        }
+    }
+
+    flexible_thread_guard(const flexible_thread_guard&amp;) = delete;
+    flexible_thread_guard&amp; operator=(const flexible_thread_guard&amp;) = delete;
+
+private:
+    std::thread t_;
+    thread_action action_;
+};
+
+// Usage:
+flexible_thread_guard g1(std::thread(critical_work), thread_action::join);
+flexible_thread_guard g2(std::thread(fire_and_forget), thread_action::detach);</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  std::jthread                                             -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="jthread">std::jthread (C++20)</h2>
+      <p>
+        C++20 introduced <code>std::jthread</code> (the "j" stands for "joining") which solves
+        both the RAII problem and adds cooperative cancellation. It automatically joins in its
+        destructor, eliminating the need for external guards.
+      </p>
+
+      <h3>Basic usage</h3>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+int main() {
+    std::jthread t([]() {
+        std::cout &lt;&lt; "Hello from jthread\n";
+    });
+    // No need to call t.join()!
+    // The destructor requests stop and then joins automatically.
+}</code></pre>
+
+      <h3>jthread vs thread comparison</h3>
+      <table>
+        <thead>
+          <tr><th>Feature</th><th>std::thread</th><th>std::jthread</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Auto-join on destruction</td><td>No (calls terminate)</td><td>Yes</td></tr>
+          <tr><td>Stop token support</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Move-only</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Detach support</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td>Exception safety</td><td>Manual (RAII needed)</td><td>Built-in</td></tr>
+          <tr><td>Available since</td><td>C++11</td><td>C++20</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ── Stop Token ── -->
+      <h2 id="stop-token">Stop Tokens and Cooperative Cancellation</h2>
+      <p>
+        <code>std::jthread</code> provides a built-in cancellation mechanism via
+        <code>std::stop_token</code>. The thread can periodically check if a stop has been
+        requested, and the <code>jthread</code> destructor automatically requests stop before
+        joining.
+      </p>
+
+      <h3>Using stop_token in the callable</h3>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;thread&gt;
+#include &lt;chrono&gt;
+
+void worker(std::stop_token stoken) {
+    int iteration = 0;
+    while (!stoken.stop_requested()) {
+        std::cout &lt;&lt; "Working... iteration " &lt;&lt; ++iteration &lt;&lt; "\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    std::cout &lt;&lt; "Stop requested. Cleaning up.\n";
+}
+
+int main() {
+    std::jthread t(worker);
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // t goes out of scope here:
+    // 1. t.request_stop() is called automatically
+    // 2. Then t.join() is called
+    // The worker sees stop_requested() == true and exits gracefully
+}</code></pre>
+
+      <h3>Explicitly requesting stop</h3>
+<pre><code>int main() {
+    std::jthread t(worker);
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    t.request_stop();  // signal the thread to stop
+
+    // Thread will finish its current iteration, then exit.
+    // Destructor still joins, but the thread exits quickly.
+}</code></pre>
+
+      <h3>Getting the stop_source and stop_token</h3>
+<pre><code>std::jthread t(worker);
+
+// The jthread owns a stop_source
+std::stop_source ss = t.get_stop_source();
+std::stop_token st = t.get_stop_token();
+
+// Check if stop was already requested
+if (!st.stop_requested()) {
+    std::cout &lt;&lt; "Thread still running\n";
+}
+
+// Request stop via the source
+ss.request_stop();</code></pre>
+
+      <div class="callout">
+        <strong>Cooperative, not preemptive.</strong> The stop token is a <em>request</em>, not
+        a forced kill. The thread must check <code>stop_requested()</code> at appropriate
+        intervals. If the thread ignores the token, the destructor will still block on join
+        until the thread finishes on its own.
+      </div>
+
+      <h3>stop_token with additional arguments</h3>
+      <p>
+        When the callable accepts a <code>std::stop_token</code> as its first parameter,
+        <code>std::jthread</code> automatically passes its internal stop token. Additional
+        arguments work normally:
+      </p>
+<pre><code>void monitored_work(std::stop_token stoken, int id, const std::string&amp; name) {
+    while (!stoken.stop_requested()) {
+        std::cout &lt;&lt; name &lt;&lt; " [" &lt;&lt; id &lt;&lt; "] working...\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+int main() {
+    std::jthread t(monitored_work, 42, std::string("sensor"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // destructor requests stop and joins
+}</code></pre>
+
+      <!-- ── Stop Callbacks ── -->
+      <h2 id="stop-callback">Stop Callbacks</h2>
+      <p>
+        <code>std::stop_callback</code> lets you register a function that is called when stop
+        is requested. This is useful for waking up blocked threads:
+      </p>
+<pre><code>#include &lt;condition_variable&gt;
+#include &lt;mutex&gt;
+
+std::mutex mtx;
+std::condition_variable cv;
+bool data_ready = false;
+
+void wait_for_data(std::stop_token stoken) {
+    std::unique_lock lock(mtx);
+
+    // Register a callback that notifies the CV when stop is requested
+    std::stop_callback on_stop(stoken, [&amp;]() {
+        cv.notify_all();
+    });
+
+    cv.wait(lock, [&amp;]() {
+        return data_ready || stoken.stop_requested();
+    });
+
+    if (stoken.stop_requested()) {
+        std::cout &lt;&lt; "Cancelled while waiting\n";
+        return;
+    }
+    std::cout &lt;&lt; "Data received, processing...\n";
+}
+
+int main() {
+    std::jthread t(wait_for_data);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // Destructor calls request_stop(), which triggers the callback,
+    // which notifies the CV, which wakes the thread.
+}</code></pre>
+
+      <div class="callout">
+        <strong>Unblocking pattern.</strong> Stop callbacks are the standard way to unblock
+        threads waiting on condition variables, I/O operations, or other blocking calls.
+        Without them, the destructor's join would block indefinitely waiting for a thread
+        stuck in a <code>cv.wait()</code>.
+      </div>
+
+      <div class="anim-container" id="jthread-anim">
+        <h4>&#9654; jthread Destruction Sequence</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through what happens when a jthread goes out of scope.</p>
+        <svg id="jthread-svg" width="520" height="160" viewBox="0 0 520 160">
+          <rect x="10" y="30" width="110" height="100" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+          <text x="65" y="52" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">~jthread()</text>
+
+          <rect id="jt-s1" x="145" y="40" width="120" height="32" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="2" opacity="0.3"/>
+          <text id="jt-s1t" x="205" y="60" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0.3">request_stop()</text>
+
+          <rect id="jt-s2" x="290" y="40" width="100" height="32" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="2" opacity="0.3"/>
+          <text id="jt-s2t" x="340" y="60" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0.3">join()</text>
+
+          <rect id="jt-s3" x="415" y="40" width="90" height="32" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2" opacity="0.3"/>
+          <text id="jt-s3t" x="460" y="60" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0.3">destroyed</text>
+
+          <line id="jt-a1" x1="120" y1="56" x2="145" y2="56" stroke="#ff6b35" stroke-width="2" marker-end="url(#jt-ah)" opacity="0"/>
+          <line id="jt-a2" x1="265" y1="56" x2="290" y2="56" stroke="#ff6b35" stroke-width="2" marker-end="url(#jt-ah)" opacity="0"/>
+          <line id="jt-a3" x1="390" y1="56" x2="415" y2="56" stroke="#0a8f6a" stroke-width="2" marker-end="url(#jt-ah)" opacity="0"/>
+
+          <!-- Worker thread -->
+          <rect x="145" y="95" width="245" height="32" rx="6" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+          <text x="267" y="115" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">worker: while(!stop_requested()) {...}</text>
+
+          <text id="jt-exit" x="400" y="115" font-size="11" font-family="Consolas" fill="#c62828" opacity="0">exits</text>
+
+          <defs>
+            <marker id="jt-ah" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+              <polygon points="0 0,10 3.5,0 7" fill="#13201a"/>
+            </marker>
+          </defs>
+        </svg>
+        <div id="jthread-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="jthread-step">Step &rarr;</button>
+          <button class="anim-btn" id="jthread-reset">Reset</button>
+          <span class="anim-output" id="jthread-output"></span>
+        </div>
+      </div>
+
+      <script>
+      (function(){
+        var step=0;
+        var info=document.getElementById('jthread-info');
+        var output=document.getElementById('jthread-output');
+        var steps=[
+          {action:function(){
+            document.getElementById('jt-s1').setAttribute('opacity','1');
+            document.getElementById('jt-s1t').setAttribute('opacity','1');
+            document.getElementById('jt-a1').setAttribute('opacity','1');
+          },msg:"Step 1: Destructor first calls request_stop(). Stop token is set.",out:"1/3"},
+          {action:function(){
+            document.getElementById('jt-exit').setAttribute('opacity','1');
+            document.getElementById('jt-s2').setAttribute('opacity','1');
+            document.getElementById('jt-s2t').setAttribute('opacity','1');
+            document.getElementById('jt-a2').setAttribute('opacity','1');
+          },msg:"Step 2: Worker sees stop_requested()==true, exits loop. Destructor calls join().",out:"2/3"},
+          {action:function(){
+            document.getElementById('jt-s3').setAttribute('opacity','1');
+            document.getElementById('jt-s3t').setAttribute('opacity','1');
+            document.getElementById('jt-a3').setAttribute('opacity','1');
+          },msg:"Step 3: join() returns. jthread is safely destroyed. No std::terminate.",out:"3/3"}
+        ];
+        function reset(){
+          step=0;
+          ['jt-s1','jt-s1t','jt-a1','jt-exit','jt-s2','jt-s2t','jt-a2','jt-s3','jt-s3t','jt-a3'].forEach(function(id){
+            var el=document.getElementById(id);
+            if(el)el.setAttribute('opacity', id.indexOf('jt-s')===0 && id.length<=4 ? '0.3' : '0');
+          });
+          // Reset the box opacities properly
+          ['jt-s1','jt-s2','jt-s3'].forEach(function(id){
+            document.getElementById(id).setAttribute('opacity','0.3');
+          });
+          ['jt-s1t','jt-s2t','jt-s3t'].forEach(function(id){
+            document.getElementById(id).setAttribute('opacity','0.3');
+          });
+          ['jt-a1','jt-a2','jt-a3','jt-exit'].forEach(function(id){
+            document.getElementById(id).setAttribute('opacity','0');
+          });
+          info.textContent='Press Step to trace jthread destruction.';
+          output.textContent='';
+        }
+        reset();
+        document.getElementById('jthread-step').addEventListener('click',function(){
+          if(step>=steps.length)return;
+          steps[step].action();
+          info.textContent=steps[step].msg;
+          output.textContent=steps[step].out;
+          step++;
+        });
+        document.getElementById('jthread-reset').addEventListener('click',reset);
+      })();
+      </script>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  hardware_concurrency                                     -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="hardware-concurrency">hardware_concurrency</h2>
+      <p>
+        <code>std::thread::hardware_concurrency()</code> returns a hint for the number of
+        threads that can truly run in parallel (typically the number of CPU cores or hardware
+        threads). It returns 0 if the value is not computable.
+      </p>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+int main() {
+    unsigned int n = std::thread::hardware_concurrency();
+    std::cout &lt;&lt; "Hardware threads: " &lt;&lt; n &lt;&lt; "\n";
+    // Typical output: "Hardware threads: 8" on a quad-core with hyperthreading
+}</code></pre>
+
+      <h3>Using it to size a thread pool</h3>
+<pre><code>unsigned int num_workers = std::thread::hardware_concurrency();
+if (num_workers == 0) num_workers = 2;  // fallback
+
+std::vector&lt;std::jthread&gt; pool;
+pool.reserve(num_workers);
+
+for (unsigned int i = 0; i &lt; num_workers; ++i) {
+    pool.emplace_back([i](std::stop_token st) {
+        while (!st.stop_requested()) {
+            // pull work from a queue...
+        }
+    });
+}
+// pool destructor automatically stops and joins all threads</code></pre>
+
+      <h3>Oversubscription caveat</h3>
+      <p>
+        Creating more threads than <code>hardware_concurrency()</code> leads to
+        <em>oversubscription</em>: the OS must time-slice threads, adding context switch
+        overhead. For CPU-bound work, match the number of threads to hardware concurrency.
+        For I/O-bound work, you may benefit from more threads since they spend time waiting.
+      </p>
+
+      <h3>Partitioning work</h3>
+<pre><code>template &lt;typename Iterator, typename T&gt;
+T parallel_accumulate(Iterator first, Iterator last, T init) {
+    const unsigned long length = std::distance(first, last);
+    if (length == 0) return init;
+
+    const unsigned long hw = std::thread::hardware_concurrency();
+    const unsigned long num_threads = std::min(hw != 0 ? hw : 2UL, length);
+    const unsigned long block_size = length / num_threads;
+
+    std::vector&lt;T&gt; results(num_threads);
+    std::vector&lt;std::jthread&gt; threads;
+
+    Iterator block_start = first;
+    for (unsigned long i = 0; i &lt; num_threads - 1; ++i) {
+        Iterator block_end = block_start;
+        std::advance(block_end, block_size);
+        threads.emplace_back([block_start, block_end, &amp;results, i]() {
+            results[i] = std::accumulate(block_start, block_end, T{});
+        });
+        block_start = block_end;
+    }
+    // Last block (handles remainder)
+    results[num_threads - 1] = std::accumulate(block_start, last, T{});
+
+    // jthreads join automatically when threads vector is destroyed
+    threads.clear();  // join all
+
+    return std::accumulate(results.begin(), results.end(), init);
+}</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Putting It All Together                                  -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="putting-it-together">Putting It All Together</h2>
+      <p>
+        Here is a complete example that combines <code>thread_local</code>,
+        <code>std::jthread</code>, stop tokens, and <code>hardware_concurrency</code> into
+        a practical pattern:
+      </p>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;atomic&gt;
+#include &lt;chrono&gt;
+#include &lt;random&gt;
+
+// Per-thread statistics
+thread_local int items_processed = 0;
+thread_local int errors_encountered = 0;
+
+std::atomic&lt;int&gt; global_items{0};
+
+void worker(std::stop_token stoken, int worker_id) {
+    thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution&lt;int&gt; dist(1, 100);
+
+    while (!stoken.stop_requested()) {
+        // Simulate processing
+        int value = dist(rng);
+        if (value &gt; 95) {
+            ++errors_encountered;
+        } else {
+            ++items_processed;
+            global_items.fetch_add(1, std::memory_order_relaxed);
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    std::cout &lt;&lt; "Worker " &lt;&lt; worker_id
+              &lt;&lt; ": processed=" &lt;&lt; items_processed
+              &lt;&lt; ", errors=" &lt;&lt; errors_encountered &lt;&lt; "\n";
+}
+
+int main() {
+    unsigned int n = std::thread::hardware_concurrency();
+    if (n == 0) n = 4;
+    std::cout &lt;&lt; "Starting " &lt;&lt; n &lt;&lt; " workers\n";
+
+    {
+        std::vector&lt;std::jthread&gt; workers;
+        for (unsigned int i = 0; i &lt; n; ++i) {
+            workers.emplace_back(worker, i);
+        }
+
+        // Let them run for 1 second
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // workers go out of scope here:
+        // - request_stop() called on each
+        // - join() called on each
+    }
+
+    std::cout &lt;&lt; "Total items processed: " &lt;&lt; global_items.load() &lt;&lt; "\n";
+}</code></pre>
+
+      <h2>Summary</h2>
+      <table>
+        <thead>
+          <tr><th>Feature</th><th>Purpose</th><th>Key Benefit</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>thread_local</code></td>
+            <td>Per-thread variable storage</td>
+            <td>Eliminates synchronization for thread-private data</td>
+          </tr>
+          <tr>
+            <td>RAII guards</td>
+            <td>Automatic join/detach on destruction</td>
+            <td>Exception safety for std::thread</td>
+          </tr>
+          <tr>
+            <td><code>std::jthread</code></td>
+            <td>Auto-joining thread with stop token</td>
+            <td>Safe by default, cooperative cancellation</td>
+          </tr>
+          <tr>
+            <td><code>std::stop_token</code></td>
+            <td>Cooperative cancellation signal</td>
+            <td>Clean shutdown without thread killing</td>
+          </tr>
+          <tr>
+            <td><code>std::stop_callback</code></td>
+            <td>React to stop requests</td>
+            <td>Unblock waiting threads on cancellation</td>
+          </tr>
+          <tr>
+            <td><code>hardware_concurrency()</code></td>
+            <td>Query available parallelism</td>
+            <td>Right-size thread pools, avoid oversubscription</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Modern best practice.</strong> In C++20 and later, prefer <code>std::jthread</code>
+        over <code>std::thread</code> for all new code. It eliminates the entire class of
+        "forgot to join" bugs and provides cooperative cancellation out of the box.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../blog.js"></script>
+  <!-- GoatCounter --><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

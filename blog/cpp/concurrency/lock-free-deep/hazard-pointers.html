@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Hazard pointers for memory reclamation in lock-free data structures: protocol, implementation sketch, comparison to epoch-based reclamation.">
+  <title>Hazard Pointers | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Lock-Free</a></div>
+      <h1>Hazard Pointers</h1>
+      <p class="post-meta">March 2026</p>
+
+      <p>Lock-free data structures face a fundamental question: when is it safe to free a node that has been removed from the structure? The node might still be in use by a concurrent thread that read a pointer to it just before the removal. Hazard pointers, introduced by Maged Michael in 2004, provide a rigorous answer.</p>
+
+      <h2 id="the-problem">The Problem: When to Free Nodes</h2>
+      <p>Consider a Treiber stack pop:</p>
+<pre><code class="language-cpp">Node* old = head_.load();     // (1) Thread A reads head
+Node* next = old-&gt;next;       // (2) Thread A reads old-&gt;next
+// Thread B pops and frees old here
+head_.CAS(old, next);         // (3) Thread A CAS: old is freed!</code></pre>
+      <p>Between lines (1) and (3), Thread B may pop and free the same node. Line (2) then dereferences a freed pointer, which is undefined behaviour. Even if the CAS on line (3) fails (because <code>head_</code> changed), the damage is done at line (2).</p>
+      <p>The same problem arises in every lock-free structure: the Michael-Scott queue, skip lists, hash tables. Any structure where one thread removes a node while another might still be traversing it needs a safe reclamation scheme.</p>
+
+      <h2 id="protocol">The Hazard Pointer Protocol</h2>
+      <p>The key insight: if a thread is about to dereference a pointer, it first <em>publishes</em> that pointer in a globally visible location (a hazard slot). Other threads must check all hazard slots before freeing a node.</p>
+
+      <h3>Announce</h3>
+      <p>Before dereferencing a shared pointer, write it to your thread-local hazard slot:</p>
+<pre><code class="language-cpp">// Per-thread hazard pointer array (typically 1-2 slots per thread)
+std::atomic&lt;void*&gt; hazard_slots[MAX_THREADS][MAX_HP_PER_THREAD];
+
+void announce(int tid, int slot, void* ptr) {
+    hazard_slots[tid][slot].store(ptr, std::memory_order_release);
+}</code></pre>
+
+      <h3>Validate</h3>
+      <p>After announcing, re-read the atomic variable to confirm it has not changed. If it has, the announced pointer might be stale; update and retry.</p>
+<pre><code class="language-cpp">// Example in pop
+Node* old_head;
+do {
+    old_head = head_.load(std::memory_order_relaxed);
+    if (!old_head) return false;
+
+    // Announce
+    announce(tid, 0, old_head);
+
+    // Validate: did head_ change while we were announcing?
+    if (head_.load(std::memory_order_acquire) != old_head)
+        continue; // stale; retry
+
+    // Safe to dereference old_head-&gt;next
+    Node* next = old_head-&gt;next;
+
+    if (head_.compare_exchange_weak(old_head, next,
+            std::memory_order_acquire, std::memory_order_relaxed))
+    {
+        T val = std::move(old_head-&gt;data);
+        // Clear hazard before retiring
+        announce(tid, 0, nullptr);
+        retire(tid, old_head);
+        return val;
+    }
+} while (true);</code></pre>
+
+      <div class="callout"><strong>Why validate?</strong> Between the initial load and the announce, another thread could have removed the node. The announce does not prevent removal; it only prevents freeing. But if the pointer is already stale, dereferencing it is still unsafe (on non-x86 architectures that reorder loads). The validation ensures the announced pointer is current.</div>
+
+      <h3>Scan and Reclaim</h3>
+      <p>Each thread maintains a local list of retired nodes. Periodically (e.g., when the retired list exceeds a threshold), the thread scans all hazard slots. Any retired node not found in any slot can be safely freed.</p>
+
+<pre><code class="language-cpp">struct RetiredNode {
+    void* ptr;
+    std::function&lt;void(void*)&gt; deleter;
+};
+
+thread_local std::vector&lt;RetiredNode&gt; retired_list;
+
+void retire(int tid, Node* node) {
+    retired_list.push_back({node, [](void* p){ delete static_cast&lt;Node*&gt;(p); }});
+
+    if (retired_list.size() &gt;= SCAN_THRESHOLD) {
+        scan(tid);
+    }
+}
+
+void scan(int tid) {
+    // Step 1: collect all hazard pointers into a set
+    std::unordered_set&lt;void*&gt; protected_ptrs;
+    for (int t = 0; t &lt; MAX_THREADS; ++t) {
+        for (int s = 0; s &lt; MAX_HP_PER_THREAD; ++s) {
+            void* hp = hazard_slots[t][s].load(std::memory_order_acquire);
+            if (hp) protected_ptrs.insert(hp);
+        }
+    }
+
+    // Step 2: partition retired list into reclaimable and still-protected
+    std::vector&lt;RetiredNode&gt; still_retired;
+    for (auto&amp; r : retired_list) {
+        if (protected_ptrs.count(r.ptr)) {
+            still_retired.push_back(r);
+        } else {
+            r.deleter(r.ptr); // safe to free
+        }
+    }
+    retired_list = std::move(still_retired);
+}</code></pre>
+
+      <h2 id="implementation">Full Implementation Sketch</h2>
+      <p>Below is a complete hazard-pointer-protected Treiber stack.</p>
+
+<pre><code class="language-cpp">#include &lt;atomic&gt;
+#include &lt;functional&gt;
+#include &lt;unordered_set&gt;
+#include &lt;vector&gt;
+#include &lt;optional&gt;
+
+static constexpr int MAX_THREADS = 64;
+static constexpr int HP_PER_THREAD = 2;
+static constexpr int SCAN_THRESHOLD = 128;
+
+class HazardPointerDomain {
+    std::atomic&lt;void*&gt; hp_[MAX_THREADS][HP_PER_THREAD]{};
+
+    struct Retired {
+        void* ptr;
+        std::function&lt;void(void*)&gt; deleter;
+    };
+
+    // Per-thread retired lists (in production, use thread_local or
+    // a thread registry; simplified here with an array).
+    std::vector&lt;Retired&gt; retired_[MAX_THREADS];
+
+public:
+    void protect(int tid, int slot, void* ptr) {
+        hp_[tid][slot].store(ptr, std::memory_order_release);
+    }
+
+    void clear(int tid, int slot) {
+        hp_[tid][slot].store(nullptr, std::memory_order_release);
+    }
+
+    template &lt;typename T&gt;
+    void retire(int tid, T* ptr) {
+        retired_[tid].push_back({ptr, [](void* p){
+            delete static_cast&lt;T*&gt;(p);
+        }});
+        if (static_cast&lt;int&gt;(retired_[tid].size()) &gt;= SCAN_THRESHOLD) {
+            scan(tid);
+        }
+    }
+
+    void scan(int tid) {
+        std::unordered_set&lt;void*&gt; protected_set;
+        for (int t = 0; t &lt; MAX_THREADS; ++t) {
+            for (int s = 0; s &lt; HP_PER_THREAD; ++s) {
+                void* p = hp_[t][s].load(std::memory_order_acquire);
+                if (p) protected_set.insert(p);
+            }
+        }
+
+        std::vector&lt;Retired&gt; remaining;
+        for (auto&amp; r : retired_[tid]) {
+            if (protected_set.count(r.ptr)) {
+                remaining.push_back(std::move(r));
+            } else {
+                r.deleter(r.ptr);
+            }
+        }
+        retired_[tid] = std::move(remaining);
+    }
+};
+
+// Global domain
+static HazardPointerDomain g_hp;
+
+template &lt;typename T&gt;
+class HPTreiberStack {
+    struct Node {
+        T data;
+        Node* next;
+        template &lt;typename U&gt;
+        explicit Node(U&amp;&amp; val) : data(std::forward&lt;U&gt;(val)), next(nullptr) {}
+    };
+
+    std::atomic&lt;Node*&gt; head_{nullptr};
+
+public:
+    void push(T val) {
+        Node* node = new Node(std::move(val));
+        node-&gt;next = head_.load(std::memory_order_relaxed);
+        while (!head_.compare_exchange_weak(
+                    node-&gt;next, node,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+        { /* retry */ }
+    }
+
+    std::optional&lt;T&gt; pop(int tid) {
+        Node* old_head;
+        do {
+            old_head = head_.load(std::memory_order_relaxed);
+            if (!old_head) return std::nullopt;
+
+            // Announce
+            g_hp.protect(tid, 0, old_head);
+
+            // Validate
+            if (head_.load(std::memory_order_acquire) != old_head)
+                continue;
+
+            Node* next = old_head-&gt;next;
+
+            if (head_.compare_exchange_weak(
+                    old_head, next,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed))
+            {
+                T val = std::move(old_head-&gt;data);
+                g_hp.clear(tid, 0);
+                g_hp.retire(tid, old_head);
+                return val;
+            }
+        } while (true);
+    }
+
+    ~HPTreiberStack() {
+        Node* cur = head_.load(std::memory_order_relaxed);
+        while (cur) {
+            Node* next = cur-&gt;next;
+            delete cur;
+            cur = next;
+        }
+    }
+};</code></pre>
+
+      <h2 id="correctness">Correctness Argument</h2>
+      <p>We need to show that no node is freed while any thread holds a reference to it.</p>
+      <ol>
+        <li><strong>Announce-before-dereference</strong>: a thread publishes a hazard pointer before it reads <code>node-&gt;next</code>. The release store in <code>protect()</code> ensures the announcement is visible.</li>
+        <li><strong>Validation</strong>: after announcing, the thread re-reads the source pointer. If it has changed, the announcement is stale and the thread retries. If it has not changed, the node is guaranteed to still be in the structure (no other thread has completed a CAS to remove it between the initial load and the validation load, because if it had, the validation would see the new value).</li>
+        <li><strong>Scan checks all slots</strong>: a thread only frees a retired node if no hazard slot contains its address. The acquire loads in <code>scan()</code> synchronise with the release stores in <code>protect()</code>, ensuring the freeing thread sees all outstanding announcements.</li>
+      </ol>
+
+      <h2 id="defer-reclamation">The defer_reclamation Pattern</h2>
+      <p>In many codebases, the retire-and-scan logic is abstracted behind a <code>defer_reclamation</code> function:</p>
+
+<pre><code class="language-cpp">template &lt;typename T&gt;
+void defer_reclamation(int tid, T* ptr) {
+    g_hp.retire(tid, ptr);
+    // Optionally trigger a scan if the retired list is large
+}
+
+// Usage in pop:
+defer_reclamation(tid, old_head);</code></pre>
+
+      <p>This pattern separates the lock-free algorithm from the reclamation mechanism. You can swap in hazard pointers, epoch-based reclamation, or reference counting behind the same interface.</p>
+
+<pre><code class="language-cpp">// Generic reclamation interface
+class ReclaimStrategy {
+public:
+    virtual void enter(int tid) = 0;
+    virtual void exit(int tid) = 0;
+    virtual void protect(int tid, int slot, void* ptr) = 0;
+    virtual void clear(int tid, int slot) = 0;
+    virtual void retire(int tid, void* ptr,
+                        std::function&lt;void(void*)&gt; deleter) = 0;
+    virtual ~ReclaimStrategy() = default;
+};</code></pre>
+
+      <h2 id="ebr-comparison">Comparison: Hazard Pointers vs. Epoch-Based Reclamation</h2>
+      <table>
+        <thead><tr><th>Property</th><th>Hazard Pointers</th><th>Epoch-Based Reclamation</th></tr></thead>
+        <tbody>
+          <tr><td>Per-access overhead</td><td>1 store + 1 load (announce + validate) per pointer</td><td>1 store on enter, 1 store on exit (amortised across many accesses)</td></tr>
+          <tr><td>Reclamation latency</td><td>Bounded by scan threshold</td><td>Unbounded if a thread stalls in an old epoch</td></tr>
+          <tr><td>Memory usage</td><td>O(T * H + T * R) where T=threads, H=hazard slots, R=retired-list size</td><td>O(T * R) but R can grow unboundedly</td></tr>
+          <tr><td>Robustness to slow threads</td><td>Excellent: slow threads only protect the nodes they have announced</td><td>Poor: a single stalled thread prevents all reclamation</td></tr>
+          <tr><td>Implementation complexity</td><td>Higher (per-pointer protocol)</td><td>Lower (enter/exit bookkeeping)</td></tr>
+          <tr><td>Lock-free guarantee preserved</td><td>Yes (scan is O(T*H))</td><td>Yes, but stalled threads block reclamation</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout"><strong>When to choose which.</strong> Use hazard pointers when stalled threads are a real concern (e.g., threads may be preempted for long periods). Use epoch-based reclamation when access patterns are well-behaved (no thread holds a critical section for an extended time) and you want lower per-access overhead.</div>
+
+      <h2 id="std-hazard-pointer">C++26 and std::hazard_pointer</h2>
+      <p>The C++ standard is on track to include <code>std::hazard_pointer</code> (P2530). The interface looks roughly like:</p>
+
+<pre><code class="language-cpp">// C++26 (proposed)
+#include &lt;hazard_pointer&gt;
+
+template &lt;typename T&gt;
+class HPStack {
+    struct Node : std::hazard_pointer_obj_base&lt;Node&gt; {
+        T data;
+        Node* next;
+    };
+
+    std::atomic&lt;Node*&gt; head_{nullptr};
+
+public:
+    void push(T val) {
+        auto* node = new Node{{}, std::move(val), nullptr};
+        node-&gt;next = head_.load(std::memory_order_relaxed);
+        while (!head_.compare_exchange_weak(
+                    node-&gt;next, node,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+        {}
+    }
+
+    std::optional&lt;T&gt; pop() {
+        std::hazard_pointer hp = std::make_hazard_pointer();
+        Node* old_head;
+
+        do {
+            old_head = hp.protect(head_);
+            if (!old_head) return std::nullopt;
+
+            if (head_.compare_exchange_weak(
+                    old_head, old_head-&gt;next,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed))
+            {
+                T val = std::move(old_head-&gt;data);
+                hp.reset_protection();
+                old_head-&gt;retire(); // adds to retired list
+                return val;
+            }
+        } while (true);
+    }
+};</code></pre>
+
+      <p>The standard interface handles thread registration, hazard slot allocation, and scanning automatically. <code>hazard_pointer_obj_base</code> provides the <code>retire()</code> method, and the library manages the retired lists and reclamation timing.</p>
+
+      <h2 id="performance">Performance Considerations</h2>
+
+      <h3>Cost of the Announce/Validate Round-Trip</h3>
+      <p>Each announce is an atomic store (a <code>release</code> fence on ARM). Each validate is an atomic load (an <code>acquire</code> fence). On x86 these are cheap (just compiler fences), but on ARM or POWER they translate to real fence instructions. For hot paths, the overhead can be significant.</p>
+
+      <h3>Scan Cost</h3>
+      <p>Scanning all hazard slots is O(T * H) where T is the number of threads and H is the number of hazard slots per thread. Building a hash set from the hazard pointers takes O(T * H) time. Comparing each retired node takes O(R) time. The total scan cost is O(T * H + R), amortised over R retirements.</p>
+
+      <h3>Cache Effects</h3>
+      <p>Hazard slot arrays should be arranged so that each thread's slots are on their own cache line to avoid false sharing during announces. The scan function reads all slots, which pulls multiple cache lines; this is acceptable because scans are infrequent (once per SCAN_THRESHOLD retirements).</p>
+
+<pre><code class="language-cpp">struct alignas(64) HazardSlot {
+    std::atomic&lt;void*&gt; ptr[HP_PER_THREAD]{};
+};
+HazardSlot hazard_slots[MAX_THREADS];</code></pre>
+
+      <h2 id="pitfalls">Common Pitfalls</h2>
+      <ol>
+        <li><strong>Forgetting to validate</strong>: announcing a pointer without re-checking the source atomic leaves a window where the pointer could already be stale.</li>
+        <li><strong>Clearing too late</strong>: keeping a hazard pointer active longer than necessary delays reclamation of other nodes.</li>
+        <li><strong>Wrong scan threshold</strong>: too low and you scan often (wasting CPU); too high and retired lists grow (wasting memory). A common heuristic is threshold = 2 * T * H.</li>
+        <li><strong>Missing fence</strong>: the announce must be a release store and the scan must use acquire loads. Without this, the freeing thread might not see the announcement.</li>
+      </ol>
+
+      <h2 id="summary">Summary</h2>
+      <p>Hazard pointers solve the memory reclamation problem in lock-free structures by requiring threads to announce which nodes they are accessing. A retiring thread consults all announcements before freeing a node. The protocol is announce, validate, use, clear, retire, and periodically scan. Compared to epoch-based reclamation, hazard pointers are more robust to stalled threads but have higher per-access overhead. C++26 is expected to standardise the interface, making safe lock-free programming more accessible.</p>
+
+      <div class="post-series-nav" style="margin-top:2em;">
+        <span>Prev: <a href="aba-problem.html">ABA Problem</a></span>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

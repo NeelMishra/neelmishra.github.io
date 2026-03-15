@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into spurious wakeups in C++ condition variables: why they happen, how predicates protect you, common mistakes, and debugging techniques.">
+  <title>Spurious Wakeups | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Condition Variables</a></div>
+      <h1>Spurious Wakeups</h1>
+      <p class="post-meta">March 2026</p>
+
+      <h2 id="what-are-they">What Are Spurious Wakeups?</h2>
+      <p>A <strong>spurious wakeup</strong> is when a thread returns from <code>wait()</code> on a condition variable even though no other thread called <code>notify_one()</code> or <code>notify_all()</code>. The thread wakes up, but the condition it was waiting for is still false.</p>
+      <p>This is not a bug in your code. The C++ standard explicitly allows implementations to wake threads spuriously. POSIX pthreads, which underlie most C++ standard library implementations on Unix, have always permitted this behaviour.</p>
+
+      <div class="callout"><strong>Standard Wording.</strong> The C++ standard states that <code>wait()</code> may unblock spuriously, meaning it can return even if <code>notify_one()</code> or <code>notify_all()</code> was not called. The standard mandates that you always recheck your predicate after waking.</div>
+
+      <h2 id="why-they-happen">Why Do Spurious Wakeups Happen?</h2>
+      <p>There are several reasons at the OS and hardware level:</p>
+
+      <h3 id="os-signals">1. OS Signal Interrupts</h3>
+      <p>On POSIX systems, if a signal is delivered to a thread while it is blocked on a futex or similar kernel primitive, the system call may return with <code>EINTR</code>. Rather than adding expensive retry logic deep in the kernel, the implementation surfaces this as a wakeup and lets userspace decide whether the condition is satisfied.</p>
+
+      <h3 id="multiprocessor">2. Multiprocessor Optimisations</h3>
+      <p>On systems with multiple CPUs, the kernel may batch wakeup operations. When <code>notify_one()</code> targets one thread, other threads sharing the same wait queue may also be woken as a side effect of cache invalidation or the way the kernel manages its internal data structures.</p>
+
+      <h3 id="futex">3. Futex Implementation Details (Linux)</h3>
+      <p>Linux implements condition variables on top of futexes. Certain code paths in the futex subsystem can cause a waiter to be woken even when no explicit wake call targeted it, particularly during requeue operations (<code>FUTEX_CMP_REQUEUE</code>) used to implement <code>notify_all()</code> efficiently.</p>
+
+      <h3 id="stolen-wakeups">4. Stolen Wakeups</h3>
+      <p>Sometimes a thread is legitimately woken, but before it can acquire the mutex and check the predicate, another thread has already consumed the work. This is not technically a spurious wakeup from the OS perspective, but it looks identical from the application perspective: the thread wakes up and finds nothing to do.</p>
+
+      <div class="anim-container" id="spurious-anim">
+        <h4>&#9654; Spurious Wakeup in Action</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through to see a thread wake without a real notification, then correctly recheck the predicate.</p>
+        <svg id="spurious-svg" width="520" height="240" viewBox="0 0 520 240">
+          <rect x="20" y="10" width="160" height="28" rx="6" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+          <text x="100" y="29" text-anchor="middle" font-size="12" fill="#1a1a2e" font-family="Manrope,sans-serif">Waiting Thread</text>
+          <rect x="220" y="10" width="140" height="28" rx="6" fill="#e0f2f1" stroke="#00897b" stroke-width="1.5"/>
+          <text x="290" y="29" text-anchor="middle" font-size="12" fill="#1a1a2e" font-family="Manrope,sans-serif">OS / Kernel</text>
+          <rect x="400" y="10" width="110" height="28" rx="6" fill="#fef7e0" stroke="#f9ab00" stroke-width="1.5"/>
+          <text x="455" y="29" text-anchor="middle" font-size="12" fill="#1a1a2e" font-family="Manrope,sans-serif">Predicate</text>
+          <g id="spurious-steps"></g>
+        </svg>
+        <div id="spurious-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="spurious-step">Step &rarr;</button>
+          <button class="anim-btn" id="spurious-reset">Reset</button>
+          <span class="anim-output" id="spurious-output"></span>
+        </div>
+      </div>
+
+      <script>
+      (function() {
+        const svg = document.getElementById('spurious-steps');
+        const info = document.getElementById('spurious-info');
+        const output = document.getElementById('spurious-output');
+        let step = 0;
+        const steps = [
+          { desc: 'Thread calls cv.wait(lock, pred). Predicate is false, so it sleeps.', boxes: [
+            { x:20, y:50, w:160, h:22, text:'cv.wait(lock, pred)', fill:'#e8f0fe', stroke:'#4285f4' },
+            { x:400, y:50, w:110, h:22, text:'false', fill:'#fce4e4', stroke:'#d93025' }
+          ]},
+          { desc: 'OS delivers a signal, causing the futex wait to return early.', boxes: [
+            { x:220, y:80, w:140, h:22, text:'signal interrupt!', fill:'#fff3e0', stroke:'#e65100' }
+          ]},
+          { desc: 'Thread wakes up (spurious). It reacquires the mutex.', boxes: [
+            { x:20, y:110, w:160, h:22, text:'woke up, lock held', fill:'#e8f0fe', stroke:'#4285f4' }
+          ]},
+          { desc: 'Thread rechecks predicate: still false. Goes back to sleep.', boxes: [
+            { x:20, y:140, w:160, h:22, text:'pred() == false', fill:'#fce4e4', stroke:'#d93025' },
+            { x:20, y:166, w:160, h:22, text:'back to sleep', fill:'#e8f0fe', stroke:'#4285f4' }
+          ]},
+          { desc: 'Later, a real notify_one() arrives. Thread wakes again.', boxes: [
+            { x:220, y:140, w:140, h:22, text:'notify_one()', fill:'#e0f2f1', stroke:'#00897b' }
+          ]},
+          { desc: 'Predicate is now true. Thread proceeds with the work.', boxes: [
+            { x:20, y:196, w:160, h:22, text:'pred() == true!', fill:'#e8f5e9', stroke:'#2e7d32' },
+            { x:400, y:196, w:110, h:22, text:'true', fill:'#e8f5e9', stroke:'#2e7d32' }
+          ]}
+        ];
+
+        function render() {
+          svg.innerHTML = '';
+          for (let i = 0; i < step; i++) {
+            steps[i].boxes.forEach(function(b) {
+              const r = document.createElementNS('http://www.w3.org/2000/svg','rect');
+              r.setAttribute('x',b.x); r.setAttribute('y',b.y); r.setAttribute('width',b.w); r.setAttribute('height',b.h);
+              r.setAttribute('rx','4'); r.setAttribute('fill',b.fill); r.setAttribute('stroke',b.stroke); r.setAttribute('stroke-width','1');
+              svg.appendChild(r);
+              const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+              t.setAttribute('x', b.x + b.w/2); t.setAttribute('y', b.y + 15); t.setAttribute('text-anchor','middle');
+              t.setAttribute('font-size','11'); t.setAttribute('fill','#1a1a2e'); t.setAttribute('font-family','Consolas,monospace');
+              t.textContent = b.text; svg.appendChild(t);
+            });
+          }
+          info.textContent = step > 0 ? steps[step-1].desc : '';
+          output.textContent = 'Step ' + step + ' / ' + steps.length;
+        }
+
+        document.getElementById('spurious-step').addEventListener('click', function() {
+          if (step < steps.length) { step++; render(); }
+        });
+        document.getElementById('spurious-reset').addEventListener('click', function() {
+          step = 0; render();
+        });
+        render();
+      })();
+      </script>
+
+      <h2 id="predicate-loop">How the Predicate Loop Solves It</h2>
+      <p>The canonical pattern is a <code>while</code> loop that rechecks the condition after every wakeup:</p>
+      <pre><code>std::unique_lock&lt;std::mutex&gt; lock(mtx);
+while (!ready) {          // re-check after every wakeup
+    cv.wait(lock);
+}
+// ready is guaranteed true here, lock is held</code></pre>
+      <p>The predicate overload of <code>wait()</code> does exactly this internally:</p>
+      <pre><code>template&lt;class Pred&gt;
+void condition_variable::wait(unique_lock&lt;mutex&gt;&amp; lock, Pred pred) {
+    while (!pred()) {
+        wait(lock);
+    }
+}</code></pre>
+      <p>Whether the wakeup was spurious or real does not matter. If the predicate is false, the thread goes back to sleep. If it is true, execution continues. This is why the C++ standard can afford to be lenient about spurious wakeups: the correct usage pattern handles them gracefully.</p>
+
+      <div class="callout"><strong>Performance Note.</strong> Spurious wakeups are rare in practice. Some developers run for years without ever triggering one. But "rare" is not "never," and concurrent bugs that manifest rarely are the hardest to debug. Always use the predicate.</div>
+
+      <h2 id="common-mistakes">Common Mistakes</h2>
+
+      <h3 id="no-predicate">1. Waiting Without a Predicate</h3>
+      <pre><code>// WRONG: vulnerable to spurious wakeups
+std::unique_lock&lt;std::mutex&gt; lock(mtx);
+cv.wait(lock);
+// Cannot assume the condition is true here!</code></pre>
+      <p>This is the most common mistake. The thread may wake up with the condition still false and proceed to access data that is not ready.</p>
+
+      <h3 id="if-not-while">2. Using if Instead of while</h3>
+      <pre><code>// WRONG: only checks once
+std::unique_lock&lt;std::mutex&gt; lock(mtx);
+if (!ready) {
+    cv.wait(lock);
+}
+// Still not safe: a spurious wakeup skips the check</code></pre>
+      <p>An <code>if</code> checks the condition once before waiting. After waking, it falls through without rechecking. You need a <code>while</code> loop or the predicate overload.</p>
+
+      <h3 id="wrong-predicate">3. Predicate That is Always True</h3>
+      <pre><code>// Probably a bug: this never waits
+cv.wait(lock, []{ return true; });</code></pre>
+
+      <h3 id="checking-outside-lock">4. Checking the Predicate Outside the Lock</h3>
+      <pre><code>// WRONG: data race on 'ready'
+if (ready) return;             // no lock held!
+std::unique_lock&lt;std::mutex&gt; lock(mtx);
+cv.wait(lock, []{ return ready; });</code></pre>
+      <p>The initial check of <code>ready</code> without the mutex is a data race. Always access the shared predicate under the lock.</p>
+
+      <h2 id="debugging">Debugging Condition Variable Bugs</h2>
+      <p>CV bugs are notoriously hard to reproduce. Here are practical techniques:</p>
+
+      <h3>Thread Sanitizer (TSan)</h3>
+      <p>Compile with <code>-fsanitize=thread</code> (GCC/Clang). TSan detects data races on the predicate variable, which is the root cause of most CV bugs.</p>
+      <pre><code>g++ -std=c++20 -fsanitize=thread -g main.cpp -o main</code></pre>
+
+      <h3>Logging with Timestamps</h3>
+      <p>Add fine-grained logging around <code>wait()</code> and <code>notify_*()</code> calls. Include thread IDs and high-resolution timestamps to identify ordering issues.</p>
+      <pre><code>auto now = std::chrono::steady_clock::now();
+auto ms = std::chrono::duration_cast&lt;std::chrono::microseconds&gt;(
+    now.time_since_epoch()).count();
+std::cerr &lt;&lt; "[" &lt;&lt; ms &lt;&lt; "] T" &lt;&lt; std::this_thread::get_id()
+          &lt;&lt; " entering wait, pred=" &lt;&lt; pred() &lt;&lt; "\n";</code></pre>
+
+      <h3>Stress Testing</h3>
+      <p>Run the program thousands of times in a loop. Spurious wakeups and race conditions often only manifest under load or specific scheduling patterns.</p>
+      <pre><code># Run 10000 iterations, stop on first failure
+for i in $(seq 1 10000); do
+    ./my_program || { echo "Failed on run $i"; break; }
+done</code></pre>
+
+      <h3>Helgrind (Valgrind)</h3>
+      <p>Helgrind is another data race detector, part of the Valgrind suite. It works without recompilation.</p>
+      <pre><code>valgrind --tool=helgrind ./my_program</code></pre>
+
+      <h2 id="stolen-vs-spurious">Stolen Wakeups vs Spurious Wakeups</h2>
+      <table>
+        <thead><tr><th>Aspect</th><th>Spurious Wakeup</th><th>Stolen Wakeup</th></tr></thead>
+        <tbody>
+          <tr><td>Cause</td><td>OS / hardware artefact</td><td>Another thread consumed the work</td></tr>
+          <tr><td>Was notify called?</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Is predicate true?</td><td>No</td><td>No (consumed by another waiter)</td></tr>
+          <tr><td>Solution</td><td colspan="2">Same: always use a predicate loop</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="wait-for-spurious">Spurious Wakeups with Timed Waits</h2>
+      <p>Timed waits (<code>wait_for</code>, <code>wait_until</code>) also suffer from spurious wakeups. The predicate overload handles this correctly:</p>
+      <pre><code>// Correct: predicate is checked on every wakeup, including spurious ones
+bool got_it = cv.wait_for(lock, 100ms, []{ return data_ready; });
+// got_it is true only if predicate became true within the timeout</code></pre>
+      <p>Without the predicate, <code>wait_for</code> returns <code>cv_status::no_timeout</code> on a spurious wakeup, which can be misinterpreted as a legitimate notification.</p>
+
+      <h2 id="frequency">How Often Do Spurious Wakeups Actually Happen?</h2>
+      <p>Empirically, they are extremely rare on modern Linux (glibc). Some developers build tests specifically designed to trigger them (heavy signal load, CPU oversubscription, memory pressure) and still cannot reproduce one. On Windows, the <code>SleepConditionVariableCS</code> API documentation similarly warns about spurious wakeups but they are also very rare in practice.</p>
+      <p>However, "rare" is architecture and workload dependent. Real-time systems, systems under heavy signal traffic, and programs using <code>setjmp</code>/<code>longjmp</code> near CV waits are more likely to see them. The cost of the predicate check is negligible compared to the risk.</p>
+
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li>Spurious wakeups are permitted by the C++ standard and allowed by POSIX.</li>
+        <li>They happen due to OS signals, multiprocessor scheduling, and futex internals.</li>
+        <li>The predicate loop (<code>while (!pred) cv.wait(...)</code>) handles both spurious wakeups and stolen wakeups identically.</li>
+        <li>Always use the predicate overload of <code>wait()</code> for clarity and correctness.</li>
+        <li>Use TSan, Helgrind, and stress testing to catch CV bugs in your code.</li>
+      </ul>
+
+      <div class="post-series-nav" style="margin-top:2rem;">
+        <span>&larr; <a href="basics.html">Basics</a></span>
+        <span style="margin-left:2rem;">Next: <a href="producer-consumer.html">Producer-Consumer</a> &rarr;</span>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

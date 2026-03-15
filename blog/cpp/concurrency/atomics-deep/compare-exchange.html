@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into compare-and-swap in C++: compare_exchange_weak, compare_exchange_strong, CAS loops, spinlocks, and ABA problem awareness.">
+  <title>Compare-Exchange Operations in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Atomics</a></div>
+      <h1>Compare-Exchange Operations</h1>
+      <p class="post-meta">March 2026</p>
+
+      <p>Compare-and-swap (CAS) is the cornerstone of lock-free programming. In C++, it appears as <code>compare_exchange_weak</code> and <code>compare_exchange_strong</code>. Every lock-free data structure, every optimistic update, and most spinlock implementations rely on this single primitive.</p>
+
+      <h2 id="cas-semantics">CAS Semantics</h2>
+
+      <p>The compare-exchange operation performs the following <em>atomically</em>:</p>
+      <ol>
+        <li>Read the current value of the atomic variable.</li>
+        <li>Compare it with an <strong>expected</strong> value.</li>
+        <li>If they match, write the <strong>desired</strong> value and return <code>true</code>.</li>
+        <li>If they do not match, load the actual current value into <code>expected</code> and return <code>false</code>.</li>
+      </ol>
+
+      <pre><code class="lang-cpp">bool compare_exchange_strong(T&amp; expected, T desired,
+                             std::memory_order success,
+                             std::memory_order failure);
+
+bool compare_exchange_weak(T&amp; expected, T desired,
+                           std::memory_order success,
+                           std::memory_order failure);</code></pre>
+
+      <div class="callout"><strong>The expected parameter is a reference.</strong> On failure, the runtime writes the actual current value into <code>expected</code>. This is critical: it means your CAS loop automatically has the fresh value for the next iteration without an extra load.</div>
+
+      <h2 id="strong-vs-weak">compare_exchange_strong vs. compare_exchange_weak</h2>
+
+      <p><code>compare_exchange_strong</code> returns <code>false</code> only when the current value genuinely differs from <code>expected</code>. <code>compare_exchange_weak</code> may <em>also</em> return <code>false</code> spuriously, even when the values match.</p>
+
+      <p>Why does the weak form exist? On architectures that use load-linked/store-conditional (LL/SC) instructions (ARM, RISC-V, PowerPC), the SC can fail for reasons unrelated to the value, such as a cache line eviction or a context switch. Mapping CAS to LL/SC with guaranteed success requires a retry loop inside the implementation. The weak form avoids this internal loop, yielding better performance when the caller already has an outer loop.</p>
+
+      <pre><code class="lang-cpp">// strong: use when NOT in a loop (single attempt matters)
+bool ok = val.compare_exchange_strong(expected, desired);
+
+// weak: use INSIDE a loop (spurious failure is retried anyway)
+while (!val.compare_exchange_weak(expected, desired)) {
+    // expected is updated automatically on failure
+    // recompute desired if needed
+}</code></pre>
+
+      <table>
+        <thead><tr><th>Property</th><th>strong</th><th>weak</th></tr></thead>
+        <tbody>
+          <tr><td>Spurious failure</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Internal retry loop</td><td>May have one (LL/SC)</td><td>Never</td></tr>
+          <tr><td>Best used</td><td>Single-shot CAS</td><td>Inside a CAS loop</td></tr>
+          <tr><td>Performance on x86</td><td>Same (CMPXCHG)</td><td>Same</td></tr>
+          <tr><td>Performance on ARM</td><td>Slightly worse</td><td>Slightly better in loops</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="cas-loop-pattern">The CAS Loop Pattern</h2>
+
+      <p>The canonical CAS loop reads the current value, computes a new value, then attempts to swap. If another thread changed the value in between, the loop retries with the updated value.</p>
+
+      <pre><code class="lang-cpp">std::atomic&lt;int&gt; counter{0};
+
+void atomic_increment() {
+    int expected = counter.load(std::memory_order_relaxed);
+    while (!counter.compare_exchange_weak(
+               expected,
+               expected + 1,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+        // expected is automatically updated to current value
+        // loop retries with fresh expected + 1
+    }
+}</code></pre>
+
+      <div class="anim-container" id="cas-anim">
+        <h4>&#9654; CAS Loop Retry Mechanism</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Two threads try to increment a shared counter. Step through to see how the CAS loop detects a conflict and retries.</p>
+        <svg id="cas-svg" width="520" height="280" viewBox="0 0 520 280">
+          <style>
+            .cas-text { font-family: Consolas, monospace; font-size: 11px; fill: #333; }
+            .cas-title { font-family: Consolas, monospace; font-size: 12px; fill: #333; font-weight: bold; }
+            .cas-box { rx: 5; ry: 5; stroke-width: 1.5; }
+            .cas-val { font-family: Consolas, monospace; font-size: 18px; fill: #1a237e; font-weight: bold; }
+          </style>
+        </svg>
+        <div id="cas-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="cas-step">Step &rarr;</button>
+          <button class="anim-btn" id="cas-reset">Reset</button>
+          <span class="anim-output" id="cas-output"></span>
+        </div>
+      </div>
+      <script>
+      (function() {
+        const svg = document.getElementById('cas-svg');
+        const info = document.getElementById('cas-info');
+        const output = document.getElementById('cas-output');
+        let step = 0;
+        const baseStyle = '<style>.cas-text{font-family:Consolas,monospace;font-size:11px;fill:#333}.cas-title{font-family:Consolas,monospace;font-size:12px;fill:#333;font-weight:bold}.cas-box{rx:5;ry:5;stroke-width:1.5}.cas-val{font-family:Consolas,monospace;font-size:18px;fill:#1a237e;font-weight:bold}</style>';
+        function clear() { svg.innerHTML = baseStyle; }
+        function r(x,y,w,h,f,s) { return '<rect class="cas-box" x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" fill="'+f+'" stroke="'+s+'"/>'; }
+        function t(x,y,txt,cls) { return '<text class="'+(cls||'cas-text')+'" x="'+x+'" y="'+y+'">'+txt+'</text>'; }
+        function arrow(x1,y1,x2,y2,col) { return '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+(col||'#555')+'" stroke-width="1.5" marker-end="url(#cas-arr)"/>'; }
+        function defs() { return '<defs><marker id="cas-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#555"/></marker></defs>'; }
+
+        function counterBox(val, highlight) {
+          var fill = highlight ? '#fff9c4' : '#e3f2fd';
+          var stroke = highlight ? '#f9a825' : '#1565c0';
+          return r(210,10,100,50,fill,stroke) + t(225,30,'counter','cas-title') + t(245,52,String(val),'cas-val');
+        }
+        function threadA(text, bg) { return r(20,90,200,40,(bg||'#e8f5e9'),'#43a047') + t(30,115,'Thread A: '+text); }
+        function threadB(text, bg) { return r(300,90,200,40,(bg||'#e3f2fd'),'#1565c0') + t(310,115,'Thread B: '+text); }
+        function regA(exp, des, bg) { return r(20,150,200,70,(bg||'#f1f8e9'),'#7cb342') + t(30,170,'expected = '+exp) + t(30,190,'desired  = '+des); }
+        function regB(exp, des, bg) { return r(300,150,200,70,(bg||'#e8eaf6'),'#5c6bc0') + t(310,170,'expected = '+exp) + t(310,190,'desired  = '+des); }
+        function result(text) { return r(20,238,480,34,'#fafafa','#bbb') + t(30,260,text); }
+
+        var steps = [
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(0,false);
+            svg.innerHTML += threadA('idle') + threadB('idle');
+            svg.innerHTML += result('Both threads will try to increment counter from 0 to 1.');
+            info.textContent = 'Initial state: counter = 0. Two threads are about to increment it.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(0,false);
+            svg.innerHTML += threadA('load()','#c8e6c9') + threadB('idle');
+            svg.innerHTML += arrow(120,90,255,62,'#43a047');
+            svg.innerHTML += regA('0','1','#dcedc8');
+            svg.innerHTML += result('Thread A loads current value (0), computes desired = 0 + 1 = 1.');
+            info.textContent = 'Thread A: expected = counter.load() = 0, desired = expected + 1 = 1.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(0,false);
+            svg.innerHTML += threadA('(preempted)','#fff9c4') + threadB('load()','#bbdefb');
+            svg.innerHTML += arrow(400,90,315,62,'#1565c0');
+            svg.innerHTML += regA('0','1') + regB('0','1','#c5cae9');
+            svg.innerHTML += result('Thread A is preempted. Thread B loads counter (0), desires 1.');
+            info.textContent = 'Thread B: expected = 0, desired = 1. Thread A is suspended.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(1,true);
+            svg.innerHTML += threadA('(preempted)','#fff9c4') + threadB('CAS success!','#c8e6c9');
+            svg.innerHTML += arrow(400,90,315,62,'#43a047');
+            svg.innerHTML += regA('0','1') + regB('0','1','#c8e6c9');
+            svg.innerHTML += result('Thread B: CAS(expected=0, desired=1) succeeds. counter is now 1.');
+            info.textContent = 'Thread B wins the race. counter goes from 0 to 1.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(1,false);
+            svg.innerHTML += threadA('CAS attempt...','#fff9c4') + threadB('done','#c8e6c9');
+            svg.innerHTML += arrow(120,90,205,62,'#e53935');
+            svg.innerHTML += regA('0','1','#ffcdd2');
+            svg.innerHTML += result('Thread A resumes, tries CAS(expected=0, desired=1). counter=1, mismatch!');
+            info.textContent = 'Thread A: CAS fails! counter is 1 but expected was 0.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(1,false);
+            svg.innerHTML += threadA('retry: reload','#fff3e0') + threadB('done','#c8e6c9');
+            svg.innerHTML += arrow(120,90,205,62,'#ef6c00');
+            svg.innerHTML += regA('1','2','#ffe0b2');
+            svg.innerHTML += result('CAS updated expected to 1 (current value). Recompute desired = 1+1 = 2.');
+            info.textContent = 'Loop retries: expected is now 1 (auto-updated), desired = 2.';
+          },
+          function() {
+            clear(); svg.innerHTML += defs() + counterBox(2,true);
+            svg.innerHTML += threadA('CAS success!','#c8e6c9') + threadB('done','#c8e6c9');
+            svg.innerHTML += arrow(120,90,205,62,'#43a047');
+            svg.innerHTML += regA('1','2','#c8e6c9');
+            svg.innerHTML += result('Thread A: CAS(expected=1, desired=2) succeeds. counter = 2. Both done.');
+            info.textContent = 'Thread A succeeds on retry. Final counter = 2. Both increments applied correctly.';
+          }
+        ];
+
+        steps[0]();
+        document.getElementById('cas-step').addEventListener('click', function() {
+          if (step < steps.length - 1) { step++; steps[step](); output.textContent = 'Step ' + step + '/' + (steps.length-1); }
+        });
+        document.getElementById('cas-reset').addEventListener('click', function() {
+          step = 0; steps[0](); info.textContent = 'Initial state: counter = 0. Two threads are about to increment it.'; output.textContent = '';
+        });
+      })();
+      </script>
+
+      <h2 id="implementing-atomic-increment">Implementing Atomic Increment with CAS</h2>
+
+      <p>While <code>fetch_add</code> exists, implementing increment manually shows the pattern that generalises to any read-modify-write:</p>
+
+      <pre><code class="lang-cpp">template &lt;typename T&gt;
+T atomic_add(std::atomic&lt;T&gt;&amp; atom, T value) {
+    T expected = atom.load(std::memory_order_relaxed);
+    while (!atom.compare_exchange_weak(
+               expected,
+               expected + value,
+               std::memory_order_acq_rel,
+               std::memory_order_relaxed)) {
+        // expected is updated automatically;
+        // loop immediately re-tries with fresh value
+    }
+    return expected;  // previous value
+}</code></pre>
+
+      <p>This pattern extends to any function of the current value:</p>
+
+      <pre><code class="lang-cpp">// Atomic maximum
+void atomic_max(std::atomic&lt;int&gt;&amp; atom, int val) {
+    int expected = atom.load(std::memory_order_relaxed);
+    while (expected &lt; val &amp;&amp;
+           !atom.compare_exchange_weak(
+               expected, val,
+               std::memory_order_relaxed)) {
+        // if expected >= val, we stop: no update needed
+    }
+}
+
+// Atomic multiply
+void atomic_mul(std::atomic&lt;int&gt;&amp; atom, int factor) {
+    int expected = atom.load(std::memory_order_relaxed);
+    while (!atom.compare_exchange_weak(
+               expected,
+               expected * factor,
+               std::memory_order_relaxed)) {
+        // retries until success
+    }
+}</code></pre>
+
+      <h2 id="spinlock-with-cas">Implementing a Spinlock with CAS</h2>
+
+      <p>A spinlock is the simplest lock: spin in a loop until you acquire it. CAS makes this lock-free in the uncontended path.</p>
+
+      <pre><code class="lang-cpp">class Spinlock {
+    std::atomic&lt;bool&gt; locked_{false};
+public:
+    void lock() {
+        // Fast path: try to acquire immediately
+        bool expected = false;
+        if (locked_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acquire,
+                std::memory_order_relaxed)) {
+            return;
+        }
+        // Slow path: spin
+        while (true) {
+            // Spin on load (read-only, no bus traffic)
+            while (locked_.load(std::memory_order_relaxed)) {
+                // Optional: pause hint for hyper-threading
+                #if defined(__x86_64__) || defined(_M_X64)
+                _mm_pause();
+                #endif
+            }
+            // Try to acquire
+            expected = false;
+            if (locked_.compare_exchange_weak(
+                    expected, true,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    void unlock() {
+        locked_.store(false, std::memory_order_release);
+    }
+};</code></pre>
+
+      <div class="callout"><strong>Test-and-test-and-set.</strong> The inner <code>while (locked_.load(...))</code> loop reads without writing. This avoids cacheline bouncing between cores. Only when we see the lock is free do we attempt the CAS. This pattern is called TTAS (test-and-test-and-set).</div>
+
+      <pre><code class="lang-cpp">// Usage
+Spinlock mtx;
+
+void worker(int id) {
+    mtx.lock();
+    std::cout &lt;&lt; "Thread " &lt;&lt; id &lt;&lt; " in critical section\n";
+    mtx.unlock();
+}
+
+int main() {
+    std::vector&lt;std::thread&gt; threads;
+    for (int i = 0; i &lt; 4; i++)
+        threads.emplace_back(worker, i);
+    for (auto&amp; t : threads) t.join();
+}</code></pre>
+
+      <h2 id="memory-order-cas">Memory Orders in Compare-Exchange</h2>
+
+      <p>compare_exchange takes two memory orders: one for success, one for failure. The failure order cannot be stronger than the success order, and cannot be <code>release</code> or <code>acq_rel</code>.</p>
+
+      <pre><code class="lang-cpp">// Common combinations:
+atom.compare_exchange_strong(exp, des,
+    std::memory_order_acq_rel,    // success: acquire + release
+    std::memory_order_acquire);   // failure: just acquire
+
+atom.compare_exchange_weak(exp, des,
+    std::memory_order_release,    // success: release
+    std::memory_order_relaxed);   // failure: no ordering
+
+atom.compare_exchange_strong(exp, des,
+    std::memory_order_seq_cst,    // success: full fence
+    std::memory_order_seq_cst);   // failure: full fence (default)</code></pre>
+
+      <p>If you specify only one memory order, it is used for both success and failure (but failure is capped at the acquire equivalent):</p>
+
+      <pre><code class="lang-cpp">// Single memory order form
+atom.compare_exchange_weak(exp, des, std::memory_order_acq_rel);
+// Equivalent to:
+// success = acq_rel, failure = acquire</code></pre>
+
+      <h2 id="common-patterns">Common CAS Patterns</h2>
+
+      <h3>Lock-Free Stack Push</h3>
+      <pre><code class="lang-cpp">struct Node {
+    int data;
+    Node* next;
+};
+
+std::atomic&lt;Node*&gt; head{nullptr};
+
+void push(int value) {
+    Node* new_node = new Node{value, nullptr};
+    new_node-&gt;next = head.load(std::memory_order_relaxed);
+    while (!head.compare_exchange_weak(
+               new_node-&gt;next,    // expected = current head
+               new_node,          // desired  = new node
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+        // new_node->next is updated to current head on failure
+    }
+}</code></pre>
+
+      <h3>Lock-Free Stack Pop</h3>
+      <pre><code class="lang-cpp">Node* pop() {
+    Node* old_head = head.load(std::memory_order_acquire);
+    while (old_head &amp;&amp;
+           !head.compare_exchange_weak(
+               old_head,              // expected = current head
+               old_head-&gt;next,        // desired = next node
+               std::memory_order_acquire,
+               std::memory_order_relaxed)) {
+        // old_head is updated to current head on failure
+    }
+    return old_head;  // caller must handle deletion
+}</code></pre>
+
+      <h3>Conditional Update</h3>
+      <pre><code class="lang-cpp">// Only update if current value satisfies a predicate
+bool atomic_update_if(std::atomic&lt;int&gt;&amp; atom,
+                      std::function&lt;bool(int)&gt; predicate,
+                      std::function&lt;int(int)&gt; transform) {
+    int expected = atom.load(std::memory_order_acquire);
+    do {
+        if (!predicate(expected)) return false;
+    } while (!atom.compare_exchange_weak(
+                 expected,
+                 transform(expected),
+                 std::memory_order_acq_rel,
+                 std::memory_order_acquire));
+    return true;
+}
+
+// Usage: increment only if below threshold
+std::atomic&lt;int&gt; permits{10};
+bool acquired = atomic_update_if(
+    permits,
+    [](int v) { return v &gt; 0; },
+    [](int v) { return v - 1; });</code></pre>
+
+      <h2 id="aba-problem">The ABA Problem</h2>
+
+      <p>CAS checks whether the value is the same as expected. But "the same value" does not mean "nothing changed." If the value goes from A to B and back to A between your load and your CAS, the CAS will succeed even though the state may have changed in ways that break your invariants.</p>
+
+      <pre><code class="lang-cpp">// Scenario: lock-free stack with ABA
+// State: head -> [A] -> [B] -> [C]
+
+// Thread 1: pop()
+//   old_head = A
+//   next = B
+//   (preempted here)
+
+// Thread 2: pop() -> removes A
+//           pop() -> removes B
+//           push(A) -> puts A back on stack
+// State: head -> [A] -> [C]   (B is gone!)
+
+// Thread 1 resumes:
+//   CAS(head, A, B) -> succeeds! A == A
+//   But B has been freed! head now points to freed memory.</code></pre>
+
+      <p>Common solutions to the ABA problem:</p>
+
+      <pre><code class="lang-cpp">// Solution 1: Tagged/versioned pointer
+struct TaggedPtr {
+    Node* ptr;
+    uint64_t tag;
+};
+
+std::atomic&lt;TaggedPtr&gt; head;
+
+void push(Node* node) {
+    TaggedPtr old = head.load(std::memory_order_relaxed);
+    TaggedPtr next;
+    do {
+        node-&gt;next = old.ptr;
+        next = {node, old.tag + 1};  // increment tag
+    } while (!head.compare_exchange_weak(
+                 old, next,
+                 std::memory_order_release,
+                 std::memory_order_relaxed));
+}
+
+// Solution 2: Hazard pointers (conceptual)
+// Each thread publishes which nodes it is currently accessing.
+// Nodes are only reclaimed when no hazard pointer references them.
+
+// Solution 3: Epoch-based reclamation
+// Threads enter/exit epochs. Memory is freed only when
+// all threads have crossed an epoch boundary.</code></pre>
+
+      <div class="callout"><strong>ABA in practice.</strong> The ABA problem mainly affects pointer-based CAS operations where nodes are recycled. For simple integer counters, ABA is harmless because every distinct value truly represents a distinct state. When working with lock-free data structures, always consider memory reclamation and ABA avoidance.</div>
+
+      <h2 id="bitwise-cas">Double-Width CAS</h2>
+
+      <p>Some platforms support <code>cmpxchg16b</code> (x86-64) or equivalent, allowing atomic CAS on 128-bit values. This is essential for tagged pointers and lock-free structures.</p>
+
+      <pre><code class="lang-cpp">// On x86-64 with -mcx16 flag:
+struct alignas(16) DoubleWord {
+    uint64_t lo;
+    uint64_t hi;
+};
+
+std::atomic&lt;DoubleWord&gt; dw;
+
+static_assert(std::atomic&lt;DoubleWord&gt;::is_always_lock_free,
+              "Need 128-bit CAS support");
+
+DoubleWord expected = dw.load();
+DoubleWord desired = {expected.lo + 1, expected.hi};
+dw.compare_exchange_strong(expected, desired);</code></pre>
+
+      <h2 id="pitfalls">Common Pitfalls</h2>
+
+      <h3>Forgetting that expected is modified on failure</h3>
+      <pre><code class="lang-cpp">// WRONG: expected is never updated in the loop condition
+int expected = 0;
+int desired = 1;
+while (!atom.compare_exchange_weak(expected, desired)) {
+    // expected is now the CURRENT value, not 0
+    // desired should probably be recomputed!
+    desired = expected + 1;  // add this line
+}</code></pre>
+
+      <h3>Using strong in a tight loop unnecessarily</h3>
+      <pre><code class="lang-cpp">// Suboptimal on ARM/RISC-V:
+while (!atom.compare_exchange_strong(exp, des)) { ... }
+
+// Better: weak is sufficient in loops
+while (!atom.compare_exchange_weak(exp, des)) { ... }</code></pre>
+
+      <h3>Ignoring the return value</h3>
+      <pre><code class="lang-cpp">// WRONG: ignoring return value
+atom.compare_exchange_strong(expected, desired);
+// Did it succeed? We don't know!
+
+// CORRECT: always check the result
+if (atom.compare_exchange_strong(expected, desired)) {
+    // succeeded: old value was expected, now it's desired
+} else {
+    // failed: expected now holds the current value
+}</code></pre>
+
+      <h2 id="summary">Summary</h2>
+
+      <ul>
+        <li><code>compare_exchange_strong</code> fails only on genuine mismatch; use it for one-shot CAS.</li>
+        <li><code>compare_exchange_weak</code> may fail spuriously; use it inside CAS loops for better performance on LL/SC platforms.</li>
+        <li>The <code>expected</code> parameter is updated on failure, giving you the current value for free.</li>
+        <li>Always recompute the desired value after a failed CAS if it depends on the current value.</li>
+        <li>The ABA problem affects pointer-based CAS; mitigate with tagged pointers, hazard pointers, or epoch-based reclamation.</li>
+        <li>CAS is the universal building block: any lock-free algorithm can be expressed as a CAS loop.</li>
+      </ul>
+
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

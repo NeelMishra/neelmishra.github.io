@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Lock-free queue implementations in C++: Michael-Scott queue, SPSC ring buffer, and multi-producer multi-consumer challenges.">
+  <title>Lock-Free Queue | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Lock-Free</a></div>
+      <h1>Lock-Free Queue</h1>
+      <p class="post-meta">March 2026</p>
+
+      <p>Queues are harder to make lock-free than stacks because they have two ends: enqueue touches the tail and dequeue touches the head. Coordinating two atomic pointers without a lock requires more care. This article covers three increasingly practical designs.</p>
+
+      <h2 id="spsc-ring-buffer">Single-Producer Single-Consumer Ring Buffer</h2>
+      <p>When exactly one thread produces and one consumes, the problem simplifies dramatically. A fixed-size circular buffer with two atomic indices suffices. No CAS is needed; plain loads and stores with the right memory ordering are enough.</p>
+
+<pre><code class="language-cpp">template &lt;typename T, std::size_t Capacity&gt;
+class SPSCQueue {
+    static_assert((Capacity &amp; (Capacity - 1)) == 0,
+                  "Capacity must be a power of 2");
+
+    std::array&lt;T, Capacity&gt; buffer_;
+    alignas(64) std::atomic&lt;std::size_t&gt; head_{0}; // read position
+    alignas(64) std::atomic&lt;std::size_t&gt; tail_{0}; // write position
+
+public:
+    bool try_push(const T&amp; val) {
+        const std::size_t t = tail_.load(std::memory_order_relaxed);
+        const std::size_t next_t = (t + 1) &amp; (Capacity - 1);
+
+        // If next write position equals head, the queue is full.
+        if (next_t == head_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        buffer_[t] = val;
+        tail_.store(next_t, std::memory_order_release);
+        return true;
+    }
+
+    bool try_pop(T&amp; result) {
+        const std::size_t h = head_.load(std::memory_order_relaxed);
+
+        // If head equals tail, the queue is empty.
+        if (h == tail_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        result = buffer_[h];
+        head_.store((h + 1) &amp; (Capacity - 1), std::memory_order_release);
+        return true;
+    }
+};</code></pre>
+
+      <div class="callout"><strong>Why power of 2?</strong> The mask <code>(Capacity - 1)</code> replaces the modulo operator, which is critical on hot paths. The bitwise AND compiles to a single instruction.</div>
+
+      <h3>Memory Ordering Analysis</h3>
+      <table>
+        <thead><tr><th>Access</th><th>Ordering</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>Producer reads <code>head_</code></td><td><code>acquire</code></td><td>Synchronises with consumer's release store, ensuring we see the consumer's update before overwriting the slot.</td></tr>
+          <tr><td>Producer stores <code>tail_</code></td><td><code>release</code></td><td>Ensures the write to <code>buffer_[t]</code> is visible to the consumer before the index advances.</td></tr>
+          <tr><td>Consumer reads <code>tail_</code></td><td><code>acquire</code></td><td>Synchronises with producer's release store, ensuring we see the data the producer wrote.</td></tr>
+          <tr><td>Consumer stores <code>head_</code></td><td><code>release</code></td><td>Ensures the read from <code>buffer_[h]</code> completes before the producer sees the freed slot.</td></tr>
+        </tbody>
+      </table>
+
+      <p>The <code>alignas(64)</code> on <code>head_</code> and <code>tail_</code> avoids false sharing. Without it, both indices could sit in the same cache line, causing needless cross-core invalidation.</p>
+
+      <h2 id="michael-scott-queue">Michael-Scott Queue</h2>
+      <p>The Michael-Scott (MS) queue, published in 1996, is the classic lock-free FIFO for multiple producers and multiple consumers. It uses a linked list with a sentinel (dummy) node. Two atomic pointers track the head and tail.</p>
+
+      <h3>Structure</h3>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+class MSQueue {
+    struct Node {
+        T data;
+        std::atomic&lt;Node*&gt; next{nullptr};
+        Node() = default;
+        explicit Node(T val) : data(std::move(val)) {}
+    };
+
+    alignas(64) std::atomic&lt;Node*&gt; head_;
+    alignas(64) std::atomic&lt;Node*&gt; tail_;
+
+public:
+    MSQueue() {
+        Node* sentinel = new Node();
+        head_.store(sentinel, std::memory_order_relaxed);
+        tail_.store(sentinel, std::memory_order_relaxed);
+    }
+
+    void enqueue(T val);
+    bool dequeue(T&amp; result);
+    ~MSQueue();
+};</code></pre>
+
+      <h3>Enqueue</h3>
+      <p>Enqueue appends a new node after the current tail. Two CAS operations may be needed: one to link the new node, and one to advance the tail pointer. The subtle insight is that the tail pointer is allowed to lag behind the actual last node.</p>
+
+<pre><code class="language-cpp">template &lt;typename T&gt;
+void MSQueue&lt;T&gt;::enqueue(T val) {
+    Node* node = new Node(std::move(val));
+
+    while (true) {
+        Node* tail = tail_.load(std::memory_order_acquire);
+        Node* next = tail-&gt;next.load(std::memory_order_acquire);
+
+        // Is tail still the actual tail?
+        if (tail == tail_.load(std::memory_order_acquire)) {
+            if (next == nullptr) {
+                // tail-&gt;next is null: try to link the new node
+                if (tail-&gt;next.compare_exchange_weak(
+                        next, node,
+                        std::memory_order_release,
+                        std::memory_order_relaxed))
+                {
+                    // Linked. Now try to advance tail_.
+                    // If this fails, another thread will help.
+                    tail_.compare_exchange_strong(
+                        tail, node,
+                        std::memory_order_release,
+                        std::memory_order_relaxed);
+                    return;
+                }
+            } else {
+                // tail is lagging; help advance it
+                tail_.compare_exchange_weak(
+                    tail, next,
+                    std::memory_order_release,
+                    std::memory_order_relaxed);
+            }
+        }
+    }
+}</code></pre>
+
+      <div class="callout"><strong>Helping mechanism.</strong> If thread A links a node but is preempted before it advances <code>tail_</code>, any thread that calls enqueue or dequeue will observe that <code>tail-&gt;next != nullptr</code> and help advance <code>tail_</code>. This is what makes the algorithm lock-free rather than just obstruction-free.</div>
+
+      <h3>Dequeue</h3>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+bool MSQueue&lt;T&gt;::dequeue(T&amp; result) {
+    while (true) {
+        Node* head = head_.load(std::memory_order_acquire);
+        Node* tail = tail_.load(std::memory_order_acquire);
+        Node* next = head-&gt;next.load(std::memory_order_acquire);
+
+        if (head == head_.load(std::memory_order_acquire)) {
+            if (head == tail) {
+                if (next == nullptr) {
+                    // Queue is truly empty
+                    return false;
+                }
+                // Tail is lagging; help advance
+                tail_.compare_exchange_weak(
+                    tail, next,
+                    std::memory_order_release,
+                    std::memory_order_relaxed);
+            } else {
+                // Read value before CAS; otherwise another
+                // dequeue might free the node.
+                result = next-&gt;data;
+                if (head_.compare_exchange_weak(
+                        head, next,
+                        std::memory_order_release,
+                        std::memory_order_relaxed))
+                {
+                    // Success: head retired. Free old sentinel.
+                    // CAUTION: same ABA/reclamation issues apply.
+                    delete head;
+                    return true;
+                }
+            }
+        }
+    }
+}</code></pre>
+
+      <h3>Destructor</h3>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+MSQueue&lt;T&gt;::~MSQueue() {
+    Node* cur = head_.load(std::memory_order_relaxed);
+    while (cur) {
+        Node* next = cur-&gt;next.load(std::memory_order_relaxed);
+        delete cur;
+        cur = next;
+    }
+}</code></pre>
+
+      <h2 id="linearisation">Linearisation Points</h2>
+      <table>
+        <thead><tr><th>Operation</th><th>Linearisation point</th></tr></thead>
+        <tbody>
+          <tr><td>Enqueue</td><td>Successful CAS on <code>tail-&gt;next</code> (linking the node)</td></tr>
+          <tr><td>Dequeue (non-empty)</td><td>Successful CAS on <code>head_</code></td></tr>
+          <tr><td>Dequeue (empty)</td><td>Read of <code>head-&gt;next == nullptr</code> when <code>head == tail</code></td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="mpmc-challenges">Multi-Producer Multi-Consumer Challenges</h2>
+      <p>The MS queue is MPMC, but in practice several issues arise:</p>
+
+      <h3>1. Memory Reclamation</h3>
+      <p>The <code>delete head</code> in dequeue is unsafe for the same reasons as in the Treiber stack. A concurrent dequeue may still be reading <code>head-&gt;next</code> when another thread frees <code>head</code>. Solutions:</p>
+      <ul>
+        <li><strong>Hazard pointers</strong>: each thread announces which nodes it is currently accessing. A thread that wants to free a node first checks all announcements.</li>
+        <li><strong>Epoch-based reclamation (EBR)</strong>: threads enter a "critical section" by advancing a per-thread epoch counter. Nodes are retired and freed only when all threads have advanced past the epoch in which the node was retired.</li>
+        <li><strong>Reference counting</strong>: each node has an atomic reference count. This adds overhead to every access but is straightforward.</li>
+      </ul>
+
+      <h3>2. Contention on Head and Tail</h3>
+      <p>Under high load, both enqueue and dequeue hammer their respective atomic pointers. Backoff strategies help:</p>
+<pre><code class="language-cpp">// Exponential backoff after a failed CAS
+struct Backoff {
+    unsigned delay = 1;
+    static constexpr unsigned MAX_DELAY = 1024;
+
+    void operator()() {
+        for (unsigned i = 0; i &lt; delay; ++i) {
+            // Pause hint to the CPU (x86)
+            #if defined(__x86_64__) || defined(_M_X64)
+            _mm_pause();
+            #else
+            std::this_thread::yield();
+            #endif
+        }
+        delay = std::min(delay * 2, MAX_DELAY);
+    }
+
+    void reset() { delay = 1; }
+};</code></pre>
+
+      <h3>3. False Sharing</h3>
+      <p>Placing <code>head_</code> and <code>tail_</code> on separate cache lines (via <code>alignas(64)</code>) is essential. Without this, a store to <code>tail_</code> by an enqueuer invalidates the consumer's cache line containing <code>head_</code>, even though they are logically independent.</p>
+
+      <h2 id="bounded-mpmc">Bounded MPMC Ring Buffer</h2>
+      <p>For bounded queues with multiple producers and consumers, a popular approach uses a ring buffer where each slot contains a <em>sequence counter</em>. This design avoids linked-list allocation entirely.</p>
+
+<pre><code class="language-cpp">template &lt;typename T, std::size_t Capacity&gt;
+class BoundedMPMCQueue {
+    struct Cell {
+        std::atomic&lt;std::size_t&gt; sequence;
+        T data;
+    };
+
+    alignas(64) Cell buffer_[Capacity];
+    alignas(64) std::atomic&lt;std::size_t&gt; enqueue_pos_{0};
+    alignas(64) std::atomic&lt;std::size_t&gt; dequeue_pos_{0};
+
+public:
+    BoundedMPMCQueue() {
+        for (std::size_t i = 0; i &lt; Capacity; ++i)
+            buffer_[i].sequence.store(i, std::memory_order_relaxed);
+    }
+
+    bool try_push(T val) {
+        Cell* cell;
+        std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+
+        while (true) {
+            cell = &amp;buffer_[pos % Capacity];
+            std::size_t seq = cell-&gt;sequence.load(std::memory_order_acquire);
+            intptr_t diff = static_cast&lt;intptr_t&gt;(seq) -
+                            static_cast&lt;intptr_t&gt;(pos);
+
+            if (diff == 0) {
+                // Slot is ready for writing
+                if (enqueue_pos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed))
+                    break;
+            } else if (diff &lt; 0) {
+                // Queue is full
+                return false;
+            } else {
+                // Another enqueuer took this slot; reload
+                pos = enqueue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+
+        cell-&gt;data = std::move(val);
+        cell-&gt;sequence.store(pos + 1, std::memory_order_release);
+        return true;
+    }
+
+    bool try_pop(T&amp; result) {
+        Cell* cell;
+        std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+
+        while (true) {
+            cell = &amp;buffer_[pos % Capacity];
+            std::size_t seq = cell-&gt;sequence.load(std::memory_order_acquire);
+            intptr_t diff = static_cast&lt;intptr_t&gt;(seq) -
+                            static_cast&lt;intptr_t&gt;(pos + 1);
+
+            if (diff == 0) {
+                if (dequeue_pos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed))
+                    break;
+            } else if (diff &lt; 0) {
+                return false; // empty
+            } else {
+                pos = dequeue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+
+        result = std::move(cell-&gt;data);
+        cell-&gt;sequence.store(pos + Capacity, std::memory_order_release);
+        return true;
+    }
+};</code></pre>
+
+      <div class="callout"><strong>Sequence trick.</strong> Each cell's sequence counter acts as a per-slot state machine. When <code>seq == pos</code>, the slot is free for writing. When <code>seq == pos + 1</code>, it is ready for reading. After reading, the consumer sets <code>seq = pos + Capacity</code>, marking the slot free for the next cycle.</div>
+
+      <h2 id="practical-tips">Practical Tips</h2>
+      <ul>
+        <li>If you have exactly one producer and one consumer, always prefer the SPSC ring buffer. It is dramatically simpler and faster (no CAS at all).</li>
+        <li>For MPMC with bounded size, the sequence-counter ring buffer outperforms the MS queue by avoiding allocation.</li>
+        <li>The MS queue is best when the queue size is unpredictable and you need an unbounded structure.</li>
+        <li>Profile before committing to lock-free. Under low contention, a simple <code>std::mutex</code> with a <code>std::deque</code> can be faster due to lower constant factors.</li>
+      </ul>
+
+      <h2 id="comparison">Comparison</h2>
+      <table>
+        <thead><tr><th>Design</th><th>Producers</th><th>Consumers</th><th>Bounded</th><th>Allocation</th><th>CAS needed</th></tr></thead>
+        <tbody>
+          <tr><td>SPSC ring buffer</td><td>1</td><td>1</td><td>Yes</td><td>None</td><td>No</td></tr>
+          <tr><td>Michael-Scott queue</td><td>Many</td><td>Many</td><td>No</td><td>Per enqueue</td><td>Yes</td></tr>
+          <tr><td>Bounded MPMC ring</td><td>Many</td><td>Many</td><td>Yes</td><td>None</td><td>Yes</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="summary">Summary</h2>
+      <p>Lock-free queues are more complex than lock-free stacks because they manage two ends simultaneously. The SPSC ring buffer eliminates CAS entirely by relying on the single-writer principle. The Michael-Scott queue introduces a helping mechanism to ensure lock-freedom with multiple threads on both ends. The bounded MPMC ring buffer avoids dynamic allocation by using sequence counters as per-slot state machines. All three designs require careful memory ordering analysis to be correct.</p>
+
+      <div class="post-series-nav" style="margin-top:2em;">
+        <span>Prev: <a href="lock-free-stack.html">Lock-Free Stack</a></span>
+        <span style="margin-left:2em;">Next: <a href="aba-problem.html">ABA Problem</a></span>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

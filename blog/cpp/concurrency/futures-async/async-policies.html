@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="std::async launch policies in C++ - async vs deferred, fire-and-forget pitfalls, future destructor blocking, and when to use async vs manual threads.">
+  <title>std::async Launch Policies | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Futures &amp; Async</a></div>
+      <h1>std::async Launch Policies</h1>
+      <p class="post-meta">March 2026</p>
+
+      <!-- =================== INTRO =================== -->
+      <h2>Overview</h2>
+      <p>
+        <code>std::async</code> is the highest-level way to launch concurrent
+        work in the C++ standard library. You hand it a callable, and it
+        returns a <code>std::future</code> for the result. The <em>launch
+        policy</em> controls <strong>where</strong> and <strong>when</strong>
+        the work actually executes.
+      </p>
+<pre><code>#include &lt;future&gt;
+
+auto fut = std::async(launch_policy, callable, args...);</code></pre>
+      <p>There are three possible policies:</p>
+      <ul>
+        <li><code>std::launch::async</code></li>
+        <li><code>std::launch::deferred</code></li>
+        <li><code>std::launch::async | std::launch::deferred</code> (the default)</li>
+      </ul>
+
+      <!-- ============= LAUNCH::ASYNC ============= -->
+      <h2>std::launch::async</h2>
+      <p>
+        Forces the runtime to execute the callable on a <strong>new
+        thread</strong> (as if by <code>std::thread</code>). The work begins
+        immediately, and the returned future is associated with that thread.
+      </p>
+<pre><code>#include &lt;future&gt;
+#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+int main() {
+    auto fut = std::async(std::launch::async, []{
+        std::cout &lt;&lt; "Running on thread "
+                  &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
+        return 42;
+    });
+
+    std::cout &lt;&lt; "Main thread: "
+              &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
+    std::cout &lt;&lt; "Result: " &lt;&lt; fut.get() &lt;&lt; "\n";
+}</code></pre>
+      <p>
+        The standard guarantees that the callable will run asynchronously.
+        On all major implementations (libstdc++, libc++, MSVC), this spawns
+        a real OS thread.
+      </p>
+
+      <!-- ============= LAUNCH::DEFERRED ============= -->
+      <h2>std::launch::deferred</h2>
+      <p>
+        The callable is <strong>not executed</strong> until the consumer calls
+        <code>get()</code> or <code>wait()</code> on the future. Execution
+        happens on the <em>caller's thread</em>, not on a new thread. This
+        is essentially lazy evaluation.
+      </p>
+<pre><code>#include &lt;future&gt;
+#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+int main() {
+    auto fut = std::async(std::launch::deferred, []{
+        std::cout &lt;&lt; "Executing on thread "
+                  &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
+        return 99;
+    });
+
+    std::cout &lt;&lt; "Main thread: "
+              &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
+
+    // Nothing has run yet.
+    std::cout &lt;&lt; "Result: " &lt;&lt; fut.get() &lt;&lt; "\n";
+    // Output shows both IDs are the same.
+}</code></pre>
+
+      <div class="callout">
+        <strong>Deferred + wait_for.</strong> If you call
+        <code>wait_for()</code> on a deferred future, it always returns
+        <code>std::future_status::deferred</code> without executing the task.
+        Only <code>get()</code> or <code>wait()</code> triggers execution.
+      </div>
+
+      <!-- ============= DEFAULT POLICY ============= -->
+      <h2>Default: async | deferred</h2>
+      <p>
+        When you omit the policy or use
+        <code>std::launch::async | std::launch::deferred</code>, the
+        implementation is free to choose either strategy. In practice, most
+        implementations choose <code>async</code> when system resources
+        permit and <code>deferred</code> as a fallback.
+      </p>
+<pre><code>// These are equivalent
+auto f1 = std::async(compute);
+auto f2 = std::async(std::launch::async | std::launch::deferred, compute);</code></pre>
+      <p>
+        Because the choice is implementation-defined, code that cares about
+        true concurrency should always specify <code>std::launch::async</code>
+        explicitly.
+      </p>
+
+      <!-- ========== THE DESTRUCTOR BLOCKS GOTCHA ========== -->
+      <h2>The Future Destructor Blocks</h2>
+      <p>
+        This is the single most surprising behaviour of <code>std::async</code>.
+        If the future returned by <code>std::async(launch::async, ...)</code>
+        is destroyed without being <code>get()</code>-ed, its destructor
+        <strong>blocks until the task completes</strong>. This applies
+        <em>only</em> to futures obtained from <code>std::async</code>, not
+        to futures from <code>std::promise</code> or
+        <code>std::packaged_task</code>.
+      </p>
+
+      <div class="callout">
+        <strong>Gotcha.</strong> <code>std::async</code> returns a special
+        future whose destructor joins the spawned thread. If you discard the
+        future, the "asynchronous" call becomes synchronous.
+      </div>
+
+      <!-- ======== SVG: destructor blocks visual ======== -->
+      <h3>Visualizing the Block</h3>
+      <p>
+        Step through to see how discarding the future turns an async call
+        into a blocking call.
+      </p>
+
+      <svg id="db-svg" viewBox="0 0 720 320" style="width:100%;max-width:720px;font-family:Manrope,sans-serif;background:#181c24;border-radius:10px;margin:1.2em 0">
+        <!-- timeline labels -->
+        <text x="20" y="55" fill="#5eead4" font-size="12" font-weight="700">Main</text>
+        <text x="20" y="175" fill="#818cf8" font-size="12" font-weight="700">Worker</text>
+
+        <!-- main timeline -->
+        <line x1="80" y1="50" x2="680" y2="50" stroke="#334155" stroke-width="2"/>
+        <!-- worker timeline -->
+        <line x1="80" y1="170" x2="680" y2="170" stroke="#334155" stroke-width="2"/>
+
+        <!-- step 0: initial state labels -->
+        <text id="db-m0" x="100" y="40" fill="#94a3b8" font-size="10">call async</text>
+        <rect id="db-m-async" x="100" y="44" width="60" height="12" rx="3" fill="#5eead4" opacity="0"/>
+
+        <rect id="db-w-work" x="170" y="164" width="200" height="12" rx="3" fill="#818cf8" opacity="0"/>
+        <text id="db-w-label" x="270" y="160" text-anchor="middle" fill="#818cf8" font-size="10" opacity="0">task running (2 sec)</text>
+
+        <!-- future destroyed marker -->
+        <line id="db-destroy" x1="170" y1="30" x2="170" y2="65" stroke="#f87171" stroke-width="2" opacity="0"/>
+        <text id="db-dlabel" x="170" y="25" text-anchor="middle" fill="#f87171" font-size="10" opacity="0">~future()</text>
+
+        <!-- blocked section on main -->
+        <rect id="db-block" x="170" y="44" width="200" height="12" rx="3" fill="#f87171" opacity="0"/>
+        <text id="db-blabel" x="270" y="90" text-anchor="middle" fill="#f87171" font-size="11" opacity="0">BLOCKED (destructor waits for task)</text>
+
+        <!-- resume marker -->
+        <text id="db-resume" x="380" y="40" fill="#5eead4" font-size="10" opacity="0">resumes</text>
+        <rect id="db-m-after" x="380" y="44" width="100" height="12" rx="3" fill="#5eead4" opacity="0"/>
+        <text id="db-next" x="430" y="40" fill="#94a3b8" font-size="10" opacity="0">next statement</text>
+
+        <!-- status text -->
+        <text id="db-status" x="360" y="260" text-anchor="middle" fill="#475569" font-size="12">Click Step to begin</text>
+
+        <!-- CORRECT pattern -->
+        <text x="80" y="300" fill="#94a3b8" font-size="11" opacity="0" id="db-fix">Fix: auto fut = std::async(...); /* use fut later */</text>
+      </svg>
+      <div style="display:flex;gap:.6rem;margin-bottom:1.4em">
+        <button onclick="dbStep()" style="padding:.35em 1.1em;border-radius:6px;border:1px solid #5eead4;background:transparent;color:#5eead4;cursor:pointer;font-size:.85rem">Step</button>
+        <button onclick="dbReset()" style="padding:.35em 1.1em;border-radius:6px;border:1px solid #475569;background:transparent;color:#94a3b8;cursor:pointer;font-size:.85rem">Reset</button>
+      </div>
+      <script>
+      (function(){
+        var s=0;
+        window.dbStep=function(){
+          s++;
+          var st=document.getElementById('db-status');
+          if(s===1){
+            document.getElementById('db-m-async').setAttribute('opacity','1');
+            st.textContent='Main calls std::async(launch::async, work)';
+          } else if(s===2){
+            document.getElementById('db-w-work').setAttribute('opacity','1');
+            document.getElementById('db-w-label').setAttribute('opacity','1');
+            st.textContent='Worker thread starts executing the task';
+          } else if(s===3){
+            document.getElementById('db-destroy').setAttribute('opacity','1');
+            document.getElementById('db-dlabel').setAttribute('opacity','1');
+            document.getElementById('db-block').setAttribute('opacity','1');
+            document.getElementById('db-blabel').setAttribute('opacity','1');
+            st.textContent='Future is discarded (temporary). Destructor BLOCKS main thread!';
+          } else if(s===4){
+            document.getElementById('db-resume').setAttribute('opacity','1');
+            document.getElementById('db-m-after').setAttribute('opacity','1');
+            document.getElementById('db-next').setAttribute('opacity','1');
+            st.textContent='Task finishes. Destructor returns. Main resumes.';
+          } else if(s===5){
+            document.getElementById('db-fix').setAttribute('opacity','1');
+            st.textContent='Fix: always capture the returned future in a named variable.';
+          }
+        };
+        window.dbReset=function(){
+          s=0;
+          ['db-m-async','db-w-work','db-w-label','db-destroy','db-dlabel',
+           'db-block','db-blabel','db-resume','db-m-after','db-next','db-fix'
+          ].forEach(function(id){document.getElementById(id).setAttribute('opacity','0');});
+          document.getElementById('db-status').textContent='Click Step to begin';
+        };
+      })();
+      </script>
+
+      <!-- ========= CODE: destructor blocks ========= -->
+      <h3>Demonstrating the Block</h3>
+<pre><code>#include &lt;future&gt;
+#include &lt;iostream&gt;
+#include &lt;chrono&gt;
+#include &lt;thread&gt;
+
+void slow_work() {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::cout &lt;&lt; "Work done\n";
+}
+
+int main() {
+    auto start = std::chrono::steady_clock::now();
+
+    // WRONG: future is a temporary, destroyed at end of statement
+    std::async(std::launch::async, slow_work);
+    // ^ destructor blocks here for 2 seconds!
+
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    auto ms = std::chrono::duration_cast&lt;std::chrono::milliseconds&gt;(
+        elapsed).count();
+    std::cout &lt;&lt; "Elapsed: " &lt;&lt; ms &lt;&lt; " ms\n";
+    // Prints ~2000 ms, NOT ~0 ms
+}</code></pre>
+      <p>
+        The returned future is a temporary. It is destroyed at the semicolon,
+        and the destructor blocks until <code>slow_work()</code> finishes. The
+        "asynchronous" call is effectively synchronous.
+      </p>
+
+      <h3>The Fix</h3>
+<pre><code>int main() {
+    auto start = std::chrono::steady_clock::now();
+
+    // CORRECT: capture in a named variable
+    auto fut = std::async(std::launch::async, slow_work);
+
+    // Main thread can do other work here...
+    std::cout &lt;&lt; "Doing other work...\n";
+
+    fut.get();  // wait only when we need the result
+
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    auto ms = std::chrono::duration_cast&lt;std::chrono::milliseconds&gt;(
+        elapsed).count();
+    std::cout &lt;&lt; "Elapsed: " &lt;&lt; ms &lt;&lt; " ms\n";
+}</code></pre>
+
+      <!-- ========= FIRE AND FORGET ========= -->
+      <h2>Fire-and-Forget with async</h2>
+      <p>
+        True fire-and-forget is <strong>impossible</strong> with
+        <code>std::async</code> because of the destructor-blocks rule.
+        If you truly need fire-and-forget, use a detached thread or a
+        dedicated thread pool that owns the futures.
+      </p>
+<pre><code>// True fire-and-forget using detached thread
+void fire_and_forget(auto&amp;&amp; f) {
+    std::thread(std::forward&lt;decltype(f)&gt;(f)).detach();
+}
+
+// Or: move the future into a long-lived container
+class AsyncPool {
+    std::vector&lt;std::future&lt;void&gt;&gt; futures_;
+public:
+    void spawn(auto&amp;&amp; f) {
+        futures_.push_back(
+            std::async(std::launch::async,
+                       std::forward&lt;decltype(f)&gt;(f)));
+    }
+    ~AsyncPool() {
+        for (auto&amp; f : futures_) f.get();
+    }
+};</code></pre>
+
+      <div class="callout">
+        <strong>Detached threads.</strong> Detaching threads avoids the
+        blocking destructor but introduces lifetime risks. The detached
+        thread must not access any stack-local variable that might go out
+        of scope. Prefer a pool-based approach in production code.
+      </div>
+
+      <!-- ======= RETURN VALUE HANDLING ======= -->
+      <h2>Return Value Handling</h2>
+      <p>
+        <code>std::async</code> deduces the return type of the callable and
+        produces a matching <code>std::future&lt;R&gt;</code>.
+      </p>
+<pre><code>#include &lt;future&gt;
+#include &lt;string&gt;
+#include &lt;iostream&gt;
+
+std::string greet(const std::string&amp; name) {
+    return "Hello, " + name + "!";
+}
+
+int main() {
+    std::future&lt;std::string&gt; fut =
+        std::async(std::launch::async, greet, "World");
+
+    std::cout &lt;&lt; fut.get() &lt;&lt; "\n";  // "Hello, World!"
+}</code></pre>
+
+      <h3>Returning void</h3>
+<pre><code>auto fut = std::async(std::launch::async, []{
+    // side-effect-only work
+    std::cout &lt;&lt; "Done\n";
+});
+fut.get();  // returns void, but still waits</code></pre>
+
+      <h3>Returning move-only types</h3>
+<pre><code>#include &lt;future&gt;
+#include &lt;memory&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    auto fut = std::async(std::launch::async, []{
+        return std::make_unique&lt;int&gt;(42);
+    });
+
+    std::unique_ptr&lt;int&gt; ptr = fut.get();  // moved out
+    std::cout &lt;&lt; *ptr &lt;&lt; "\n";              // 42
+}</code></pre>
+
+      <!-- ======= ASYNC VS THREAD ======= -->
+      <h2>When to Use async vs. Manual Threads</h2>
+      <table style="width:100%;border-collapse:collapse;margin:1em 0">
+        <thead>
+          <tr style="border-bottom:1px solid #334155">
+            <th style="text-align:left;padding:.4em .6em;color:#5eead4">Use case</th>
+            <th style="text-align:left;padding:.4em .6em;color:#5eead4">Recommendation</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #1e293b">
+            <td style="padding:.4em .6em">Compute a value and return it</td>
+            <td style="padding:.4em .6em"><code>std::async(launch::async, ...)</code></td>
+          </tr>
+          <tr style="border-bottom:1px solid #1e293b">
+            <td style="padding:.4em .6em">Long-lived background worker</td>
+            <td style="padding:.4em .6em"><code>std::thread</code> (or <code>std::jthread</code>)</td>
+          </tr>
+          <tr style="border-bottom:1px solid #1e293b">
+            <td style="padding:.4em .6em">Task queue with many short tasks</td>
+            <td style="padding:.4em .6em">Thread pool with <code>packaged_task</code></td>
+          </tr>
+          <tr style="border-bottom:1px solid #1e293b">
+            <td style="padding:.4em .6em">Need to control thread count</td>
+            <td style="padding:.4em .6em"><code>std::thread</code> pool</td>
+          </tr>
+          <tr style="border-bottom:1px solid #1e293b">
+            <td style="padding:.4em .6em">Lazy evaluation</td>
+            <td style="padding:.4em .6em"><code>std::async(launch::deferred, ...)</code></td>
+          </tr>
+          <tr>
+            <td style="padding:.4em .6em">Fire-and-forget</td>
+            <td style="padding:.4em .6em"><code>std::thread::detach()</code> or pool</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ======= DEFERRED PITFALLS ======= -->
+      <h2>Deferred Pitfalls with wait_for</h2>
+      <p>
+        A loop that polls via <code>wait_for</code> will never trigger a
+        deferred task. This can create an infinite loop if the default
+        policy selected deferred.
+      </p>
+<pre><code>// Potentially infinite loop if policy chooses deferred
+auto fut = std::async(compute);  // default policy
+
+while (fut.wait_for(std::chrono::milliseconds(10))
+       != std::future_status::ready) {
+    // If deferred, wait_for always returns deferred, never ready!
+    std::cout &lt;&lt; "Still waiting...\n";
+}
+
+// Safe version: check for deferred first
+auto fut2 = std::async(compute);
+if (fut2.wait_for(std::chrono::seconds(0))
+    == std::future_status::deferred) {
+    // Task is deferred; call get() to execute it now
+    auto result = fut2.get();
+} else {
+    // Task is (or will be) running asynchronously
+    while (fut2.wait_for(std::chrono::milliseconds(10))
+           != std::future_status::ready) {
+        // do other work
+    }
+    auto result = fut2.get();
+}</code></pre>
+
+      <!-- ===== PARALLEL COMPUTATION ===== -->
+      <h2>Complete Example: Parallel Summation</h2>
+<pre><code>#include &lt;future&gt;
+#include &lt;vector&gt;
+#include &lt;numeric&gt;
+#include &lt;iostream&gt;
+
+long long partial_sum(const std::vector&lt;int&gt;&amp; v,
+                      std::size_t lo, std::size_t hi) {
+    long long s = 0;
+    for (std::size_t i = lo; i &lt; hi; ++i) s += v[i];
+    return s;
+}
+
+int main() {
+    const std::size_t N = 10'000'000;
+    std::vector&lt;int&gt; data(N, 1);
+
+    std::size_t mid = N / 2;
+
+    auto fut1 = std::async(std::launch::async,
+                           partial_sum, std::cref(data), 0, mid);
+    auto fut2 = std::async(std::launch::async,
+                           partial_sum, std::cref(data), mid, N);
+
+    long long total = fut1.get() + fut2.get();
+    std::cout &lt;&lt; "Sum: " &lt;&lt; total &lt;&lt; "\n";  // 10000000
+}</code></pre>
+
+      <!-- ===== EXCEPTION FORWARDING ===== -->
+      <h2>Exception Forwarding</h2>
+      <p>
+        If the callable throws, the exception is stored in the shared state
+        and re-thrown when the consumer calls <code>get()</code>.
+      </p>
+<pre><code>#include &lt;future&gt;
+#include &lt;iostream&gt;
+#include &lt;stdexcept&gt;
+
+int main() {
+    auto fut = std::async(std::launch::async, []{
+        throw std::runtime_error("async failure");
+        return 0;
+    });
+
+    try {
+        fut.get();
+    } catch (const std::runtime_error&amp; e) {
+        std::cout &lt;&lt; "Caught from async: " &lt;&lt; e.what() &lt;&lt; "\n";
+    }
+}</code></pre>
+
+      <!-- ===== SUMMARY ===== -->
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li><code>launch::async</code> guarantees a new thread; <code>launch::deferred</code> executes lazily on the caller's thread.</li>
+        <li>The default policy lets the implementation choose. Specify explicitly when concurrency matters.</li>
+        <li>The future returned by <code>std::async</code> blocks in its destructor. Always capture it in a named variable.</li>
+        <li>True fire-and-forget is not possible with <code>std::async</code>; use a thread pool or detached thread.</li>
+        <li><code>wait_for</code> on a deferred future never returns <code>ready</code>; check for <code>deferred</code> first.</li>
+        <li>Exceptions thrown in the task are forwarded to the consumer on <code>get()</code>.</li>
+      </ul>
+
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

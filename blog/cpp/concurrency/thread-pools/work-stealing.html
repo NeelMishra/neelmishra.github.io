@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Work-stealing thread pools in C++: per-thread deques, the Chase-Lev algorithm, reducing contention, and handling unbalanced workloads.">
+  <title>Work-Stealing Thread Pools | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Thread Pools</a></div>
+      <h1>Work-Stealing Thread Pools</h1>
+      <p class="post-meta">March 2026</p>
+
+      <!-- ── Motivation ──────────────────────────────────────── -->
+      <section>
+        <h2>The Single-Queue Bottleneck</h2>
+        <p>
+          In the basic thread pool from the previous article, every task submission and every task retrieval goes
+          through one mutex. Under low contention that is perfectly fine, but when many workers compete for the
+          lock simultaneously, throughput drops because workers spend time spinning or sleeping on the mutex
+          instead of executing tasks.
+        </p>
+        <p>
+          The problem intensifies with <strong>unbalanced workloads</strong>: if some tasks produce sub-tasks at
+          high frequency while other workers sit idle, the single queue becomes a serialization point.
+        </p>
+        <div class="callout">
+          <strong>Key insight.</strong> Give each worker its own local queue. Workers push and pop from their own
+          queue without contention. When a worker runs out of work, it <em>steals</em> from another worker&rsquo;s
+          queue.
+        </div>
+      </section>
+
+      <!-- ── How Work Stealing Works ─────────────────────────── -->
+      <section>
+        <h2>How Work Stealing Works</h2>
+        <p>
+          Each worker thread owns a <strong>double-ended queue (deque)</strong>. The owning thread pushes and pops
+          from the <em>bottom</em> (private end), while thieves steal from the <em>top</em> (public end).
+        </p>
+        <ol>
+          <li>When a worker produces a new task (or receives one via <code>submit()</code>), it pushes onto the
+              bottom of its own deque.</li>
+          <li>When a worker needs work, it pops from the bottom of its own deque (LIFO order for cache
+              locality).</li>
+          <li>If a worker&rsquo;s deque is empty, it randomly selects another worker and tries to steal from the
+              <em>top</em> of that worker&rsquo;s deque (FIFO order).</li>
+        </ol>
+
+        <!-- SVG: work stealing diagram -->
+        <div class="svg-container" style="margin:2rem 0;">
+          <svg id="ws-svg" viewBox="0 0 700 300" style="width:100%;max-width:700px;font-family:'Manrope',sans-serif;font-size:12px;">
+            <!-- Worker 0 deque -->
+            <text x="100" y="20" text-anchor="middle" fill="#ccc" font-weight="700" font-size="13">Worker 0 Deque</text>
+            <rect x="30" y="30" width="140" height="220" rx="8" fill="#1a1a2e" stroke="#4cc9f0" stroke-width="2"/>
+            <text x="15" y="48" fill="#888" font-size="10">top</text>
+            <text x="7" y="240" fill="#888" font-size="10">bottom</text>
+            <rect id="ws-d0-0" x="40" y="40" width="120" height="30" rx="5" fill="#3a3a5c" stroke="#7b2ff7" stroke-width="1"/>
+            <text x="100" y="60" text-anchor="middle" fill="#e0e0e0" font-size="11">Task 1</text>
+            <rect id="ws-d0-1" x="40" y="78" width="120" height="30" rx="5" fill="#3a3a5c" stroke="#7b2ff7" stroke-width="1"/>
+            <text x="100" y="98" text-anchor="middle" fill="#e0e0e0" font-size="11">Task 2</text>
+            <rect id="ws-d0-2" x="40" y="116" width="120" height="30" rx="5" fill="#3a3a5c" stroke="#7b2ff7" stroke-width="1"/>
+            <text x="100" y="136" text-anchor="middle" fill="#e0e0e0" font-size="11">Task 3</text>
+            <rect id="ws-d0-3" x="40" y="154" width="120" height="30" rx="5" fill="#3a3a5c" stroke="#7b2ff7" stroke-width="1"/>
+            <text x="100" y="174" text-anchor="middle" fill="#e0e0e0" font-size="11">Task 4</text>
+            <rect id="ws-d0-4" x="40" y="192" width="120" height="30" rx="5" fill="#3a3a5c" stroke="#7b2ff7" stroke-width="1"/>
+            <text x="100" y="212" text-anchor="middle" fill="#e0e0e0" font-size="11">Task 5</text>
+
+            <!-- Worker 1 deque (empty) -->
+            <text x="350" y="20" text-anchor="middle" fill="#ccc" font-weight="700" font-size="13">Worker 1 Deque</text>
+            <rect x="280" y="30" width="140" height="220" rx="8" fill="#1a1a2e" stroke="#f72585" stroke-width="2"/>
+            <text x="350" y="150" text-anchor="middle" fill="#555" font-size="12" id="ws-w1-empty">(empty)</text>
+            <rect id="ws-d1-stolen" x="290" y="40" width="120" height="30" rx="5" fill="#f72585" stroke="#f72585" stroke-width="1" opacity="0"/>
+            <text id="ws-d1-stolen-t" x="350" y="60" text-anchor="middle" fill="#fff" font-size="11" opacity="0">Task 1 (stolen)</text>
+
+            <!-- Worker 2 deque (empty) -->
+            <text x="600" y="20" text-anchor="middle" fill="#ccc" font-weight="700" font-size="13">Worker 2 Deque</text>
+            <rect x="530" y="30" width="140" height="220" rx="8" fill="#1a1a2e" stroke="#4cc9f0" stroke-width="2"/>
+            <text x="600" y="150" text-anchor="middle" fill="#555" font-size="12" id="ws-w2-empty">(empty)</text>
+
+            <!-- Steal arrow -->
+            <path id="ws-arrow" d="M280,55 C230,55 200,45 170,45" fill="none" stroke="#f72585" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#ws-arrowhead)" opacity="0"/>
+            <text id="ws-steal-label" x="225" y="38" text-anchor="middle" fill="#f72585" font-weight="600" font-size="11" opacity="0">STEAL</text>
+            <defs>
+              <marker id="ws-arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+                <polygon points="0 0, 10 3.5, 0 7" fill="#f72585"/>
+              </marker>
+            </defs>
+            <!-- Pop arrow -->
+            <text id="ws-pop-label" x="100" y="280" text-anchor="middle" fill="#4cc9f0" font-weight="600" font-size="11" opacity="0">POP (owner)</text>
+            <line id="ws-pop-arrow" x1="100" y1="225" x2="100" y2="260" stroke="#4cc9f0" stroke-width="2" marker-end="url(#ws-arrowhead2)" opacity="0"/>
+            <defs>
+              <marker id="ws-arrowhead2" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+                <polygon points="0 0, 10 3.5, 0 7" fill="#4cc9f0"/>
+              </marker>
+            </defs>
+          </svg>
+          <div style="text-align:center;margin-top:.6rem;">
+            <button onclick="wsSvgStep()" style="padding:6px 18px;margin-right:8px;border:1px solid #4cc9f0;background:transparent;color:#4cc9f0;border-radius:6px;cursor:pointer;font-family:inherit;">Step</button>
+            <button onclick="wsSvgReset()" style="padding:6px 18px;border:1px solid #888;background:transparent;color:#888;border-radius:6px;cursor:pointer;font-family:inherit;">Reset</button>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          function $(id){return document.getElementById(id);}
+          function show(id){$(id).setAttribute('opacity','1');}
+          function hide(id){$(id).setAttribute('opacity','0');}
+          window.wsSvgStep=function(){
+            step++;
+            if(step===1){
+              show('ws-pop-label');show('ws-pop-arrow');
+              $('ws-d0-4').setAttribute('fill','#4cc9f0');
+            } else if(step===2){
+              show('ws-arrow');show('ws-steal-label');
+              $('ws-d0-0').setAttribute('fill','#f72585');
+            } else if(step===3){
+              hide('ws-w1-empty');
+              show('ws-d1-stolen');show('ws-d1-stolen-t');
+            }
+          };
+          window.wsSvgReset=function(){
+            step=0;
+            ['ws-pop-label','ws-pop-arrow','ws-arrow','ws-steal-label','ws-d1-stolen','ws-d1-stolen-t'].forEach(function(id){hide(id);});
+            $('ws-d0-4').setAttribute('fill','#3a3a5c');
+            $('ws-d0-0').setAttribute('fill','#3a3a5c');
+            $('ws-w1-empty').setAttribute('opacity','1');
+          };
+        })();
+        </script>
+        <p>
+          The owner pops from the bottom (Step 1), a thief steals from the top (Steps 2&ndash;3). The push/pop on
+          the bottom is a fast, often lock-free operation because only the owner touches it. Contention only
+          occurs during a steal, and steals are rare relative to local pops.
+        </p>
+      </section>
+
+      <!-- ── The Chase-Lev Deque ─────────────────────────────── -->
+      <section>
+        <h2>The Chase-Lev Deque</h2>
+        <p>
+          The foundational data structure for work stealing is the <strong>Chase-Lev deque</strong>, described by
+          David Chase and Yossi Lev (2005). It provides:
+        </p>
+        <ul>
+          <li><code>push()</code> and <code>pop()</code> at the bottom, called only by the owner thread.</li>
+          <li><code>steal()</code> at the top, callable by any other thread.</li>
+          <li><code>push</code> and <code>pop</code> are wait-free in the common case; <code>steal</code> uses a
+              single compare-and-swap.</li>
+        </ul>
+        <p>
+          It uses a circular buffer (resizable array) with two atomic indices: <code>top</code> and
+          <code>bottom</code>.
+        </p>
+
+        <h3>Interface</h3>
+        <pre><code class="language-cpp">template &lt;typename T&gt;
+class WorkStealingDeque {
+public:
+    explicit WorkStealingDeque(std::size_t capacity = 1024);
+
+    // Owner only
+    void push(T item);
+    std::optional&lt;T&gt; pop();
+
+    // Any thread
+    std::optional&lt;T&gt; steal();
+
+    std::size_t size() const;
+};</code></pre>
+
+        <h3>Circular Buffer</h3>
+        <pre><code class="language-cpp">template &lt;typename T&gt;
+class CircularBuffer {
+public:
+    explicit CircularBuffer(std::size_t capacity)
+        : capacity_(capacity)
+        , mask_(capacity - 1)
+        , buffer_(new T[capacity])
+    {
+        // capacity must be a power of two
+        assert((capacity &amp; (capacity - 1)) == 0);
+    }
+
+    T get(std::size_t index) const {
+        return buffer_[index &amp; mask_];
+    }
+
+    void put(std::size_t index, T value) {
+        buffer_[index &amp; mask_] = std::move(value);
+    }
+
+    // Grow the buffer, copying elements from old_top to old_bottom.
+    CircularBuffer* grow(std::size_t old_top,
+                         std::size_t old_bottom) {
+        auto* new_buf = new CircularBuffer(capacity_ * 2);
+        for (std::size_t i = old_top; i < old_bottom; ++i) {
+            new_buf->put(i, get(i));
+        }
+        return new_buf;
+    }
+
+    std::size_t capacity() const { return capacity_; }
+
+private:
+    std::size_t capacity_;
+    std::size_t mask_;
+    std::unique_ptr&lt;T[]&gt; buffer_;
+};</code></pre>
+
+        <h3>Core Operations</h3>
+        <pre><code class="language-cpp">template &lt;typename T&gt;
+class WorkStealingDeque {
+    std::atomic&lt;std::size_t&gt; top_{0};
+    std::atomic&lt;std::size_t&gt; bottom_{0};
+    std::atomic&lt;CircularBuffer&lt;T&gt;*&gt; buffer_;
+
+public:
+    explicit WorkStealingDeque(std::size_t capacity = 1024)
+        : buffer_(new CircularBuffer&lt;T&gt;(capacity)) {}
+
+    ~WorkStealingDeque() {
+        delete buffer_.load(std::memory_order_relaxed);
+    }
+
+    // Owner pushes at the bottom.
+    void push(T item) {
+        std::size_t b = bottom_.load(std::memory_order_relaxed);
+        std::size_t t = top_.load(std::memory_order_acquire);
+        auto* buf = buffer_.load(std::memory_order_relaxed);
+
+        if (b - t >= buf->capacity()) {
+            // Deque is full; grow.
+            auto* new_buf = buf->grow(t, b);
+            delete buf;
+            buffer_.store(new_buf, std::memory_order_relaxed);
+            buf = new_buf;
+        }
+
+        buf->put(b, std::move(item));
+        std::atomic_thread_fence(std::memory_order_release);
+        bottom_.store(b + 1, std::memory_order_relaxed);
+    }
+
+    // Owner pops from the bottom.
+    std::optional&lt;T&gt; pop() {
+        std::size_t b = bottom_.load(std::memory_order_relaxed) - 1;
+        auto* buf = buffer_.load(std::memory_order_relaxed);
+        bottom_.store(b, std::memory_order_relaxed);
+
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        std::size_t t = top_.load(std::memory_order_relaxed);
+        if (t &lt;= b) {
+            // Non-empty.
+            T item = buf->get(b);
+            if (t == b) {
+                // Last element: race with steal().
+                if (!top_.compare_exchange_strong(
+                        t, t + 1,
+                        std::memory_order_seq_cst,
+                        std::memory_order_relaxed)) {
+                    // Lost the race to a thief.
+                    bottom_.store(t + 1, std::memory_order_relaxed);
+                    return std::nullopt;
+                }
+                bottom_.store(t + 1, std::memory_order_relaxed);
+            }
+            return item;
+        }
+        // Deque was empty.
+        bottom_.store(t, std::memory_order_relaxed);
+        return std::nullopt;
+    }
+
+    // Any thread steals from the top.
+    std::optional&lt;T&gt; steal() {
+        std::size_t t = top_.load(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        std::size_t b = bottom_.load(std::memory_order_acquire);
+
+        if (t &lt; b) {
+            auto* buf = buffer_.load(std::memory_order_relaxed);
+            T item = buf->get(t);
+            if (!top_.compare_exchange_strong(
+                    t, t + 1,
+                    std::memory_order_seq_cst,
+                    std::memory_order_relaxed)) {
+                return std::nullopt;  // another thief won
+            }
+            return item;
+        }
+        return std::nullopt;
+    }
+
+    std::size_t size() const {
+        std::size_t b = bottom_.load(std::memory_order_relaxed);
+        std::size_t t = top_.load(std::memory_order_relaxed);
+        return (b > t) ? (b - t) : 0;
+    }
+};</code></pre>
+        <div class="callout">
+          <strong>Memory ordering matters.</strong> The <code>seq_cst</code> fence in <code>pop()</code> and the
+          matching fence in <code>steal()</code> prevent the owner and a thief from both successfully taking the
+          last element. Getting the ordering wrong leads to double-consumption or lost items.
+        </div>
+      </section>
+
+      <!-- ── Work-Stealing Pool ──────────────────────────────── -->
+      <section>
+        <h2>Putting It Together: A Work-Stealing Pool</h2>
+        <pre><code class="language-cpp">#include &lt;vector&gt;
+#include &lt;thread&gt;
+#include &lt;atomic&gt;
+#include &lt;functional&gt;
+#include &lt;random&gt;
+
+class WorkStealingPool {
+public:
+    explicit WorkStealingPool(std::size_t num_threads
+                              = std::thread::hardware_concurrency())
+        : stop_(false)
+        , num_threads_(num_threads == 0 ? 1 : num_threads)
+    {
+        deques_.reserve(num_threads_);
+        for (std::size_t i = 0; i &lt; num_threads_; ++i) {
+            deques_.emplace_back(
+                std::make_unique&lt;WorkStealingDeque&lt;
+                    std::function&lt;void()&gt;&gt;&gt;());
+        }
+
+        workers_.reserve(num_threads_);
+        for (std::size_t i = 0; i &lt; num_threads_; ++i) {
+            workers_.emplace_back([this, i] { run(i); });
+        }
+    }
+
+    WorkStealingPool(const WorkStealingPool&amp;) = delete;
+    WorkStealingPool&amp; operator=(const WorkStealingPool&amp;) = delete;
+
+    void submit(std::function&lt;void()&gt; task) {
+        // Round-robin distribution to local deques.
+        std::size_t idx = next_index_.fetch_add(1,
+            std::memory_order_relaxed) % num_threads_;
+        deques_[idx]-&gt;push(std::move(task));
+    }
+
+    void shutdown() {
+        stop_.store(true, std::memory_order_release);
+        for (auto&amp; w : workers_) {
+            if (w.joinable()) w.join();
+        }
+    }
+
+    ~WorkStealingPool() {
+        if (!stop_.load(std::memory_order_acquire)) {
+            shutdown();
+        }
+    }
+
+private:
+    void run(std::size_t my_index) {
+        thread_local std::mt19937 rng(
+            std::random_device{}());
+
+        while (!stop_.load(std::memory_order_acquire)) {
+            // 1. Try own deque first.
+            auto task = deques_[my_index]-&gt;pop();
+            if (task) { (*task)(); continue; }
+
+            // 2. Try stealing from a random other worker.
+            bool found = false;
+            for (std::size_t attempt = 0;
+                 attempt &lt; num_threads_; ++attempt) {
+                std::size_t victim =
+                    rng() % num_threads_;
+                if (victim == my_index) continue;
+                task = deques_[victim]-&gt;steal();
+                if (task) {
+                    (*task)();
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // 3. No work anywhere; yield to reduce CPU.
+                std::this_thread::yield();
+            }
+        }
+
+        // Drain own deque before exiting.
+        while (auto task = deques_[my_index]-&gt;pop()) {
+            (*task)();
+        }
+    }
+
+    std::atomic&lt;bool&gt; stop_;
+    std::size_t num_threads_;
+    std::atomic&lt;std::size_t&gt; next_index_{0};
+    std::vector&lt;std::unique_ptr&lt;
+        WorkStealingDeque&lt;std::function&lt;void()&gt;&gt;&gt;&gt; deques_;
+    std::vector&lt;std::thread&gt; workers_;
+};</code></pre>
+      </section>
+
+      <!-- ── When Work Stealing Helps ────────────────────────── -->
+      <section>
+        <h2>When Work Stealing Helps</h2>
+        <p>
+          Work stealing is not universally better than a single shared queue. It shines in specific scenarios:
+        </p>
+        <h3>Unbalanced Workloads</h3>
+        <p>
+          When tasks spawn sub-tasks unevenly (e.g., recursive divide-and-conquer), some workers accumulate large
+          backlogs while others run dry. Stealing redistributes work automatically.
+        </p>
+        <h3>Fork-Join Parallelism</h3>
+        <p>
+          Classic parallel algorithms like merge sort or quicksort split work recursively. The worker that
+          initiates the split pushes sub-tasks to its own deque, maintaining cache locality. Other workers steal
+          only when they have nothing else to do.
+        </p>
+        <pre><code class="language-cpp">// Parallel fibonacci with work stealing (illustrative)
+void parallel_fib(WorkStealingPool&amp; pool, int n,
+                  std::promise&lt;long long&gt; result) {
+    if (n &lt; 30) {
+        // Base case: compute sequentially.
+        result.set_value(fib_sequential(n));
+        return;
+    }
+
+    std::promise&lt;long long&gt; p1, p2;
+    auto f1 = p1.get_future();
+    auto f2 = p2.get_future();
+
+    pool.submit([&amp;pool, n, p = std::move(p1)]() mutable {
+        parallel_fib(pool, n - 1, std::move(p));
+    });
+    pool.submit([&amp;pool, n, p = std::move(p2)]() mutable {
+        parallel_fib(pool, n - 2, std::move(p));
+    });
+
+    result.set_value(f1.get() + f2.get());
+}</code></pre>
+
+        <h3>When It Does Not Help</h3>
+        <ul>
+          <li><strong>Uniform, coarse tasks.</strong> If every task takes roughly the same time, a round-robin
+              shared queue distributes load evenly with less complexity.</li>
+          <li><strong>Very few tasks.</strong> The overhead of per-thread deques is not justified if you only
+              submit a handful of tasks.</li>
+          <li><strong>High-frequency submission from one thread.</strong> A single producer flooding the pool is
+              better served by an MPMC queue.</li>
+        </ul>
+      </section>
+
+      <!-- ── Reducing Contention ─────────────────────────────── -->
+      <section>
+        <h2>Reducing Contention Further</h2>
+        <h3>LIFO for Locality, FIFO for Stealing</h3>
+        <p>
+          The owner processes tasks in LIFO order (most recently pushed). This maximizes temporal and spatial cache
+          locality because the most recent task likely shares data with the current task.
+        </p>
+        <p>
+          Thieves take from the FIFO end (oldest tasks first). Older tasks tend to represent larger, coarser units
+          of work, so a single steal gives the thief more to do before it needs to steal again.
+        </p>
+
+        <h3>Exponential Backoff</h3>
+        <p>
+          Instead of <code>std::this_thread::yield()</code> when no work is found, use exponential backoff to
+          reduce scheduler overhead:
+        </p>
+        <pre><code class="language-cpp">void backoff_wait(unsigned&amp; spin_count) {
+    if (spin_count &lt; 10) {
+        // Busy spin with pause hint.
+        for (unsigned i = 0; i &lt; (1u &lt;&lt; spin_count); ++i) {
+#if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+#else
+            std::this_thread::yield();
+#endif
+        }
+        ++spin_count;
+    } else {
+        // After many failed attempts, sleep briefly.
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(50));
+    }
+}
+
+// Reset spin_count to 0 whenever work is found.</code></pre>
+
+        <h3>Bounded Stealing Attempts</h3>
+        <p>
+          Rather than scanning all workers, limit stealing attempts to 2 or 3 random victims per round. If all
+          fail, back off. This prevents a thundering herd of idle workers all trying to steal from the same busy
+          worker.
+        </p>
+      </section>
+
+      <!-- ── Comparison ──────────────────────────────────────── -->
+      <section>
+        <h2>Comparison: Shared Queue vs. Work Stealing</h2>
+        <table style="width:100%;border-collapse:collapse;margin:1.2rem 0;">
+          <thead>
+            <tr style="border-bottom:2px solid #444;">
+              <th style="text-align:left;padding:8px;color:#ccc;">Property</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Shared Queue</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Work Stealing</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Contention</td>
+              <td style="padding:8px;">All threads on one lock</td>
+              <td style="padding:8px;">Mostly lock-free local ops</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Cache locality</td>
+              <td style="padding:8px;">Poor (tasks scattered)</td>
+              <td style="padding:8px;">LIFO pop preserves locality</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Load balancing</td>
+              <td style="padding:8px;">Automatic (one queue)</td>
+              <td style="padding:8px;">On-demand via stealing</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Complexity</td>
+              <td style="padding:8px;">Simple</td>
+              <td style="padding:8px;">Moderate (CAS, memory ordering)</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;">Best for</td>
+              <td style="padding:8px;">Uniform, moderate tasks</td>
+              <td style="padding:8px;">Unbalanced, recursive tasks</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Summary ─────────────────────────────────────────── -->
+      <section>
+        <h2>Summary</h2>
+        <ul>
+          <li>Work stealing gives each worker a private deque, eliminating the shared-queue bottleneck.</li>
+          <li>The Chase-Lev deque provides wait-free push/pop for the owner and CAS-based steal for thieves.</li>
+          <li>LIFO pop maximizes cache locality; FIFO steal transfers coarser work chunks.</li>
+          <li>Work stealing excels at fork-join parallelism and unbalanced workloads.</li>
+          <li>For uniform tasks or simple pools, a shared queue with a mutex is often sufficient.</li>
+        </ul>
+        <div class="callout">
+          <strong>Next up.</strong> Shutting down a pool cleanly is harder than it sounds. The next article covers
+          graceful shutdown: draining the queue, handling in-flight tasks, and exception safety.
+        </div>
+      </section>
+
+      <div class="post-series-nav" style="margin-top:2.5rem;">
+        <a href="basic-pool.html">&larr; Basic Thread Pool</a>
+        <a href="graceful-shutdown.html">Graceful Shutdown &rarr;</a>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

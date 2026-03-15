@@ -39,19 +39,100 @@ var BLOG_TREE = [
         label: 'Concurrency',
         children: [
           { title: 'Overview', file: 'cpp/concurrency/index.html', links: ['cpp/deep-dives/operator-overloading.html', 'cpp/concurrency/threads.html'] },
-          { title: 'Threads', file: 'cpp/concurrency/threads.html', links: ['cpp/concurrency/index.html', 'cpp/concurrency/sharing-data.html'] },
+          {
+            name: 'threads-series',
+            label: 'Threads',
+            children: [
+              { title: 'Threads', file: 'cpp/concurrency/threads.html', links: ['cpp/concurrency/index.html', 'cpp/concurrency/threads/creation-lifecycle.html'] },
+              { title: 'Creation & Lifecycle', file: 'cpp/concurrency/threads/creation-lifecycle.html', links: ['cpp/concurrency/threads.html', 'cpp/concurrency/threads/passing-arguments.html'] },
+              { title: 'Passing Arguments', file: 'cpp/concurrency/threads/passing-arguments.html', links: ['cpp/concurrency/threads/creation-lifecycle.html', 'cpp/concurrency/threads/returning-values.html'] },
+              { title: 'Returning Values', file: 'cpp/concurrency/threads/returning-values.html', links: ['cpp/concurrency/threads/passing-arguments.html', 'cpp/concurrency/threads/thread-local-raii.html'] },
+              { title: 'Thread-Local & RAII', file: 'cpp/concurrency/threads/thread-local-raii.html', links: ['cpp/concurrency/threads/returning-values.html', 'cpp/concurrency/sharing-data.html'] }
+            ]
+          },
           { title: 'Sharing Data', file: 'cpp/concurrency/sharing-data.html', links: ['cpp/concurrency/threads.html', 'cpp/concurrency/mutexes.html'] },
-          { title: 'Mutexes & Locks', file: 'cpp/concurrency/mutexes.html', links: ['cpp/concurrency/sharing-data.html', 'cpp/concurrency/deadlocks.html'] },
-          { title: 'Deadlocks & Hazards', file: 'cpp/concurrency/deadlocks.html', links: ['cpp/concurrency/mutexes.html', 'cpp/concurrency/condition-variables.html'] },
-          { title: 'Condition Variables', file: 'cpp/concurrency/condition-variables.html', links: ['cpp/concurrency/deadlocks.html', 'cpp/concurrency/atomics.html'] },
-          { title: 'Atomic Operations', file: 'cpp/concurrency/atomics.html', links: ['cpp/concurrency/condition-variables.html', 'cpp/concurrency/memory-model.html'] },
-          { title: 'Memory Model', file: 'cpp/concurrency/memory-model.html', links: ['cpp/concurrency/atomics.html', 'cpp/concurrency/futures-promises.html'] },
-          { title: 'Futures & Promises', file: 'cpp/concurrency/futures-promises.html', links: ['cpp/concurrency/memory-model.html', 'cpp/concurrency/async.html'] },
-          { title: 'std::async', file: 'cpp/concurrency/async.html', links: ['cpp/concurrency/futures-promises.html', 'cpp/concurrency/thread-pool.html'] },
-          { title: 'Thread Pools', file: 'cpp/concurrency/thread-pool.html', links: ['cpp/concurrency/async.html', 'cpp/concurrency/lock-free.html'] },
-          { title: 'Lock-Free Programming', file: 'cpp/concurrency/lock-free.html', links: ['cpp/concurrency/thread-pool.html', 'cpp/concurrency/parallel-algorithms.html'] },
-          { title: 'Parallel Algorithms', file: 'cpp/concurrency/parallel-algorithms.html', links: ['cpp/concurrency/lock-free.html', 'cpp/concurrency/coroutines.html'] },
-          { title: 'Coroutines', file: 'cpp/concurrency/coroutines.html', links: ['cpp/concurrency/parallel-algorithms.html', 'cpp/concurrency/patterns.html'] },
+          {
+            name: 'synchronization-series',
+            label: 'Synchronization',
+            children: [
+              { title: 'Mutexes & Locks', file: 'cpp/concurrency/mutexes.html', links: ['cpp/concurrency/sharing-data.html', 'cpp/concurrency/synchronization/mutex-types.html'] },
+              { title: 'Mutex Types', file: 'cpp/concurrency/synchronization/mutex-types.html', links: ['cpp/concurrency/mutexes.html', 'cpp/concurrency/synchronization/lock-guards.html'] },
+              { title: 'Lock Guards & Scoped Lock', file: 'cpp/concurrency/synchronization/lock-guards.html', links: ['cpp/concurrency/synchronization/mutex-types.html', 'cpp/concurrency/synchronization/reader-writer.html'] },
+              { title: 'Reader-Writer Locks', file: 'cpp/concurrency/synchronization/reader-writer.html', links: ['cpp/concurrency/synchronization/lock-guards.html', 'cpp/concurrency/synchronization/once-flag.html'] },
+              { title: 'std::once_flag & call_once', file: 'cpp/concurrency/synchronization/once-flag.html', links: ['cpp/concurrency/synchronization/reader-writer.html', 'cpp/concurrency/deadlocks.html'] }
+            ]
+          },
+          { title: 'Deadlocks & Hazards', file: 'cpp/concurrency/deadlocks.html', links: ['cpp/concurrency/synchronization/once-flag.html', 'cpp/concurrency/condition-variables.html'] },
+          {
+            name: 'condition-vars-series',
+            label: 'Condition Variables',
+            children: [
+              { title: 'Condition Variables', file: 'cpp/concurrency/condition-variables.html', links: ['cpp/concurrency/deadlocks.html', 'cpp/concurrency/condition-vars/basics.html'] },
+              { title: 'CV Basics', file: 'cpp/concurrency/condition-vars/basics.html', links: ['cpp/concurrency/condition-variables.html', 'cpp/concurrency/condition-vars/spurious-wakeups.html'] },
+              { title: 'Spurious Wakeups', file: 'cpp/concurrency/condition-vars/spurious-wakeups.html', links: ['cpp/concurrency/condition-vars/basics.html', 'cpp/concurrency/condition-vars/producer-consumer.html'] },
+              { title: 'Producer-Consumer', file: 'cpp/concurrency/condition-vars/producer-consumer.html', links: ['cpp/concurrency/condition-vars/spurious-wakeups.html', 'cpp/concurrency/condition-vars/barriers-latches.html'] },
+              { title: 'Barriers & Latches', file: 'cpp/concurrency/condition-vars/barriers-latches.html', links: ['cpp/concurrency/condition-vars/producer-consumer.html', 'cpp/concurrency/atomics.html'] }
+            ]
+          },
+          {
+            name: 'atomics-series',
+            label: 'Atomics',
+            children: [
+              { title: 'Atomic Operations', file: 'cpp/concurrency/atomics.html', links: ['cpp/concurrency/condition-vars/barriers-latches.html', 'cpp/concurrency/atomics-deep/atomic-types.html'] },
+              { title: 'Atomic Types', file: 'cpp/concurrency/atomics-deep/atomic-types.html', links: ['cpp/concurrency/atomics.html', 'cpp/concurrency/atomics-deep/compare-exchange.html'] },
+              { title: 'Compare-and-Exchange', file: 'cpp/concurrency/atomics-deep/compare-exchange.html', links: ['cpp/concurrency/atomics-deep/atomic-types.html', 'cpp/concurrency/atomics-deep/fetch-operations.html'] },
+              { title: 'Fetch Operations', file: 'cpp/concurrency/atomics-deep/fetch-operations.html', links: ['cpp/concurrency/atomics-deep/compare-exchange.html', 'cpp/concurrency/atomics-deep/wait-notify.html'] },
+              { title: 'Wait & Notify (C++20)', file: 'cpp/concurrency/atomics-deep/wait-notify.html', links: ['cpp/concurrency/atomics-deep/fetch-operations.html', 'cpp/concurrency/memory-model.html'] }
+            ]
+          },
+          { title: 'Memory Model', file: 'cpp/concurrency/memory-model.html', links: ['cpp/concurrency/atomics-deep/wait-notify.html', 'cpp/concurrency/futures-promises.html'] },
+          {
+            name: 'futures-async-series',
+            label: 'Futures & Async',
+            children: [
+              { title: 'Futures & Promises', file: 'cpp/concurrency/futures-promises.html', links: ['cpp/concurrency/memory-model.html', 'cpp/concurrency/futures-async/future-promise.html'] },
+              { title: 'Future-Promise Mechanics', file: 'cpp/concurrency/futures-async/future-promise.html', links: ['cpp/concurrency/futures-promises.html', 'cpp/concurrency/futures-async/async-policies.html'] },
+              { title: 'Async Launch Policies', file: 'cpp/concurrency/futures-async/async-policies.html', links: ['cpp/concurrency/futures-async/future-promise.html', 'cpp/concurrency/futures-async/packaged-task.html'] },
+              { title: 'Packaged Task', file: 'cpp/concurrency/futures-async/packaged-task.html', links: ['cpp/concurrency/futures-async/async-policies.html', 'cpp/concurrency/futures-async/shared-future.html'] },
+              { title: 'Shared Future', file: 'cpp/concurrency/futures-async/shared-future.html', links: ['cpp/concurrency/futures-async/packaged-task.html', 'cpp/concurrency/futures-async/exception-propagation.html'] },
+              { title: 'Exception Propagation', file: 'cpp/concurrency/futures-async/exception-propagation.html', links: ['cpp/concurrency/futures-async/shared-future.html', 'cpp/concurrency/async.html'] }
+            ]
+          },
+          { title: 'std::async', file: 'cpp/concurrency/async.html', links: ['cpp/concurrency/futures-async/exception-propagation.html', 'cpp/concurrency/thread-pool.html'] },
+          {
+            name: 'thread-pools-series',
+            label: 'Thread Pools',
+            children: [
+              { title: 'Thread Pools', file: 'cpp/concurrency/thread-pool.html', links: ['cpp/concurrency/async.html', 'cpp/concurrency/thread-pools/basic-pool.html'] },
+              { title: 'Basic Thread Pool', file: 'cpp/concurrency/thread-pools/basic-pool.html', links: ['cpp/concurrency/thread-pool.html', 'cpp/concurrency/thread-pools/work-stealing.html'] },
+              { title: 'Work Stealing', file: 'cpp/concurrency/thread-pools/work-stealing.html', links: ['cpp/concurrency/thread-pools/basic-pool.html', 'cpp/concurrency/thread-pools/graceful-shutdown.html'] },
+              { title: 'Graceful Shutdown', file: 'cpp/concurrency/thread-pools/graceful-shutdown.html', links: ['cpp/concurrency/thread-pools/work-stealing.html', 'cpp/concurrency/thread-pools/async-io-integration.html'] },
+              { title: 'Async I/O Integration', file: 'cpp/concurrency/thread-pools/async-io-integration.html', links: ['cpp/concurrency/thread-pools/graceful-shutdown.html', 'cpp/concurrency/lock-free.html'] }
+            ]
+          },
+          {
+            name: 'lock-free-series',
+            label: 'Lock-Free Programming',
+            children: [
+              { title: 'Lock-Free Programming', file: 'cpp/concurrency/lock-free.html', links: ['cpp/concurrency/thread-pools/async-io-integration.html', 'cpp/concurrency/lock-free-deep/lock-free-stack.html'] },
+              { title: 'Lock-Free Stack', file: 'cpp/concurrency/lock-free-deep/lock-free-stack.html', links: ['cpp/concurrency/lock-free.html', 'cpp/concurrency/lock-free-deep/lock-free-queue.html'] },
+              { title: 'Lock-Free Queue', file: 'cpp/concurrency/lock-free-deep/lock-free-queue.html', links: ['cpp/concurrency/lock-free-deep/lock-free-stack.html', 'cpp/concurrency/lock-free-deep/aba-problem.html'] },
+              { title: 'ABA Problem', file: 'cpp/concurrency/lock-free-deep/aba-problem.html', links: ['cpp/concurrency/lock-free-deep/lock-free-queue.html', 'cpp/concurrency/lock-free-deep/hazard-pointers.html'] },
+              { title: 'Hazard Pointers', file: 'cpp/concurrency/lock-free-deep/hazard-pointers.html', links: ['cpp/concurrency/lock-free-deep/aba-problem.html', 'cpp/concurrency/parallel-algorithms.html'] }
+            ]
+          },
+          {
+            name: 'parallel-patterns-series',
+            label: 'Parallel Patterns',
+            children: [
+              { title: 'Parallel Algorithms', file: 'cpp/concurrency/parallel-algorithms.html', links: ['cpp/concurrency/lock-free-deep/hazard-pointers.html', 'cpp/concurrency/parallel-patterns/fork-join.html'] },
+              { title: 'Fork-Join', file: 'cpp/concurrency/parallel-patterns/fork-join.html', links: ['cpp/concurrency/parallel-algorithms.html', 'cpp/concurrency/parallel-patterns/map-reduce.html'] },
+              { title: 'Map-Reduce', file: 'cpp/concurrency/parallel-patterns/map-reduce.html', links: ['cpp/concurrency/parallel-patterns/fork-join.html', 'cpp/concurrency/parallel-patterns/pipeline.html'] },
+              { title: 'Pipeline Pattern', file: 'cpp/concurrency/parallel-patterns/pipeline.html', links: ['cpp/concurrency/parallel-patterns/map-reduce.html', 'cpp/concurrency/parallel-patterns/actor-model.html'] },
+              { title: 'Actor Model', file: 'cpp/concurrency/parallel-patterns/actor-model.html', links: ['cpp/concurrency/parallel-patterns/pipeline.html', 'cpp/concurrency/coroutines.html'] }
+            ]
+          },
+          { title: 'Coroutines', file: 'cpp/concurrency/coroutines.html', links: ['cpp/concurrency/parallel-patterns/actor-model.html', 'cpp/concurrency/patterns.html'] },
           { title: 'Concurrency Patterns', file: 'cpp/concurrency/patterns.html', links: ['cpp/concurrency/coroutines.html'] }
         ]
       }

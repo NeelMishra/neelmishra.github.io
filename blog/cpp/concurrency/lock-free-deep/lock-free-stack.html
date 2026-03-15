@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Implementing a lock-free stack in C++ using compare-and-swap (CAS), Treiber stack algorithm, memory ordering choices, and correctness reasoning.">
+  <title>Lock-Free Stack | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Lock-Free</a></div>
+      <h1>Lock-Free Stack</h1>
+      <p class="post-meta">March 2026</p>
+
+      <p>A lock-free stack is the canonical introduction to lock-free data structures. It relies on a single atomic pointer to the head of a singly linked list and uses <code>compare_exchange_weak</code> (CAS) to swing that pointer atomically. The resulting structure is known as the <strong>Treiber stack</strong>, first described by R. Kent Treiber in 1986.</p>
+
+      <h2 id="why-lock-free">Why Lock-Free?</h2>
+      <p>A mutex-based stack serialises every push and pop behind a single lock. Under contention this creates two problems: threads that hold the lock can be preempted, stalling every other thread; and the OS scheduler has no idea that the waiting threads are actually ready to make progress the moment the lock is released.</p>
+      <p>A lock-free algorithm guarantees that at least one thread makes progress in a finite number of steps, regardless of the scheduling decisions the OS makes. This does not mean every thread makes progress (that would be wait-free); it means the system as a whole cannot be stuck.</p>
+
+      <h2 id="node-layout">Node Layout</h2>
+      <p>Each node stores a value and a pointer to the next node:</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+struct Node {
+    T data;
+    Node* next;
+
+    explicit Node(const T&amp; val) : data(val), next(nullptr) {}
+    explicit Node(T&amp;&amp; val) : data(std::move(val)), next(nullptr) {}
+};</code></pre>
+      <p>The stack itself holds an atomic pointer to the top node:</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+class LockFreeStack {
+    std::atomic&lt;Node&lt;T&gt;*&gt; head_{nullptr};
+public:
+    void push(const T&amp; val);
+    bool pop(T&amp; result);
+    ~LockFreeStack();
+};</code></pre>
+
+      <h2 id="push-operation">Push Operation</h2>
+      <p>Push allocates a new node, sets its <code>next</code> to the current head, then tries to swing <code>head_</code> from the old value to the new node. If another thread modified <code>head_</code> in the meantime, the CAS fails and we retry.</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+void LockFreeStack&lt;T&gt;::push(const T&amp; val) {
+    Node&lt;T&gt;* new_node = new Node&lt;T&gt;(val);
+    new_node-&gt;next = head_.load(std::memory_order_relaxed);
+
+    // CAS loop: try to swing head_ from old_head to new_node
+    while (!head_.compare_exchange_weak(
+                new_node-&gt;next,   // expected (updated on failure)
+                new_node,         // desired
+                std::memory_order_release,  // success
+                std::memory_order_relaxed)) // failure
+    {
+        // On failure, new_node-&gt;next is automatically updated
+        // to the current value of head_. Just retry.
+    }
+}</code></pre>
+
+      <div class="callout"><strong>Why compare_exchange_weak?</strong> On architectures with LL/SC (load-linked/store-conditional), <code>compare_exchange_weak</code> may fail spuriously, but it compiles to fewer instructions than <code>compare_exchange_strong</code>. Since we are already in a retry loop, spurious failures cost nothing.</div>
+
+      <h2 id="pop-operation">Pop Operation</h2>
+      <p>Pop reads the current head, reads its <code>next</code> pointer, and tries to swing <code>head_</code> from the old head to the next node. On success it extracts the data and returns true.</p>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+bool LockFreeStack&lt;T&gt;::pop(T&amp; result) {
+    Node&lt;T&gt;* old_head = head_.load(std::memory_order_relaxed);
+
+    while (old_head != nullptr) {
+        // Read next before CAS, because after CAS succeeds another
+        // thread might immediately free old_head.
+        Node&lt;T&gt;* next = old_head-&gt;next;
+
+        if (head_.compare_exchange_weak(
+                old_head,  // expected (updated on failure)
+                next,      // desired
+                std::memory_order_acquire,  // success
+                std::memory_order_relaxed)) // failure
+        {
+            result = std::move(old_head-&gt;data);
+            // WARNING: deleting old_head here is NOT safe in the
+            // general case. See the ABA problem article.
+            delete old_head;
+            return true;
+        }
+        // On failure, old_head is updated to new head_. Retry.
+    }
+    return false; // stack was empty
+}</code></pre>
+
+      <div class="callout"><strong>Danger: memory reclamation.</strong> The <code>delete old_head</code> above is only safe if no other thread is concurrently reading <code>old_head-&gt;next</code>. In a concurrent pop, another thread may still hold a reference to that node. This is the root of the ABA problem, which we address in a <a href="aba-problem.html">dedicated article</a>.</div>
+
+      <h2 id="memory-ordering">Memory Ordering Choices</h2>
+      <p>The ordering constraints are chosen deliberately:</p>
+      <table>
+        <thead><tr><th>Operation</th><th>Success ordering</th><th>Failure ordering</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>push CAS</td><td><code>release</code></td><td><code>relaxed</code></td><td>The release ensures that the node construction (writes to <code>data</code> and <code>next</code>) is visible to the thread that later pops the node with an acquire load.</td></tr>
+          <tr><td>pop CAS</td><td><code>acquire</code></td><td><code>relaxed</code></td><td>The acquire synchronises with the release in push, ensuring we see fully initialised node data.</td></tr>
+          <tr><td>Initial head load</td><td colspan="2"><code>relaxed</code></td><td>The load merely provides a hint for the CAS. If it is stale, the CAS will fail and we retry. No ordering is needed.</td></tr>
+        </tbody>
+      </table>
+      <p>Together, push-release and pop-acquire form a release-acquire pair. Every successful pop synchronises-with the push that created the node, establishing a happens-before edge that makes the node data visible.</p>
+
+      <h2 id="treiber-stack">The Treiber Stack</h2>
+      <p>The algorithm above is exactly the Treiber stack. Its key properties:</p>
+      <ul>
+        <li><strong>Lock-free</strong>: if one thread is suspended mid-CAS, other threads can still push and pop successfully.</li>
+        <li><strong>Linearisable</strong>: each push and pop takes effect atomically at the point where its CAS succeeds. The linearisation point is the successful <code>compare_exchange</code>.</li>
+        <li><strong>LIFO ordering</strong>: the most recently pushed item is always at the head.</li>
+      </ul>
+
+      <h2 id="svg-visualization">CAS Push/Pop Visualization</h2>
+      <p>The diagram below shows a linked list with <code>head</code> pointing to the top. Use <strong>Step</strong> to advance through a push operation followed by a pop, and <strong>Reset</strong> to start over.</p>
+
+      <svg id="cas-viz" viewBox="0 0 700 340" style="width:100%;max-width:700px;font-family:'Manrope',sans-serif;user-select:none;">
+        <!-- arrowhead marker -->
+        <defs>
+          <marker id="arrowM" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#334155"/>
+          </marker>
+        </defs>
+
+        <!-- existing nodes -->
+        <rect id="nodeC" x="460" y="130" width="90" height="50" rx="8" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+        <text x="505" y="161" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">C</text>
+
+        <rect id="nodeB" x="300" y="130" width="90" height="50" rx="8" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+        <text x="345" y="161" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">B</text>
+
+        <rect id="nodeA" x="140" y="130" width="90" height="50" rx="8" fill="#e2e8f0" stroke="#64748b" stroke-width="2"/>
+        <text x="185" y="161" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">A</text>
+
+        <!-- arrows between nodes -->
+        <line x1="230" y1="155" x2="298" y2="155" stroke="#334155" stroke-width="2" marker-end="url(#arrowM)"/>
+        <line x1="390" y1="155" x2="458" y2="155" stroke="#334155" stroke-width="2" marker-end="url(#arrowM)"/>
+
+        <!-- head pointer -->
+        <text id="headLabel" x="185" y="105" text-anchor="middle" font-size="13" font-weight="700" fill="#6366f1">head</text>
+        <line id="headArrow" x1="185" y1="110" x2="185" y2="128" stroke="#6366f1" stroke-width="2" marker-end="url(#arrowM)"/>
+
+        <!-- new node (hidden initially) -->
+        <g id="newNodeGroup" opacity="0">
+          <rect id="newNode" x="30" y="240" width="90" height="50" rx="8" fill="#bbf7d0" stroke="#16a34a" stroke-width="2"/>
+          <text x="75" y="271" text-anchor="middle" font-size="15" font-weight="700" fill="#14532d">X</text>
+          <text id="newLabel" x="75" y="310" text-anchor="middle" font-size="11" fill="#16a34a">new_node</text>
+        </g>
+
+        <!-- new node arrow to A (hidden) -->
+        <line id="newArrow" x1="120" y1="265" x2="155" y2="182" stroke="#16a34a" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrowM)" opacity="0"/>
+
+        <!-- status text -->
+        <text id="statusText" x="350" y="30" text-anchor="middle" font-size="14" fill="#475569">Click Step to begin a push of node X</text>
+
+        <!-- CAS flash rect (hidden) -->
+        <rect id="casFlash" x="0" y="0" width="700" height="340" rx="12" fill="#6366f1" opacity="0" pointer-events="none"/>
+      </svg>
+      <div style="text-align:center;margin-top:8px;">
+        <button onclick="casStep()" style="padding:6px 20px;margin-right:8px;border-radius:6px;border:1px solid #64748b;cursor:pointer;font-family:inherit;font-weight:600;">Step</button>
+        <button onclick="casReset()" style="padding:6px 20px;border-radius:6px;border:1px solid #64748b;cursor:pointer;font-family:inherit;font-weight:600;">Reset</button>
+      </div>
+
+      <script>
+      (function(){
+        var step = 0;
+        var maxStep = 6;
+        var svg = document.getElementById('cas-viz');
+        function $(id){ return document.getElementById(id); }
+
+        function setAttr(id,attr,val){ $(id).setAttribute(attr,val); }
+
+        window.casStep = function(){
+          step++;
+          if(step === 1){
+            // Show new node
+            setAttr('newNodeGroup','opacity','1');
+            $('statusText').textContent = 'Step 1: Allocate node X';
+          } else if(step === 2){
+            // Set new_node->next = head (A)
+            setAttr('newArrow','opacity','1');
+            $('statusText').textContent = 'Step 2: new_node->next = head (points to A)';
+          } else if(step === 3){
+            // CAS succeeds: head now points to X
+            // flash
+            setAttr('casFlash','opacity','0.08');
+            setTimeout(function(){ setAttr('casFlash','opacity','0'); }, 250);
+            // move new node up
+            setAttr('newNode','y','130');
+            setAttr('newNode','x','10');
+            $('newNodeGroup').querySelector('text').setAttribute('y','161');
+            $('newNodeGroup').querySelector('text').setAttribute('x','55');
+            $('newLabel').setAttribute('y','120');
+            $('newLabel').setAttribute('x','55');
+            setAttr('newArrow','x1','100');
+            setAttr('newArrow','y1','155');
+            setAttr('newArrow','x2','138');
+            setAttr('newArrow','y2','155');
+            $('newArrow').setAttribute('stroke-dasharray','');
+            // head now points to X
+            setAttr('headArrow','x1','55');
+            setAttr('headArrow','x2','55');
+            setAttr('headArrow','y1','110');
+            setAttr('headArrow','y2','128');
+            $('headLabel').setAttribute('x','55');
+            $('statusText').textContent = 'Step 3: CAS succeeds! head now points to X. Push complete.';
+          } else if(step === 4){
+            $('statusText').textContent = 'Step 4: Begin pop. old_head = head (X). Read next = A.';
+          } else if(step === 5){
+            setAttr('casFlash','opacity','0.08');
+            setTimeout(function(){ setAttr('casFlash','opacity','0'); }, 250);
+            // head back to A
+            setAttr('headArrow','x1','185');
+            setAttr('headArrow','x2','185');
+            $('headLabel').setAttribute('x','185');
+            // fade out X
+            setAttr('newNodeGroup','opacity','0.3');
+            setAttr('newArrow','opacity','0.3');
+            $('statusText').textContent = 'Step 5: CAS succeeds! head swings to A. X is popped.';
+          } else if(step === 6){
+            setAttr('newNodeGroup','opacity','0');
+            setAttr('newArrow','opacity','0');
+            $('statusText').textContent = 'Step 6: Node X deleted (freed). Stack is A -> B -> C.';
+          } else {
+            step = maxStep;
+          }
+        };
+
+        window.casReset = function(){
+          step = 0;
+          setAttr('newNodeGroup','opacity','0');
+          setAttr('newArrow','opacity','0');
+          setAttr('newNode','x','30'); setAttr('newNode','y','240');
+          var texts = $('newNodeGroup').querySelectorAll('text');
+          texts[0].setAttribute('x','75'); texts[0].setAttribute('y','271');
+          $('newLabel').setAttribute('x','75'); $('newLabel').setAttribute('y','310');
+          setAttr('newArrow','x1','120'); setAttr('newArrow','y1','265');
+          setAttr('newArrow','x2','155'); setAttr('newArrow','y2','182');
+          $('newArrow').setAttribute('stroke-dasharray','5,3');
+          setAttr('headArrow','x1','185'); setAttr('headArrow','x2','185');
+          setAttr('headArrow','y1','110'); setAttr('headArrow','y2','128');
+          $('headLabel').setAttribute('x','185');
+          $('statusText').textContent = 'Click Step to begin a push of node X';
+        };
+      })();
+      </script>
+
+      <h2 id="correctness">Correctness Reasoning</h2>
+      <p>To argue correctness we need to show two things: <strong>safety</strong> (the stack is always in a consistent state) and <strong>progress</strong> (the system never gets stuck).</p>
+
+      <h3>Safety: Linearisability</h3>
+      <p>Consider any concurrent execution. Each push or pop contains exactly one successful CAS (or, for pop on an empty stack, a read that sees <code>nullptr</code>). We assign the linearisation point to that CAS. Since CAS on an atomic variable is itself atomic, the linearisation points form a total order. In that total order:</p>
+      <ul>
+        <li>Every push inserts its node at the head.</li>
+        <li>Every pop removes the node at the head.</li>
+        <li>No node is removed twice (a successful CAS is a unique swap).</li>
+      </ul>
+      <p>This corresponds exactly to a sequential LIFO stack.</p>
+
+      <h3>Progress: Lock-Freedom</h3>
+      <p>If a CAS fails, it means another thread's CAS succeeded. In any finite window of CAS attempts across all threads, at least one succeeds and completes its operation. Therefore the algorithm is lock-free.</p>
+      <p>Note: individual threads can starve if they keep losing the CAS race. This is acceptable under the lock-free guarantee but not under wait-free. Making the stack wait-free is substantially harder and rarely necessary in practice.</p>
+
+      <h2 id="compare-exchange-details">compare_exchange_weak vs. compare_exchange_strong</h2>
+<pre><code class="language-cpp">// compare_exchange_weak: may fail spuriously on LL/SC architectures
+// Use when you ALREADY have a retry loop.
+bool compare_exchange_weak(T&amp; expected, T desired,
+                           memory_order success,
+                           memory_order failure);
+
+// compare_exchange_strong: no spurious failures
+// Use when you need a single-shot CAS without a loop.
+bool compare_exchange_strong(T&amp; expected, T desired,
+                             memory_order success,
+                             memory_order failure);</code></pre>
+      <p>On x86, both compile to the same <code>LOCK CMPXCHG</code> instruction. The distinction matters only on ARM and POWER, where LL/SC can fail spuriously. Since our push and pop already loop, <code>compare_exchange_weak</code> is the right choice.</p>
+
+      <h2 id="full-implementation">Full Implementation</h2>
+<pre><code class="language-cpp">#include &lt;atomic&gt;
+#include &lt;optional&gt;
+
+template &lt;typename T&gt;
+class TreiberStack {
+    struct Node {
+        T data;
+        Node* next;
+        template &lt;typename U&gt;
+        explicit Node(U&amp;&amp; val) : data(std::forward&lt;U&gt;(val)), next(nullptr) {}
+    };
+
+    std::atomic&lt;Node*&gt; head_{nullptr};
+
+public:
+    void push(T val) {
+        Node* node = new Node(std::move(val));
+        node-&gt;next = head_.load(std::memory_order_relaxed);
+        while (!head_.compare_exchange_weak(
+                    node-&gt;next, node,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+        { /* retry */ }
+    }
+
+    std::optional&lt;T&gt; pop() {
+        Node* old = head_.load(std::memory_order_relaxed);
+        while (old != nullptr) {
+            if (head_.compare_exchange_weak(
+                    old, old-&gt;next,
+                    std::memory_order_acquire,
+                    std::memory_order_relaxed))
+            {
+                T val = std::move(old-&gt;data);
+                // In production, use hazard pointers or epoch-based
+                // reclamation instead of raw delete.
+                delete old;
+                return val;
+            }
+        }
+        return std::nullopt;
+    }
+
+    ~TreiberStack() {
+        Node* cur = head_.load(std::memory_order_relaxed);
+        while (cur) {
+            Node* next = cur-&gt;next;
+            delete cur;
+            cur = next;
+        }
+    }
+
+    // Non-copyable, non-movable
+    TreiberStack() = default;
+    TreiberStack(const TreiberStack&amp;) = delete;
+    TreiberStack&amp; operator=(const TreiberStack&amp;) = delete;
+};</code></pre>
+
+      <h2 id="testing">Testing Under Contention</h2>
+<pre><code class="language-cpp">#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;cassert&gt;
+#include &lt;set&gt;
+
+void stress_test() {
+    TreiberStack&lt;int&gt; stack;
+    constexpr int N = 100000;
+    constexpr int T = 4;
+
+    // T threads each push N values
+    std::vector&lt;std::thread&gt; pushers;
+    for (int t = 0; t &lt; T; ++t) {
+        pushers.emplace_back([&amp;stack, t]() {
+            for (int i = 0; i &lt; N; ++i) {
+                stack.push(t * N + i);
+            }
+        });
+    }
+    for (auto&amp; th : pushers) th.join();
+
+    // T threads collectively pop all values
+    std::vector&lt;std::vector&lt;int&gt;&gt; results(T);
+    std::vector&lt;std::thread&gt; poppers;
+    for (int t = 0; t &lt; T; ++t) {
+        poppers.emplace_back([&amp;stack, &amp;results, t]() {
+            while (auto val = stack.pop()) {
+                results[t].push_back(*val);
+            }
+        });
+    }
+    for (auto&amp; th : poppers) th.join();
+
+    // Verify: every value popped exactly once
+    std::set&lt;int&gt; all;
+    for (auto&amp; v : results)
+        for (int x : v) all.insert(x);
+    assert(all.size() == T * N);
+    for (int i = 0; i &lt; T * N; ++i)
+        assert(all.count(i) == 1);
+}</code></pre>
+
+      <h2 id="performance">Performance Considerations</h2>
+      <ul>
+        <li><strong>Cache-line contention</strong>: every push and pop touches <code>head_</code>. Under high contention the cache line bounces across cores. An elimination array (backoff technique) can alleviate this.</li>
+        <li><strong>Memory allocation</strong>: each push calls <code>new</code>. A per-thread memory pool amortises allocation cost.</li>
+        <li><strong>False sharing</strong>: align <code>head_</code> to a cache line boundary using <code>alignas(64)</code>.</li>
+      </ul>
+<pre><code class="language-cpp">template &lt;typename T&gt;
+class AlignedTreiberStack {
+    struct Node { /* ... */ };
+    alignas(64) std::atomic&lt;Node*&gt; head_{nullptr};
+    // ...
+};</code></pre>
+
+      <h2 id="limitations">Limitations</h2>
+      <ol>
+        <li><strong>ABA problem</strong>: the naive <code>delete</code> in pop is unsafe. A thread may read <code>old-&gt;next</code> after another thread pops and frees <code>old</code>, then pushes a new node at the same address. The CAS succeeds but <code>next</code> points to garbage. See <a href="aba-problem.html">ABA Problem</a>.</li>
+        <li><strong>No size query</strong>: there is no efficient way to atomically read the stack size without a separate counter, and maintaining a counter adds another contention point.</li>
+        <li><strong>Unbounded memory</strong>: without safe reclamation, popped nodes cannot be freed. Solutions include hazard pointers and epoch-based reclamation.</li>
+      </ol>
+
+      <h2 id="summary">Summary</h2>
+      <p>The Treiber stack is the simplest lock-free data structure: a singly linked list guarded by a single atomic CAS. Its correctness follows from the atomicity of <code>compare_exchange</code>, and its lock-freedom from the fact that every failed CAS implies a successful one by another thread. The main open problem is safe memory reclamation, which motivates hazard pointers, epoch-based reclamation, and tagged-pointer approaches.</p>
+
+      <div class="post-series-nav" style="margin-top:2em;">
+        <span>Next: <a href="lock-free-queue.html">Lock-Free Queue</a></span>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

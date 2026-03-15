@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="How to stop a C++ thread pool cleanly: poison pills, atomic flags, draining queues, handling in-flight tasks, exception safety, and destructor behavior.">
+  <title>Graceful Thread Pool Shutdown | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Thread Pools</a></div>
+      <h1>Graceful Thread Pool Shutdown</h1>
+      <p class="post-meta">March 2026</p>
+
+      <!-- ── Introduction ────────────────────────────────────── -->
+      <section>
+        <h2>Why Shutdown Is Hard</h2>
+        <p>
+          Building a thread pool is straightforward. <em>Stopping</em> it correctly is where the subtle bugs
+          live. You need to answer several questions simultaneously:
+        </p>
+        <ul>
+          <li>Should pending tasks in the queue execute before workers exit, or be discarded?</li>
+          <li>What about tasks that are mid-execution when shutdown is requested?</li>
+          <li>How do workers learn that it is time to stop?</li>
+          <li>What if a task throws during shutdown?</li>
+          <li>Is the destructor safe if <code>shutdown()</code> was never called?</li>
+        </ul>
+        <p>
+          Getting any of these wrong leads to deadlocks (workers waiting on a condition variable that is never
+          notified), resource leaks (threads never joined), or undefined behavior (destroying a mutex while a
+          thread is blocked on it).
+        </p>
+      </section>
+
+      <!-- ── Signaling Strategies ────────────────────────────── -->
+      <section>
+        <h2>Signaling Strategies</h2>
+        <p>
+          There are two common approaches for telling workers to stop.
+        </p>
+
+        <h3>Approach 1: Atomic Stop Flag</h3>
+        <p>
+          The pool maintains an <code>std::atomic&lt;bool&gt; stop_</code> flag. When the controller calls
+          <code>shutdown()</code>, it sets the flag and notifies all waiting threads.
+        </p>
+        <pre><code class="language-cpp">void shutdown() {
+    {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+        stop_.store(true);
+    }
+    cv_.notify_all();
+
+    for (auto&amp; t : workers_) {
+        if (t.joinable()) t.join();
+    }
+}
+
+// Worker loop
+void worker() {
+    while (true) {
+        std::function&lt;void()&gt; task;
+        {
+            std::unique_lock&lt;std::mutex&gt; lock(mtx_);
+            cv_.wait(lock, [this] {
+                return !queue_.empty() || stop_.load();
+            });
+            if (stop_.load() &amp;&amp; queue_.empty()) return;
+            task = std::move(queue_.front());
+            queue_.pop();
+        }
+        task();
+    }
+}</code></pre>
+        <div class="callout">
+          <strong>Drain vs. discard.</strong> The condition <code>stop_ &amp;&amp; queue_.empty()</code> means
+          workers drain the queue before exiting. Change it to just <code>stop_</code> for immediate exit.
+        </div>
+
+        <h3>Approach 2: Poison Pills</h3>
+        <p>
+          Instead of a flag, push a special &ldquo;poison pill&rdquo; task for each worker. When a worker dequeues a
+          poison pill, it exits.
+        </p>
+        <pre><code class="language-cpp">void shutdown() {
+    // Push one poison pill per worker.
+    for (std::size_t i = 0; i &lt; workers_.size(); ++i) {
+        {
+            std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+            queue_.push(nullptr);  // nullptr = poison pill
+        }
+        cv_.notify_one();
+    }
+
+    for (auto&amp; t : workers_) {
+        if (t.joinable()) t.join();
+    }
+}
+
+// Worker loop
+void worker() {
+    while (true) {
+        std::function&lt;void()&gt; task;
+        {
+            std::unique_lock&lt;std::mutex&gt; lock(mtx_);
+            cv_.wait(lock, [this] { return !queue_.empty(); });
+            task = std::move(queue_.front());
+            queue_.pop();
+        }
+        if (!task) return;  // poison pill
+        task();
+    }
+}</code></pre>
+        <p>
+          Poison pills guarantee that all tasks enqueued <em>before</em> the pills are executed first, providing
+          natural draining. However, they require knowing the exact number of workers and cannot be &ldquo;cancelled&rdquo;
+          once enqueued.
+        </p>
+
+        <h3>Comparison</h3>
+        <table style="width:100%;border-collapse:collapse;margin:1.2rem 0;">
+          <thead>
+            <tr style="border-bottom:2px solid #444;">
+              <th style="text-align:left;padding:8px;color:#ccc;">Aspect</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Atomic Flag</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Poison Pill</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Draining behavior</td>
+              <td style="padding:8px;">Configurable</td>
+              <td style="padding:8px;">Always drains</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Extra state</td>
+              <td style="padding:8px;">One atomic bool</td>
+              <td style="padding:8px;">N sentinel tasks</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Cancellable</td>
+              <td style="padding:8px;">Yes (reset flag)</td>
+              <td style="padding:8px;">No</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;">Complexity</td>
+              <td style="padding:8px;">Slightly more logic in wait</td>
+              <td style="padding:8px;">Simpler worker loop</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          In practice, the atomic flag approach is more flexible and is the standard choice.
+        </p>
+      </section>
+
+      <!-- ── Draining the Queue ──────────────────────────────── -->
+      <section>
+        <h2>Draining the Queue</h2>
+        <p>
+          When you want to ensure all submitted tasks complete before the pool is destroyed, the shutdown sequence
+          is:
+        </p>
+        <ol>
+          <li>Stop accepting new tasks (reject or throw on new <code>submit()</code> calls).</li>
+          <li>Set the stop flag.</li>
+          <li>Notify all workers.</li>
+          <li>Workers continue popping and executing until the queue is empty, then exit.</li>
+          <li>Join all threads.</li>
+        </ol>
+        <pre><code class="language-cpp">void shutdown() {
+    {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+        stop_.store(true);
+    }
+    cv_.notify_all();
+
+    for (auto&amp; t : workers_) {
+        if (t.joinable()) t.join();
+    }
+    // At this point, the queue is empty and all workers have exited.
+}</code></pre>
+        <p>
+          The critical line in the worker loop is:
+        </p>
+        <pre><code class="language-cpp">if (stop_.load() &amp;&amp; queue_.empty()) return;</code></pre>
+        <p>
+          The worker checks <code>stop_</code> <em>and</em> <code>queue_.empty()</code>. If the queue is not
+          empty, it pops another task even though stop has been requested.
+        </p>
+        <div class="callout">
+          <strong>Beware infinite producers.</strong> If tasks enqueue further tasks, the queue may never drain.
+          Guard against this by rejecting <code>submit()</code> after <code>stop_</code> is set.
+        </div>
+      </section>
+
+      <!-- ── Handling In-Flight Tasks ────────────────────────── -->
+      <section>
+        <h2>Handling In-Flight Tasks</h2>
+        <p>
+          A task that is currently executing on a worker thread cannot be interrupted by the pool. C++ has no
+          built-in thread cancellation mechanism (unlike Java&rsquo;s <code>Thread.interrupt()</code>). You have
+          two options:
+        </p>
+
+        <h3>Option A: Let Them Finish</h3>
+        <p>
+          This is the default and safest approach. <code>join()</code> blocks until every in-flight task completes
+          naturally. The total shutdown time is bounded by the longest-running task.
+        </p>
+
+        <h3>Option B: Cooperative Cancellation</h3>
+        <p>
+          Pass a cancellation token to tasks so they can check periodically:
+        </p>
+        <pre><code class="language-cpp">class CancellationToken {
+public:
+    void cancel() {
+        cancelled_.store(true, std::memory_order_release);
+    }
+    bool is_cancelled() const {
+        return cancelled_.load(std::memory_order_acquire);
+    }
+private:
+    std::atomic&lt;bool&gt; cancelled_{false};
+};
+
+// Usage inside a task
+void long_running_task(CancellationToken&amp; token) {
+    for (int i = 0; i &lt; 1000000; ++i) {
+        if (token.is_cancelled()) return;
+        // ... do work ...
+    }
+}
+
+// On shutdown
+void shutdown() {
+    cancel_token_.cancel();  // signal all tasks
+
+    {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+        stop_.store(true);
+    }
+    cv_.notify_all();
+
+    for (auto&amp; t : workers_) {
+        if (t.joinable()) t.join();
+    }
+}</code></pre>
+
+        <h3>C++20: std::stop_token</h3>
+        <p>
+          C++20 introduced <code>std::stop_token</code> and <code>std::stop_source</code> as a standardized
+          cooperative cancellation mechanism. If you are on C++20 or later, prefer these over rolling your own:
+        </p>
+        <pre><code class="language-cpp">#include &lt;stop_token&gt;
+
+void task_with_stop(std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
+        // ... do work ...
+    }
+}
+
+// The pool holds a std::stop_source and passes
+// stop_source_.get_token() to each task.</code></pre>
+      </section>
+
+      <!-- ── Exception Safety ────────────────────────────────── -->
+      <section>
+        <h2>Exception Safety During Shutdown</h2>
+        <p>
+          What happens if a task throws while the pool is shutting down? The exception is captured by
+          <code>std::packaged_task</code> and stored in the future. The worker thread itself is not terminated. It
+          simply moves on to the next task (or exits if the queue is empty and <code>stop_</code> is set).
+        </p>
+        <p>
+          However, if you are using raw <code>std::function&lt;void()&gt;</code> without a
+          <code>packaged_task</code> wrapper, an uncaught exception will call <code>std::terminate()</code>. Always
+          wrap task execution in a try-catch at the worker level:
+        </p>
+        <pre><code class="language-cpp">void worker() {
+    while (true) {
+        std::function&lt;void()&gt; task;
+        {
+            std::unique_lock&lt;std::mutex&gt; lock(mtx_);
+            cv_.wait(lock, [this] {
+                return !queue_.empty() || stop_.load();
+            });
+            if (stop_.load() &amp;&amp; queue_.empty()) return;
+            task = std::move(queue_.front());
+            queue_.pop();
+        }
+        try {
+            task();
+        } catch (const std::exception&amp; e) {
+            // Log the error. Do NOT rethrow.
+            // The worker must survive to process
+            // remaining tasks.
+            std::cerr &lt;&lt; "Task threw: " &lt;&lt; e.what()
+                      &lt;&lt; "\n";
+        } catch (...) {
+            std::cerr &lt;&lt; "Task threw unknown exception\n";
+        }
+    }
+}</code></pre>
+        <div class="callout">
+          <strong>Key invariant.</strong> A single task&rsquo;s failure must never take down the entire pool.
+          Each task is isolated: it runs, it completes (or fails), and the worker moves on.
+        </div>
+
+        <h3>Exceptions in the Destructor</h3>
+        <p>
+          The pool destructor calls <code>shutdown()</code>, which calls <code>join()</code> on each thread.
+          <code>join()</code> itself does not throw under normal conditions. The destructor should be
+          <code>noexcept</code> (the default for destructors in C++11 and later), so make sure
+          <code>shutdown()</code> does not throw either.
+        </p>
+        <pre><code class="language-cpp">~ThreadPool() noexcept {
+    try {
+        if (!stop_.load()) shutdown();
+    } catch (...) {
+        // Swallow. Destructors must not throw.
+    }
+}</code></pre>
+      </section>
+
+      <!-- ── Destructor Behavior ─────────────────────────────── -->
+      <section>
+        <h2>Destructor Behavior</h2>
+        <p>
+          A well-designed pool destructor must handle two scenarios:
+        </p>
+        <ol>
+          <li><strong>User called <code>shutdown()</code>.</strong> Workers are already joined. The destructor is a
+              no-op.</li>
+          <li><strong>User did not call <code>shutdown()</code>.</strong> The destructor must shut down the pool
+              itself. This means setting the stop flag, waking all workers, and joining them.</li>
+        </ol>
+        <pre><code class="language-cpp">class ThreadPool {
+    // ...
+    ~ThreadPool() noexcept {
+        if (!stop_.load(std::memory_order_acquire)) {
+            shutdown();
+        }
+    }
+};</code></pre>
+        <p>
+          Without this guard, destroying the pool while workers reference its members (mutex, condition variable,
+          queue) is undefined behavior. The <code>std::thread</code> destructor calls <code>std::terminate()</code>
+          if the thread is still joinable.
+        </p>
+
+        <!-- SVG: shutdown sequence -->
+        <div class="svg-container" style="margin:2rem 0;">
+          <svg id="shutdown-svg" viewBox="0 0 660 260" style="width:100%;max-width:660px;font-family:'Manrope',sans-serif;font-size:12px;">
+            <!-- Timeline -->
+            <line x1="40" y1="130" x2="620" y2="130" stroke="#555" stroke-width="1.5"/>
+            <text x="330" y="258" text-anchor="middle" fill="#888" font-size="11">Time</text>
+            <line x1="600" y1="125" x2="620" y2="130" stroke="#555" stroke-width="1.5"/>
+            <line x1="600" y1="135" x2="620" y2="130" stroke="#555" stroke-width="1.5"/>
+
+            <!-- Phase labels -->
+            <rect id="sh-p1" x="50" y="110" width="120" height="40" rx="6" fill="#1a1a2e" stroke="#4cc9f0" stroke-width="2"/>
+            <text x="110" y="135" text-anchor="middle" fill="#4cc9f0" font-size="11" font-weight="600">stop_ = true</text>
+
+            <rect id="sh-p2" x="190" y="110" width="120" height="40" rx="6" fill="#1a1a2e" stroke="#7b2ff7" stroke-width="2" opacity="0"/>
+            <text id="sh-p2t" x="250" y="135" text-anchor="middle" fill="#7b2ff7" font-size="11" font-weight="600" opacity="0">notify_all()</text>
+
+            <rect id="sh-p3" x="330" y="110" width="130" height="40" rx="6" fill="#1a1a2e" stroke="#f0a500" stroke-width="2" opacity="0"/>
+            <text id="sh-p3t" x="395" y="135" text-anchor="middle" fill="#f0a500" font-size="11" font-weight="600" opacity="0">drain queue</text>
+
+            <rect id="sh-p4" x="480" y="110" width="110" height="40" rx="6" fill="#1a1a2e" stroke="#f72585" stroke-width="2" opacity="0"/>
+            <text id="sh-p4t" x="535" y="135" text-anchor="middle" fill="#f72585" font-size="11" font-weight="600" opacity="0">join threads</text>
+
+            <!-- Worker status bars -->
+            <text x="40" y="80" fill="#ccc" font-size="11" font-weight="600">Workers</text>
+            <rect id="sh-w1" x="50" y="60" width="290" height="14" rx="3" fill="#3a3a5c"/>
+            <text x="195" y="71" text-anchor="middle" fill="#aaa" font-size="9">executing tasks</text>
+            <rect id="sh-w1b" x="340" y="60" width="120" height="14" rx="3" fill="#3a3a5c" opacity="0"/>
+            <text id="sh-w1bt" x="400" y="71" text-anchor="middle" fill="#aaa" font-size="9" opacity="0">draining</text>
+            <rect id="sh-w1c" x="460" y="60" width="60" height="14" rx="3" fill="#2a2a2a" opacity="0"/>
+            <text id="sh-w1ct" x="490" y="71" text-anchor="middle" fill="#666" font-size="9" opacity="0">exited</text>
+
+            <!-- Labels -->
+            <text x="40" y="180" fill="#ccc" font-size="11" font-weight="600">Queue</text>
+            <rect x="50" y="185" width="180" height="14" rx="3" fill="#7b2ff7" opacity="0.4"/>
+            <text x="140" y="196" text-anchor="middle" fill="#ccc" font-size="9">pending tasks</text>
+            <rect id="sh-q2" x="230" y="185" width="230" height="14" rx="3" fill="#333" opacity="0"/>
+            <text id="sh-q2t" x="345" y="196" text-anchor="middle" fill="#666" font-size="9" opacity="0">emptying</text>
+            <rect id="sh-q3" x="460" y="185" width="60" height="14" rx="3" fill="#1a1a2e" opacity="0"/>
+            <text id="sh-q3t" x="490" y="196" text-anchor="middle" fill="#555" font-size="9" opacity="0">empty</text>
+
+            <text x="40" y="230" fill="#ccc" font-size="11" font-weight="600">Submit</text>
+            <rect x="50" y="215" width="60" height="14" rx="3" fill="#0a6" opacity="0.5"/>
+            <text x="80" y="226" text-anchor="middle" fill="#ccc" font-size="9">open</text>
+            <rect id="sh-s2" x="110" y="215" width="500" height="14" rx="3" fill="#600" opacity="0"/>
+            <text id="sh-s2t" x="360" y="226" text-anchor="middle" fill="#f66" font-size="9" opacity="0">rejected (throws)</text>
+          </svg>
+          <div style="text-align:center;margin-top:.6rem;">
+            <button onclick="shSvgStep()" style="padding:6px 18px;margin-right:8px;border:1px solid #4cc9f0;background:transparent;color:#4cc9f0;border-radius:6px;cursor:pointer;font-family:inherit;">Step</button>
+            <button onclick="shSvgReset()" style="padding:6px 18px;border:1px solid #888;background:transparent;color:#888;border-radius:6px;cursor:pointer;font-family:inherit;">Reset</button>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          function $(id){return document.getElementById(id);}
+          function show(id){$(id).setAttribute('opacity','1');}
+          function hide(id){$(id).setAttribute('opacity','0');}
+          window.shSvgStep=function(){
+            step++;
+            if(step===1){show('sh-p2');show('sh-p2t');show('sh-s2');show('sh-s2t');}
+            else if(step===2){show('sh-p3');show('sh-p3t');show('sh-q2');show('sh-q2t');show('sh-w1b');show('sh-w1bt');}
+            else if(step===3){show('sh-p4');show('sh-p4t');show('sh-q3');show('sh-q3t');show('sh-w1c');show('sh-w1ct');}
+          };
+          window.shSvgReset=function(){
+            step=0;
+            ['sh-p2','sh-p2t','sh-p3','sh-p3t','sh-p4','sh-p4t','sh-q2','sh-q2t','sh-q3','sh-q3t','sh-w1b','sh-w1bt','sh-w1c','sh-w1ct','sh-s2','sh-s2t'].forEach(function(id){hide(id);});
+          };
+        })();
+        </script>
+      </section>
+
+      <!-- ── Complete Shutdown-Safe Pool ──────────────────────── -->
+      <section>
+        <h2>Complete Shutdown-Safe Pool</h2>
+        <p>
+          Combining all the pieces, here is a pool that supports both graceful draining and immediate stop, with
+          full exception safety:
+        </p>
+        <pre><code class="language-cpp">#include &lt;vector&gt;
+#include &lt;queue&gt;
+#include &lt;thread&gt;
+#include &lt;mutex&gt;
+#include &lt;condition_variable&gt;
+#include &lt;functional&gt;
+#include &lt;future&gt;
+#include &lt;atomic&gt;
+#include &lt;stdexcept&gt;
+#include &lt;iostream&gt;
+
+class ThreadPool {
+public:
+    enum class ShutdownPolicy { Drain, Immediate };
+
+    explicit ThreadPool(std::size_t n
+                        = std::thread::hardware_concurrency())
+        : stop_(false), policy_(ShutdownPolicy::Drain)
+    {
+        if (n == 0) n = 1;
+        workers_.reserve(n);
+        for (std::size_t i = 0; i &lt; n; ++i) {
+            workers_.emplace_back([this] { run(); });
+        }
+    }
+
+    ThreadPool(const ThreadPool&amp;) = delete;
+    ThreadPool&amp; operator=(const ThreadPool&amp;) = delete;
+
+    template &lt;typename F, typename... Args&gt;
+    auto submit(F&amp;&amp; f, Args&amp;&amp;... args)
+        -&gt; std::future&lt;std::invoke_result_t&lt;F, Args...&gt;&gt;
+    {
+        using R = std::invoke_result_t&lt;F, Args...&gt;;
+        auto task = std::make_shared&lt;
+            std::packaged_task&lt;R()&gt;&gt;(
+                std::bind(std::forward&lt;F&gt;(f),
+                          std::forward&lt;Args&gt;(args)...));
+        auto future = task-&gt;get_future();
+        {
+            std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+            if (stop_.load()) {
+                throw std::runtime_error(
+                    "submit on stopped pool");
+            }
+            tasks_.push([task] { (*task)(); });
+        }
+        cv_.notify_one();
+        return future;
+    }
+
+    void shutdown(ShutdownPolicy policy
+                  = ShutdownPolicy::Drain) {
+        {
+            std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+            policy_ = policy;
+            stop_.store(true);
+        }
+        cv_.notify_all();
+        for (auto&amp; t : workers_) {
+            if (t.joinable()) t.join();
+        }
+    }
+
+    ~ThreadPool() noexcept {
+        try {
+            if (!stop_.load()) shutdown();
+        } catch (...) {}
+    }
+
+private:
+    void run() {
+        while (true) {
+            std::function&lt;void()&gt; task;
+            {
+                std::unique_lock&lt;std::mutex&gt; lock(mtx_);
+                cv_.wait(lock, [this] {
+                    return !tasks_.empty() || stop_.load();
+                });
+
+                if (stop_.load()) {
+                    if (policy_ == ShutdownPolicy::Immediate
+                        || tasks_.empty()) {
+                        return;
+                    }
+                }
+
+                if (tasks_.empty()) return;
+
+                task = std::move(tasks_.front());
+                tasks_.pop();
+            }
+
+            try {
+                task();
+            } catch (const std::exception&amp; e) {
+                std::cerr &lt;&lt; "[pool] task error: "
+                          &lt;&lt; e.what() &lt;&lt; "\n";
+            } catch (...) {
+                std::cerr &lt;&lt; "[pool] unknown task error\n";
+            }
+        }
+    }
+
+    std::vector&lt;std::thread&gt; workers_;
+    std::queue&lt;std::function&lt;void()&gt;&gt; tasks_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::atomic&lt;bool&gt; stop_;
+    ShutdownPolicy policy_;
+};</code></pre>
+      </section>
+
+      <!-- ── Testing Shutdown ────────────────────────────────── -->
+      <section>
+        <h2>Testing Shutdown Behavior</h2>
+        <pre><code class="language-cpp">#include &lt;cassert&gt;
+#include &lt;chrono&gt;
+
+void test_graceful_drain() {
+    ThreadPool pool(2);
+    std::atomic&lt;int&gt; counter{0};
+
+    for (int i = 0; i &lt; 100; ++i) {
+        pool.submit([&amp;counter] {
+            ++counter;
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1));
+        });
+    }
+
+    pool.shutdown(ThreadPool::ShutdownPolicy::Drain);
+    assert(counter.load() == 100);
+    // All 100 tasks completed.
+}
+
+void test_immediate_stop() {
+    ThreadPool pool(2);
+    std::atomic&lt;int&gt; counter{0};
+
+    for (int i = 0; i &lt; 1000; ++i) {
+        pool.submit([&amp;counter] {
+            ++counter;
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(10));
+        });
+    }
+
+    pool.shutdown(ThreadPool::ShutdownPolicy::Immediate);
+    // counter &lt; 1000: some tasks were discarded.
+    std::cout &lt;&lt; "Completed " &lt;&lt; counter.load()
+              &lt;&lt; " of 1000 tasks\n";
+}
+
+void test_submit_after_shutdown() {
+    ThreadPool pool(2);
+    pool.shutdown();
+
+    bool threw = false;
+    try {
+        pool.submit([] {});
+    } catch (const std::runtime_error&amp;) {
+        threw = true;
+    }
+    assert(threw);
+}
+
+void test_destructor_without_shutdown() {
+    std::atomic&lt;int&gt; counter{0};
+    {
+        ThreadPool pool(2);
+        for (int i = 0; i &lt; 50; ++i) {
+            pool.submit([&amp;counter] { ++counter; });
+        }
+        // pool goes out of scope without explicit shutdown
+    }
+    assert(counter.load() == 50);
+}
+
+int main() {
+    test_graceful_drain();
+    test_immediate_stop();
+    test_submit_after_shutdown();
+    test_destructor_without_shutdown();
+    std::cout &lt;&lt; "All shutdown tests passed.\n";
+    return 0;
+}</code></pre>
+      </section>
+
+      <!-- ── Common Bugs ─────────────────────────────────────── -->
+      <section>
+        <h2>Common Shutdown Bugs</h2>
+
+        <h3>Bug: Notification Before Flag</h3>
+        <pre><code class="language-cpp">// WRONG: workers may see the notify but not the flag
+cv_.notify_all();
+stop_.store(true);
+
+// CORRECT: set flag under lock, then notify
+{
+    std::lock_guard&lt;std::mutex&gt; lock(mtx_);
+    stop_.store(true);
+}
+cv_.notify_all();</code></pre>
+        <p>
+          If <code>notify_all()</code> fires before <code>stop_</code> is set, workers wake up, see
+          <code>stop_ == false</code> and the queue empty, and go back to sleep. The subsequent
+          <code>stop_ = true</code> is never noticed because no further notification arrives.
+        </p>
+
+        <h3>Bug: Double Shutdown</h3>
+        <p>
+          If <code>shutdown()</code> is called twice, the second call attempts to <code>join()</code> threads that
+          are already joined, which is undefined behavior. Guard with a check:
+        </p>
+        <pre><code class="language-cpp">void shutdown() {
+    bool expected = false;
+    if (!stop_.compare_exchange_strong(expected, true)) {
+        return;  // already shut down
+    }
+    cv_.notify_all();
+    for (auto&amp; t : workers_) {
+        if (t.joinable()) t.join();
+    }
+}</code></pre>
+
+        <h3>Bug: Destroying the Mutex While Blocked</h3>
+        <p>
+          If the destructor runs without joining threads, the <code>std::mutex</code> and
+          <code>std::condition_variable</code> are destroyed while workers are blocked on them. This is undefined
+          behavior and typically crashes. Always join all threads before the pool object is destroyed.
+        </p>
+      </section>
+
+      <!-- ── Summary ─────────────────────────────────────────── -->
+      <section>
+        <h2>Summary</h2>
+        <ul>
+          <li>Use an atomic flag and <code>notify_all()</code> as the primary signaling mechanism.</li>
+          <li>Decide between drain (complete pending tasks) and immediate stop (discard pending tasks).</li>
+          <li>In-flight tasks cannot be forcibly interrupted; use cooperative cancellation tokens.</li>
+          <li>Wrap task execution in try-catch to isolate failures from the pool infrastructure.</li>
+          <li>The destructor must join all threads. Guard against double shutdown.</li>
+          <li>Set the flag <em>before</em> notifying, under the lock, to avoid lost wakeups.</li>
+        </ul>
+        <div class="callout">
+          <strong>Next up.</strong> The final article in this series explores integrating thread pools with async
+          I/O, covering proactor vs. reactor patterns and how blocking I/O degrades pool performance.
+        </div>
+      </section>
+
+      <div class="post-series-nav" style="margin-top:2.5rem;">
+        <a href="work-stealing.html">&larr; Work-Stealing Queues</a>
+        <a href="async-io-integration.html">Async I/O Integration &rarr;</a>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

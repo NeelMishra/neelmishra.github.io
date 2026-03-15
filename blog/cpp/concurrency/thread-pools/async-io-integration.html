@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Integrating C++ thread pools with async I/O: proactor vs reactor patterns, epoll and IOCP, why blocking I/O in a pool is harmful, and a look at Boost.Asio and std::execution.">
+  <title>Thread Pools and Async I/O Integration | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">C++ &middot; Concurrency &middot; Thread Pools</a></div>
+      <h1>Thread Pools and Async I/O Integration</h1>
+      <p class="post-meta">March 2026</p>
+
+      <!-- ── Introduction ────────────────────────────────────── -->
+      <section>
+        <h2>The Problem with Blocking I/O in a Thread Pool</h2>
+        <p>
+          A thread pool works by keeping a fixed number of worker threads busy executing tasks. If a task
+          performs <strong>blocking I/O</strong> (reading from a socket, waiting on a file descriptor), that
+          worker sits idle for the duration of the I/O operation. The thread is unavailable for other tasks
+          even though it is doing no useful work.
+        </p>
+        <p>
+          With enough blocking tasks, every worker in the pool can stall simultaneously, leaving CPU-bound
+          tasks queued behind them. Throughput drops to zero until some I/O completes and frees a thread.
+        </p>
+        <div class="callout">
+          <strong>The fundamental tension.</strong> Thread pools are designed to multiplex many tasks onto a few
+          threads. Blocking I/O breaks this multiplexing because one blocked thread can no longer service other
+          tasks.
+        </div>
+
+        <!-- SVG: blocking vs async -->
+        <div class="svg-container" style="margin:2rem 0;">
+          <svg id="bio-svg" viewBox="0 0 660 260" style="width:100%;max-width:660px;font-family:'Manrope',sans-serif;font-size:12px;">
+            <text x="330" y="18" text-anchor="middle" fill="#ccc" font-weight="700" font-size="14">Blocking I/O: Threads Stall</text>
+
+            <!-- Timeline axis -->
+            <line x1="60" y1="230" x2="620" y2="230" stroke="#555" stroke-width="1"/>
+            <text x="340" y="250" text-anchor="middle" fill="#888" font-size="10">Time</text>
+
+            <!-- Thread 0 -->
+            <text x="10" y="60" fill="#ccc" font-size="11">T0</text>
+            <rect x="60" y="45" width="80" height="24" rx="4" fill="#4cc9f0" opacity="0.8"/>
+            <text x="100" y="62" text-anchor="middle" fill="#111" font-size="10">compute</text>
+            <rect id="bio-block0" x="140" y="45" width="200" height="24" rx="4" fill="#f72585" opacity="0.3"/>
+            <text x="240" y="62" text-anchor="middle" fill="#f72585" font-size="10" opacity="0">blocked on read()</text>
+            <rect id="bio-resume0" x="340" y="45" width="60" height="24" rx="4" fill="#4cc9f0" opacity="0"/>
+            <text id="bio-resume0t" x="370" y="62" text-anchor="middle" fill="#111" font-size="10" opacity="0">work</text>
+
+            <!-- Thread 1 -->
+            <text x="10" y="105" fill="#ccc" font-size="11">T1</text>
+            <rect x="60" y="90" width="40" height="24" rx="4" fill="#4cc9f0" opacity="0.8"/>
+            <text x="80" y="107" text-anchor="middle" fill="#111" font-size="10">cpu</text>
+            <rect id="bio-block1" x="100" y="90" width="260" height="24" rx="4" fill="#f72585" opacity="0.3"/>
+            <text x="230" y="107" text-anchor="middle" fill="#f72585" font-size="10" opacity="0">blocked on recv()</text>
+            <rect id="bio-resume1" x="360" y="90" width="60" height="24" rx="4" fill="#4cc9f0" opacity="0"/>
+
+            <!-- Thread 2 -->
+            <text x="10" y="150" fill="#ccc" font-size="11">T2</text>
+            <rect x="60" y="135" width="100" height="24" rx="4" fill="#4cc9f0" opacity="0.8"/>
+            <text x="110" y="152" text-anchor="middle" fill="#111" font-size="10">compute</text>
+            <rect id="bio-block2" x="160" y="135" width="180" height="24" rx="4" fill="#f72585" opacity="0.3"/>
+            <text x="250" y="152" text-anchor="middle" fill="#f72585" font-size="10" opacity="0">blocked on write()</text>
+            <rect id="bio-resume2" x="340" y="135" width="60" height="24" rx="4" fill="#4cc9f0" opacity="0"/>
+
+            <!-- Queued tasks -->
+            <text x="10" y="200" fill="#ccc" font-size="11">Queue</text>
+            <rect id="bio-queued" x="60" y="185" width="280" height="24" rx="4" fill="#7b2ff7" opacity="0"/>
+            <text id="bio-queuedt" x="200" y="202" text-anchor="middle" fill="#e0e0e0" font-size="10" opacity="0">tasks waiting (no free threads)</text>
+          </svg>
+          <div style="text-align:center;margin-top:.6rem;">
+            <button onclick="bioSvgStep()" style="padding:6px 18px;margin-right:8px;border:1px solid #4cc9f0;background:transparent;color:#4cc9f0;border-radius:6px;cursor:pointer;font-family:inherit;">Step</button>
+            <button onclick="bioSvgReset()" style="padding:6px 18px;border:1px solid #888;background:transparent;color:#888;border-radius:6px;cursor:pointer;font-family:inherit;">Reset</button>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          function $(id){return document.getElementById(id);}
+          function show(id){$(id).setAttribute('opacity','1');}
+          function hide(id){$(id).setAttribute('opacity','0');}
+          function setOp(id,v){$(id).setAttribute('opacity',v);}
+          window.bioSvgStep=function(){
+            step++;
+            if(step===1){setOp('bio-block0','0.6');setOp('bio-block1','0.6');setOp('bio-block2','0.6');}
+            else if(step===2){show('bio-queued');show('bio-queuedt');}
+            else if(step===3){show('bio-resume0');show('bio-resume0t');show('bio-resume1');show('bio-resume2');}
+          };
+          window.bioSvgReset=function(){
+            step=0;
+            ['bio-resume0','bio-resume0t','bio-resume1','bio-resume2','bio-queued','bio-queuedt'].forEach(function(id){hide(id);});
+            ['bio-block0','bio-block1','bio-block2'].forEach(function(id){setOp(id,'0.3');});
+          };
+        })();
+        </script>
+      </section>
+
+      <!-- ── Reactor vs Proactor ─────────────────────────────── -->
+      <section>
+        <h2>Reactor vs. Proactor Patterns</h2>
+        <p>
+          The two fundamental patterns for event-driven I/O are the <strong>reactor</strong> and the
+          <strong>proactor</strong>.
+        </p>
+
+        <h3>Reactor (Readiness-Based)</h3>
+        <p>
+          A reactor notifies you when an I/O operation <em>can</em> proceed without blocking. You then perform
+          the operation yourself.
+        </p>
+        <ol>
+          <li>Register interest in a file descriptor (e.g., &ldquo;tell me when socket 5 is readable&rdquo;).</li>
+          <li>The event loop calls <code>epoll_wait()</code> (Linux) or <code>kqueue()</code> (BSD/macOS).</li>
+          <li>When ready, the loop dispatches a handler that calls <code>read()</code> on the now-ready fd.</li>
+        </ol>
+        <pre><code class="language-cpp">// Simplified reactor sketch (Linux epoll)
+int epfd = epoll_create1(0);
+
+struct epoll_event ev;
+ev.events = EPOLLIN;
+ev.data.fd = client_socket;
+epoll_ctl(epfd, EPOLL_CTL_ADD, client_socket, &amp;ev);
+
+struct epoll_event events[64];
+while (running) {
+    int n = epoll_wait(epfd, events, 64, -1);
+    for (int i = 0; i &lt; n; ++i) {
+        int fd = events[i].data.fd;
+        // fd is now readable; dispatch to handler
+        handle_readable(fd);
+    }
+}</code></pre>
+        <div class="callout">
+          <strong>Thread pool integration.</strong> The event loop runs on a dedicated thread. When an fd becomes
+          ready, it packages the handler as a task and submits it to the thread pool. The pool thread calls
+          <code>read()</code> (which will not block because the fd is ready) and processes the data.
+        </div>
+
+        <h3>Proactor (Completion-Based)</h3>
+        <p>
+          A proactor initiates the I/O operation and notifies you when it <em>completes</em>. The OS performs the
+          read/write in the background.
+        </p>
+        <ol>
+          <li>Initiate an async read: &ldquo;read 4096 bytes from socket 5 into this buffer.&rdquo;</li>
+          <li>The OS performs the read in kernel space.</li>
+          <li>When complete, a completion handler is invoked with the result.</li>
+        </ol>
+        <p>
+          Windows I/O Completion Ports (IOCP) is the classic proactor implementation. Linux has <code>io_uring</code>
+          (since kernel 5.1), which provides completion-based async I/O with a shared submission/completion ring
+          buffer.
+        </p>
+        <pre><code class="language-cpp">// Simplified IOCP sketch (Windows)
+HANDLE iocp = CreateIoCompletionPort(
+    INVALID_HANDLE_VALUE, NULL, 0, num_threads);
+
+// Associate a socket with the IOCP
+CreateIoCompletionPort(
+    (HANDLE)client_socket, iocp, (ULONG_PTR)ctx, 0);
+
+// Initiate async read
+WSABUF buf = { buffer_size, buffer };
+DWORD flags = 0;
+WSARecv(client_socket, &amp;buf, 1, NULL,
+        &amp;flags, &amp;overlapped, NULL);
+
+// Worker threads dequeue completions
+while (running) {
+    DWORD bytes;
+    ULONG_PTR key;
+    OVERLAPPED* ov;
+    GetQueuedCompletionStatus(
+        iocp, &amp;bytes, &amp;key, &amp;ov, INFINITE);
+
+    auto* ctx = reinterpret_cast&lt;Context*&gt;(key);
+    ctx-&gt;on_read_complete(bytes);
+}</code></pre>
+
+        <h3>Comparison</h3>
+        <table style="width:100%;border-collapse:collapse;margin:1.2rem 0;">
+          <thead>
+            <tr style="border-bottom:2px solid #444;">
+              <th style="text-align:left;padding:8px;color:#ccc;">Aspect</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Reactor</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Proactor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Notification</td>
+              <td style="padding:8px;">Readiness (can do I/O)</td>
+              <td style="padding:8px;">Completion (I/O done)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Who does the I/O</td>
+              <td style="padding:8px;">Application</td>
+              <td style="padding:8px;">OS / kernel</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Linux</td>
+              <td style="padding:8px;">epoll, poll, select</td>
+              <td style="padding:8px;">io_uring</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Windows</td>
+              <td style="padding:8px;">select (limited)</td>
+              <td style="padding:8px;">IOCP</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;">Thread pool fit</td>
+              <td style="padding:8px;">Event loop + pool dispatch</td>
+              <td style="padding:8px;">Workers dequeue completions</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Task-Based Architectures ────────────────────────── -->
+      <section>
+        <h2>Task-Based Architectures</h2>
+        <p>
+          The ideal design separates <em>what</em> to do from <em>how</em> to schedule it. Tasks are units of
+          work that do not care whether they run on a thread pool thread, an event loop thread, or an inline
+          executor. This is the core idea behind <strong>task-based parallelism</strong>.
+        </p>
+
+        <h3>The Event Loop + Thread Pool Pattern</h3>
+        <pre><code class="language-cpp">// Pseudo-architecture
+class Server {
+    EventLoop event_loop_;     // single thread, epoll/IOCP
+    ThreadPool compute_pool_;  // N threads for CPU work
+
+    void on_data_ready(int fd) {
+        auto data = read_nonblocking(fd);
+
+        // Offload CPU work to the pool
+        compute_pool_.submit([this, fd,
+                              data = std::move(data)] {
+            auto result = process(data);
+
+            // Schedule the response back on the event loop
+            event_loop_.post([this, fd,
+                              result = std::move(result)] {
+                write_nonblocking(fd, result);
+            });
+        });
+    }
+};</code></pre>
+        <p>
+          The event loop handles I/O readiness. CPU-intensive processing happens in the pool. Responses are posted
+          back to the event loop for non-blocking writes. No thread ever blocks on I/O.
+        </p>
+
+        <h3>Continuation-Passing Style</h3>
+        <p>
+          Rather than blocking on a future, tasks chain continuations:
+        </p>
+        <pre><code class="language-cpp">// Conceptual (not valid C++ yet without a library)
+async_read(socket, buffer)
+    .then([](std::size_t bytes_read) {
+        return parse_request(buffer, bytes_read);
+    })
+    .then([](Request req) {
+        return handle_request(req);
+    })
+    .then([&amp;socket](Response resp) {
+        return async_write(socket, resp.data());
+    });</code></pre>
+        <p>
+          Each <code>.then()</code> schedules the next step as a task, freeing the current thread immediately.
+          This is the programming model that Boost.Asio and <code>std::execution</code> formalize.
+        </p>
+      </section>
+
+      <!-- ── Boost.Asio ──────────────────────────────────────── -->
+      <section>
+        <h2>Boost.Asio: The De Facto Standard</h2>
+        <p>
+          Boost.Asio (also available as standalone Asio) is the most widely used C++ async I/O library. It
+          provides:
+        </p>
+        <ul>
+          <li>An <code>io_context</code> that acts as both an event loop and a task scheduler.</li>
+          <li>Async operations (<code>async_read</code>, <code>async_write</code>, <code>async_connect</code>)
+              that register with the OS and invoke completion handlers.</li>
+          <li>Built-in thread pool support: multiple threads can call <code>io_context::run()</code>
+              concurrently.</li>
+        </ul>
+        <pre><code class="language-cpp">#include &lt;asio.hpp&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    asio::io_context io(4); // internal hint for concurrency
+
+    // Create a thread pool by running io_context on N threads
+    std::vector&lt;std::thread&gt; threads;
+    for (int i = 0; i &lt; 4; ++i) {
+        threads.emplace_back([&amp;io] { io.run(); });
+    }
+
+    // Post work
+    for (int i = 0; i &lt; 10; ++i) {
+        asio::post(io, [i] {
+            std::cout &lt;&lt; "Task " &lt;&lt; i &lt;&lt; " on thread "
+                      &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
+        });
+    }
+
+    // Asio also provides asio::thread_pool directly:
+    // asio::thread_pool pool(4);
+    // asio::post(pool, []{ ... });
+    // pool.join();
+
+    for (auto&amp; t : threads) t.join();
+    return 0;
+}</code></pre>
+
+        <h3>Asio with Coroutines (C++20)</h3>
+        <p>
+          With C++20 coroutines, Asio enables a synchronous-looking coding style without blocking threads:
+        </p>
+        <pre><code class="language-cpp">asio::awaitable&lt;void&gt; handle_client(
+        asio::ip::tcp::socket socket) {
+    char buf[1024];
+
+    while (true) {
+        std::size_t n = co_await socket.async_read_some(
+            asio::buffer(buf), asio::use_awaitable);
+
+        co_await asio::async_write(
+            socket, asio::buffer(buf, n),
+            asio::use_awaitable);
+    }
+}</code></pre>
+        <p>
+          The coroutine suspends at each <code>co_await</code>, freeing the thread to run other tasks. When the
+          I/O completes, the coroutine resumes on a pool thread. No callbacks, no blocking, no thread waste.
+        </p>
+      </section>
+
+      <!-- ── std::execution (C++26) ──────────────────────────── -->
+      <section>
+        <h2>std::execution (C++26): The Future Standard</h2>
+        <p>
+          The C++ standardization committee has been working on <code>std::execution</code> (formerly known as
+          &ldquo;senders and receivers&rdquo; or P2300). Accepted for C++26, it provides a composable framework for
+          describing asynchronous work.
+        </p>
+
+        <h3>Core Concepts</h3>
+        <ul>
+          <li><strong>Sender</strong>: describes work to be done, but does not start it. Think of it as a lazy
+              future.</li>
+          <li><strong>Receiver</strong>: a callback that consumes the result of a sender (value, error, or
+              cancellation).</li>
+          <li><strong>Scheduler</strong>: determines where work runs (thread pool, inline, GPU, etc.).</li>
+        </ul>
+        <pre><code class="language-cpp">// Conceptual std::execution usage (C++26)
+namespace ex = std::execution;
+
+ex::static_thread_pool pool(4);
+ex::scheduler auto sched = pool.get_scheduler();
+
+auto work = ex::schedule(sched)
+    | ex::then([] { return read_data(); })
+    | ex::then([](Data d) { return process(d); })
+    | ex::then([](Result r) { write_output(r); });
+
+// Start the pipeline
+ex::sync_wait(std::move(work));</code></pre>
+
+        <h3>Why It Matters</h3>
+        <ul>
+          <li><strong>Composability.</strong> Senders compose like pipes. You can build complex async graphs
+              without callbacks or shared state.</li>
+          <li><strong>Scheduler-agnostic.</strong> The same sender chain can run on a thread pool, an event loop,
+              or a GPU by simply changing the scheduler.</li>
+          <li><strong>Structured concurrency.</strong> Operations like <code>when_all</code> ensure all child
+              tasks complete (or are cancelled) before the parent continues.</li>
+          <li><strong>Cancellation.</strong> Stop tokens are built into the protocol. Cancelling a parent
+              automatically cancels children.</li>
+        </ul>
+        <div class="callout">
+          <strong>Adoption timeline.</strong> As of early 2026, compiler support for <code>std::execution</code>
+          is still emerging. Libraries like stdexec (the reference implementation) and libunifex provide the model
+          today. Production code can use Boost.Asio or Intel TBB in the meantime.
+        </div>
+      </section>
+
+      <!-- ── Practical Architecture ──────────────────────────── -->
+      <section>
+        <h2>Practical Architecture: Combining I/O and Compute</h2>
+        <p>
+          A high-performance server typically uses this architecture:
+        </p>
+        <ol>
+          <li><strong>I/O threads</strong> (1 per core, or fewer): run the event loop (<code>epoll</code>,
+              IOCP, or <code>io_uring</code>). They never execute user code beyond minimal parsing.</li>
+          <li><strong>Compute pool</strong>: handles CPU-bound request processing, serialization, encoding,
+              and business logic.</li>
+          <li><strong>Completion posting</strong>: when a compute task finishes, it posts the response back to the
+              I/O thread for a non-blocking write.</li>
+        </ol>
+
+        <pre><code class="language-cpp">// Architecture skeleton
+class HighPerfServer {
+    // I/O layer
+    asio::io_context io_ctx_;
+    asio::ip::tcp::acceptor acceptor_;
+
+    // Compute layer
+    ThreadPool compute_pool_{
+        std::thread::hardware_concurrency()};
+
+    void accept_loop() {
+        acceptor_.async_accept(
+            [this](asio::error_code ec,
+                   asio::ip::tcp::socket socket) {
+            if (!ec) handle_connection(std::move(socket));
+            accept_loop();  // accept next
+        });
+    }
+
+    void handle_connection(asio::ip::tcp::socket socket) {
+        auto shared_socket = std::make_shared&lt;
+            asio::ip::tcp::socket&gt;(std::move(socket));
+
+        // Read request on I/O thread (non-blocking)
+        auto buf = std::make_shared&lt;std::vector&lt;char&gt;&gt;(4096);
+        shared_socket-&gt;async_read_some(
+            asio::buffer(*buf),
+            [this, shared_socket, buf](
+                asio::error_code ec, std::size_t n) {
+            if (ec) return;
+
+            // Offload processing to compute pool
+            compute_pool_.submit(
+                [this, shared_socket, buf, n] {
+                auto response = process_request(
+                    buf-&gt;data(), n);
+
+                // Post write back to I/O thread
+                asio::post(io_ctx_,
+                    [shared_socket,
+                     resp = std::move(response)] {
+                    asio::async_write(
+                        *shared_socket,
+                        asio::buffer(resp),
+                        [](asio::error_code, std::size_t){});
+                });
+            });
+        });
+    }
+};</code></pre>
+
+        <h3>Guidelines</h3>
+        <ul>
+          <li>Never call blocking I/O from a pool thread. If you must wait on I/O, submit the wait to the event
+              loop instead.</li>
+          <li>Keep I/O handlers lightweight. Heavy parsing or computation should be offloaded to the compute
+              pool.</li>
+          <li>Use <code>asio::strand</code> if multiple handlers access the same connection state, to avoid data
+              races without explicit locking.</li>
+          <li>For disk I/O, consider dedicated I/O threads or <code>io_uring</code> rather than the compute
+              pool.</li>
+        </ul>
+      </section>
+
+      <!-- ── io_uring ────────────────────────────────────────── -->
+      <section>
+        <h2>Linux io_uring: The Modern Proactor</h2>
+        <p>
+          <code>io_uring</code> (introduced in Linux 5.1) is a high-performance async I/O interface that works
+          with both network and file I/O. It uses two ring buffers shared between user space and the kernel:
+        </p>
+        <ul>
+          <li><strong>Submission Queue (SQ)</strong>: the application pushes I/O requests.</li>
+          <li><strong>Completion Queue (CQ)</strong>: the kernel pushes completed results.</li>
+        </ul>
+        <p>
+          This design eliminates most system calls from the hot path. The application writes to the SQ and reads
+          from the CQ using plain memory operations; the kernel processes requests asynchronously.
+        </p>
+        <pre><code class="language-cpp">// Simplified io_uring read sketch
+#include &lt;liburing.h&gt;
+
+struct io_uring ring;
+io_uring_queue_init(256, &amp;ring, 0);
+
+// Prepare a read operation
+struct io_uring_sqe* sqe = io_uring_get_sqe(&amp;ring);
+io_uring_prep_read(sqe, fd, buffer, buf_size, 0);
+io_uring_sqe_set_data(sqe, user_context);
+
+// Submit
+io_uring_submit(&amp;ring);
+
+// Wait for completion
+struct io_uring_cqe* cqe;
+io_uring_wait_cqe(&amp;ring, &amp;cqe);
+
+int bytes_read = cqe-&gt;res;
+auto* ctx = io_uring_cqe_get_data(cqe);
+io_uring_cqe_seen(&amp;ring, cqe);
+
+// Process the result on a pool thread
+pool.submit([ctx, bytes_read] {
+    ctx-&gt;on_read_complete(bytes_read);
+});</code></pre>
+        <div class="callout">
+          <strong>io_uring + thread pool.</strong> One thread manages the io_uring rings and dispatches completed
+          I/O to the thread pool. Alternatively, multiple threads can share a ring using
+          <code>IORING_SETUP_SQPOLL</code> for kernel-side polling, eliminating submission system calls entirely.
+        </div>
+      </section>
+
+      <!-- ── Anti-Patterns ───────────────────────────────────── -->
+      <section>
+        <h2>Anti-Patterns to Avoid</h2>
+
+        <h3>1. Blocking the Pool with Sleep or I/O</h3>
+        <pre><code class="language-cpp">// BAD: blocks a pool thread for the entire duration
+pool.submit([fd] {
+    char buf[4096];
+    read(fd, buf, sizeof(buf));  // might block for seconds
+    process(buf);
+});</code></pre>
+        <p>
+          Use non-blocking I/O or async operations instead. If you must do blocking I/O, use a dedicated I/O
+          thread pool separate from the compute pool.
+        </p>
+
+        <h3>2. Unbounded Thread Growth</h3>
+        <pre><code class="language-cpp">// BAD: defeats the purpose of a pool
+void handle(Request req) {
+    std::thread([req] { process(req); }).detach();
+}</code></pre>
+        <p>
+          Detached threads are unmanageable. They consume resources without bound and cannot be joined on
+          shutdown.
+        </p>
+
+        <h3>3. Mixing Event Loop and Pool Incorrectly</h3>
+        <p>
+          Calling <code>io_context::run()</code> from inside a pool task creates a nested event loop. Each
+          layer should have its own dedicated threads.
+        </p>
+
+        <h3>4. Ignoring Backpressure</h3>
+        <p>
+          If the compute pool is full and I/O completions arrive faster than they can be processed, the
+          completion queue overflows. Implement backpressure: stop accepting new connections or pause reads
+          until the pool drains.
+        </p>
+      </section>
+
+      <!-- ── Library Comparison ──────────────────────────────── -->
+      <section>
+        <h2>Library Comparison</h2>
+        <table style="width:100%;border-collapse:collapse;margin:1.2rem 0;">
+          <thead>
+            <tr style="border-bottom:2px solid #444;">
+              <th style="text-align:left;padding:8px;color:#ccc;">Library</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Model</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Thread Pool</th>
+              <th style="text-align:left;padding:8px;color:#ccc;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">Boost.Asio</td>
+              <td style="padding:8px;">Reactor + proactor</td>
+              <td style="padding:8px;">Built-in</td>
+              <td style="padding:8px;">Production-ready</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">liburing</td>
+              <td style="padding:8px;">Proactor (io_uring)</td>
+              <td style="padding:8px;">Manual</td>
+              <td style="padding:8px;">Linux 5.1+</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">libuv</td>
+              <td style="padding:8px;">Reactor</td>
+              <td style="padding:8px;">Built-in</td>
+              <td style="padding:8px;">Production-ready (Node.js)</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">stdexec (P2300)</td>
+              <td style="padding:8px;">Senders/Receivers</td>
+              <td style="padding:8px;">Yes</td>
+              <td style="padding:8px;">Reference impl</td>
+            </tr>
+            <tr style="border-bottom:1px solid #333;">
+              <td style="padding:8px;">libunifex</td>
+              <td style="padding:8px;">Senders/Receivers</td>
+              <td style="padding:8px;">Yes</td>
+              <td style="padding:8px;">Meta (experimental)</td>
+            </tr>
+            <tr>
+              <td style="padding:8px;">Intel TBB</td>
+              <td style="padding:8px;">Work stealing</td>
+              <td style="padding:8px;">Built-in</td>
+              <td style="padding:8px;">Production-ready</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Summary ─────────────────────────────────────────── -->
+      <section>
+        <h2>Summary</h2>
+        <ul>
+          <li>Blocking I/O in a fixed-size thread pool wastes threads and can stall the entire system.</li>
+          <li>Reactors (epoll, kqueue) notify on readiness; proactors (IOCP, io_uring) notify on completion.</li>
+          <li>Separate I/O handling from CPU-bound work: event loop threads for I/O, thread pool for compute.</li>
+          <li>Post results back to the I/O layer for non-blocking writes.</li>
+          <li>Boost.Asio is the current production standard; <code>std::execution</code> (C++26) is the future.</li>
+          <li>Never block pool threads on I/O. Use cooperative async patterns instead.</li>
+        </ul>
+        <div class="callout">
+          <strong>Series complete.</strong> This concludes the thread pool series. We started with a basic pool,
+          added work stealing for better load balancing, covered graceful shutdown, and finally integrated with
+          async I/O for real-world server architectures.
+        </div>
+      </section>
+
+      <div class="post-series-nav" style="margin-top:2.5rem;">
+        <a href="graceful-shutdown.html">&larr; Graceful Shutdown</a>
+        <span></span>
+      </div>
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
