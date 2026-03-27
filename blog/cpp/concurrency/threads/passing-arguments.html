@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Deep dive into passing arguments to C++ threads: by value, by reference with std::ref, move-only types, dangling reference pitfalls, and member function arguments.">
+  <meta name="description" content="Deep dive into passing arguments to C++ threads: by value, by reference with std::ref, move-only types, dangling reference pitfalls, implicit conversion traps, member function arguments, std::decay behavior, and perfect forwarding internals.">
   <title>Passing Arguments to Threads | Neel Mishra</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -30,13 +30,15 @@
         <h4>Table of Contents</h4>
         <ul>
           <li><a href="#how-args-work">How Argument Passing Works</a></li>
+          <li><a href="#decay-and-invoke">std::decay and std::invoke</a></li>
           <li><a href="#by-value">Passing by Value</a></li>
-          <li><a href="#by-reference">Passing by Reference (std::ref)</a></li>
+          <li><a href="#by-reference">Passing by Reference</a></li>
           <li><a href="#implicit-conversions">Implicit Conversions Trap</a></li>
           <li><a href="#move-only">Move-Only Types</a></li>
           <li><a href="#dangling-refs">Dangling References</a></li>
-          <li><a href="#member-functions">Member Functions with Object Pointers</a></li>
+          <li><a href="#member-functions">Member Functions</a></li>
           <li><a href="#large-objects">Large Objects and Performance</a></li>
+          <li><a href="#common-mistakes">Common Mistakes</a></li>
           <li><a href="#summary-table">Summary Table</a></li>
         </ul>
       </div>
@@ -57,49 +59,80 @@
         behaviors that differ from ordinary function calls, and misunderstanding them is one of
         the most common sources of concurrency bugs.
       </p>
+      <p>
+        This page covers the internal mechanics of how arguments flow from the calling thread
+        to the new thread, what <code>std::decay</code> does to your types, every passing
+        strategy (by value, by reference, by move), the implicit conversion trap, member function
+        binding, and a catalog of dangling reference scenarios.
+      </p>
 
-      <!-- ── How Args Work ── -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  How Args Work                                            -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="how-args-work">How Argument Passing Works Internally</h2>
       <p>
-        When you write <code>std::thread t(f, arg1, arg2)</code>, the constructor does the
-        following:
+        When you write <code>std::thread t(f, arg1, arg2)</code>, the constructor performs a
+        two-phase process:
       </p>
       <ol>
-        <li><strong>Copies or moves</strong> each argument into internal storage owned by the thread object.</li>
-        <li>When the new thread starts, these stored copies are <strong>forwarded</strong> to the callable.</li>
+        <li><strong>Phase 1 (calling thread):</strong> Each argument is <em>decay-copied</em> or <em>decay-moved</em> into internal storage owned by the thread object. This storage is typically a heap-allocated tuple.</li>
+        <li><strong>Phase 2 (new thread):</strong> When the new thread starts, the stored copies are forwarded to the callable via <code>std::invoke</code>.</li>
       </ol>
       <p>
-        This two-phase mechanism is critical to understand. The arguments are copied in the
-        <em>calling</em> thread's context, then passed to the callable on the <em>new</em>
-        thread. This means conversions, copies, and moves all happen at construction time, not
-        at invocation time.
+        This two-phase model has a critical consequence: the types of the stored arguments may
+        differ from what you passed (thanks to <code>std::decay</code>), and any conversions
+        from the stored type to the function parameter type happen on the <em>new</em> thread,
+        not the calling thread.
       </p>
 
       <div class="anim-container" id="argflow-anim">
         <h4>&#9654; Argument Flow: Calling Thread to New Thread</h4>
-        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the argument copying and forwarding stages.</p>
-        <svg id="argflow-svg" width="520" height="180" viewBox="0 0 520 180">
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the decay-copy, storage, and forwarding stages.</p>
+        <svg id="argflow-svg" width="640" height="280" viewBox="0 0 640 280">
           <!-- Main Thread -->
-          <rect x="10" y="20" width="140" height="140" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
-          <text x="80" y="42" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">Main Thread</text>
-          <rect id="af-arg-orig" x="30" y="55" width="100" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
-          <text x="80" y="75" text-anchor="middle" font-size="12" font-family="Consolas" fill="#13201a">arg = "hello"</text>
-          <rect id="af-copy" x="30" y="100" width="100" height="30" rx="4" fill="#fff3e0" stroke="#ff6b35" opacity="0"/>
-          <text id="af-copy-text" x="80" y="120" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">copy in storage</text>
+          <rect x="10" y="20" width="200" height="230" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+          <text x="110" y="42" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">Calling Thread</text>
+
+          <!-- Stack frame -->
+          <rect x="25" y="55" width="170" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
+          <text x="110" y="75" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">arg1 = "hello" (stack)</text>
+
+          <rect id="af-decay" x="25" y="100" width="170" height="30" rx="4" fill="#fff3e0" stroke="#ff6b35" opacity="0"/>
+          <text id="af-decay-t" x="110" y="120" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">decay&lt;const char*&gt; = const char*</text>
+
+          <rect id="af-copy" x="25" y="145" width="170" height="30" rx="4" fill="#fff3e0" stroke="#ff6b35" opacity="0"/>
+          <text id="af-copy-t" x="110" y="165" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">copy into heap tuple</text>
+
+          <text id="af-phase1" x="110" y="210" text-anchor="middle" font-size="10" font-family="Manrope" fill="#0a8f6a" opacity="0">Phase 1 complete on calling thread</text>
 
           <!-- Arrow -->
-          <line id="af-arrow" x1="150" y1="115" x2="230" y2="115" stroke="#ff6b35" stroke-width="2" marker-end="url(#af-arrowhead)" opacity="0"/>
+          <line id="af-arrow" x1="210" y1="160" x2="300" y2="160" stroke="#ff6b35" stroke-width="2" marker-end="url(#af-ah)" opacity="0"/>
+          <text id="af-arr-label" x="255" y="150" text-anchor="middle" font-size="9" font-family="Consolas" fill="#ff6b35" opacity="0">heap ptr</text>
+
+          <!-- Heap storage -->
+          <rect id="af-heap" x="300" y="110" width="120" height="70" rx="6" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5" opacity="0"/>
+          <text id="af-heap-t1" x="360" y="132" text-anchor="middle" font-size="10" font-weight="bold" font-family="Manrope" fill="#13201a" opacity="0">Heap Tuple</text>
+          <text id="af-heap-t2" x="360" y="150" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">["hello"]</text>
+          <text id="af-heap-t3" x="360" y="168" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0">(const char*)</text>
 
           <!-- New Thread -->
-          <rect x="230" y="20" width="160" height="140" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
-          <text x="310" y="42" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">New Thread</text>
-          <rect id="af-received" x="250" y="70" width="120" height="30" rx="4" fill="#bbdefb" stroke="#1565c0" opacity="0"/>
-          <text id="af-received-text" x="310" y="90" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">f("hello")</text>
+          <rect x="440" y="20" width="190" height="230" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+          <text x="535" y="42" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">New Thread</text>
+
+          <line id="af-arrow2" x1="420" y1="145" x2="455" y2="100" stroke="#1565c0" stroke-width="2" marker-end="url(#af-ah2)" opacity="0"/>
+
+          <rect id="af-invoke" x="455" y="65" width="160" height="30" rx="4" fill="#bbdefb" stroke="#1565c0" opacity="0"/>
+          <text id="af-invoke-t" x="535" y="85" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">std::invoke(f, "hello")</text>
+
+          <rect id="af-convert" x="455" y="110" width="160" height="45" rx="4" fill="#e1bee7" stroke="#7b1fa2" opacity="0"/>
+          <text id="af-conv-t1" x="535" y="128" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">const char* to std::string</text>
+          <text id="af-conv-t2" x="535" y="145" text-anchor="middle" font-size="9" font-family="Manrope" fill="#7b1fa2" opacity="0">Conversion happens HERE</text>
+
+          <text id="af-phase2" x="535" y="200" text-anchor="middle" font-size="10" font-family="Manrope" fill="#1565c0" opacity="0">Phase 2 on new thread</text>
 
           <defs>
-            <marker id="af-arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-              <polygon points="0 0,10 3.5,0 7" fill="#ff6b35"/>
-            </marker>
+            <marker id="af-ah" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#ff6b35"/></marker>
+            <marker id="af-ah2" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#1565c0"/></marker>
           </defs>
         </svg>
         <div id="argflow-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
@@ -115,33 +148,25 @@
         var step = 0;
         var info = document.getElementById('argflow-info');
         var output = document.getElementById('argflow-output');
+        var allHide = ['af-decay','af-decay-t','af-copy','af-copy-t','af-phase1','af-arrow','af-arr-label','af-heap','af-heap-t1','af-heap-t2','af-heap-t3','af-arrow2','af-invoke','af-invoke-t','af-convert','af-conv-t1','af-conv-t2','af-phase2'];
         var steps = [
-          { action: function(){
-              document.getElementById('af-copy').setAttribute('opacity','1');
-              document.getElementById('af-copy-text').setAttribute('opacity','1');
-            }, msg: "Step 1: The thread constructor COPIES arg into internal storage (on the calling thread).", out: "1/3" },
-          { action: function(){
-              document.getElementById('af-arrow').setAttribute('opacity','1');
-            }, msg: "Step 2: When the new thread starts, the stored copy is forwarded to the callable.", out: "2/3" },
-          { action: function(){
-              document.getElementById('af-received').setAttribute('opacity','1');
-              document.getElementById('af-received-text').setAttribute('opacity','1');
-            }, msg: "Step 3: The callable receives the forwarded argument. Original on main thread is unchanged.", out: "3/3" }
+          { show:['af-decay','af-decay-t'], msg:"1. std::decay strips references and cv-qualifiers. const char[6] becomes const char*.", out:"Step 1/6" },
+          { show:['af-copy','af-copy-t'], msg:"2. The decayed argument is copied into a heap-allocated tuple on the calling thread.", out:"Step 2/6" },
+          { show:['af-phase1'], msg:"3. Phase 1 complete. The calling thread continues. The tuple pointer is passed to the OS.", out:"Step 3/6" },
+          { show:['af-arrow','af-arr-label','af-heap','af-heap-t1','af-heap-t2','af-heap-t3'], msg:"4. The heap tuple contains the raw const char* pointer (NOT a std::string yet).", out:"Step 4/6" },
+          { show:['af-arrow2','af-invoke','af-invoke-t'], msg:"5. New thread starts, unpacks tuple, calls std::invoke(f, stored_args...).", out:"Step 5/6" },
+          { show:['af-convert','af-conv-t1','af-conv-t2','af-phase2'], msg:"6. Conversion from const char* to std::string happens NOW, on the new thread. If the buffer is gone, UB.", out:"Step 6/6 (done)" }
         ];
-
         function reset(){
           step = 0;
-          ['af-copy','af-copy-text','af-arrow','af-received','af-received-text'].forEach(function(id){
-            document.getElementById(id).setAttribute('opacity','0');
-          });
-          info.textContent = 'Press Step to trace the argument flow.';
+          allHide.forEach(function(id){ document.getElementById(id).setAttribute('opacity','0'); });
+          info.textContent = 'Press Step to trace argument flow.';
           output.textContent = '';
         }
         reset();
-
         document.getElementById('argflow-step').addEventListener('click', function(){
           if(step >= steps.length) return;
-          steps[step].action();
+          steps[step].show.forEach(function(id){ document.getElementById(id).setAttribute('opacity','1'); });
           info.textContent = steps[step].msg;
           output.textContent = steps[step].out;
           step++;
@@ -150,11 +175,58 @@
       })();
       </script>
 
-      <!-- ── By Value ── -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  std::decay and std::invoke                               -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="decay-and-invoke">std::decay and std::invoke: The Machinery</h2>
+      <p>
+        The thread constructor applies <code>std::decay_t</code> to every argument before
+        storing it. <code>std::decay</code> models what happens when you pass an argument by
+        value to a function:
+      </p>
+      <table>
+        <thead>
+          <tr><th>Original Type</th><th>After std::decay</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>int&amp;</code></td><td><code>int</code></td><td>Strips references</td></tr>
+          <tr><td><code>const int&amp;</code></td><td><code>int</code></td><td>Strips references and cv</td></tr>
+          <tr><td><code>int[10]</code></td><td><code>int*</code></td><td>Array to pointer</td></tr>
+          <tr><td><code>const char[6]</code></td><td><code>const char*</code></td><td>String literal to pointer</td></tr>
+          <tr><td><code>void(int)</code></td><td><code>void(*)(int)</code></td><td>Function to pointer</td></tr>
+          <tr><td><code>std::string</code></td><td><code>std::string</code></td><td>No change (already a value)</td></tr>
+        </tbody>
+      </table>
+      <p>
+        After decay-copying, <code>std::invoke</code> calls the stored callable with the
+        stored arguments. <code>std::invoke</code> handles function pointers, member function
+        pointers (with the object as first argument), and regular callables uniformly.
+      </p>
+
+      <h3>Why this matters</h3>
+      <p>
+        Because references are stripped by decay, passing a variable to a thread always creates
+        an independent copy unless you explicitly wrap it with <code>std::ref</code> or
+        <code>std::cref</code>. The wrapper type <code>std::reference_wrapper</code> survives
+        decay because it is a class type, not a reference.
+      </p>
+<pre><code>// Without std::ref: decay strips the reference, thread gets a copy
+void inc(int&amp; x) { ++x; }
+int val = 0;
+// std::thread t(inc, val);  // COMPILE ERROR: trying to bind rvalue to non-const ref
+
+// With std::ref: decay preserves std::reference_wrapper&lt;int&gt;
+std::thread t(inc, std::ref(val));  // OK: std::invoke unwraps the reference
+t.join();
+// val == 1</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  By Value                                                 -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="by-value">Passing by Value</h2>
       <p>
-        By default, all arguments are <strong>copied</strong> into the thread. Even if the
-        target function takes a <code>const</code> reference, the thread stores its own copy:
+        By default, all arguments are <strong>copied</strong> into the thread. Even if the target
+        function takes a <code>const</code> reference, the thread stores its own copy:
       </p>
 <pre><code>void process(const std::string&amp; data) {
     std::cout &lt;&lt; data &lt;&lt; "\n";
@@ -163,8 +235,8 @@
 int main() {
     std::string input = "sensor data";
     std::thread t(process, input);
-    // input is COPIED into the thread's internal storage.
-    // The reference in process() binds to that internal copy, NOT to input.
+    // input is COPIED into thread storage.
+    // The const ref in process() binds to that internal copy, NOT to input.
     t.join();
 }</code></pre>
       <p>
@@ -184,16 +256,51 @@ int main() {
     t.join();
     std::cout &lt;&lt; "Main sees: " &lt;&lt; original &lt;&lt; "\n";
     // Output:
-    // Thread sees: base modified
-    // Main sees: base
+    //   Thread sees: base modified
+    //   Main sees: base
 }</code></pre>
 
-      <!-- ── By Reference ── -->
+      <h3>Stack frame layout</h3>
+      <p>
+        When arguments are passed by value, the calling thread's stack holds the original, and
+        the thread's internal heap tuple holds an independent copy. The new thread's stack frame
+        receives the value via <code>std::invoke</code> forwarding:
+      </p>
+      <!-- Static SVG diagram: stack frame layout by value -->
+      <svg width="500" height="200" viewBox="0 0 500 200" style="display:block;margin:1rem auto">
+        <text x="80" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Main Stack</text>
+        <rect x="20" y="25" width="120" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
+        <text x="80" y="50" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">input = "hi"</text>
+
+        <text x="250" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Heap Tuple</text>
+        <rect x="190" y="25" width="120" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="250" y="50" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">copy = "hi"</text>
+
+        <text x="420" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Thread Stack</text>
+        <rect x="360" y="25" width="120" height="40" rx="4" fill="#bbdefb" stroke="#1565c0"/>
+        <text x="420" y="50" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">data = "hi"</text>
+
+        <line x1="140" y1="45" x2="190" y2="45" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#sf-ah)"/>
+        <text x="165" y="38" text-anchor="middle" font-size="9" font-family="Consolas" fill="#ff6b35">copy</text>
+        <line x1="310" y1="45" x2="360" y2="45" stroke="#1565c0" stroke-width="1.5" marker-end="url(#sf-ah2)"/>
+        <text x="335" y="38" text-anchor="middle" font-size="9" font-family="Consolas" fill="#1565c0">forward</text>
+
+        <text x="250" y="95" text-anchor="middle" font-size="11" font-family="Manrope" fill="#666">Three independent copies of the string exist.</text>
+        <text x="250" y="115" text-anchor="middle" font-size="11" font-family="Manrope" fill="#666">Modifying one does not affect the others.</text>
+
+        <defs>
+          <marker id="sf-ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#ff6b35"/></marker>
+          <marker id="sf-ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#1565c0"/></marker>
+        </defs>
+      </svg>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  By Reference                                             -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="by-reference">Passing by Reference (std::ref)</h2>
       <p>
-        Sometimes you <em>want</em> the thread to modify a variable in the calling scope or
-        avoid an expensive copy. You must explicitly use <code>std::ref</code> (or
-        <code>std::cref</code> for const references):
+        When you need the thread to modify a variable in the calling scope or avoid an expensive
+        copy, use <code>std::ref</code> (or <code>std::cref</code> for const):
       </p>
 <pre><code>#include &lt;functional&gt;  // for std::ref
 
@@ -213,11 +320,12 @@ int main() {
 }</code></pre>
 
       <div class="callout">
-        <strong>Why std::ref is required.</strong> The thread constructor uses
-        <code>std::decay</code> on arguments, which strips references. Without
-        <code>std::ref</code>, a <code>const int&amp;</code> parameter will receive a copy, and
-        a non-const <code>int&amp;</code> parameter will fail to compile because the thread
-        tries to bind a temporary to a non-const lvalue reference.
+        <strong>Why std::ref is required.</strong> The thread constructor applies
+        <code>std::decay</code> to arguments, which strips references. Without
+        <code>std::ref</code>, a non-const <code>int&amp;</code> parameter fails to compile
+        because the thread tries to bind a temporary (the decayed copy) to a non-const lvalue
+        reference. <code>std::ref</code> wraps the reference in a
+        <code>std::reference_wrapper</code>, which is a copyable class that survives decay.
       </div>
 
       <h3>What happens without std::ref</h3>
@@ -233,12 +341,85 @@ int main() {
     std::cout &lt;&lt; std::boolalpha &lt;&lt; done &lt;&lt; "\n"; // true
 }</code></pre>
 
-      <!-- ── Implicit Conversions Trap ── -->
+      <div class="anim-container" id="refflow-anim">
+        <h4>&#9654; By-Value vs By-Reference Memory Layout</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through both passing modes and see where the data lives.</p>
+        <svg id="refflow-svg" width="600" height="300" viewBox="0 0 600 300">
+          <!-- By Value side -->
+          <text x="150" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#0a8f6a">By Value (default)</text>
+          <rect x="20" y="30" width="110" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
+          <text x="75" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a">val = 42</text>
+          <rect id="rf-vcopy" x="170" y="30" width="110" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35" opacity="0"/>
+          <text id="rf-vcopy-t" x="225" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">copy = 42</text>
+          <line id="rf-varrow" x1="130" y1="50" x2="170" y2="50" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#rf-ah)" opacity="0"/>
+          <text id="rf-vindep" x="150" y="95" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666" opacity="0">Independent copy. No aliasing.</text>
+
+          <!-- By Reference side -->
+          <text x="450" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#1565c0">By Reference (std::ref)</text>
+          <rect x="350" y="30" width="110" height="40" rx="4" fill="#c8e6c9" stroke="#2e7d32"/>
+          <text x="405" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a">val = 42</text>
+          <rect id="rf-rref" x="500" y="30" width="90" height="40" rx="4" fill="#e1bee7" stroke="#7b1fa2" opacity="0"/>
+          <text id="rf-rref-t" x="545" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a" opacity="0">ref_wrap</text>
+          <line id="rf-rback" x1="500" y1="50" x2="460" y2="50" stroke="#7b1fa2" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#rf-ah2)" opacity="0"/>
+          <text id="rf-ralias" x="450" y="95" text-anchor="middle" font-size="9" font-family="Manrope" fill="#7b1fa2" opacity="0">Points back to original. Aliased!</text>
+
+          <!-- Danger box -->
+          <rect id="rf-danger" x="330" y="120" width="260" height="50" rx="6" fill="#ffebee" stroke="#c62828" stroke-width="1.5" opacity="0"/>
+          <text id="rf-danger-t1" x="460" y="140" text-anchor="middle" font-size="10" font-family="Manrope" fill="#c62828" opacity="0">Thread modifies the ORIGINAL variable.</text>
+          <text id="rf-danger-t2" x="460" y="158" text-anchor="middle" font-size="10" font-family="Manrope" fill="#c62828" opacity="0">Data race if no synchronization.</text>
+
+          <defs>
+            <marker id="rf-ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#ff6b35"/></marker>
+            <marker id="rf-ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#7b1fa2"/></marker>
+          </defs>
+        </svg>
+        <div id="refflow-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="refflow-step">Step &rarr;</button>
+          <button class="anim-btn" id="refflow-reset">Reset</button>
+          <span class="anim-output" id="refflow-output"></span>
+        </div>
+      </div>
+
+      <script>
+      (function(){
+        var step = 0;
+        var info = document.getElementById('refflow-info');
+        var output = document.getElementById('refflow-output');
+        var allHide = ['rf-vcopy','rf-vcopy-t','rf-varrow','rf-vindep','rf-rref','rf-rref-t','rf-rback','rf-ralias','rf-danger','rf-danger-t1','rf-danger-t2'];
+        var steps = [
+          { show:['rf-varrow','rf-vcopy','rf-vcopy-t'], msg:"1. By value: argument is copied. Thread has its own independent data.", out:"Step 1/4" },
+          { show:['rf-vindep'], msg:"2. Thread and caller can run concurrently with no aliasing. No synchronization needed.", out:"Step 2/4" },
+          { show:['rf-rref','rf-rref-t','rf-rback'], msg:"3. By reference: std::ref stores a reference_wrapper that points back to the original.", out:"Step 3/4" },
+          { show:['rf-ralias','rf-danger','rf-danger-t1','rf-danger-t2'], msg:"4. Both threads alias the same memory. Modification is a data race without synchronization.", out:"Step 4/4 (done)" }
+        ];
+        function reset(){
+          step = 0;
+          allHide.forEach(function(id){ document.getElementById(id).setAttribute('opacity','0'); });
+          info.textContent = 'Press Step to compare passing modes.';
+          output.textContent = '';
+        }
+        reset();
+        document.getElementById('refflow-step').addEventListener('click', function(){
+          if(step >= steps.length) return;
+          steps[step].show.forEach(function(id){ document.getElementById(id).setAttribute('opacity','1'); });
+          info.textContent = steps[step].msg;
+          output.textContent = steps[step].out;
+          step++;
+        });
+        document.getElementById('refflow-reset').addEventListener('click', reset);
+      })();
+      </script>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Implicit Conversions Trap                                -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="implicit-conversions">The Implicit Conversion Trap</h2>
       <p>
-        Because argument copying happens on the <em>calling</em> thread but the conversion
-        to the parameter type happens on the <em>new</em> thread, implicit conversions can
-        lead to dangling pointers:
+        Because argument copying (Phase 1) happens on the calling thread but the conversion
+        to the function parameter type (Phase 2) happens on the new thread, implicit conversions
+        can create dangling pointers. This is the single most dangerous subtlety of
+        <code>std::thread</code> argument passing.
       </p>
 <pre><code>void process(const std::string&amp; s) {
     // use s...
@@ -250,7 +431,7 @@ void dangerous(int param) {
 
     std::thread t(process, buffer);
     t.detach();
-    // BUG: buffer (a char*) is copied into the thread as a POINTER.
+    // BUG: buffer (char*) is decay-copied as a POINTER.
     // The conversion to std::string happens on the NEW thread.
     // By then, buffer may be destroyed (dangerous() returned).
 }
@@ -259,23 +440,45 @@ void safe(int param) {
     char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "data-%d", param);
 
-    std::thread t(process, std::string(buffer));  // explicit conversion NOW
+    std::thread t(process, std::string(buffer));  // convert NOW
     t.detach();
-    // OK: std::string is constructed on the calling thread, then copied.
+    // OK: std::string is constructed on the calling thread,
+    // then the string is decay-copied (or moved) into the tuple.
 }</code></pre>
 
+      <h3>The timeline of the bug</h3>
+      <ol>
+        <li>Calling thread: <code>buffer</code> is on the stack. <code>std::decay&lt;char[64]&gt;</code> yields <code>char*</code>. The pointer is copied into the tuple.</li>
+        <li>Calling thread: <code>dangerous()</code> returns. The stack frame (including <code>buffer</code>) is destroyed.</li>
+        <li>New thread: <code>std::invoke</code> tries to convert the stored <code>char*</code> to <code>const std::string&amp;</code>. The pointer now points to freed stack memory. Undefined behavior.</li>
+      </ol>
+
       <div class="callout">
-        <strong>Rule of thumb.</strong> When passing string literals or <code>char*</code> to a
-        thread function that expects <code>std::string</code>, always convert explicitly at
-        the call site. Never rely on implicit conversion across thread boundaries.
+        <strong>Rule.</strong> When passing string literals or <code>char*</code> to a thread
+        function expecting <code>std::string</code>, always convert explicitly at the call site.
+        Never rely on implicit conversion across thread boundaries.
       </div>
 
-      <!-- ── Move-Only Types ── -->
+      <h3>Other implicit conversions that can bite</h3>
+<pre><code>// Integer narrowing: the int is stored, then converted to short on the new thread.
+// Not dangerous (no pointer) but potentially surprising.
+void worker(short val) { /* ... */ }
+int x = 300;
+std::thread t(worker, x);  // stored as int, narrowed to short on new thread
+t.join();
+
+// Pointer from temporary: extremely dangerous
+void use_data(const std::vector&lt;int&gt;* ptr) { /* ... */ }
+// std::thread t(use_data, &amp;std::vector&lt;int&gt;{1,2,3});  // dangling!</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Move-Only Types                                          -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="move-only">Move-Only Types</h2>
       <p>
         Types like <code>std::unique_ptr</code>, <code>std::promise</code>, and
-        <code>std::packaged_task</code> cannot be copied. You must <code>std::move</code> them
-        into the thread:
+        <code>std::packaged_task</code> cannot be copied. You must <code>std::move</code>
+        them into the thread:
       </p>
 <pre><code>void take_ownership(std::unique_ptr&lt;int&gt; p) {
     std::cout &lt;&lt; "Thread got: " &lt;&lt; *p &lt;&lt; "\n";
@@ -291,29 +494,36 @@ int main() {
     t.join();
 }</code></pre>
 
-      <p>
-        The same applies to <code>std::promise</code>, which is frequently moved into threads
-        to communicate results back:
-      </p>
+      <h3>Moving a promise into a thread</h3>
 <pre><code>void compute(std::promise&lt;int&gt; p) {
-    int result = 42;
-    p.set_value(result);
+    p.set_value(42);
 }
 
 int main() {
     std::promise&lt;int&gt; p;
     auto f = p.get_future();
-
     std::thread t(compute, std::move(p));
     std::cout &lt;&lt; "Result: " &lt;&lt; f.get() &lt;&lt; "\n";
     t.join();
 }</code></pre>
 
-      <!-- ── Dangling References ── -->
+      <h3>Moving large containers</h3>
+<pre><code>std::vector&lt;double&gt; data(1'000'000, 3.14);
+std::thread t([](std::vector&lt;double&gt; d) {
+    double sum = 0;
+    for (double x : d) sum += x;
+    std::cout &lt;&lt; "Sum: " &lt;&lt; sum &lt;&lt; "\n";
+}, std::move(data));
+// data is now empty on the main thread
+t.join();</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Dangling References                                      -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="dangling-refs">Dangling References: The Full Picture</h2>
       <p>
         Dangling references are the most dangerous pitfall when passing arguments to threads.
-        Here is a comprehensive list of scenarios:
+        Here is a comprehensive catalog of scenarios:
       </p>
 
       <h3>Scenario 1: Detached thread with stack reference</h3>
@@ -326,19 +536,80 @@ int main() {
     t.detach();
 }   // local destroyed here, but thread still running</code></pre>
 
-      <h3>Scenario 2: std::ref to a temporary</h3>
-<pre><code>void process(int&amp; val) { val *= 2; }
+      <div class="anim-container" id="dangle-anim">
+        <h4>&#9654; Dangling Reference Timeline</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through what happens when a detached thread outlives a local variable.</p>
+        <svg id="dangle-svg" width="600" height="220" viewBox="0 0 600 220">
+          <!-- Timeline -->
+          <line x1="50" y1="60" x2="560" y2="60" stroke="#ccc" stroke-width="1"/>
+          <text x="30" y="40" font-size="11" font-weight="bold" font-family="Manrope" fill="#0a8f6a">Main</text>
+          <line x1="50" y1="120" x2="560" y2="120" stroke="#ccc" stroke-width="1"/>
+          <text x="30" y="104" font-size="11" font-weight="bold" font-family="Manrope" fill="#1565c0">Thread</text>
 
-void bad_ref() {
-    // std::thread t(process, std::ref(42));
-    // Won't compile, but the intent is wrong regardless.
-    // Even if you work around it, the temporary is gone.
-}</code></pre>
+          <!-- Main events -->
+          <rect id="dg-create" x="80" y="45" width="80" height="30" rx="4" fill="#c8e6c9" stroke="#2e7d32" opacity="0"/>
+          <text id="dg-create-t" x="120" y="65" text-anchor="middle" font-size="9" font-family="Consolas" fill="#13201a" opacity="0">local = 10</text>
 
-      <h3>Scenario 3: Pointer to local in a loop</h3>
+          <rect id="dg-detach" x="180" y="45" width="70" height="30" rx="4" fill="#fff3e0" stroke="#ff6b35" opacity="0"/>
+          <text id="dg-detach-t" x="215" y="65" text-anchor="middle" font-size="9" font-family="Consolas" fill="#13201a" opacity="0">detach()</text>
+
+          <rect id="dg-exit" x="280" y="45" width="90" height="30" rx="4" fill="#ffebee" stroke="#c62828" opacity="0"/>
+          <text id="dg-exit-t" x="325" y="65" text-anchor="middle" font-size="9" font-family="Consolas" fill="#c62828" opacity="0">scope exits</text>
+
+          <text id="dg-destroy" x="325" y="95" text-anchor="middle" font-size="9" font-family="Manrope" fill="#c62828" opacity="0">local is destroyed!</text>
+
+          <!-- Thread events -->
+          <rect id="dg-sleep" x="180" y="105" width="200" height="30" rx="4" fill="#bbdefb" stroke="#1565c0" opacity="0"/>
+          <text id="dg-sleep-t" x="280" y="125" text-anchor="middle" font-size="9" font-family="Consolas" fill="#13201a" opacity="0">sleep_for(1s)...</text>
+
+          <rect id="dg-read" x="400" y="105" width="120" height="30" rx="4" fill="#ffebee" stroke="#c62828" opacity="0"/>
+          <text id="dg-read-t" x="460" y="125" text-anchor="middle" font-size="9" font-family="Consolas" fill="#c62828" opacity="0">cout &lt;&lt; local  // UB!</text>
+
+          <line id="dg-xline" x1="325" y1="45" x2="460" y2="105" stroke="#c62828" stroke-width="2" stroke-dasharray="6,3" opacity="0"/>
+        </svg>
+        <div id="dangle-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="dangle-step">Step &rarr;</button>
+          <button class="anim-btn" id="dangle-reset">Reset</button>
+          <span class="anim-output" id="dangle-output"></span>
+        </div>
+      </div>
+
+      <script>
+      (function(){
+        var step = 0;
+        var info = document.getElementById('dangle-info');
+        var output = document.getElementById('dangle-output');
+        var allHide = ['dg-create','dg-create-t','dg-detach','dg-detach-t','dg-exit','dg-exit-t','dg-destroy','dg-sleep','dg-sleep-t','dg-read','dg-read-t','dg-xline'];
+        var steps = [
+          { show:['dg-create','dg-create-t'], msg:"1. Main thread creates local variable (local = 10) on the stack.", out:"Step 1/5" },
+          { show:['dg-detach','dg-detach-t','dg-sleep','dg-sleep-t'], msg:"2. Thread is detached. It starts sleeping. Main continues.", out:"Step 2/5" },
+          { show:['dg-exit','dg-exit-t','dg-destroy'], msg:"3. Main function exits. The stack frame (including local) is destroyed.", out:"Step 3/5" },
+          { show:['dg-read','dg-read-t'], msg:"4. Thread wakes up, reads local. The memory is freed. UNDEFINED BEHAVIOR.", out:"Step 4/5" },
+          { show:['dg-xline'], msg:"5. The red dashed line shows the dangerous gap: variable dead, thread alive.", out:"Step 5/5 (done)" }
+        ];
+        function reset(){
+          step = 0;
+          allHide.forEach(function(id){ document.getElementById(id).setAttribute('opacity','0'); });
+          info.textContent = 'Press Step to see the dangling reference timeline.';
+          output.textContent = '';
+        }
+        reset();
+        document.getElementById('dangle-step').addEventListener('click', function(){
+          if(step >= steps.length) return;
+          steps[step].show.forEach(function(id){ document.getElementById(id).setAttribute('opacity','1'); });
+          info.textContent = steps[step].msg;
+          output.textContent = steps[step].out;
+          step++;
+        });
+        document.getElementById('dangle-reset').addEventListener('click', reset);
+      })();
+      </script>
+
+      <h3>Scenario 2: Pointer to local in a loop</h3>
 <pre><code>std::vector&lt;std::thread&gt; threads;
 for (int i = 0; i &lt; 5; ++i) {
-    // BAD: &amp;i captures address of loop variable
+    // BAD: &amp;i captures address of loop variable, which changes each iteration
     // threads.emplace_back([&amp;i](){ std::cout &lt;&lt; i; });
 
     // GOOD: capture by value
@@ -346,7 +617,7 @@ for (int i = 0; i &lt; 5; ++i) {
 }
 for (auto&amp; t : threads) t.join();</code></pre>
 
-      <h3>Scenario 4: Implicit conversion of char* (detailed)</h3>
+      <h3>Scenario 3: Implicit conversion of char* (detailed)</h3>
       <p>
         As shown above, passing a <code>char*</code> to a function expecting
         <code>std::string</code> defers the conversion. If the buffer is on the stack and the
@@ -354,7 +625,21 @@ for (auto&amp; t : threads) t.join();</code></pre>
         happens.
       </p>
 
-      <!-- ── Member Functions ── -->
+      <h3>Scenario 4: Reference to member of a temporary</h3>
+<pre><code>struct Config { int timeout = 30; };
+
+void worker(const int&amp; timeout) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::cout &lt;&lt; timeout &lt;&lt; "\n";  // may be dangling
+}
+
+// Config() creates a temporary. &amp;Config().timeout is a dangling pointer
+// after the full expression ends.
+// std::thread t(worker, std::cref(Config().timeout));  // DANGEROUS</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Member Functions                                         -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="member-functions">Member Functions with Object Pointers</h2>
       <p>
         When launching a member function on a thread, the second argument is the object on
@@ -367,6 +652,7 @@ for (auto&amp; t : threads) t.join();</code></pre>
         <li>A copy of the object (if copyable)</li>
       </ul>
 
+      <h3>Complete example with all binding modes</h3>
 <pre><code>class Logger {
 public:
     void log(const std::string&amp; msg) {
@@ -377,51 +663,176 @@ public:
 int main() {
     Logger logger;
 
-    // Using raw pointer
+    // Using raw pointer (caller must ensure lifetime)
     std::thread t1(&amp;Logger::log, &amp;logger, "via pointer");
     t1.join();
 
     // Using shared_ptr (safe for detached threads)
     auto shared_logger = std::make_shared&lt;Logger&gt;();
     std::thread t2(&amp;Logger::log, shared_logger, "via shared_ptr");
-    t2.detach();  // safe: shared_ptr keeps Logger alive
+    t2.detach();  // safe: shared_ptr extends lifetime
+
+    // Using std::ref (same as raw pointer semantically)
+    std::thread t3(&amp;Logger::log, std::ref(logger), "via ref");
+    t3.join();
 
     // Passing a copy of the object
-    std::thread t3(&amp;Logger::log, logger, "via copy");
-    t3.join();
+    std::thread t4(&amp;Logger::log, logger, "via copy");
+    t4.join();
 }</code></pre>
+
+      <h3>How std::invoke handles member functions</h3>
+      <p>
+        <code>std::invoke(&amp;C::fn, obj_ptr, args...)</code> is equivalent to
+        <code>(obj_ptr-&gt;*&amp;C::fn)(args...)</code>. If the second argument is a
+        <code>reference_wrapper</code>, it is unwrapped. If it is a raw value (not a pointer),
+        <code>std::invoke</code> calls the member function on the copy.
+      </p>
+
+      <!-- Static SVG: member function binding diagram -->
+      <svg width="520" height="160" viewBox="0 0 520 160" style="display:block;margin:1rem auto">
+        <text x="260" y="18" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Member Function Binding</text>
+
+        <rect x="10" y="35" width="140" height="30" rx="4" fill="#e3f2fd" stroke="#1565c0"/>
+        <text x="80" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a">&amp;Logger::log</text>
+        <text x="80" y="80" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">member fn pointer</text>
+
+        <rect x="190" y="35" width="120" height="30" rx="4" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="250" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a">&amp;logger</text>
+        <text x="250" y="80" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">object (this)</text>
+
+        <rect x="350" y="35" width="140" height="30" rx="4" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="420" y="55" text-anchor="middle" font-size="10" font-family="Consolas" fill="#13201a">"via pointer"</text>
+        <text x="420" y="80" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">additional args</text>
+
+        <text x="260" y="115" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">std::invoke(&amp;Logger::log, &amp;logger, "via pointer")</text>
+        <text x="260" y="140" text-anchor="middle" font-size="11" font-family="Consolas" fill="#7b1fa2">= logger.log("via pointer")</text>
+      </svg>
 
       <div class="callout">
         <strong>Prefer shared_ptr for detached threads.</strong> If you detach a thread that
         operates on an object, the object must outlive the thread. A
-        <code>std::shared_ptr</code> guarantees this by extending the object's lifetime.
+        <code>std::shared_ptr</code> guarantees this by extending the object's lifetime
+        through shared ownership.
       </div>
 
-      <!-- ── Large Objects ── -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Large Objects and Performance                            -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="large-objects">Large Objects and Performance</h2>
       <p>
         Since the thread constructor copies arguments, passing large objects can be expensive.
-        Strategies:
+        The three strategies in order of preference:
       </p>
-      <ul>
-        <li><strong>Move:</strong> If the caller does not need the object anymore, move it in.</li>
-        <li><strong>std::ref:</strong> If both threads need access and synchronization is handled.</li>
-        <li><strong>Shared pointer:</strong> For shared ownership semantics.</li>
-      </ul>
-<pre><code>// Moving a large vector into a thread
+      <ol>
+        <li><strong>Move:</strong> If the caller no longer needs the data, move it. Zero-copy transfer of internal buffers.</li>
+        <li><strong>std::ref:</strong> If both threads need access and synchronization is handled. Zero copies total.</li>
+        <li><strong>shared_ptr:</strong> For shared ownership across multiple threads. Reference-counted, thread-safe pointer.</li>
+      </ol>
+
+<pre><code>// Strategy 1: Move
 std::vector&lt;double&gt; data(1'000'000, 3.14);
-
 std::thread t([](std::vector&lt;double&gt; d) {
-    // d is owned by this thread now
-    double sum = 0;
-    for (double x : d) sum += x;
-    std::cout &lt;&lt; "Sum: " &lt;&lt; sum &lt;&lt; "\n";
+    // d is owned by this thread
 }, std::move(data));
+t.join();
 
-// data is now empty on the main thread
+// Strategy 2: Reference (must synchronize or join first)
+std::vector&lt;double&gt; data2(1'000'000, 2.71);
+std::thread t2([](const std::vector&lt;double&gt;&amp; d) {
+    // read-only access to the original
+}, std::cref(data2));
+t2.join();
+
+// Strategy 3: Shared pointer
+auto data3 = std::make_shared&lt;std::vector&lt;double&gt;&gt;(1'000'000, 1.41);
+std::thread t3([](std::shared_ptr&lt;std::vector&lt;double&gt;&gt; d) {
+    // shared ownership
+}, data3);
+t3.join();</code></pre>
+
+      <h3>Measuring the copy cost</h3>
+<pre><code>#include &lt;chrono&gt;
+#include &lt;thread&gt;
+#include &lt;vector&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    std::vector&lt;int&gt; big(10'000'000, 1);
+    using Clock = std::chrono::high_resolution_clock;
+
+    // By copy
+    auto t0 = Clock::now();
+    std::thread tc([](std::vector&lt;int&gt; v){ }, big);
+    tc.join();
+    auto t1 = Clock::now();
+
+    // By move
+    auto t2 = Clock::now();
+    auto big2 = big;  // make a copy to move from
+    std::thread tm([](std::vector&lt;int&gt; v){ }, std::move(big2));
+    tm.join();
+    auto t3 = Clock::now();
+
+    auto ms = [](auto d){ return std::chrono::duration_cast&lt;std::chrono::milliseconds&gt;(d).count(); };
+    std::cout &lt;&lt; "Copy: " &lt;&lt; ms(t1 - t0) &lt;&lt; " ms\n";
+    std::cout &lt;&lt; "Move: " &lt;&lt; ms(t3 - t2) &lt;&lt; " ms\n";
+    // Typical result: Copy ~20 ms, Move ~0 ms (for 40 MB vector)
+}</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Common Mistakes                                          -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="common-mistakes">Common Mistakes</h2>
+
+      <h3>1. Forgetting std::ref for output parameters</h3>
+<pre><code>void compute(int&amp; result) { result = 42; }
+int r = 0;
+// std::thread t(compute, r);           // COMPILE ERROR
+std::thread t(compute, std::ref(r));    // OK
 t.join();</code></pre>
 
-      <!-- ── Summary Table ── -->
+      <h3>2. Passing string literals to detached threads</h3>
+<pre><code>void log(const std::string&amp; msg) { /* ... */ }
+void bad() {
+    char buf[] = "temp";
+    std::thread t(log, buf);       // stores char*, not string
+    t.detach();                     // buf is destroyed; UB on new thread
+}
+void good() {
+    char buf[] = "temp";
+    std::thread t(log, std::string(buf));  // convert immediately
+    t.detach();
+}</code></pre>
+
+      <h3>3. Passing this by reference to a detached thread</h3>
+<pre><code>class Worker {
+public:
+    void start() {
+        std::thread t(&amp;Worker::run, this);
+        t.detach();
+        // If the Worker object is destroyed before run() finishes: UB
+    }
+private:
+    void run() { /* uses member variables */ }
+};
+// Fix: use shared_from_this() or ensure the object outlives the thread</code></pre>
+
+      <h3>4. Using std::ref with a temporary</h3>
+<pre><code>// std::thread t(process, std::ref(std::string("temp")));
+// COMPILE ERROR: cannot bind reference to temporary
+// (This is actually caught at compile time, which is good)</code></pre>
+
+      <h3>5. Race condition on std::ref argument</h3>
+<pre><code>int counter = 0;
+std::thread t1([](int&amp; c){ for(int i=0;i&lt;1000;++i) ++c; }, std::ref(counter));
+std::thread t2([](int&amp; c){ for(int i=0;i&lt;1000;++i) ++c; }, std::ref(counter));
+t1.join(); t2.join();
+// counter is likely NOT 2000 due to data race. Need atomic or mutex.</code></pre>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Summary Table                                            -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="summary-table">Summary Table</h2>
       <table>
         <thead>
@@ -430,6 +841,7 @@ t.join();</code></pre>
             <th>Syntax</th>
             <th>Thread gets</th>
             <th>Safe with detach?</th>
+            <th>Performance</th>
           </tr>
         </thead>
         <tbody>
@@ -438,44 +850,55 @@ t.join();</code></pre>
             <td><code>thread(f, arg)</code></td>
             <td>Independent copy</td>
             <td>Yes</td>
+            <td>Copy cost</td>
           </tr>
           <tr>
             <td>By reference</td>
             <td><code>thread(f, std::ref(arg))</code></td>
             <td>Reference to original</td>
             <td>No (unless lifetime guaranteed)</td>
+            <td>Zero copy</td>
+          </tr>
+          <tr>
+            <td>By const reference</td>
+            <td><code>thread(f, std::cref(arg))</code></td>
+            <td>Const reference to original</td>
+            <td>No (unless lifetime guaranteed)</td>
+            <td>Zero copy</td>
           </tr>
           <tr>
             <td>By move</td>
             <td><code>thread(f, std::move(arg))</code></td>
             <td>Moved-from ownership</td>
             <td>Yes</td>
+            <td>Move cost (often O(1))</td>
           </tr>
           <tr>
             <td>Pointer to object</td>
-            <td><code>thread(&amp;C::fn, &amp;obj, args...)</code></td>
-            <td>Raw pointer (no ownership)</td>
-            <td>No (unless lifetime guaranteed)</td>
+            <td><code>thread(&amp;C::fn, &amp;obj, ...)</code></td>
+            <td>Raw pointer</td>
+            <td>No (unless lifetime managed)</td>
+            <td>No copy</td>
           </tr>
           <tr>
             <td>shared_ptr to object</td>
-            <td><code>thread(&amp;C::fn, sptr, args...)</code></td>
+            <td><code>thread(&amp;C::fn, sptr, ...)</code></td>
             <td>Shared ownership</td>
             <td>Yes</td>
+            <td>Ref count increment</td>
           </tr>
         </tbody>
       </table>
 
       <div class="callout">
-        <strong>Final advice.</strong> Default to pass-by-value or move. Use
-        <code>std::ref</code> only when you have a clear synchronization story and the
-        referenced object is guaranteed to outlive the thread.
+        <strong>Default strategy.</strong> Pass by value or move. Use <code>std::ref</code>
+        only when you have a clear synchronization story and the referenced object is
+        guaranteed to outlive the thread.
       </div>
 
     </article>
   </div>
 
   <script src="../../../../blog.js"></script>
-  <!-- GoatCounter --><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body>
 </html>

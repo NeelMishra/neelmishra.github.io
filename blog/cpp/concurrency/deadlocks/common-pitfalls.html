@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Common deadlock pitfalls in C++ including lock-ordering violations, callback deadlocks, condition variable pitfalls, livelock, priority inversion, and starvation.">
+  <title>Common Deadlock Pitfalls in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#lock-ordering-violations">Lock-Ordering Violations</a></li>
+          <li><a href="#callback-deadlock">Callback Deadlock</a></li>
+          <li><a href="#callback-anim">Animation: Callback Deadlock</a></li>
+          <li><a href="#condvar-deadlock">Condition Variable Pitfalls</a></li>
+          <li><a href="#livelock">Livelock</a></li>
+          <li><a href="#livelock-anim">Animation: Livelock</a></li>
+          <li><a href="#priority-inversion">Priority Inversion</a></li>
+          <li><a href="#priority-anim">Animation: Priority Inversion</a></li>
+          <li><a href="#comparison">Starvation vs Deadlock vs Livelock</a></li>
+          <li><a href="#guidelines">Defensive Guidelines</a></li>
+          <li><a href="#summary">Summary</a></li>
+        </ul>
+      </div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">C++ &middot; Concurrency &middot; Deadlocks</a>
+      </div>
+      <h1>Common Deadlock Pitfalls in C++</h1>
+      <p class="post-meta">March 2026</p>
+
+      <!-- ===== Lock Ordering Violations ===== -->
+      <section id="lock-ordering-violations">
+        <h2>Lock-Ordering Violations in Practice</h2>
+        <p>
+          Even when a project documents a lock ordering policy, violations
+          creep in as code evolves. Common causes include:
+        </p>
+        <ul>
+          <li><strong>Code path diversity.</strong> A function acquires locks
+            in the documented order, but a different code path (error handler,
+            destructor, or optimisation shortcut) reverses the order.</li>
+          <li><strong>Layered libraries.</strong> Library A acquires lock X
+            under lock Y.  Your code acquires lock Y under lock X, creating a
+            cross-layer ordering violation that may be invisible during code
+            review.</li>
+          <li><strong>Refactoring drift.</strong> Lock ordering is correct at
+            commit time, but later refactors change the call graph so that lock
+            scopes nest differently.</li>
+        </ul>
+        <pre><code class="language-cpp">#include &lt;mutex&gt;
+#include &lt;iostream&gt;
+
+class Account {
+    mutable std::mutex mtx;
+    double balance;
+    int id;
+public:
+    Account(int id, double bal) : id(id), balance(bal) {}
+
+    // Correct: lock in ID order
+    static void transfer(Account&amp; from, Account&amp; to, double amt) {
+        Account&amp; first  = (from.id &lt; to.id) ? from : to;
+        Account&amp; second = (from.id &lt; to.id) ? to   : from;
+
+        std::scoped_lock lock(first.mtx, second.mtx);
+        if (from.balance &gt;= amt) {
+            from.balance -= amt;
+            to.balance   += amt;
+        }
+    }
+
+    // BUG: this helper ignores ordering
+    void emergencyDebit(Account&amp; other, double amt) {
+        std::lock_guard&lt;std::mutex&gt; mine(this-&gt;mtx);
+        std::lock_guard&lt;std::mutex&gt; theirs(other.mtx);
+        // If another thread calls other.emergencyDebit(*this)
+        // at the same time, deadlock occurs.
+        balance -= amt;
+        other.balance += amt;
+    }
+};</code></pre>
+        <p>
+          The <code>transfer</code> function correctly orders locks by account
+          ID.  The <code>emergencyDebit</code> method, added later, locks
+          <code>this</code> first regardless of ID, violating the established
+          policy.
+        </p>
+      </section>
+
+      <!-- ===== Callback Deadlock ===== -->
+      <section id="callback-deadlock">
+        <h2>Calling Unknown Code While Holding a Lock</h2>
+        <p>
+          One of the most insidious deadlock patterns arises when a thread
+          invokes a callback, virtual function, or function pointer while
+          holding a lock.  The called code may attempt to acquire the same
+          lock, or a different lock that creates a cycle.
+        </p>
+        <pre><code class="language-cpp">#include &lt;mutex&gt;
+#include &lt;functional&gt;
+#include &lt;vector&gt;
+#include &lt;iostream&gt;
+
+class EventEmitter {
+    std::mutex mtx;
+    std::vector&lt;std::function&lt;void()&gt;&gt; listeners;
+public:
+    void addListener(std::function&lt;void()&gt; fn) {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx);
+        listeners.push_back(std::move(fn));
+    }
+
+    void emit() {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx);  // Lock held!
+        for (auto&amp; fn : listeners) {
+            fn();  // DANGER: callback may call addListener
+        }
+    }
+};
+
+// Usage that deadlocks:
+EventEmitter emitter;
+
+void setup() {
+    emitter.addListener([]() {
+        std::cout &lt;&lt; "Event received, adding another listener\n";
+        // This re-enters addListener, which tries to lock mtx
+        // But mtx is already held by emit(). DEADLOCK.
+        emitter.addListener([]() {
+            std::cout &lt;&lt; "Nested listener\n";
+        });
+    });
+    emitter.emit();
+}</code></pre>
+        <h3>Mitigations</h3>
+        <ul>
+          <li><strong>Copy and release.</strong> Copy the listener list under
+            the lock, release the lock, then invoke callbacks outside the
+            critical section.</li>
+          <li><strong>Use a recursive mutex.</strong> This avoids the self-deadlock
+            but introduces other problems (e.g., invariant violations).</li>
+          <li><strong>Deferred invocation.</strong> Queue callback events and
+            process them outside the lock scope.</li>
+        </ul>
+        <pre><code class="language-cpp">void emitSafe() {
+    std::vector&lt;std::function&lt;void()&gt;&gt; snapshot;
+    {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx);
+        snapshot = listeners;  // Copy under lock
+    }
+    // Lock released; safe to call callbacks
+    for (auto&amp; fn : snapshot) {
+        fn();
+    }
+}</code></pre>
+      </section>
+
+      <!-- ===== Callback Animation ===== -->
+      <section id="callback-anim">
+        <h2>Animation: Callback Deadlock Scenario</h2>
+        <p>
+          A thread calls <code>emit()</code>, holds the mutex, and invokes a
+          callback that calls <code>addListener()</code>, which tries to
+          re-acquire the same mutex.
+        </p>
+        <div class="anim-container" id="cb-anim">
+          <h4>&#9654; Callback Deadlock</h4>
+          <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">
+            Single thread, single mutex, self-deadlock via re-entrant callback.
+          </p>
+          <svg id="cb-svg" width="600" height="280" viewBox="0 0 600 280">
+            <!-- Thread -->
+            <rect x="20" y="30" width="90" height="40" rx="6" fill="none" stroke="#60a5fa" stroke-width="2"/>
+            <text x="65" y="56" text-anchor="middle" fill="#60a5fa" font-size="13" font-family="Manrope">Thread</text>
+            <!-- Mutex -->
+            <rect x="250" y="30" width="100" height="40" rx="6" fill="none" stroke="#f472b6" stroke-width="2"/>
+            <text x="300" y="56" text-anchor="middle" fill="#f472b6" font-size="13" font-family="Manrope">mtx</text>
+            <!-- Call stack frames -->
+            <rect id="cb-f1" x="20" y="100" width="250" height="35" rx="4" fill="none" stroke="#34d399" stroke-width="1.5" opacity="0"/>
+            <text id="cb-f1t" x="145" y="123" text-anchor="middle" fill="#34d399" font-size="12" font-family="Consolas" opacity="0">emit() { lock(mtx); ... }</text>
+            <rect id="cb-f2" x="40" y="145" width="280" height="35" rx="4" fill="none" stroke="#facc15" stroke-width="1.5" opacity="0"/>
+            <text id="cb-f2t" x="180" y="168" text-anchor="middle" fill="#facc15" font-size="12" font-family="Consolas" opacity="0">callback() { addListener(...); }</text>
+            <rect id="cb-f3" x="60" y="190" width="310" height="35" rx="4" fill="none" stroke="#ef4444" stroke-width="1.5" opacity="0"/>
+            <text id="cb-f3t" x="215" y="213" text-anchor="middle" fill="#ef4444" font-size="12" font-family="Consolas" opacity="0">addListener() { lock(mtx); // BLOCKED }</text>
+            <!-- Lock state -->
+            <rect id="cb-lock" x="250" y="75" width="100" height="20" rx="3" fill="#34d399" opacity="0"/>
+            <text id="cb-lockt" x="300" y="89" text-anchor="middle" fill="#0f172a" font-size="10" font-family="Manrope" opacity="0">LOCKED</text>
+            <!-- Deadlock indicator -->
+            <text id="cb-dead" x="300" y="260" text-anchor="middle" fill="#ef4444" font-size="14" font-family="Manrope" opacity="0">SELF-DEADLOCK: thread waits on lock it already holds</text>
+          </svg>
+          <div id="cb-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+          <div class="anim-controls">
+            <button class="anim-btn" id="cb-step">Step &rarr;</button>
+            <button class="anim-btn" id="cb-reset">Reset</button>
+            <span class="anim-output" id="cb-output"></span>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          var msgs=[
+            'Step 1: Thread calls emit(). emit() acquires mtx.',
+            'Step 2: Lock state: LOCKED by current thread.',
+            'Step 3: emit() iterates listeners, calls callback().',
+            'Step 4: callback() calls addListener(), which tries lock(mtx).',
+            'Step 5: mtx is already held by this thread. std::mutex is not re-entrant. DEADLOCK.'
+          ];
+          function reset(){
+            step=0;
+            ['cb-f1','cb-f1t','cb-f2','cb-f2t','cb-f3','cb-f3t','cb-lock','cb-lockt'].forEach(function(id){
+              document.getElementById(id).setAttribute('opacity','0');
+            });
+            document.getElementById('cb-dead').setAttribute('opacity','0');
+            document.getElementById('cb-info').innerHTML='Press Step to begin.';
+            document.getElementById('cb-output').textContent='';
+          }
+          reset();
+          document.getElementById('cb-step').addEventListener('click',function(){
+            if(step>=msgs.length) return;
+            if(step===0){document.getElementById('cb-f1').setAttribute('opacity','1');document.getElementById('cb-f1t').setAttribute('opacity','1');}
+            if(step===1){document.getElementById('cb-lock').setAttribute('opacity','1');document.getElementById('cb-lockt').setAttribute('opacity','1');}
+            if(step===2){document.getElementById('cb-f2').setAttribute('opacity','1');document.getElementById('cb-f2t').setAttribute('opacity','1');}
+            if(step===3){document.getElementById('cb-f3').setAttribute('opacity','1');document.getElementById('cb-f3t').setAttribute('opacity','1');}
+            if(step===4){document.getElementById('cb-dead').setAttribute('opacity','1');}
+            document.getElementById('cb-info').innerHTML=msgs[step];
+            document.getElementById('cb-output').textContent='Step '+(step+1)+'/'+msgs.length;
+            step++;
+          });
+          document.getElementById('cb-reset').addEventListener('click',reset);
+        })();
+        </script>
+      </section>
+
+      <!-- ===== Condition Variable Pitfalls ===== -->
+      <section id="condvar-deadlock">
+        <h2>Deadlock with Condition Variables</h2>
+        <p>
+          Condition variables introduce subtle deadlock risks.  The most common
+          pitfall is the <strong>lost wakeup</strong>, where a notification is
+          sent before the receiving thread starts waiting, causing it to block
+          forever.
+        </p>
+        <pre><code class="language-cpp">#include &lt;mutex&gt;
+#include &lt;condition_variable&gt;
+#include &lt;thread&gt;
+#include &lt;iostream&gt;
+
+std::mutex mtx;
+std::condition_variable cv;
+bool ready = false;
+
+void consumer() {
+    std::unique_lock&lt;std::mutex&gt; lock(mtx);
+    // Correct: use predicate to guard against spurious and lost wakeups
+    cv.wait(lock, []{ return ready; });
+    std::cout &lt;&lt; "Consumer: data ready\n";
+}
+
+void producer() {
+    {
+        std::lock_guard&lt;std::mutex&gt; lock(mtx);
+        ready = true;
+    }
+    cv.notify_one();  // Safe: ready flag is set before notify
+}
+
+int main() {
+    std::thread c(consumer);
+    std::thread p(producer);
+    c.join();
+    p.join();
+    return 0;
+}</code></pre>
+        <h3>Signal-With-Lock-Held Debate</h3>
+        <p>
+          Should you call <code>notify_one()</code> inside or outside the lock?
+        </p>
+        <ul>
+          <li><strong>Inside the lock:</strong> The notified thread wakes up,
+            tries to reacquire the mutex, finds it still held, and immediately
+            blocks again.  This causes a "hurry-up-and-wait" pessimisation but
+            is semantically correct.</li>
+          <li><strong>Outside the lock:</strong> The notified thread can
+            immediately acquire the mutex.  More efficient but requires care to
+            ensure the predicate was already set under the lock.</li>
+        </ul>
+        <p>
+          Neither approach causes deadlock by itself, but mixing
+          <code>notify_all()</code> with locks from multiple condition variables
+          can create complex interleavings where threads wait on each other's
+          conditions indefinitely.
+        </p>
+      </section>
+
+      <!-- ===== Livelock ===== -->
+      <section id="livelock">
+        <h2>Livelock: Busy But Making No Progress</h2>
+        <p>
+          In a livelock, threads are not blocked.  They are actively executing,
+          but they keep undoing and retrying their actions in response to each
+          other, and no thread ever makes forward progress.
+        </p>
+        <pre><code class="language-cpp">#include &lt;mutex&gt;
+#include &lt;thread&gt;
+#include &lt;iostream&gt;
+#include &lt;atomic&gt;
+
+std::mutex m1, m2;
+std::atomic&lt;int&gt; retries{0};
+
+void livelockThread(const char* name,
+                    std::mutex&amp; first,
+                    std::mutex&amp; second) {
+    while (true) {
+        first.lock();
+        if (second.try_lock()) {
+            std::cout &lt;&lt; name &lt;&lt; ": acquired both\n";
+            second.unlock();
+            first.unlock();
+            return;
+        }
+        first.unlock();
+        retries++;
+        // Both threads yield immediately and retry in lockstep
+        std::this_thread::yield();
+        if (retries &gt; 1000000) {
+            std::cout &lt;&lt; name &lt;&lt; ": gave up after 1M retries\n";
+            return;
+        }
+    }
+}
+
+int main() {
+    std::thread t1(livelockThread, "T1", std::ref(m1), std::ref(m2));
+    std::thread t2(livelockThread, "T2", std::ref(m2), std::ref(m1));
+    t1.join();
+    t2.join();
+    return 0;
+}</code></pre>
+        <p>
+          The fix is randomized or exponential backoff so the two threads
+          desynchronise.
+        </p>
+      </section>
+
+      <!-- ===== Livelock Animation ===== -->
+      <section id="livelock-anim">
+        <h2>Animation: Livelock Between Two Threads</h2>
+        <p>
+          Watch two threads repeatedly acquire one lock, fail try_lock on the
+          other, release, and retry in perfect lockstep, making zero progress.
+        </p>
+        <div class="anim-container" id="ll-anim">
+          <h4>&#9654; Livelock: Backing Off in Sync</h4>
+          <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">
+            T1 grabs A, T2 grabs B. Both fail try_lock on the other. Both release. Repeat.
+          </p>
+          <svg id="ll-svg" width="600" height="260" viewBox="0 0 600 260">
+            <!-- T1 and T2 icons -->
+            <rect x="20" y="40" width="70" height="30" rx="5" fill="none" stroke="#60a5fa" stroke-width="2"/>
+            <text x="55" y="60" text-anchor="middle" fill="#60a5fa" font-size="12" font-family="Manrope">T1</text>
+            <rect x="20" y="130" width="70" height="30" rx="5" fill="none" stroke="#60a5fa" stroke-width="2"/>
+            <text x="55" y="150" text-anchor="middle" fill="#60a5fa" font-size="12" font-family="Manrope">T2</text>
+            <!-- Iteration columns -->
+            <!-- Iter 1 -->
+            <rect id="ll-1a" x="110" y="30" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-1at" x="155" y="47" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(A) ok</text>
+            <rect id="ll-1b" x="110" y="56" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-1bt" x="155" y="73" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(B) fail</text>
+            <rect id="ll-1c" x="110" y="120" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-1ct" x="155" y="137" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(B) ok</text>
+            <rect id="ll-1d" x="110" y="146" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-1dt" x="155" y="163" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(A) fail</text>
+            <!-- Iter 2 -->
+            <rect id="ll-2a" x="220" y="30" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-2at" x="265" y="47" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(A) ok</text>
+            <rect id="ll-2b" x="220" y="56" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-2bt" x="265" y="73" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(B) fail</text>
+            <rect id="ll-2c" x="220" y="120" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-2ct" x="265" y="137" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(B) ok</text>
+            <rect id="ll-2d" x="220" y="146" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-2dt" x="265" y="163" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(A) fail</text>
+            <!-- Iter 3 -->
+            <rect id="ll-3a" x="330" y="30" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-3at" x="375" y="47" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(A) ok</text>
+            <rect id="ll-3b" x="330" y="56" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-3bt" x="375" y="73" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(B) fail</text>
+            <rect id="ll-3c" x="330" y="120" width="90" height="24" rx="3" fill="#34d399" opacity="0"/>
+            <text id="ll-3ct" x="375" y="137" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">lock(B) ok</text>
+            <rect id="ll-3d" x="330" y="146" width="90" height="24" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="ll-3dt" x="375" y="163" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">try(A) fail</text>
+            <!-- Ellipsis -->
+            <text id="ll-dots" x="460" y="100" fill="#94a3b8" font-size="24" font-family="Manrope" opacity="0">. . .</text>
+            <!-- Result -->
+            <text id="ll-result" x="300" y="220" text-anchor="middle" fill="#facc15" font-size="13" font-family="Manrope" opacity="0">LIVELOCK: both threads active but zero progress</text>
+            <text id="ll-fix" x="300" y="248" text-anchor="middle" fill="#34d399" font-size="12" font-family="Manrope" opacity="0">Fix: add randomized backoff to break symmetry</text>
+          </svg>
+          <div id="ll-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+          <div class="anim-controls">
+            <button class="anim-btn" id="ll-step">Step &rarr;</button>
+            <button class="anim-btn" id="ll-reset">Reset</button>
+            <span class="anim-output" id="ll-output"></span>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          var groups=[
+            ['ll-1a','ll-1at','ll-1b','ll-1bt','ll-1c','ll-1ct','ll-1d','ll-1dt'],
+            ['ll-2a','ll-2at','ll-2b','ll-2bt','ll-2c','ll-2ct','ll-2d','ll-2dt'],
+            ['ll-3a','ll-3at','ll-3b','ll-3bt','ll-3c','ll-3ct','ll-3d','ll-3dt'],
+            ['ll-dots'],
+            ['ll-result'],
+            ['ll-fix']
+          ];
+          var msgs=[
+            'Iteration 1: T1 locks A, fails try_lock(B). T2 locks B, fails try_lock(A). Both release.',
+            'Iteration 2: Same thing. T1 locks A, fails B. T2 locks B, fails A. Both release.',
+            'Iteration 3: Same again. Both threads are active but making zero progress.',
+            'This continues indefinitely. Threads are not blocked, just perpetually retrying.',
+            'LIVELOCK detected: threads consume CPU without forward progress.',
+            'Solution: randomized backoff (sleep for random duration) breaks the symmetry.'
+          ];
+          function reset(){
+            step=0;
+            groups.forEach(function(g){g.forEach(function(id){document.getElementById(id).setAttribute('opacity','0');});});
+            document.getElementById('ll-info').innerHTML='Press Step to begin.';
+            document.getElementById('ll-output').textContent='';
+          }
+          reset();
+          document.getElementById('ll-step').addEventListener('click',function(){
+            if(step>=msgs.length) return;
+            groups[step].forEach(function(id){document.getElementById(id).setAttribute('opacity','1');});
+            document.getElementById('ll-info').innerHTML=msgs[step];
+            document.getElementById('ll-output').textContent='Step '+(step+1)+'/'+msgs.length;
+            step++;
+          });
+          document.getElementById('ll-reset').addEventListener('click',reset);
+        })();
+        </script>
+      </section>
+
+      <!-- ===== Priority Inversion ===== -->
+      <section id="priority-inversion">
+        <h2>Priority Inversion</h2>
+        <p>
+          Priority inversion occurs when a low-priority thread holds a lock
+          needed by a high-priority thread, while a medium-priority thread
+          preempts the low-priority thread.  The high-priority thread is
+          effectively blocked by the medium-priority thread, even though they
+          share no resources.
+        </p>
+        <pre><code class="language-cpp">// Scenario (pseudocode):
+// Thread H (high priority): needs mutex M
+// Thread M (medium priority): CPU-bound, no locks
+// Thread L (low priority): holds mutex M
+
+// Timeline:
+// 1. L acquires M
+// 2. H preempts L, tries to acquire M, blocks
+// 3. M preempts L (M has higher priority than L)
+// 4. L cannot run to release M because M is running
+// 5. H is blocked waiting for M, held by L, which is blocked by M
+// Result: H is effectively waiting for thread M to finish</code></pre>
+        <h3>Solutions</h3>
+        <ul>
+          <li><strong>Priority inheritance:</strong> When H blocks on M, boost
+            L's priority to H's level so L can run, release M, and unblock
+            H.</li>
+          <li><strong>Priority ceiling:</strong> Associate each mutex with the
+            highest priority of any thread that may lock it.  A thread holding
+            the mutex runs at the ceiling priority.</li>
+        </ul>
+        <p>
+          The Mars Pathfinder incident in 1997 is the most famous example: the
+          spacecraft's VxWorks RTOS experienced priority inversion that caused
+          system resets, resolved by enabling priority inheritance.
+        </p>
+      </section>
+
+      <!-- ===== Priority Inversion Animation ===== -->
+      <section id="priority-anim">
+        <h2>Animation: Priority Inversion Scenario</h2>
+        <p>
+          Three threads at high, medium, and low priority compete. Step through
+          to see how the medium-priority thread indirectly blocks the
+          high-priority thread.
+        </p>
+        <div class="anim-container" id="pi-anim">
+          <h4>&#9654; Priority Inversion</h4>
+          <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">
+            H=high priority, M=medium, L=low. L holds the mutex.
+          </p>
+          <svg id="pi-svg" width="600" height="280" viewBox="0 0 600 280">
+            <!-- Priority labels -->
+            <text x="10" y="56" fill="#ef4444" font-size="13" font-family="Manrope">H</text>
+            <text x="10" y="126" fill="#facc15" font-size="13" font-family="Manrope">M</text>
+            <text x="10" y="196" fill="#34d399" font-size="13" font-family="Manrope">L</text>
+            <!-- Timelines -->
+            <line x1="30" y1="50" x2="580" y2="50" stroke="#334155" stroke-width="1"/>
+            <line x1="30" y1="120" x2="580" y2="120" stroke="#334155" stroke-width="1"/>
+            <line x1="30" y1="190" x2="580" y2="190" stroke="#334155" stroke-width="1"/>
+            <!-- Time markers -->
+            <text x="60" y="30" fill="#94a3b8" font-size="9" font-family="Consolas">t0</text>
+            <text x="150" y="30" fill="#94a3b8" font-size="9" font-family="Consolas">t1</text>
+            <text x="250" y="30" fill="#94a3b8" font-size="9" font-family="Consolas">t2</text>
+            <text x="400" y="30" fill="#94a3b8" font-size="9" font-family="Consolas">t3</text>
+            <!-- L runs and holds lock -->
+            <rect id="pi-l1" x="50" y="178" width="100" height="22" rx="3" fill="#34d399" opacity="0"/>
+            <text id="pi-l1t" x="100" y="194" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">L runs (holds mtx)</text>
+            <!-- H arrives, blocks on lock -->
+            <rect id="pi-h1" x="150" y="38" width="70" height="22" rx="3" fill="#ef4444" opacity="0"/>
+            <text id="pi-h1t" x="185" y="54" text-anchor="middle" fill="#fff" font-size="9" font-family="Manrope" opacity="0">H blocked</text>
+            <!-- M preempts L -->
+            <rect id="pi-m1" x="160" y="108" width="240" height="22" rx="3" fill="#facc15" opacity="0"/>
+            <text id="pi-m1t" x="280" y="124" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">M runs (preempts L, no lock needed)</text>
+            <!-- L cannot run -->
+            <rect id="pi-l2" x="160" y="178" width="240" height="22" rx="3" fill="#334155" opacity="0"/>
+            <text id="pi-l2t" x="280" y="194" text-anchor="middle" fill="#94a3b8" font-size="9" font-family="Manrope" opacity="0">L preempted (cannot release mtx)</text>
+            <!-- H still blocked -->
+            <rect id="pi-h2" x="220" y="38" width="180" height="22" rx="3" fill="#7f1d1d" opacity="0"/>
+            <text id="pi-h2t" x="310" y="54" text-anchor="middle" fill="#fca5a5" font-size="9" font-family="Manrope" opacity="0">H STILL BLOCKED (priority inversion)</text>
+            <!-- Resolution -->
+            <rect id="pi-l3" x="410" y="178" width="80" height="22" rx="3" fill="#34d399" opacity="0"/>
+            <text id="pi-l3t" x="450" y="194" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">L releases</text>
+            <rect id="pi-h3" x="500" y="38" width="70" height="22" rx="3" fill="#34d399" opacity="0"/>
+            <text id="pi-h3t" x="535" y="54" text-anchor="middle" fill="#0f172a" font-size="9" font-family="Manrope" opacity="0">H runs</text>
+            <!-- Result -->
+            <text id="pi-result" x="300" y="250" text-anchor="middle" fill="#facc15" font-size="12" font-family="Manrope" opacity="0">H was blocked by M indirectly (priority inversion)</text>
+            <text id="pi-fix" x="300" y="272" text-anchor="middle" fill="#34d399" font-size="11" font-family="Manrope" opacity="0">Fix: priority inheritance boosts L while it holds the lock</text>
+          </svg>
+          <div id="pi-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+          <div class="anim-controls">
+            <button class="anim-btn" id="pi-step">Step &rarr;</button>
+            <button class="anim-btn" id="pi-reset">Reset</button>
+            <span class="anim-output" id="pi-output"></span>
+          </div>
+        </div>
+        <script>
+        (function(){
+          var step=0;
+          var groups=[
+            ['pi-l1','pi-l1t'],
+            ['pi-h1','pi-h1t'],
+            ['pi-m1','pi-m1t','pi-l2','pi-l2t','pi-h2','pi-h2t'],
+            ['pi-l3','pi-l3t','pi-h3','pi-h3t'],
+            ['pi-result','pi-fix']
+          ];
+          var msgs=[
+            'Step 1: L starts running and acquires the mutex.',
+            'Step 2: H arrives and tries to lock the mutex. Blocked (held by L).',
+            'Step 3: M arrives and preempts L (higher priority). L cannot release the mutex. H remains blocked.',
+            'Step 4: Eventually M finishes. L resumes, releases mutex. H finally acquires it.',
+            'Result: H was delayed by M despite having higher priority. Fix: priority inheritance.'
+          ];
+          function reset(){
+            step=0;
+            groups.forEach(function(g){g.forEach(function(id){document.getElementById(id).setAttribute('opacity','0');});});
+            document.getElementById('pi-info').innerHTML='Press Step to begin.';
+            document.getElementById('pi-output').textContent='';
+          }
+          reset();
+          document.getElementById('pi-step').addEventListener('click',function(){
+            if(step>=msgs.length) return;
+            groups[step].forEach(function(id){document.getElementById(id).setAttribute('opacity','1');});
+            document.getElementById('pi-info').innerHTML=msgs[step];
+            document.getElementById('pi-output').textContent='Step '+(step+1)+'/'+msgs.length;
+            step++;
+          });
+          document.getElementById('pi-reset').addEventListener('click',reset);
+        })();
+        </script>
+      </section>
+
+      <!-- ===== Comparison ===== -->
+      <section id="comparison">
+        <h2>Starvation vs Deadlock vs Livelock</h2>
+        <table style="width:100%;border-collapse:collapse;margin:1rem 0">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border)">
+              <th style="text-align:left;padding:0.5rem">Property</th>
+              <th style="text-align:left;padding:0.5rem">Deadlock</th>
+              <th style="text-align:left;padding:0.5rem">Livelock</th>
+              <th style="text-align:left;padding:0.5rem">Starvation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:0.5rem">Threads blocked?</td>
+              <td style="padding:0.5rem">Yes, permanently</td>
+              <td style="padding:0.5rem">No, actively retrying</td>
+              <td style="padding:0.5rem">Yes, waiting indefinitely</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:0.5rem">CPU usage</td>
+              <td style="padding:0.5rem">Zero (blocked)</td>
+              <td style="padding:0.5rem">High (busy waiting)</td>
+              <td style="padding:0.5rem">Zero (waiting)</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:0.5rem">Progress</td>
+              <td style="padding:0.5rem">None for any involved thread</td>
+              <td style="padding:0.5rem">None for involved threads</td>
+              <td style="padding:0.5rem">Other threads progress; starved thread does not</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:0.5rem">Cyclic dependency?</td>
+              <td style="padding:0.5rem">Yes</td>
+              <td style="padding:0.5rem">Not necessarily</td>
+              <td style="padding:0.5rem">No</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:0.5rem">Detection</td>
+              <td style="padding:0.5rem">Cycle in wait-for graph</td>
+              <td style="padding:0.5rem">High CPU with no throughput</td>
+              <td style="padding:0.5rem">Long wait time for specific thread</td>
+            </tr>
+            <tr>
+              <td style="padding:0.5rem">Typical fix</td>
+              <td style="padding:0.5rem">Lock ordering / scoped_lock</td>
+              <td style="padding:0.5rem">Randomized backoff</td>
+              <td style="padding:0.5rem">Fair scheduling / fair locks</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ===== Guidelines ===== -->
+      <section id="guidelines">
+        <h2>Defensive Guidelines</h2>
+        <ol>
+          <li>
+            <strong>Never call unknown code under a lock.</strong>  If you
+            must invoke a callback, copy the callback list, release the lock,
+            then invoke.
+          </li>
+          <li>
+            <strong>Document the lock order.</strong>  Every mutex in the
+            codebase should have a documented level or rank in comments.
+          </li>
+          <li>
+            <strong>Prefer <code>std::scoped_lock</code>.</strong>  It handles
+            multi-lock acquisition safely and concisely.
+          </li>
+          <li>
+            <strong>Minimise lock scope.</strong>  Hold locks for the shortest
+            duration possible to reduce contention and the chance of ordering
+            mistakes.
+          </li>
+          <li>
+            <strong>Use sanitizers in CI.</strong>  Build with
+            <code>-fsanitize=thread</code> and run your test suite to catch
+            lock-order inversions early.
+          </li>
+          <li>
+            <strong>Add randomized backoff to try_lock loops.</strong>  This
+            prevents livelock when threads coordinate via try_lock.
+          </li>
+          <li>
+            <strong>Use timed locks as a safety net.</strong>
+            <code>try_lock_for</code> provides an escape hatch for unexpected
+            deadlocks in production.
+          </li>
+          <li>
+            <strong>Test with high thread counts.</strong>  Deadlocks and
+            livelocks are timing-dependent.  Stress tests with more threads
+            than cores increase the chance of exposing bugs.
+          </li>
+        </ol>
+      </section>
+
+      <!-- ===== Summary ===== -->
+      <section id="summary">
+        <h2>Summary</h2>
+        <ul>
+          <li>Lock-ordering violations are the most common cause of deadlock in
+            real C++ codebases.  They often appear during refactoring or in
+            error-handling paths.</li>
+          <li>Calling unknown code (callbacks, virtual functions) while holding
+            a lock risks self-deadlock or cross-lock cycles.</li>
+          <li>Livelock is a subtler failure mode where threads consume CPU but
+            achieve nothing.  Randomized backoff is the standard fix.</li>
+          <li>Priority inversion is a scheduling-level problem solved by
+            priority inheritance or priority ceiling protocols.</li>
+          <li>Starvation differs from deadlock in that the system as a whole
+            makes progress, but one thread is perpetually denied resources.</li>
+        </ul>
+        <div class="post-nav" style="margin-top:2.5rem;display:flex;justify-content:space-between">
+          <a href="detection-recovery.html">&larr; Detection &amp; Recovery</a>
+          <a href="../deadlocks.html">Deadlocks Overview &rarr;</a>
+        </div>
+      </section>
+
+    </article>
+  </div>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

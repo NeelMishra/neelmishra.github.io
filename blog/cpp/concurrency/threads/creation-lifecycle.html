@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Deep dive into C++ thread creation using function pointers, lambdas, functors, and member functions. Covers join vs detach, thread lifecycle, and destruction pitfalls.">
+  <meta name="description" content="Deep dive into C++ thread creation using function pointers, lambdas, functors, and member functions. Covers join vs detach, thread lifecycle state machine, OS-level thread creation internals, most vexing parse, ownership transfer with move semantics, and performance benchmarks.">
   <title>Thread Creation &amp; Lifecycle | Neel Mishra</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,13 +34,16 @@
           <li><a href="#lambdas">Lambda Expressions</a></li>
           <li><a href="#functors">Functors (Callable Objects)</a></li>
           <li><a href="#member-functions">Member Functions</a></li>
+          <li><a href="#under-the-hood">Thread Creation Under the Hood</a></li>
           <li><a href="#join-vs-detach">Join vs Detach</a></li>
           <li><a href="#joinable-check">The Joinable Check</a></li>
-          <li><a href="#lifecycle">Thread Lifecycle</a></li>
+          <li><a href="#lifecycle">Thread Lifecycle State Machine</a></li>
           <li><a href="#destruction-pitfalls">Destruction Without Join</a></li>
           <li><a href="#vexing-parse">The Most Vexing Parse</a></li>
           <li><a href="#thread-ids">Thread Identifiers</a></li>
           <li><a href="#ownership-transfer">Ownership Transfer</a></li>
+          <li><a href="#benchmark">Performance: Callable Types</a></li>
+          <li><a href="#common-mistakes">Common Mistakes</a></li>
         </ul>
       </div>
     </aside>
@@ -56,25 +59,46 @@
 
       <p>
         Every concurrent C++ program starts with the same fundamental operation: creating a thread.
-        The <code>std::thread</code> class (defined in <code>&lt;thread&gt;</code>) is the standard
-        mechanism for launching a new thread of execution. Understanding the different ways to
-        construct a thread, its lifecycle states, and the consequences of mismanaging that lifecycle
-        is essential before tackling higher-level concurrency patterns.
+        The <code>std::thread</code> class, defined in <code>&lt;thread&gt;</code>, is the standard
+        mechanism for launching a new thread of execution. Understanding how threads are constructed,
+        what happens at the OS level, the lifecycle states a thread passes through, and the
+        consequences of mismanaging that lifecycle is essential groundwork before tackling any
+        higher-level concurrency pattern.
+      </p>
+      <p>
+        This page covers thread construction from four callable types, the OS-level machinery
+        behind <code>std::thread</code>, the complete lifecycle state machine, ownership semantics,
+        and common pitfalls that catch even experienced programmers.
       </p>
 
-      <!-- ── Section 1: Creating Threads ── -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Creating Threads                                         -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="creating-threads">Creating Threads</h2>
       <p>
         The <code>std::thread</code> constructor accepts any <em>callable</em> entity followed by
-        its arguments. The callable is invoked on the new thread immediately after construction.
-        Four primary callable types are used in practice: function pointers, lambda expressions,
+        its arguments. The callable is invoked on a new thread immediately after construction.
+        Four primary callable types appear in practice: function pointers, lambda expressions,
         functors, and member function pointers.
+      </p>
+      <p>
+        Internally, the constructor performs the following sequence:
+      </p>
+      <ol>
+        <li>Copies or moves the callable and all arguments into storage owned by the thread object.</li>
+        <li>Requests the OS to create a new kernel thread.</li>
+        <li>The new thread invokes the stored callable with the stored arguments.</li>
+      </ol>
+      <p>
+        The copy/move happens on the calling thread. The invocation happens on the new thread.
+        This two-phase model is the source of many subtle behaviors covered later in this series.
       </p>
 
       <!-- ── Function Pointers ── -->
       <h3 id="function-pointers">Function Pointers</h3>
       <p>
-        The simplest form. Pass a free function (or a static member function) by name:
+        The simplest callable type. Pass a free function (or a static member function) by name.
+        The compiler resolves the function name to a pointer automatically:
       </p>
 <pre><code>#include &lt;iostream&gt;
 #include &lt;thread&gt;
@@ -84,33 +108,54 @@ void greet(int id) {
 }
 
 int main() {
-    std::thread t1(greet, 1);   // calls greet(1) on new thread
-    std::thread t2(greet, 2);   // calls greet(2) on new thread
+    std::thread t1(greet, 1);   // calls greet(1) on a new thread
+    std::thread t2(greet, 2);   // calls greet(2) on another new thread
 
     t1.join();
     t2.join();
 }</code></pre>
+      <p>
+        You can also pass the address explicitly with <code>&amp;greet</code>. Both forms are
+        identical; the compiler decays the function name to a pointer.
+      </p>
+
+      <h4>Static member functions</h4>
+<pre><code>class Server {
+public:
+    static void listen(int port) {
+        std::cout &lt;&lt; "Listening on port " &lt;&lt; port &lt;&lt; "\n";
+    }
+};
+
+int main() {
+    std::thread t(Server::listen, 8080);
+    t.join();
+}</code></pre>
+
       <div class="callout">
         <strong>Key point.</strong> Arguments are <em>copied</em> into the new thread by default.
-        Even if the function signature takes a reference, the thread constructor will still copy
-        the argument unless you explicitly wrap it with <code>std::ref</code>.
+        Even if the function signature takes a reference, the thread constructor still copies the
+        argument unless you explicitly wrap it with <code>std::ref</code>. This is covered in
+        detail on the <a href="passing-arguments.html">Passing Arguments</a> page.
       </div>
 
       <!-- ── Lambdas ── -->
       <h3 id="lambdas">Lambda Expressions</h3>
       <p>
-        Lambdas are the most common way to launch threads in modern C++. They allow inline
-        definition of the work unit and flexible capture of surrounding state:
+        Lambdas are the most common callable type for threads in modern C++. They allow inline
+        definition of the work unit and flexible capture of surrounding state. The compiler
+        generates a closure type with an <code>operator()</code>, which the thread constructor
+        stores and later invokes.
       </p>
 <pre><code>int main() {
     int work_id = 42;
 
-    // Capture by value
+    // Capture by value: safe, each thread gets its own copy
     std::thread t1([work_id]() {
         std::cout &lt;&lt; "Processing work " &lt;&lt; work_id &lt;&lt; "\n";
     });
 
-    // Capture by reference (careful with lifetime!)
+    // Capture by reference: dangerous if thread outlives the variable
     std::string message = "urgent";
     std::thread t2([&amp;message]() {
         std::cout &lt;&lt; "Message: " &lt;&lt; message &lt;&lt; "\n";
@@ -119,28 +164,51 @@ int main() {
     t1.join();
     t2.join();  // safe only because we join before message goes out of scope
 }</code></pre>
+
       <div class="callout">
         <strong>Dangling reference trap.</strong> If you capture local variables by reference and
-        the creating thread exits or the variable goes out of scope before the spawned thread
-        finishes, you get undefined behavior. Always prefer capture by value or ensure join
-        happens before the captured variable is destroyed.
+        the creating scope exits before the spawned thread finishes, the behavior is undefined.
+        Always prefer capture by value or ensure join happens before destruction.
       </div>
 
-      <p>Lambda with parameters (passed through the <code>std::thread</code> constructor):</p>
+      <h4>Lambda with parameters passed through the constructor</h4>
 <pre><code>auto worker = [](int start, int end) {
-    for (int i = start; i &lt; end; ++i) {
-        // process chunk [start, end)
-    }
+    long long sum = 0;
+    for (int i = start; i &lt; end; ++i) sum += i;
+    std::cout &lt;&lt; "Sum [" &lt;&lt; start &lt;&lt; ", " &lt;&lt; end &lt;&lt; "): " &lt;&lt; sum &lt;&lt; "\n";
 };
 
 std::thread t(worker, 0, 1000);
 t.join();</code></pre>
 
+      <h4>Generic lambdas (C++14)</h4>
+<pre><code>auto print_any = [](auto value) {
+    std::cout &lt;&lt; value &lt;&lt; "\n";
+};
+
+std::thread t1(print_any, 42);
+std::thread t2(print_any, std::string("hello"));
+t1.join();
+t2.join();</code></pre>
+
+      <h4>Mutable lambdas</h4>
+      <p>
+        If the lambda needs to modify captured-by-value variables, mark it <code>mutable</code>.
+        The thread receives its own copy of the closure, so mutations do not affect the original:
+      </p>
+<pre><code>int counter = 0;
+std::thread t([counter]() mutable {
+    for (int i = 0; i &lt; 100; ++i) ++counter;
+    std::cout &lt;&lt; "Thread counter: " &lt;&lt; counter &lt;&lt; "\n";  // 100
+});
+t.join();
+std::cout &lt;&lt; "Main counter: " &lt;&lt; counter &lt;&lt; "\n";  // still 0</code></pre>
+
       <!-- ── Functors ── -->
       <h3 id="functors">Functors (Callable Objects)</h3>
       <p>
-        A functor is any object with an overloaded <code>operator()</code>. This is useful when
-        the thread needs to carry internal state:
+        A functor is any object with an overloaded <code>operator()</code>. Useful when the
+        thread work unit carries internal state or when you want a reusable, testable unit:
       </p>
 <pre><code>class Downloader {
 public:
@@ -157,85 +225,171 @@ private:
 
 int main() {
     Downloader dl("https://example.com/data.bin");
-    std::thread t(dl);        // copies the functor
-    t.join();
+    std::thread t1(dl);        // copies the functor into the thread
+    t1.join();
 
-    // Move a temporary directly
+    // Move a temporary directly (avoids extra copy)
     std::thread t2(Downloader("https://example.com/other.bin"));
     t2.join();
 }</code></pre>
 
-      <div class="callout">
-        <strong>Watch out.</strong> If you write <code>std::thread t(Downloader());</code> with
-        empty parentheses, the compiler interprets this as a function declaration, not a thread
-        construction. This is the "most vexing parse." Fix it with braces:
-        <code>std::thread t(Downloader{});</code> or <code>std::thread t{Downloader{}};</code>.
-      </div>
+      <h4>Functor with mutable state and std::ref</h4>
+<pre><code>class Counter {
+public:
+    void operator()() {
+        for (int i = 0; i &lt; 1000; ++i) ++count_;
+    }
+    int get_count() const { return count_; }
+private:
+    int count_ = 0;
+};
+
+int main() {
+    Counter c;
+    std::thread t(std::ref(c));  // pass by reference to read count_ after
+    t.join();
+    std::cout &lt;&lt; "Count: " &lt;&lt; c.get_count() &lt;&lt; "\n";  // 1000
+}</code></pre>
 
       <!-- ── Member Functions ── -->
       <h3 id="member-functions">Member Functions</h3>
       <p>
-        To run a non-static member function on a thread, pass a pointer to the member function
-        followed by a pointer (or reference) to the object instance:
+        To run a non-static member function on a thread, pass a pointer-to-member-function
+        followed by a pointer (or reference wrapper, or smart pointer) to the object, then
+        any additional arguments:
       </p>
 <pre><code>class Sensor {
 public:
     void read_data(int samples) {
-        for (int i = 0; i &lt; samples; ++i) {
-            // read sensor
-        }
+        for (int i = 0; i &lt; samples; ++i) { /* read sensor */ }
         std::cout &lt;&lt; "Read " &lt;&lt; samples &lt;&lt; " samples\n";
     }
 };
 
 int main() {
     Sensor s;
-    // Pass &amp;Sensor::read_data, then the object pointer, then arguments
     std::thread t(&amp;Sensor::read_data, &amp;s, 100);
     t.join();
 }</code></pre>
-      <p>
-        The object pointer (<code>&amp;s</code>) is passed as the implicit <code>this</code>.
-        You can also pass a <code>std::shared_ptr</code> to guarantee the object stays alive:
-      </p>
+
+      <h4>Using shared_ptr for safe lifetime management</h4>
 <pre><code>auto sensor = std::make_shared&lt;Sensor&gt;();
 std::thread t(&amp;Sensor::read_data, sensor, 100);
-t.join();</code></pre>
+t.detach();
+// Safe: the shared_ptr inside the thread keeps the Sensor alive</code></pre>
 
-      <!-- ── Join vs Detach ── -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Under the Hood                                           -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="under-the-hood">Thread Creation Under the Hood</h2>
+      <p>
+        When you write <code>std::thread t(func, args...)</code>, the standard library bridges
+        C++ callable semantics and the OS thread API. Here is what happens at each layer:
+      </p>
+
+      <h3>1. The C++ layer</h3>
+      <p>
+        The constructor creates a <em>decay-copied</em> tuple of the callable and its arguments.
+        <code>std::decay</code> strips references, converts arrays to pointers, and functions to
+        function pointers. This tuple is heap-allocated (typically via <code>new</code>) and a
+        pointer to it is passed to the OS thread creation function.
+      </p>
+      <p>
+        The new thread runs a trampoline function that unpacks the tuple and invokes the callable
+        using <code>std::invoke</code>.
+      </p>
+
+      <h3>2. The POSIX layer (Linux, macOS)</h3>
+      <p>
+        On POSIX systems, the implementation calls <code>pthread_create</code>:
+      </p>
+<pre><code>// Simplified pseudocode of what happens internally:
+auto* data = new ThreadData{std::move(callable_tuple)};
+
+pthread_t handle;
+int err = pthread_create(&amp;handle, nullptr, &amp;trampoline, data);
+if (err != 0) throw std::system_error(err, std::system_category());
+
+// The trampoline (runs on the new thread):
+static void* trampoline(void* arg) {
+    auto* data = static_cast&lt;ThreadData*&gt;(arg);
+    std::invoke(std::move(data-&gt;callable), std::move(data-&gt;args)...);
+    delete data;
+    return nullptr;
+}</code></pre>
+
+      <h3>3. The kernel layer</h3>
+      <p>
+        <code>pthread_create</code> wraps the <code>clone</code> system call on Linux. The
+        kernel performs:
+      </p>
+      <ul>
+        <li><strong>Stack allocation:</strong> A new stack is allocated for the thread (default 8 MB on Linux, controlled by <code>ulimit -s</code>). The stack is backed by virtual memory; physical pages are assigned on demand via page faults.</li>
+        <li><strong>Thread control block:</strong> The kernel creates a <code>task_struct</code> holding the thread's register state, scheduling priority, signal mask, and a pointer to the shared address space.</li>
+        <li><strong>Scheduler entry:</strong> The new thread is placed on the CPU run queue. The scheduler decides when execution actually begins.</li>
+        <li><strong>TLS setup:</strong> The runtime copies the <code>.tdata</code> template and zeroes the <code>.tbss</code> region for the new thread.</li>
+      </ul>
+
+      <h3>4. The Windows layer</h3>
+      <p>
+        On Windows, the implementation calls <code>_beginthreadex</code>, which allocates a
+        thread stack (default 1 MB committed), creates a thread kernel object with a unique
+        handle and ID, initializes TLS slots, and marks the thread as schedulable.
+      </p>
+
+      <h3>Cost of thread creation</h3>
+      <table>
+        <thead>
+          <tr><th>Operation</th><th>Approximate Cost</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Stack allocation (virtual)</td><td>~1 microsecond</td></tr>
+          <tr><td>Kernel thread creation</td><td>~10 to 50 microseconds</td></tr>
+          <tr><td>TLS initialization</td><td>~1 to 5 microseconds</td></tr>
+          <tr><td>First context switch to new thread</td><td>~1 to 10 microseconds</td></tr>
+          <tr><td><strong>Total</strong></td><td><strong>~15 to 70 microseconds</strong></td></tr>
+        </tbody>
+      </table>
+      <p>
+        A function call costs about 1 to 5 nanoseconds. Thread creation is roughly 10,000x more
+        expensive. This is why thread pools exist: they amortize the creation cost across many
+        tasks.
+      </p>
+
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Join vs Detach                                           -->
+      <!-- ══════════════════════════════════════════════════════════ -->
       <h2 id="join-vs-detach">Join vs Detach</h2>
       <p>
         After creating a thread, you <em>must</em> do one of two things before the
         <code>std::thread</code> object is destroyed: <strong>join</strong> it or
-        <strong>detach</strong> it.
+        <strong>detach</strong> it. Failing to do either terminates the program.
       </p>
 
       <h3>join()</h3>
       <p>
-        Blocks the calling thread until the spawned thread finishes execution. After
-        <code>join()</code> returns, the <code>std::thread</code> object is no longer joinable.
+        Blocks the calling thread until the spawned thread finishes. Internally, this calls
+        <code>pthread_join</code> (POSIX) or <code>WaitForSingleObject</code> (Windows).
+        After return, the thread's resources are fully reclaimed.
       </p>
 <pre><code>std::thread t(some_work);
-// ... do other stuff on the main thread ...
 t.join();  // blocks here until some_work completes
-// t.joinable() == false after this point</code></pre>
+// t.joinable() == false</code></pre>
 
       <h3>detach()</h3>
       <p>
-        Separates the thread of execution from the <code>std::thread</code> object. The thread
-        continues running in the background. You lose all ability to join or query it. The
-        detached thread will be cleaned up by the runtime when it finishes.
+        Separates the execution from the <code>std::thread</code> object. The thread runs
+        independently. You lose all ability to join or query it.
       </p>
 <pre><code>std::thread t(background_logging);
 t.detach();
-// t.joinable() == false
-// The logging thread runs independently; you cannot wait for it</code></pre>
+// t.joinable() == false</code></pre>
 
       <div class="callout">
-        <strong>Detach is dangerous.</strong> If the detached thread accesses any local variables
-        from the launching scope, those variables may be destroyed before the detached thread
-        finishes. This leads to undefined behavior. Detached threads should only access global or
-        heap-allocated data they own or that outlives them.
+        <strong>Detach is dangerous.</strong> A detached thread that accesses local variables
+        from the launching scope will encounter undefined behavior if those variables are
+        destroyed first. Detached threads should only access global data, heap-allocated data
+        they own, or data whose lifetime is explicitly managed.
       </div>
 
       <table>
@@ -244,10 +398,11 @@ t.detach();
         </thead>
         <tbody>
           <tr><td>Blocks caller?</td><td>Yes, until thread completes</td><td>No</td></tr>
-          <tr><td>Thread still running after call?</td><td>No (guaranteed complete)</td><td>Possibly yes</td></tr>
-          <tr><td>Can query thread state?</td><td>No (not joinable anymore)</td><td>No (detached)</td></tr>
-          <tr><td>Resource cleanup</td><td>Deterministic</td><td>When thread finishes (runtime-managed)</td></tr>
+          <tr><td>Thread still running after?</td><td>No (guaranteed complete)</td><td>Possibly yes</td></tr>
+          <tr><td>Resource cleanup</td><td>Immediate</td><td>Deferred until thread exits</td></tr>
           <tr><td>Safe with local variables?</td><td>Yes, if joined before scope exit</td><td>No, unless variables outlive the thread</td></tr>
+          <tr><td>POSIX call</td><td>pthread_join</td><td>pthread_detach</td></tr>
+          <tr><td>Windows call</td><td>WaitForSingleObject + CloseHandle</td><td>CloseHandle (thread runs)</td></tr>
         </tbody>
       </table>
 
@@ -255,51 +410,75 @@ t.detach();
       <h2 id="joinable-check">The Joinable Check</h2>
       <p>
         Calling <code>join()</code> or <code>detach()</code> on a non-joinable thread throws
-        <code>std::system_error</code>. Always check first:
+        <code>std::system_error</code>. Always check:
       </p>
 <pre><code>if (t.joinable()) {
     t.join();
 }</code></pre>
       <p>A thread is <em>not</em> joinable if:</p>
       <ul>
-        <li>It was default-constructed (no callable provided)</li>
-        <li>It has been <code>join()</code>ed already</li>
-        <li>It has been <code>detach()</code>ed already</li>
-        <li>It has been moved from (ownership transferred)</li>
+        <li>Default-constructed (no callable): <code>std::thread t;</code></li>
+        <li>Already joined</li>
+        <li>Already detached</li>
+        <li>Moved from (ownership transferred)</li>
       </ul>
 
-      <!-- ── Lifecycle ── -->
-      <h2 id="lifecycle">Thread Lifecycle</h2>
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <!--  Lifecycle State Machine                                  -->
+      <!-- ══════════════════════════════════════════════════════════ -->
+      <h2 id="lifecycle">Thread Lifecycle State Machine</h2>
+      <p>
+        A <code>std::thread</code> object passes through well-defined states. The following
+        animation traces every transition, including error paths and move operations.
+      </p>
 
       <div class="anim-container" id="lifecycle-anim">
-        <h4>&#9654; Thread State Machine</h4>
-        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the lifecycle of a std::thread object from construction to destruction.</p>
-        <svg id="lifecycle-svg" width="520" height="220" viewBox="0 0 520 220">
-          <!-- States -->
-          <rect x="10" y="80" width="100" height="40" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
-          <text x="60" y="105" text-anchor="middle" font-size="13" font-family="Manrope" fill="#13201a">Created</text>
+        <h4>&#9654; Thread Lifecycle State Machine</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through every state from construction to destruction, including error and move paths.</p>
+        <svg id="lifecycle-svg" width="680" height="340" viewBox="0 0 680 340">
+          <rect x="10" y="140" width="110" height="44" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+          <text x="65" y="167" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Constructed</text>
 
-          <rect x="150" y="80" width="100" height="40" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
-          <text x="200" y="105" text-anchor="middle" font-size="13" font-family="Manrope" fill="#13201a">Running</text>
+          <rect x="160" y="140" width="100" height="44" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+          <text x="210" y="163" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Running</text>
+          <text x="210" y="198" text-anchor="middle" font-size="10" font-family="Consolas" fill="#666">(joinable=true)</text>
 
-          <rect x="300" y="30" width="100" height="40" rx="8" fill="#fff3e0" stroke="#ff6b35" stroke-width="2"/>
-          <text x="350" y="55" text-anchor="middle" font-size="13" font-family="Manrope" fill="#13201a">Joined</text>
+          <rect x="310" y="140" width="110" height="44" rx="8" fill="#fff3e0" stroke="#ff6b35" stroke-width="2"/>
+          <text x="365" y="163" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a">Completed</text>
+          <text x="365" y="198" text-anchor="middle" font-size="10" font-family="Consolas" fill="#666">(joinable=true)</text>
 
-          <rect x="300" y="130" width="100" height="40" rx="8" fill="#fff3e0" stroke="#ff6b35" stroke-width="2"/>
-          <text x="350" y="155" text-anchor="middle" font-size="13" font-family="Manrope" fill="#13201a">Detached</text>
+          <rect id="lc-joined" x="480" y="80" width="100" height="44" rx="8" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" opacity="0.3"/>
+          <text id="lc-joined-t" x="530" y="107" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a" opacity="0.3">Joined</text>
 
-          <rect x="440" y="80" width="70" height="40" rx="8" fill="#ffebee" stroke="#c62828" stroke-width="2"/>
-          <text x="475" y="105" text-anchor="middle" font-size="12" font-family="Manrope" fill="#13201a">Destroyed</text>
+          <rect id="lc-detached" x="480" y="200" width="100" height="44" rx="8" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" opacity="0.3"/>
+          <text id="lc-detached-t" x="530" y="227" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#13201a" opacity="0.3">Detached</text>
 
-          <!-- Arrows (drawn by script) -->
-          <line id="lc-arrow1" x1="110" y1="100" x2="150" y2="100" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lc-arrowhead)" opacity="0"/>
-          <line id="lc-arrow2a" x1="250" y1="92" x2="300" y2="50" stroke="#ff6b35" stroke-width="2" marker-end="url(#lc-arrowhead)" opacity="0"/>
-          <line id="lc-arrow2b" x1="250" y1="108" x2="300" y2="150" stroke="#ff6b35" stroke-width="2" marker-end="url(#lc-arrowhead)" opacity="0"/>
-          <line id="lc-arrow3a" x1="400" y1="50" x2="440" y2="90" stroke="#c62828" stroke-width="2" marker-end="url(#lc-arrowhead)" opacity="0"/>
-          <line id="lc-arrow3b" x1="400" y1="150" x2="440" y2="110" stroke="#c62828" stroke-width="2" marker-end="url(#lc-arrowhead)" opacity="0"/>
+          <rect id="lc-destroyed" x="600" y="140" width="70" height="44" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2" opacity="0.3"/>
+          <text id="lc-destroyed-t" x="635" y="167" text-anchor="middle" font-size="11" font-weight="bold" font-family="Manrope" fill="#13201a" opacity="0.3">Dead</text>
+
+          <rect id="lc-terminate" x="440" y="280" width="130" height="40" rx="8" fill="#ffebee" stroke="#c62828" stroke-width="2" opacity="0.3"/>
+          <text id="lc-terminate-t" x="505" y="305" text-anchor="middle" font-size="11" font-weight="bold" font-family="Manrope" fill="#c62828" opacity="0.3">std::terminate!</text>
+
+          <rect id="lc-moved" x="160" y="40" width="100" height="36" rx="8" fill="#f5f5f5" stroke="#999" stroke-width="1.5" opacity="0"/>
+          <text id="lc-moved-t" x="210" y="63" text-anchor="middle" font-size="11" font-weight="bold" font-family="Manrope" fill="#666" opacity="0">Moved-from</text>
+
+          <line id="lc-a1" x1="120" y1="162" x2="160" y2="162" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a1t" x="140" y="152" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666" opacity="0">start</text>
+          <line id="lc-a2" x1="260" y1="162" x2="310" y2="162" stroke="#1565c0" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a2t" x="285" y="152" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666" opacity="0">return</text>
+          <line id="lc-a3" x1="420" y1="150" x2="480" y2="102" stroke="#7b1fa2" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a3t" x="445" y="118" text-anchor="middle" font-size="9" font-family="Consolas" fill="#7b1fa2" opacity="0">join()</text>
+          <line id="lc-a4" x1="420" y1="174" x2="480" y2="222" stroke="#7b1fa2" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a4t" x="445" y="210" text-anchor="middle" font-size="9" font-family="Consolas" fill="#7b1fa2" opacity="0">detach()</text>
+          <line id="lc-a5a" x1="580" y1="102" x2="600" y2="152" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <line id="lc-a5b" x1="580" y1="222" x2="600" y2="174" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <line id="lc-a6" x1="400" y1="184" x2="440" y2="280" stroke="#c62828" stroke-width="2" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a6t" x="395" y="250" text-anchor="middle" font-size="9" font-family="Consolas" fill="#c62828" opacity="0">~thread() while joinable</text>
+          <line id="lc-a7" x1="210" y1="140" x2="210" y2="76" stroke="#999" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#lc-ah)" opacity="0"/>
+          <text id="lc-a7t" x="235" y="112" font-size="9" font-family="Consolas" fill="#999" opacity="0">std::move</text>
 
           <defs>
-            <marker id="lc-arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+            <marker id="lc-ah" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
               <polygon points="0 0,10 3.5,0 7" fill="#13201a"/>
             </marker>
           </defs>
@@ -315,85 +494,85 @@ t.detach();
       <script>
       (function(){
         var step = 0;
-        var arrows = [
-          document.getElementById('lc-arrow1'),
-          document.getElementById('lc-arrow2a'),
-          document.getElementById('lc-arrow2b'),
-          document.getElementById('lc-arrow3a'),
-          document.getElementById('lc-arrow3b')
-        ];
         var info = document.getElementById('lifecycle-info');
         var output = document.getElementById('lifecycle-output');
+        var allIds = ['lc-a1','lc-a1t','lc-a2','lc-a2t','lc-a3','lc-a3t','lc-a4','lc-a4t','lc-a5a','lc-a5b','lc-a6','lc-a6t','lc-joined','lc-joined-t','lc-detached','lc-detached-t','lc-destroyed','lc-destroyed-t','lc-terminate','lc-terminate-t','lc-moved','lc-moved-t','lc-a7','lc-a7t'];
+        var ghostIds = ['lc-joined','lc-joined-t','lc-detached','lc-detached-t','lc-destroyed','lc-destroyed-t','lc-terminate','lc-terminate-t'];
         var steps = [
-          { show: [0], msg: "Thread constructed with callable. Execution begins immediately.", out: "Step 1/4" },
-          { show: [1,2], msg: "Running thread must be joined or detached before destruction.", out: "Step 2/4" },
-          { show: [3,4], msg: "After join/detach, the thread object is no longer joinable.", out: "Step 3/4" },
-          { show: [], msg: "Destroying a joinable thread calls std::terminate. Always join or detach!", out: "Step 4/4 (done)" }
+          { show:['lc-a1','lc-a1t'], msg:"1. Constructor receives callable + args. OS thread is created. Execution begins immediately.", out:"Step 1/8" },
+          { show:['lc-a2','lc-a2t'], msg:"2. Callable finishes (returns or throws). Thread completes, but resources are still held.", out:"Step 2/8" },
+          { show:['lc-a3','lc-a3t','lc-joined','lc-joined-t'], msg:"3. join() blocks the caller, then reclaims resources. Object becomes non-joinable.", out:"Step 3/8" },
+          { show:['lc-a4','lc-a4t','lc-detached','lc-detached-t'], msg:"4. Alternatively, detach() releases ownership. Thread runs independently.", out:"Step 4/8" },
+          { show:['lc-a5a','lc-a5b','lc-destroyed','lc-destroyed-t'], msg:"5. After join or detach, the destructor safely destroys the empty std::thread object.", out:"Step 5/8" },
+          { show:['lc-a6','lc-a6t','lc-terminate','lc-terminate-t'], msg:"6. DANGER: Destructor on a joinable thread calls std::terminate(). Program aborts.", out:"Step 6/8" },
+          { show:['lc-moved','lc-moved-t','lc-a7','lc-a7t'], msg:"7. std::move transfers ownership. The source becomes non-joinable (empty).", out:"Step 7/8" },
+          { show:[], msg:"8. Every thread must be joined, detached, or moved from before destruction. No exceptions.", out:"Step 8/8 (done)" }
         ];
-
-        function reset() {
+        function reset(){
           step = 0;
-          arrows.forEach(function(a){ a.setAttribute('opacity','0'); });
-          info.textContent = 'Press Step to begin.';
+          allIds.forEach(function(id){
+            var el = document.getElementById(id);
+            if(el) el.setAttribute('opacity', ghostIds.indexOf(id) >= 0 ? '0.3' : '0');
+          });
+          info.textContent = 'Press Step to trace the thread lifecycle.';
           output.textContent = '';
         }
         reset();
-
         document.getElementById('lifecycle-step').addEventListener('click', function(){
-          if (step >= steps.length) return;
-          var s = steps[step];
-          s.show.forEach(function(i){ arrows[i].setAttribute('opacity','1'); });
-          info.textContent = s.msg;
-          output.textContent = s.out;
+          if(step >= steps.length) return;
+          steps[step].show.forEach(function(id){ var el = document.getElementById(id); if(el) el.setAttribute('opacity','1'); });
+          info.textContent = steps[step].msg;
+          output.textContent = steps[step].out;
           step++;
         });
         document.getElementById('lifecycle-reset').addEventListener('click', reset);
       })();
       </script>
 
-      <p>The lifecycle follows a strict sequence:</p>
-      <ol>
-        <li><strong>Construction:</strong> A callable and arguments are provided. The OS creates a new thread and execution begins.</li>
-        <li><strong>Running:</strong> The callable executes on the new thread. The <code>std::thread</code> object is joinable.</li>
-        <li><strong>Termination:</strong> The callable returns (or an uncaught exception propagates). The thread finishes, but resources are held until join or detach.</li>
-        <li><strong>Join/Detach:</strong> The owning code explicitly calls <code>join()</code> or <code>detach()</code>.</li>
-        <li><strong>Destruction:</strong> The <code>std::thread</code> destructor runs. If still joinable, <code>std::terminate</code> is called.</li>
-      </ol>
+      <p>The lifecycle in code:</p>
+<pre><code>// Phase 1: Construction (thread starts running immediately)
+std::thread t(work_function, arg1, arg2);   // t.joinable() == true
+
+// Phase 2: work_function executes on the new thread.
+// Phase 3: Explicit join or detach is REQUIRED:
+t.join();    // Option A: wait for completion
+// t.detach();  // Option B: release ownership
+// Phase 4: Destruction is safe. t.joinable() == false</code></pre>
 
       <!-- ── Destruction Without Join ── -->
       <h2 id="destruction-pitfalls">Destruction Without Join</h2>
       <p>
-        This is the single most critical rule of <code>std::thread</code>: if the destructor runs
-        while the thread is still joinable, the program is terminated. There is no exception, no
-        graceful fallback.
+        This is the single most critical rule of <code>std::thread</code>: if the destructor
+        runs while the thread is still joinable, <code>std::terminate()</code> is called.
+        There is no exception, no recovery.
       </p>
 <pre><code>void dangerous() {
     std::thread t([]() {
         std::this_thread::sleep_for(std::chrono::seconds(5));
     });
     // t goes out of scope without join or detach
-    // RESULT: std::terminate() is called, program crashes
+    // RESULT: std::terminate(). Program crashes.
 }</code></pre>
 
       <p>
-        Why does C++ not just automatically join? Because an implicit join could silently block
-        for an arbitrary amount of time, hiding bugs. And an implicit detach could cause the
-        thread to access destroyed resources. The committee decided that crashing is preferable
-        to silently incorrect behavior.
+        Why not auto-join? An implicit join could silently block for an arbitrary duration,
+        hiding bugs. Why not auto-detach? The thread might access destroyed stack variables.
+        The committee decided a noisy crash is preferable to a silent, hard-to-diagnose bug.
       </p>
 
-      <h3>Ensuring safety with RAII</h3>
-      <p>
-        The standard pattern is to wrap the thread in a guard class that joins on destruction.
-        C++20 provides this as <code>std::jthread</code>, but you can implement it yourself:
-      </p>
+      <h3>Exception-safety problem</h3>
+<pre><code>void risky() {
+    std::thread t(long_task);
+    do_something_that_might_throw();  // if this throws...
+    t.join();                          // ...this line is skipped
+}   // t's destructor on joinable thread: terminate!</code></pre>
+
+      <h3>RAII solution</h3>
 <pre><code>class thread_guard {
 public:
     explicit thread_guard(std::thread&amp; t) : t_(t) {}
     ~thread_guard() {
-        if (t_.joinable()) {
-            t_.join();
-        }
+        if (t_.joinable()) t_.join();
     }
     thread_guard(const thread_guard&amp;) = delete;
     thread_guard&amp; operator=(const thread_guard&amp;) = delete;
@@ -402,94 +581,311 @@ private:
 };
 
 void safe() {
-    std::thread t(long_running_task);
+    std::thread t(long_task);
     thread_guard guard(t);
-    // Even if an exception is thrown here, guard ensures t is joined
-    do_other_work();
-}   // guard destructor joins t</code></pre>
+    do_something_that_might_throw();
+}  // guard destructor joins t, even if an exception was thrown</code></pre>
+      <p>
+        In C++20, <code>std::jthread</code> provides this behavior built-in. See the
+        <a href="thread-local-raii.html">thread_local, RAII Guards &amp; jthread</a> page.
+      </p>
 
-      <!-- ── Vexing Parse ── -->
+      <!-- ── Most Vexing Parse ── -->
       <h2 id="vexing-parse">The Most Vexing Parse</h2>
       <p>
-        A classic trap when constructing threads with temporary functors:
+        When constructing a thread with a temporary functor, a C++ parsing ambiguity can
+        silently turn your thread construction into a function declaration:
       </p>
 <pre><code>struct Task {
-    void operator()() const { /* ... */ }
+    void operator()() const { std::cout &lt;&lt; "Working\n"; }
 };
 
+// TRAP: This declares a FUNCTION named t, not a thread object.
 std::thread t(Task());
-// This declares a FUNCTION named t that takes a function pointer
-// returning Task and returns std::thread. Not what you want!
 
-// Fix with any of these:
-std::thread t1{Task{}};              // uniform initialization
+// Correct alternatives:
+std::thread t1{Task{}};              // uniform initialization (preferred)
 std::thread t2((Task()));            // extra parentheses
 std::thread t3(Task{});              // braces for the temporary</code></pre>
+
+      <div class="anim-container" id="vexing-anim">
+        <h4>&#9654; Most Vexing Parse: What the Compiler Sees</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through how the compiler interprets the ambiguous syntax versus braces.</p>
+        <svg id="vexing-svg" width="620" height="220" viewBox="0 0 620 220">
+          <rect x="10" y="10" width="600" height="36" rx="6" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="20" y="34" font-size="14" font-family="Consolas" fill="#13201a">std::thread t ( Task() );</text>
+
+          <rect id="vp-a-box" x="10" y="70" width="290" height="130" rx="8" fill="#ffebee" stroke="#c62828" stroke-width="2" opacity="0"/>
+          <text id="vp-a-title" x="155" y="92" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#c62828" opacity="0">Compiler Interpretation (MVP)</text>
+          <text id="vp-a-l1" x="25" y="115" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">std::thread t(  // function named "t"</text>
+          <text id="vp-a-l2" x="25" y="133" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">  Task (*)()   // param: ptr-to-fn returning Task</text>
+          <text id="vp-a-l3" x="25" y="151" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">);             // returns std::thread</text>
+          <text id="vp-a-l4" x="25" y="180" font-size="11" font-family="Manrope" fill="#c62828" opacity="0">Result: No thread is created!</text>
+
+          <rect id="vp-b-box" x="320" y="70" width="290" height="130" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2" opacity="0"/>
+          <text id="vp-b-title" x="465" y="92" text-anchor="middle" font-size="12" font-weight="bold" font-family="Manrope" fill="#0a8f6a" opacity="0">Intended (with braces)</text>
+          <text id="vp-b-l1" x="335" y="115" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">std::thread t{ Task{} };</text>
+          <text id="vp-b-l2" x="335" y="140" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">// Constructs thread with</text>
+          <text id="vp-b-l3" x="335" y="158" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">// a temporary Task functor.</text>
+          <text id="vp-b-l4" x="335" y="180" font-size="11" font-family="Manrope" fill="#0a8f6a" opacity="0">Result: Thread runs correctly!</text>
+        </svg>
+        <div id="vexing-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="vexing-step">Step &rarr;</button>
+          <button class="anim-btn" id="vexing-reset">Reset</button>
+          <span class="anim-output" id="vexing-output"></span>
+        </div>
+      </div>
+
+      <script>
+      (function(){
+        var step = 0;
+        var info = document.getElementById('vexing-info');
+        var output = document.getElementById('vexing-output');
+        var aIds = ['vp-a-box','vp-a-title','vp-a-l1','vp-a-l2','vp-a-l3','vp-a-l4'];
+        var bIds = ['vp-b-box','vp-b-title','vp-b-l1','vp-b-l2','vp-b-l3','vp-b-l4'];
+        var steps = [
+          { show: aIds.slice(0,2), msg: "The compiler sees std::thread t(Task()); and applies the most vexing parse rule.", out: "Step 1/4" },
+          { show: aIds.slice(2), msg: "It parses Task() as a function type (returning Task). 't' becomes a function declaration.", out: "Step 2/4" },
+          { show: bIds.slice(0,2), msg: "Using braces eliminates the ambiguity: std::thread t{ Task{} };", out: "Step 3/4" },
+          { show: bIds.slice(2), msg: "Task{} creates a temporary functor. The thread constructor receives it correctly.", out: "Step 4/4 (done)" }
+        ];
+        function reset(){
+          step = 0;
+          aIds.concat(bIds).forEach(function(id){ document.getElementById(id).setAttribute('opacity','0'); });
+          info.textContent = 'Press Step to see what the compiler does.';
+          output.textContent = '';
+        }
+        reset();
+        document.getElementById('vexing-step').addEventListener('click', function(){
+          if(step >= steps.length) return;
+          steps[step].show.forEach(function(id){ document.getElementById(id).setAttribute('opacity','1'); });
+          info.textContent = steps[step].msg;
+          output.textContent = steps[step].out;
+          step++;
+        });
+        document.getElementById('vexing-reset').addEventListener('click', reset);
+      })();
+      </script>
 
       <!-- ── Thread IDs ── -->
       <h2 id="thread-ids">Thread Identifiers</h2>
       <p>
-        Every thread has a unique identifier of type <code>std::thread::id</code>. You can
-        retrieve it with <code>t.get_id()</code> for a thread object, or
-        <code>std::this_thread::get_id()</code> from inside the running thread:
+        Every running thread has a unique <code>std::thread::id</code>. Retrieve it from the
+        object (<code>t.get_id()</code>) or from within the thread
+        (<code>std::this_thread::get_id()</code>):
       </p>
 <pre><code>std::thread t([](){
     std::cout &lt;&lt; "My ID: " &lt;&lt; std::this_thread::get_id() &lt;&lt; "\n";
 });
-std::cout &lt;&lt; "Spawned thread ID: " &lt;&lt; t.get_id() &lt;&lt; "\n";
+std::cout &lt;&lt; "Spawned ID: " &lt;&lt; t.get_id() &lt;&lt; "\n";
 t.join();</code></pre>
       <p>
-        Thread IDs can be compared with <code>==</code> and <code>!=</code>, and can be used
-        as keys in associative containers (they provide <code>std::hash</code> and comparison
-        operators). A default-constructed <code>std::thread::id</code> represents "no thread."
+        Thread IDs support <code>==</code>, <code>!=</code>, <code>&lt;</code>, and work as
+        keys in <code>std::unordered_map</code> (they provide <code>std::hash</code>). A
+        default-constructed <code>std::thread::id</code> represents "no thread."
       </p>
 
+      <h4>Thread-aware logging</h4>
+<pre><code>std::mutex log_mtx;
+void log(const std::string&amp; msg) {
+    std::ostringstream oss;
+    oss &lt;&lt; "[Thread " &lt;&lt; std::this_thread::get_id() &lt;&lt; "] " &lt;&lt; msg;
+    std::lock_guard&lt;std::mutex&gt; lock(log_mtx);
+    std::cout &lt;&lt; oss.str() &lt;&lt; "\n";
+}</code></pre>
+
       <!-- ── Ownership Transfer ── -->
-      <h2 id="ownership-transfer">Ownership Transfer</h2>
+      <h2 id="ownership-transfer">Ownership Transfer (Move Semantics)</h2>
       <p>
-        <code>std::thread</code> is move-only. You cannot copy a thread object, but you can
-        transfer ownership via <code>std::move</code>:
+        <code>std::thread</code> is move-only. You cannot copy a thread, but you can transfer
+        ownership via <code>std::move</code>.
       </p>
-<pre><code>std::thread create_thread() {
+<pre><code>std::thread create_worker() {
     return std::thread([]() {
-        std::cout &lt;&lt; "Running\n";
+        std::cout &lt;&lt; "Worker running\n";
     });
 }
 
 int main() {
-    std::thread t1 = create_thread();  // move from return value
+    std::thread t1 = create_worker();  // move from return value
     std::thread t2 = std::move(t1);    // explicit move
-
-    // t1 is now empty (not joinable)
-    // t2 owns the thread
+    // t1 is now empty. t2 owns the thread.
     t2.join();
 }</code></pre>
 
-      <div class="callout">
-        <strong>Moving into a joinable thread.</strong> If you move-assign to a thread object
-        that is currently joinable, <code>std::terminate</code> is called. Always join or detach
-        before reassigning:
+      <div class="anim-container" id="move-anim">
+        <h4>&#9654; Ownership Transfer via std::move</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through how thread ownership moves between objects.</p>
+        <svg id="move-svg" width="620" height="200" viewBox="0 0 620 200">
+          <rect x="20" y="30" width="170" height="80" rx="8" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+          <text x="105" y="52" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">t1</text>
+          <rect id="mv-h1" x="40" y="60" width="130" height="30" rx="4" fill="#bbdefb" stroke="#1565c0"/>
+          <text id="mv-h1t" x="105" y="80" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a">OS thread handle</text>
+
+          <rect x="300" y="30" width="170" height="80" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+          <text x="385" y="52" text-anchor="middle" font-size="13" font-weight="bold" font-family="Manrope" fill="#13201a">t2</text>
+          <rect id="mv-h2" x="320" y="60" width="130" height="30" rx="4" fill="#c8e6c9" stroke="#0a8f6a" opacity="0"/>
+          <text id="mv-h2t" x="385" y="80" text-anchor="middle" font-size="11" font-family="Consolas" fill="#13201a" opacity="0">OS thread handle</text>
+
+          <line id="mv-arrow" x1="190" y1="75" x2="300" y2="75" stroke="#ff6b35" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#mv-ah)" opacity="0"/>
+          <text id="mv-label" x="245" y="65" text-anchor="middle" font-size="11" font-family="Consolas" fill="#ff6b35" opacity="0">std::move</text>
+
+          <rect id="mv-empty" x="40" y="60" width="130" height="30" rx="4" fill="#f5f5f5" stroke="#ccc" stroke-dasharray="4,3" opacity="0"/>
+          <text id="mv-emptyt" x="105" y="80" text-anchor="middle" font-size="11" font-family="Consolas" fill="#999" opacity="0">(empty)</text>
+
+          <rect id="mv-danger" x="20" y="140" width="550" height="40" rx="6" fill="#ffebee" stroke="#c62828" stroke-width="1.5" opacity="0"/>
+          <text id="mv-dangert" x="295" y="165" text-anchor="middle" font-size="11" font-family="Consolas" fill="#c62828" opacity="0">Moving into a joinable t2 calls std::terminate! Always join/detach first.</text>
+
+          <defs><marker id="mv-ah" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#ff6b35"/></marker></defs>
+        </svg>
+        <div id="move-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="move-step">Step &rarr;</button>
+          <button class="anim-btn" id="move-reset">Reset</button>
+          <span class="anim-output" id="move-output"></span>
+        </div>
       </div>
-<pre><code>std::thread t1(work_a);
-std::thread t2(work_b);
 
-// t1 = std::move(t2);  // BAD: t1 is still joinable, calls terminate!
+      <script>
+      (function(){
+        var step = 0;
+        var info = document.getElementById('move-info');
+        var output = document.getElementById('move-output');
+        var steps = [
+          { action:function(){ document.getElementById('mv-arrow').setAttribute('opacity','1'); document.getElementById('mv-label').setAttribute('opacity','1'); }, msg:"1. std::move(t1) transfers the OS thread handle from t1 to t2.", out:"Step 1/4" },
+          { action:function(){ document.getElementById('mv-h2').setAttribute('opacity','1'); document.getElementById('mv-h2t').setAttribute('opacity','1'); }, msg:"2. t2 now owns the thread. Responsible for join/detach.", out:"Step 2/4" },
+          { action:function(){ document.getElementById('mv-h1').setAttribute('opacity','0'); document.getElementById('mv-h1t').setAttribute('opacity','0'); document.getElementById('mv-empty').setAttribute('opacity','1'); document.getElementById('mv-emptyt').setAttribute('opacity','1'); }, msg:"3. t1 is empty (not joinable). Its destructor is safe.", out:"Step 3/4" },
+          { action:function(){ document.getElementById('mv-danger').setAttribute('opacity','1'); document.getElementById('mv-dangert').setAttribute('opacity','1'); }, msg:"4. DANGER: Moving into a joinable t2 calls std::terminate.", out:"Step 4/4 (done)" }
+        ];
+        function reset(){
+          step = 0;
+          ['mv-arrow','mv-label','mv-h2','mv-h2t','mv-empty','mv-emptyt','mv-danger','mv-dangert'].forEach(function(id){ document.getElementById(id).setAttribute('opacity','0'); });
+          document.getElementById('mv-h1').setAttribute('opacity','1');
+          document.getElementById('mv-h1t').setAttribute('opacity','1');
+          info.textContent = 'Press Step to see ownership transfer.';
+          output.textContent = '';
+        }
+        reset();
+        document.getElementById('move-step').addEventListener('click', function(){ if(step >= steps.length) return; steps[step].action(); info.textContent = steps[step].msg; output.textContent = steps[step].out; step++; });
+        document.getElementById('move-reset').addEventListener('click', reset);
+      })();
+      </script>
 
-t1.join();
-t1 = std::move(t2);     // OK: t1 was joined first</code></pre>
-
-      <p>
-        This move semantics design allows threads to be stored in containers:
-      </p>
+      <h3>Storing threads in containers</h3>
 <pre><code>std::vector&lt;std::thread&gt; workers;
 for (int i = 0; i &lt; 8; ++i) {
     workers.emplace_back([i]() {
-        // process partition i
+        std::cout &lt;&lt; "Worker " &lt;&lt; i &lt;&lt; " done\n";
     });
 }
-for (auto&amp; w : workers) {
-    w.join();
+for (auto&amp; w : workers) w.join();</code></pre>
+
+      <h3>Returning threads from factory functions</h3>
+<pre><code>std::thread make_printer(const std::string&amp; text) {
+    return std::thread([text]() { std::cout &lt;&lt; text &lt;&lt; "\n"; });
+}
+auto t = make_printer("Hello from factory");
+t.join();</code></pre>
+
+      <!-- ── Benchmark ── -->
+      <h2 id="benchmark">Performance: Callable Types Compared</h2>
+      <p>
+        The callable type has negligible impact on thread performance because the dominant cost
+        is OS thread creation (tens of microseconds). The differences below are measurable only
+        in microbenchmarks:
+      </p>
+      <table>
+        <thead>
+          <tr><th>Callable Type</th><th>Invocation Mechanism</th><th>Per-Call Overhead</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Function pointer</td><td>Indirect call</td><td>~1 ns</td><td>Cannot inline.</td></tr>
+          <tr><td>Lambda (no capture)</td><td>Direct call (inlineable)</td><td>~0 ns</td><td>Compiler sees the body. Often fastest.</td></tr>
+          <tr><td>Lambda (with capture)</td><td>Closure call</td><td>~0 to 1 ns</td><td>Small captures stay on stack.</td></tr>
+          <tr><td>Functor</td><td>operator() on copy</td><td>~0 to 1 ns</td><td>May inline. Copy cost varies.</td></tr>
+          <tr><td>std::function</td><td>Type-erased indirect</td><td>~5 to 20 ns</td><td>Possible heap allocation. Avoid in hot paths.</td></tr>
+          <tr><td>Member function ptr</td><td>std::invoke</td><td>~1 to 2 ns</td><td>Similar to function pointer.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Practical guidance.</strong> Use lambdas by default. They offer the best
+        combination of readability, flexibility, and performance. Avoid <code>std::function</code>
+        as a thread callable unless you need type erasure.
+      </div>
+
+      <h3>Benchmark code (compile with -O2)</h3>
+<pre><code>#include &lt;thread&gt;
+#include &lt;chrono&gt;
+#include &lt;iostream&gt;
+#include &lt;functional&gt;
+
+void plain_func() { volatile int x = 0; (void)x; }
+
+struct Functor { void operator()() const { volatile int x = 0; (void)x; } };
+
+int main() {
+    constexpr int N = 10000;
+    using Clock = std::chrono::high_resolution_clock;
+
+    auto t0 = Clock::now();
+    for (int i = 0; i &lt; N; ++i) { std::thread t(plain_func); t.join(); }
+    auto t1 = Clock::now();
+
+    auto t2 = Clock::now();
+    for (int i = 0; i &lt; N; ++i) { std::thread t([]{ volatile int x = 0; (void)x; }); t.join(); }
+    auto t3 = Clock::now();
+
+    Functor f;
+    auto t4 = Clock::now();
+    for (int i = 0; i &lt; N; ++i) { std::thread t(f); t.join(); }
+    auto t5 = Clock::now();
+
+    auto us = [](auto d){ return std::chrono::duration_cast&lt;std::chrono::microseconds&gt;(d).count(); };
+    std::cout &lt;&lt; "Function ptr: " &lt;&lt; us(t1-t0)/N &lt;&lt; " us/thread\n";
+    std::cout &lt;&lt; "Lambda:       " &lt;&lt; us(t3-t2)/N &lt;&lt; " us/thread\n";
+    std::cout &lt;&lt; "Functor:      " &lt;&lt; us(t5-t4)/N &lt;&lt; " us/thread\n";
 }</code></pre>
+
+      <!-- ── Common Mistakes ── -->
+      <h2 id="common-mistakes">Common Mistakes</h2>
+
+      <h3>1. Forgetting to join or detach</h3>
+<pre><code>void bad() {
+    std::thread t(work);
+}   // terminate! Fix: use RAII or std::jthread</code></pre>
+
+      <h3>2. Joining twice</h3>
+<pre><code>std::thread t(work);
+t.join();
+t.join();   // throws std::system_error</code></pre>
+
+      <h3>3. Most vexing parse</h3>
+<pre><code>std::thread t(Functor());   // function declaration, not thread
+std::thread t{Functor{}};   // correct</code></pre>
+
+      <h3>4. Capturing local by reference with detach</h3>
+<pre><code>void bad() {
+    int x = 42;
+    std::thread t([&amp;x]{ std::cout &lt;&lt; x; });
+    t.detach();
+}   // x destroyed; thread accesses garbage</code></pre>
+
+      <h3>5. Moving into a joinable thread</h3>
+<pre><code>std::thread t1(work_a);
+std::thread t2(work_b);
+t1 = std::move(t2);   // t1 was joinable: terminate!</code></pre>
+
+      <h3>6. Unsynchronized cout</h3>
+<pre><code>// Multiple threads writing to cout interleave output.
+// Fix: use a mutex or build the string with ostringstream first.</code></pre>
+
+      <h3>7. Assuming thread execution order</h3>
+<pre><code>std::thread t1([]{ std::cout &lt;&lt; "1"; });
+std::thread t2([]{ std::cout &lt;&lt; "2"; });
+t1.join(); t2.join();
+// Output can be "12", "21", or interleaved.</code></pre>
 
       <h2>Summary</h2>
       <table>
@@ -498,22 +894,23 @@ for (auto&amp; w : workers) {
         </thead>
         <tbody>
           <tr><td>Function pointer</td><td><code>std::thread t(func, args...)</code></td><td>Simple, stateless tasks</td></tr>
-          <tr><td>Lambda</td><td><code>std::thread t([captures](params){...}, args...)</code></td><td>Inline work with local context</td></tr>
-          <tr><td>Functor</td><td><code>std::thread t(FunctorObj{}, args...)</code></td><td>Stateful reusable tasks</td></tr>
-          <tr><td>Member function</td><td><code>std::thread t(&amp;Class::fn, &amp;obj, args...)</code></td><td>Running methods on objects</td></tr>
+          <tr><td>Lambda</td><td><code>std::thread t([captures]{...}, args...)</code></td><td>Inline work with local context</td></tr>
+          <tr><td>Functor</td><td><code>std::thread t(FunctorObj{}, args...)</code></td><td>Stateful, reusable tasks</td></tr>
+          <tr><td>Member function</td><td><code>std::thread t(&amp;C::fn, &amp;obj, args...)</code></td><td>Running methods on objects</td></tr>
         </tbody>
       </table>
 
       <div class="callout">
-        <strong>Golden rule.</strong> Every <code>std::thread</code> must be joined or detached before
-        its destructor runs. Use RAII wrappers (or <code>std::jthread</code>) to guarantee this
-        even in the presence of exceptions.
+        <strong>Key rules.</strong> (1) Every <code>std::thread</code> must be joined or
+        detached before destruction. (2) Use RAII wrappers or <code>std::jthread</code> for
+        exception safety. (3) Prefer lambdas. (4) Use braces to avoid the most vexing parse.
+        (5) Arguments are copied by default; use <code>std::ref</code> or
+        <code>std::move</code> intentionally.
       </div>
 
     </article>
   </div>
 
   <script src="../../../../blog.js"></script>
-  <!-- GoatCounter --><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body>
 </html>
