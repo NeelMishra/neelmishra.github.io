@@ -550,7 +550,10 @@ var BLOG_TREE = [
             name: 'bridges-articulation-points',
             label: 'Bridges & Articulation Points',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/bridges-articulation-points/index.html' }
+              { title: 'Overview', file: 'dsa/graphs/bridges-articulation-points/index.html' },
+              { title: "Tarjan's Bridge Detection", file: 'dsa/graphs/bridges-articulation-points/bridges-algorithm.html' },
+              { title: 'Finding Articulation Points', file: 'dsa/graphs/bridges-articulation-points/articulation-points.html' },
+              { title: 'Applications', file: 'dsa/graphs/bridges-articulation-points/applications.html' }
             ]
           },
           {
