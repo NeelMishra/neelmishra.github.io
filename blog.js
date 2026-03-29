@@ -592,6 +592,57 @@ var BLOG_TREE = [
       { title: 'Design: Splitwise', file: 'lld/splitwise.html', links: ['lld/elevator.html', 'lld/patterns.html'] },
       { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html'] }
     ]
+  },
+  {
+    name: 'ml',
+    label: 'Machine Learning',
+    children: [
+      {
+        name: 'transformers',
+        label: 'Transformers',
+        children: [
+          { title: 'Overview', file: 'ml/transformers/index.html' },
+          {
+            name: 'attention',
+            label: 'Attention Mechanism',
+            children: [
+              { title: 'Self-Attention', file: 'ml/transformers/attention/index.html' },
+              { title: 'Multi-Head Attention', file: 'ml/transformers/attention/multi-head.html' },
+              { title: 'Scaled Dot-Product', file: 'ml/transformers/attention/scaled-dot.html' }
+            ]
+          },
+          {
+            name: 'architecture',
+            label: 'Architecture',
+            children: [
+              { title: 'Encoder-Decoder Overview', file: 'ml/transformers/architecture/index.html' },
+              { title: 'Encoder Block', file: 'ml/transformers/architecture/encoder.html' },
+              { title: 'Decoder Block', file: 'ml/transformers/architecture/decoder.html' },
+              { title: 'Positional Encoding', file: 'ml/transformers/architecture/positional-encoding.html' }
+            ]
+          },
+          {
+            name: 'training',
+            label: 'Training',
+            children: [
+              { title: 'Training Overview', file: 'ml/transformers/training/index.html' },
+              { title: 'Tokenization', file: 'ml/transformers/training/tokenization.html' },
+              { title: 'Normalization', file: 'ml/transformers/training/normalization.html' }
+            ]
+          },
+          {
+            name: 'variants',
+            label: 'Variants',
+            children: [
+              { title: 'Landscape', file: 'ml/transformers/variants/index.html' },
+              { title: 'BERT', file: 'ml/transformers/variants/bert.html' },
+              { title: 'GPT', file: 'ml/transformers/variants/gpt.html' },
+              { title: 'Vision Transformer', file: 'ml/transformers/variants/vision.html' }
+            ]
+          }
+        ]
+      }
+    ]
   }
 ];
 
