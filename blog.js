@@ -658,6 +658,14 @@ var BLOG_TREE = [
                     ]
                   }
                 ]
+              },
+              {
+                name: 'libtorch',
+                label: 'LibTorch Deep Dives',
+                children: [
+                  { title: 'register_module', file: 'ml/transformers/from-scratch/libtorch/register-module.html' }
+                ]
+              }
               }
             ]
           }

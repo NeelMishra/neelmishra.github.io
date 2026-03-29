@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Implementing a single attention head in C++ using LibTorch. Covers torch::nn::Module, masked self-attention, scaling, and the complete forward pass.">
+  <meta name="description" content="Implementing a single attention head in C++ using LibTorch. Detailed shape analysis, register_module, transpose mechanics, causal masking internals, and the complete forward pass.">
   <title>Single Attention Head in C++ (LibTorch) | Neel Mishra</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,8 +20,13 @@
     .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.9rem;overflow-x:auto;line-height:1.7}
     .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
     .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .callout.red{border-left-color:#e74c3c;background:rgba(231,76,60,0.05)}
     .step-card{border:1px solid var(--line);border-radius:14px;padding:1.2rem;margin:1.2rem 0;background:rgba(255,255,255,0.85);position:relative}
     .step-card::before{content:attr(data-step);position:absolute;top:-12px;left:16px;background:var(--brand,#0a8f6a);color:#fff;font-family:"Syne",sans-serif;font-weight:800;font-size:0.72rem;padding:2px 10px;border-radius:999px}
+    .shape-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .shape-table th,.shape-table td{border:1px solid var(--line);padding:0.5rem 0.8rem;text-align:left}
+    .shape-table th{background:rgba(10,143,106,0.08);font-weight:700}
+    .shape-table code{background:rgba(0,0,0,0.04);padding:1px 4px;border-radius:3px;font-size:0.85rem}
   </style>
 </head>
 <body>
@@ -42,12 +47,16 @@
       <div class="toc-section">
         <h4>Table of Contents</h4>
         <ul>
-          <li><a href="#what-we-build">What We Are Building</a></li>
-          <li><a href="#class-structure">The Class Structure</a></li>
-          <li><a href="#constructor">Constructor: Registering Layers</a></li>
+          <li><a href="#input-shape">Input Shape</a></li>
+          <li><a href="#class-structure">Class Structure</a></li>
+          <li><a href="#register-module">register_module Explained</a></li>
           <li><a href="#forward">The Forward Pass</a></li>
-          <li><a href="#masking">Causal Masking</a></li>
-          <li><a href="#full-code">Full Working Code</a></li>
+          <li><a href="#transpose">Why transpose(-2, -1)</a></li>
+          <li><a href="#float-cast">Why (float) Cast</a></li>
+          <li><a href="#masking">How masked_fill_ Works</a></li>
+          <li><a href="#mask-dimensions">Mask Dimensions and Broadcasting</a></li>
+          <li><a href="#output-shape">Output Shape</a></li>
+          <li><a href="#full-code">Full Code</a></li>
           <li><a href="#next">What Comes Next</a></li>
         </ul>
       </div>
@@ -64,28 +73,31 @@
       </div>
 
       <!-- ======================================================= -->
-      <section id="what-we-build">
-        <h2>What We Are Building</h2>
-        <p>A single attention head takes a sequence of token embeddings and produces a new sequence where each token is a weighted combination of all other tokens. The weights come from comparing queries against keys, then using the result to mix values.</p>
+      <section id="input-shape">
+        <h2>Input Shape</h2>
+        <p>The input to a single attention head is a 3D tensor <code>x</code> with shape:</p>
 
-        <p>The math for scaled dot-product attention:</p>
         <div class="math-block">
-Attention(Q, K, V) = softmax(Q * K^T / sqrt(d_k)) * V
+x.shape = (B, T, n_emb)
 
-Where:
-  Q = X * W_Q    (queries)
-  K = X * W_K    (keys)
-  V = X * W_V    (values)
-  d_k = dimension of keys
+B     = batch size       (how many sequences at once)
+T     = sequence length   (number of tokens)
+n_emb = embedding dim     (size of each token's vector)
         </div>
 
-        <p>We implement this using <strong>LibTorch</strong> (the C++ frontend for PyTorch). LibTorch handles tensor operations, autograd, and module registration so we can focus on the transformer logic rather than writing matrix multiplication from scratch.</p>
+        <p>For example, if we have a batch of 4 sentences, each with 64 tokens, and each token is represented by a 512-dimensional embedding:</p>
+        <div class="math-block">
+x.shape = (4, 64, 512)
+        </div>
+
+        <div class="callout">
+          <strong>Why 3D?</strong> The batch dimension (B) lets us process multiple sequences in parallel for training efficiency. The sequence dimension (T) holds all tokens. The embedding dimension (n_emb) is the feature vector for each token. LibTorch's <code>torch::nn::Linear</code> automatically handles the batch and sequence dimensions, only transforming the last dimension.
+        </div>
       </section>
 
       <!-- ======================================================= -->
       <section id="class-structure">
-        <h2>The Class Structure</h2>
-        <p>Our <code>SingleAttentionHead</code> inherits from <code>torch::nn::Module</code>. It holds three linear layers (Q, K, V projections) and knows <code>n_emb</code> (embedding dimension) and <code>head_size</code> (output dimension per head).</p>
+        <h2>Class Structure</h2>
 
         <div class="pseudo-code">
 <span class="kw">class</span> <span class="tp">SingleAttentionHead</span> : <span class="kw">public</span> <span class="tp">torch::nn::Module</span> {
@@ -94,63 +106,73 @@ Where:
     <span class="tp">torch::nn::Linear</span> Q{<span class="kw">nullptr</span>}, K{<span class="kw">nullptr</span>}, V{<span class="kw">nullptr</span>};
 
 <span class="kw">public</span>:
-    <span class="fn">SingleAttentionHead</span>(<span class="tp">int</span> n_emb, <span class="tp">int</span> head_size);
+    <span class="fn">SingleAttentionHead</span>(<span class="tp">int</span> n_emb, <span class="tp">int</span> head_size)
+        : n_emb(n_emb), head_size(head_size)
+    {
+        <span class="kw">this</span>-&gt;Q = <span class="fn">register_module</span>(<span class="str">"Q"</span>,
+            <span class="tp">torch::nn::Linear</span>(
+                <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
+        <span class="kw">this</span>-&gt;K = <span class="fn">register_module</span>(<span class="str">"K"</span>,
+            <span class="tp">torch::nn::Linear</span>(
+                <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
+        <span class="kw">this</span>-&gt;V = <span class="fn">register_module</span>(<span class="str">"V"</span>,
+            <span class="tp">torch::nn::Linear</span>(
+                <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
+    }
+
     <span class="tp">torch::Tensor</span> <span class="fn">forward</span>(<span class="tp">torch::Tensor</span> x);
 };
         </div>
 
-        <div class="step-card" data-step="Why nullptr?">
-          <p>LibTorch linear layers must be initialized in the constructor using <code>register_module</code>. We declare them as <code>nullptr</code> first and assign them during construction. This is standard LibTorch practice: you cannot construct <code>torch::nn::Linear</code> without specifying its dimensions, so we defer it.</p>
+        <div class="step-card" data-step="nullptr initialization">
+          <p>We declare <code>Q{nullptr}</code>, <code>K{nullptr}</code>, <code>V{nullptr}</code> because <code>torch::nn::Linear</code> requires dimensions at construction time. We cannot construct it as a member initializer without knowing <code>n_emb</code> and <code>head_size</code>. So we declare them as null first and assign real layers inside the constructor body.</p>
+        </div>
+
+        <div class="step-card" data-step="Why no bias?">
+          <p><code>.bias(false)</code> matches the original "Attention is All You Need" paper. The Q, K, V projections compute <code>Q = X * W_Q</code> with no added bias vector. This is standard practice. The bias would add a constant offset to every query/key/value, which is redundant since the embeddings already capture position and meaning.</p>
         </div>
       </section>
 
       <!-- ======================================================= -->
-      <section id="constructor">
-        <h2>Constructor: Registering Layers</h2>
-        <p>Each linear layer projects from <code>n_emb</code> to <code>head_size</code> with no bias (following the original "Attention is All You Need" paper).</p>
+      <section id="register-module">
+        <h2>register_module Explained</h2>
+        <p><code>register_module</code> is a critical LibTorch function. It does three things:</p>
+
+        <ol>
+          <li><strong>Parameter registration:</strong> It adds all the weights of the linear layer to the module's parameter list. When you later call <code>model-&gt;parameters()</code>, the optimizer finds these weights and updates them during training. Without registration, the weights are invisible to the training loop.</li>
+          <li><strong>Named hierarchy:</strong> The string argument (<code>"Q"</code>, <code>"K"</code>, <code>"V"</code>) creates a named hierarchy. When you print the model or save/load weights, each layer is identified by name. For example, saving produces keys like <code>Q.weight</code>, <code>K.weight</code>, <code>V.weight</code>.</li>
+          <li><strong>Device tracking:</strong> When you call <code>model-&gt;to(torch::kCUDA)</code>, all registered modules are moved to GPU. Unregistered layers stay on CPU, causing device mismatch errors.</li>
+        </ol>
 
         <div class="pseudo-code">
-<span class="fn">SingleAttentionHead</span>(<span class="tp">int</span> n_emb, <span class="tp">int</span> head_size)
-    : n_emb(n_emb), head_size(head_size)
-{
-    <span class="kw">this</span>-&gt;Q = <span class="fn">register_module</span>(
-        <span class="str">"Q"</span>, <span class="tp">torch::nn::Linear</span>(
-            <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-        )
-    );
-    <span class="kw">this</span>-&gt;K = <span class="fn">register_module</span>(
-        <span class="str">"K"</span>, <span class="tp">torch::nn::Linear</span>(
-            <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-        )
-    );
-    <span class="kw">this</span>-&gt;V = <span class="fn">register_module</span>(
-        <span class="str">"V"</span>, <span class="tp">torch::nn::Linear</span>(
-            <span class="tp">torch::nn::LinearOptions</span>(n_emb, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-        )
-    );
-}
+<span class="cm">// What happens without register_module:</span>
+<span class="tp">torch::nn::Linear</span> Q = <span class="tp">torch::nn::Linear</span>(32, 16);  <span class="cm">// NOT registered</span>
+model-&gt;<span class="fn">parameters</span>();               <span class="cm">// Q's weights are NOT in this list</span>
+optimizer.<span class="fn">step</span>();                   <span class="cm">// Q's weights are NEVER updated</span>
+model-&gt;<span class="fn">to</span>(<span class="tp">torch::kCUDA</span>);           <span class="cm">// Q stays on CPU, everything else on GPU</span>
+
+<span class="cm">// What happens with register_module:</span>
+Q = <span class="fn">register_module</span>(<span class="str">"Q"</span>, <span class="tp">torch::nn::Linear</span>(32, 16));
+model-&gt;<span class="fn">parameters</span>();               <span class="cm">// Q's weights ARE in this list</span>
+optimizer.<span class="fn">step</span>();                   <span class="cm">// Q's weights ARE updated</span>
+model-&gt;<span class="fn">to</span>(<span class="tp">torch::kCUDA</span>);           <span class="cm">// Q moves to GPU correctly</span>
         </div>
 
         <div class="callout">
-          <strong>register_module</strong> does two things: (1) gives the layer a name for serialization and debugging, and (2) registers its parameters so the optimizer can find them during training. If you skip this, the weights will not be updated during backpropagation.
-        </div>
-
-        <div class="step-card" data-step="Why no bias?">
-          <p>The Q, K, V projections in the original transformer paper do not use bias terms. The linear layers compute <code>Q = X * W_Q</code> and nothing more. Setting <code>.bias(false)</code> matches this. Some implementations do include bias, but the standard practice is to omit it.</p>
+          <strong>Deep dive:</strong> For a full explanation of register_module, named_parameters, and the LibTorch module system, see the dedicated <a href="../../libtorch/register-module.html" style="color:var(--brand);font-weight:700">register_module deep dive</a>.
         </div>
       </section>
 
       <!-- ======================================================= -->
       <section id="forward">
         <h2>The Forward Pass</h2>
-        <p>The forward method takes input <code>x</code> of shape <code>(batch, seq_len, n_emb)</code> and returns the attention output of shape <code>(batch, seq_len, head_size)</code>.</p>
 
         <div class="pseudo-code">
 <span class="tp">torch::Tensor</span> <span class="fn">forward</span>(<span class="tp">torch::Tensor</span> x) {
     <span class="cm">// Step 1: Project into Q, K, V</span>
-    <span class="tp">torch::Tensor</span> Q_vec = <span class="kw">this</span>-&gt;Q(x);   <span class="cm">// (B, T, head_size)</span>
-    <span class="tp">torch::Tensor</span> K_vec = <span class="kw">this</span>-&gt;K(x);   <span class="cm">// (B, T, head_size)</span>
-    <span class="tp">torch::Tensor</span> V_vec = <span class="kw">this</span>-&gt;V(x);   <span class="cm">// (B, T, head_size)</span>
+    <span class="tp">torch::Tensor</span> Q_vec = <span class="kw">this</span>-&gt;Q(x);   <span class="cm">// (B, T, n_emb) -&gt; (B, T, head_size)</span>
+    <span class="tp">torch::Tensor</span> K_vec = <span class="kw">this</span>-&gt;K(x);   <span class="cm">// (B, T, n_emb) -&gt; (B, T, head_size)</span>
+    <span class="tp">torch::Tensor</span> V_vec = <span class="kw">this</span>-&gt;V(x);   <span class="cm">// (B, T, n_emb) -&gt; (B, T, head_size)</span>
 
     <span class="cm">// Step 2: Compute scaled attention scores</span>
     <span class="tp">torch::Tensor</span> raw_attention =
@@ -173,52 +195,192 @@ Where:
 }
         </div>
 
-        <p>Let us break down each step:</p>
+        <h3>Shape at every step</h3>
+        <table class="shape-table">
+          <tr><th>Variable</th><th>Shape</th><th>How</th></tr>
+          <tr><td><code>x</code></td><td>(B, T, n_emb)</td><td>Input</td></tr>
+          <tr><td><code>Q_vec</code></td><td>(B, T, head_size)</td><td>x * W_Q &mdash; Linear projects last dim from n_emb to head_size</td></tr>
+          <tr><td><code>K_vec</code></td><td>(B, T, head_size)</td><td>Same as Q_vec</td></tr>
+          <tr><td><code>V_vec</code></td><td>(B, T, head_size)</td><td>Same as Q_vec</td></tr>
+          <tr><td><code>K_vec.transpose(-2,-1)</code></td><td>(B, head_size, T)</td><td>Swap last two dims</td></tr>
+          <tr><td><code>raw_attention</code></td><td>(B, T, T)</td><td>matmul: (B,T,head_size) x (B,head_size,T)</td></tr>
+          <tr><td><code>mask</code></td><td>(T, T)</td><td>Lower-triangular ones matrix</td></tr>
+          <tr><td><code>weights</code></td><td>(B, T, T)</td><td>Softmax along last dim</td></tr>
+          <tr><td><code>out</code></td><td>(B, T, head_size)</td><td>matmul: (B,T,T) x (B,T,head_size)</td></tr>
+        </table>
+      </section>
 
-        <div class="step-card" data-step="Step 1: Project">
-          <p><code>this-&gt;Q(x)</code> calls the linear layer's forward method, computing <code>x * W_Q</code>. The input shape is (B, T, n_emb) and the output is (B, T, head_size). Same for K and V. Each token now has a query, key, and value vector.</p>
+      <!-- ======================================================= -->
+      <section id="transpose">
+        <h2>Why transpose(-2, -1)?</h2>
+        <p>We need to compute the dot product between every query and every key. If Q has shape (B, T, head_size), each row is a query vector for one token. To dot every query with every key, we need:</p>
+
+        <div class="math-block">
+scores[i][j] = dot(Q[i], K[j])
+
+This is exactly matrix multiplication: Q * K^T
         </div>
 
-        <div class="step-card" data-step="Step 2: Attention Scores">
-          <p><code>torch::matmul(Q_vec, K_vec.transpose(-2, -1))</code> computes the dot product between every pair of query and key vectors. <code>.transpose(-2, -1)</code> swaps the last two dimensions (T, head_size) to (head_size, T), so the matmul gives (B, T, T). Division by <code>sqrt(head_size)</code> prevents values from growing too large before softmax.</p>
+        <p>But our tensors are 3D (they have a batch dimension). We only want to transpose the last two dimensions (the token and feature dimensions), not the batch dimension. That is what <code>.transpose(-2, -1)</code> does:</p>
+
+        <div class="math-block">
+K_vec shape:                    (B, T, head_size)
+K_vec.transpose(-2, -1) shape: (B, head_size, T)
+
+matmul(Q_vec, K_vec.transpose(-2, -1)):
+  (B, T, head_size) x (B, head_size, T) = (B, T, T)
         </div>
 
-        <div class="step-card" data-step="Steps 3-5: Mask, Softmax, Output">
-          <p>The causal mask zeros out future positions. Softmax converts scores to probabilities. Finally, we multiply weights by V to get the output: each token becomes a weighted average of all (allowed) value vectors.</p>
+        <div class="step-card" data-step="The -2, -1 indices">
+          <p>Negative indices count from the end. For a 3D tensor with dimensions [0, 1, 2]:
+          <br><code>-1</code> is dimension 2 (head_size)
+          <br><code>-2</code> is dimension 1 (T)
+          <br>So <code>.transpose(-2, -1)</code> swaps dimensions 1 and 2, leaving the batch dimension (0) untouched. This works regardless of whether the tensor is 3D, 4D, etc.</p>
+        </div>
+
+        <div class="callout warn">
+          <strong>Why not .t()?</strong> The <code>.t()</code> method only works on 2D matrices. For batched tensors (3D+), you must use <code>.transpose(dim0, dim1)</code> to specify exactly which two dimensions to swap.
+        </div>
+      </section>
+
+      <!-- ======================================================= -->
+      <section id="float-cast">
+        <h2>Why (float) Cast on head_size?</h2>
+        <p>The line in question:</p>
+        <div class="pseudo-code">
+/ <span class="fn">sqrt</span>((<span class="tp">float</span>)(head_size))
+        </div>
+
+        <p><code>head_size</code> is an <code>int</code>. In C++, <code>sqrt(int)</code> can be ambiguous: the compiler might pick <code>sqrt(double)</code> or <code>sqrt(float)</code>, or it might not compile at all depending on overload resolution.</p>
+
+        <p>More importantly, the division <code>tensor / sqrt(int)</code> can produce unexpected results. The <code>sqrt</code> of an int returns a double in C++. Dividing a float tensor by a double can trigger implicit type promotions. By explicitly casting to float:</p>
+
+        <ul>
+          <li>We get <code>sqrt(float)</code> which returns a <code>float</code></li>
+          <li>The division stays in float precision, matching the tensor's dtype (torch::kFloat32)</li>
+          <li>No ambiguous overload warnings from the compiler</li>
+        </ul>
+
+        <div class="callout">
+          <strong>The value itself:</strong> For head_size = 16, <code>sqrt(16.0f) = 4.0f</code>. We are dividing all attention scores by 4. This scaling prevents the dot products from growing proportionally with the dimension, which would push softmax into saturated regions where gradients vanish.
         </div>
       </section>
 
       <!-- ======================================================= -->
       <section id="masking">
-        <h2>Causal Masking</h2>
-        <p>For autoregressive models (like GPT), token i should only attend to tokens 0 through i, not future tokens. We enforce this with a lower-triangular mask.</p>
+        <h2>How masked_fill_ Works Behind the Scenes</h2>
+        <p><code>masked_fill_</code> is an in-place operation. The underscore suffix is LibTorch/PyTorch convention for in-place (mutating the tensor rather than creating a copy).</p>
 
         <div class="pseudo-code">
-<span class="cm">// Create lower-triangular mask</span>
-<span class="tp">torch::Tensor</span> mask = <span class="fn">torch::tril</span>(<span class="fn">torch::ones</span>({T, T}));
-
-<span class="cm">// mask looks like:</span>
-<span class="cm">// [[1, 0, 0],</span>
-<span class="cm">//  [1, 1, 0],</span>
-<span class="cm">//  [1, 1, 1]]</span>
-
-<span class="cm">// Fill positions where mask==0 with -infinity</span>
 raw_attention.<span class="fn">masked_fill_</span>(mask == 0, -1e9f);
         </div>
 
-        <div class="step-card" data-step="Why -1e9?">
-          <p>After masking, those positions hold a very large negative number. When softmax exponentiates them, exp(-1e9) is essentially 0. So the resulting attention weights for future positions are zero: the model cannot "look ahead." We use -1e9 instead of negative infinity to avoid NaN issues.</p>
+        <p>This is equivalent to the following element-wise operation:</p>
+
+        <div class="pseudo-code">
+<span class="kw">for</span> each element (i, j) <span class="kw">in</span> raw_attention:
+    <span class="kw">if</span> mask[i][j] == 0:
+        raw_attention[i][j] = -1e9f
+    <span class="cm">// else: leave it unchanged</span>
         </div>
 
-        <div class="callout warn">
-          <strong>Encoder vs Decoder:</strong> This causal mask is only for decoder-style (autoregressive) attention. For an encoder (like BERT), skip the masking entirely and allow every token to attend to every other token.
+        <h3>Step by step for a 3-token sequence</h3>
+        <div class="math-block">
+raw_attention (before masking):      mask (lower triangular):
+  [[0.5,  0.3,  0.8],                 [[1, 0, 0],
+   [0.2,  0.7,  0.1],                  [1, 1, 0],
+   [0.4,  0.9,  0.6]]                  [1, 1, 1]]
+
+mask == 0:
+  [[0, 1, 1],
+   [0, 0, 1],
+   [0, 0, 0]]
+
+raw_attention (after masked_fill_):
+  [[0.5,  -1e9, -1e9],
+   [0.2,   0.7, -1e9],
+   [0.4,   0.9,  0.6]]
+        </div>
+
+        <p>After softmax, exp(-1e9) rounds to 0, so those positions contribute zero attention weight. Token 0 can only attend to itself. Token 1 can attend to tokens 0 and 1. Token 2 can attend to all three.</p>
+
+        <div class="step-card" data-step="Why -1e9 not -infinity?">
+          <p><code>-INFINITY</code> would also work mathematically (exp(-inf) = 0). However, in practice, some edge cases (like when an entire row is masked, or during gradient computation) can produce NaN with true infinity. Using -1e9 (a very large negative number) is numerically safer while being practically equivalent: exp(-1e9) is so close to 0 that it is zero in float32 representation.</p>
+        </div>
+
+        <div class="callout red">
+          <strong>The underscore matters.</strong> <code>masked_fill_</code> (with underscore) modifies the tensor in place. <code>masked_fill</code> (without underscore) returns a new tensor. The in-place version is faster (no memory allocation) but means the original <code>raw_attention</code> is destroyed. In a forward pass where we do not need the unmasked scores again, in-place is the right choice.
+        </div>
+      </section>
+
+      <!-- ======================================================= -->
+      <section id="mask-dimensions">
+        <h2>Mask Dimensions and Broadcasting</h2>
+        <p>The mask is created as a 2D tensor:</p>
+
+        <div class="pseudo-code">
+<span class="tp">torch::Tensor</span> mask = <span class="fn">torch::tril</span>(<span class="fn">torch::ones</span>({x.<span class="fn">size</span>(1), x.<span class="fn">size</span>(1)}));
+<span class="cm">// x.size(1) = T (sequence length)</span>
+<span class="cm">// mask shape: (T, T)</span>
+        </div>
+
+        <p>But <code>raw_attention</code> has shape <code>(B, T, T)</code>. How does a (T, T) mask work on a (B, T, T) tensor?</p>
+
+        <h3>Broadcasting</h3>
+        <p>LibTorch (like PyTorch and NumPy) uses <strong>broadcasting</strong>. When dimensions do not match, it automatically expands the smaller tensor by repeating it along the missing dimensions:</p>
+
+        <div class="math-block">
+raw_attention shape: (B, T, T)  = (4, 64, 64)
+mask shape:              (T, T) =     (64, 64)
+
+Broadcasting adds a batch dimension:
+mask is treated as:  (1, T, T)  = (1, 64, 64)
+
+Then repeated B times:
+effective mask:      (B, T, T)  = (4, 64, 64)
+        </div>
+
+        <p>This means the <em>same mask</em> is applied to every sequence in the batch. This is correct because the causal constraint (do not look at future tokens) is the same for all sequences.</p>
+
+        <div class="callout">
+          <strong>Why not create the mask as (B, T, T)?</strong> We could, but it would waste memory. Since the mask is identical for every batch element, a single (T, T) matrix that gets broadcast is more efficient. LibTorch handles the broadcast internally without physically copying the data B times.
+        </div>
+      </section>
+
+      <!-- ======================================================= -->
+      <section id="output-shape">
+        <h2>Output Shape</h2>
+        <p>The final output has shape:</p>
+
+        <div class="math-block">
+out.shape = (B, T, head_size)
+        </div>
+
+        <p>Let us trace why:</p>
+        <div class="math-block">
+weights:  (B, T, T)          - attention weights (how much each token attends to each other)
+V_vec:    (B, T, head_size)  - value vectors
+
+matmul(weights, V_vec):
+  (B, T, T) x (B, T, head_size) = (B, T, head_size)
+        </div>
+
+        <p>So the output has the <strong>same batch and sequence dimensions</strong> as the input, but the last dimension changes from <code>n_emb</code> to <code>head_size</code>. Each token's output is a weighted average of all the value vectors, where the weights come from the attention scores.</p>
+
+        <table class="shape-table">
+          <tr><th>Tensor</th><th>Shape</th><th>Meaning</th></tr>
+          <tr><td>Input x</td><td>(B, T, n_emb)</td><td>Original token embeddings</td></tr>
+          <tr><td>Output</td><td>(B, T, head_size)</td><td>Context-aware token representations</td></tr>
+        </table>
+
+        <div class="callout">
+          <strong>In multi-head attention</strong>, we typically set head_size = n_emb / num_heads. With 8 heads and n_emb = 512, each head produces (B, T, 64). The 8 outputs are concatenated back to (B, T, 512), recovering the original dimension.
         </div>
       </section>
 
       <!-- ======================================================= -->
       <section id="full-code">
-        <h2>Full Working Code</h2>
-        <p>Here is the complete class. Drop this into a LibTorch project and it is ready to use.</p>
+        <h2>Full Code</h2>
 
         <div class="pseudo-code">
 <span class="kw">#include</span> &lt;torch/torch.h&gt;
@@ -263,17 +425,17 @@ raw_attention.<span class="fn">masked_fill_</span>(mask == 0, -1e9f);
     }
 };
 
-<span class="cm">// Usage example</span>
 <span class="tp">int</span> <span class="fn">main</span>() {
     <span class="tp">auto</span> head = std::<span class="fn">make_shared</span>&lt;<span class="tp">SingleAttentionHead</span>&gt;(32, 16);
 
-    <span class="cm">// Random input: batch=1, seq_len=8, n_emb=32</span>
-    <span class="tp">torch::Tensor</span> x = <span class="fn">torch::randn</span>({1, 8, 32});
+    <span class="cm">// Input: batch=2, seq_len=8, n_emb=32</span>
+    <span class="tp">torch::Tensor</span> x = <span class="fn">torch::randn</span>({2, 8, 32});
     <span class="tp">torch::Tensor</span> out = head-&gt;<span class="fn">forward</span>(x);
 
     std::cout &lt;&lt; <span class="str">"Input shape:  "</span> &lt;&lt; x.<span class="fn">sizes</span>() &lt;&lt; std::endl;
     std::cout &lt;&lt; <span class="str">"Output shape: "</span> &lt;&lt; out.<span class="fn">sizes</span>() &lt;&lt; std::endl;
-    <span class="cm">// Output: [1, 8, 16]</span>
+    <span class="cm">// Input:  [2, 8, 32]</span>
+    <span class="cm">// Output: [2, 8, 16]</span>
 }
         </div>
       </section>
