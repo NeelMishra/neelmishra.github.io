@@ -656,7 +656,8 @@ var BLOG_TREE = [
                     children: [
                       { title: 'Single Attention Head', file: 'ml/transformers/from-scratch/cpp/basic-blocks/single-attention-head.html' },
                       { title: 'Multi-Head Attention', file: 'ml/transformers/from-scratch/cpp/basic-blocks/multi-head-attention.html' },
-                      { title: 'Feed-Forward Network', file: 'ml/transformers/from-scratch/cpp/basic-blocks/feed-forward.html' }
+                      { title: 'Feed-Forward Network', file: 'ml/transformers/from-scratch/cpp/basic-blocks/feed-forward.html' },
+                      { title: 'Transformer Block', file: 'ml/transformers/from-scratch/cpp/basic-blocks/transformer-block.html' }
                     ]
                   }
                 ]
