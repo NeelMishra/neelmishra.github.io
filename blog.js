@@ -639,6 +639,20 @@ var BLOG_TREE = [
               { title: 'GPT', file: 'ml/transformers/variants/gpt.html' },
               { title: 'Vision Transformer', file: 'ml/transformers/variants/vision.html' }
             ]
+          },
+          {
+            name: 'from-scratch',
+            label: 'From Scratch',
+            children: [
+              { title: 'Overview', file: 'ml/transformers/from-scratch/index.html' },
+              {
+                name: 'cpp',
+                label: 'C++ Implementation',
+                children: [
+                  { title: 'Coming Soon', file: 'ml/transformers/from-scratch/cpp/index.html' }
+                ]
+              }
+            ]
           }
         ]
       }
