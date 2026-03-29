@@ -669,7 +669,6 @@ var BLOG_TREE = [
                   { title: 'register_module', file: 'ml/transformers/from-scratch/libtorch/register-module.html' }
                 ]
               }
-              }
             ]
           }
         ]
