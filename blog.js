@@ -649,7 +649,7 @@ var BLOG_TREE = [
                 name: 'cpp',
                 label: 'C++ Implementation',
                 children: [
-                  { title: 'Coming Soon', file: 'ml/transformers/from-scratch/cpp/index.html' },
+                  { title: 'Overview', file: 'ml/transformers/from-scratch/cpp/index.html' },
                   {
                     name: 'basic-blocks',
                     label: 'Basic Blocks',
