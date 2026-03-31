@@ -49,7 +49,8 @@
         <ul>
           <li><a href="#input-shape">Input Shape</a></li>
           <li><a href="#class-structure">Class Structure</a></li>
-          <li><a href="#register-module">register_module Explained</a></li>
+          <li><a href="#linear-vs-tensor">Why nn::Linear, Not Raw Tensors?</a></li>
+          <li><a href="#register-module">Inside register_module</a></li>
           <li><a href="#forward">The Forward Pass</a></li>
           <li><a href="#transpose">Why transpose(-2, -1)</a></li>
           <li><a href="#float-cast">Why (float) Cast</a></li>
@@ -134,8 +135,77 @@ x.shape = (4, 64, 512)
       </section>
 
       <!-- ======================================================= -->
+      <section id="linear-vs-tensor">
+        <h2>Why nn::Linear, Not Raw Tensors?</h2>
+        <p>We could represent Q, K, V as plain <code>torch::Tensor</code> weight matrices instead of <code>torch::nn::Linear</code> modules. Both can perform the same matrix multiplication. But there are fundamental differences.</p>
+
+        <h3>The raw tensor approach</h3>
+        <div class="pseudo-code">
+<span class="cm">// Using raw tensors as weights:</span>
+<span class="tp">torch::Tensor</span> W_Q = <span class="fn">torch::randn</span>({n_emb, head_size});
+<span class="tp">torch::Tensor</span> W_K = <span class="fn">torch::randn</span>({n_emb, head_size});
+<span class="tp">torch::Tensor</span> W_V = <span class="fn">torch::randn</span>({n_emb, head_size});
+
+<span class="cm">// Forward pass:</span>
+<span class="tp">torch::Tensor</span> Q_vec = <span class="fn">torch::matmul</span>(x, W_Q);   <span class="cm">// manual matmul</span>
+<span class="tp">torch::Tensor</span> K_vec = <span class="fn">torch::matmul</span>(x, W_K);
+<span class="tp">torch::Tensor</span> V_vec = <span class="fn">torch::matmul</span>(x, W_V);
+        </div>
+
+        <p>This works mathematically. <code>torch::matmul(x, W_Q)</code> multiplies the last dimension of x (n_emb) by the first dimension of W_Q (n_emb), producing a result with the last dimension as head_size. Same linear projection.</p>
+
+        <h3>So why not use it?</h3>
+
+        <div class="step-card" data-step="1. No automatic gradient tracking">
+          <p>A plain <code>torch::Tensor</code> created by <code>torch::randn</code> does not track gradients by default. You would need to explicitly set <code>W_Q.set_requires_grad(true)</code>. Then you would need to manually pass each tensor to the optimizer. With <code>nn::Linear</code>, the weight tensor is created with <code>requires_grad = true</code> automatically.</p>
+        </div>
+
+        <div class="step-card" data-step="2. No parameter discovery">
+          <p><code>torch::nn::Linear</code> is a <code>Module</code>. When you register it, all its internal parameters become discoverable via <code>model->parameters()</code>. A raw tensor is just data. The optimizer and the module system have no way to find it. You would have to manually build your own parameter list and pass it to the optimizer.</p>
+        </div>
+
+        <div class="step-card" data-step="3. No weight initialization">
+          <p><code>nn::Linear</code> initializes weights using Kaiming uniform initialization (by default), which is designed for stable training in deep networks. A raw <code>torch::randn</code> uses a standard normal distribution, which can cause exploding or vanishing activations in deep models. You would need to implement your own initialization.</p>
+        </div>
+
+        <div class="step-card" data-step="4. No device management">
+          <p>When you call <code>model->to(torch::kCUDA)</code>, all registered Linear modules move to GPU automatically. A raw tensor stays wherever it was created. You would need to manually track and move every weight tensor.</p>
+        </div>
+
+        <div class="step-card" data-step="5. No serialization">
+          <p><code>torch::save</code> and <code>torch::load</code> work with modules. Every registered parameter gets a name and can be saved/loaded as part of a checkpoint. Raw tensors would need manual serialization logic. Missing one tensor during save means a corrupted checkpoint.</p>
+        </div>
+
+        <h3>Side-by-side comparison</h3>
+        <table class="shape-table">
+          <tr><th>Feature</th><th><code>torch::nn::Linear</code></th><th>Raw <code>torch::Tensor</code></th></tr>
+          <tr><td>Gradient tracking</td><td>Automatic</td><td>Manual (<code>set_requires_grad</code>)</td></tr>
+          <tr><td>Parameter discovery</td><td>Via <code>model->parameters()</code></td><td>Not discoverable</td></tr>
+          <tr><td>Weight initialization</td><td>Kaiming uniform (default)</td><td>Whatever you pass to randn/zeros</td></tr>
+          <tr><td>Device management</td><td><code>model->to(device)</code> handles it</td><td>Manual per-tensor</td></tr>
+          <tr><td>Save/Load</td><td>Automatic via module system</td><td>Manual serialization</td></tr>
+          <tr><td>Bias support</td><td>Built-in toggle <code>.bias(true/false)</code></td><td>Separate tensor + manual add</td></tr>
+          <tr><td>Forward call</td><td><code>Q(x)</code> (handles batched matmul)</td><td><code>torch::matmul(x, W_Q)</code></td></tr>
+        </table>
+
+        <div class="callout">
+          <strong>Bottom line:</strong> <code>torch::nn::Linear</code> wraps a weight tensor (and optional bias) inside a module that integrates with the entire LibTorch ecosystem: optimizers, checkpointing, device management, and the module hierarchy. Using raw tensors means reimplementing all of that yourself. For Q, K, V in attention, there is no reason to avoid <code>nn::Linear</code>.
+        </div>
+
+        <h3>What nn::Linear actually stores</h3>
+        <p>Under the hood, <code>torch::nn::Linear(n_emb, head_size)</code> creates:</p>
+        <div class="pseudo-code">
+<span class="cm">// Inside nn::Linear:</span>
+<span class="tp">torch::Tensor</span> weight;  <span class="cm">// shape: (head_size, n_emb) -- NOTE: transposed</span>
+<span class="tp">torch::Tensor</span> bias;    <span class="cm">// shape: (head_size,) -- omitted when .bias(false)</span>
+        </div>
+
+        <p>When you call <code>Q(x)</code>, it computes <code>x @ weight.T + bias</code>. Notice the weight is stored as (head_size, n_emb) and transposed during the forward pass. This is a PyTorch convention for memory layout efficiency. With a raw tensor, you would store it as (n_emb, head_size) and compute <code>x @ W_Q</code> without transposing. Both produce the same result, but the internal layout differs.</p>
+      </section>
+
+      <!-- ======================================================= -->
       <section id="register-module">
-        <h2>register_module Explained</h2>
+        <h2>Inside register_module</h2>
         <p><code>register_module</code> is a critical LibTorch function. It does three things:</p>
 
         <ol>
