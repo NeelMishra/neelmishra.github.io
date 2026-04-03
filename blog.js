@@ -501,21 +501,21 @@ var BLOG_TREE = [
             name: 'dijkstra',
             label: 'Dijkstra',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/dijkstra/index.html' }
+              { title: "Dijkstra's Algorithm", file: 'dsa/graphs/dijkstra/index.html' }
             ]
           },
           {
             name: 'bellman-ford',
             label: 'Bellman Ford',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/bellman-ford/index.html' }
+              { title: 'Bellman-Ford Algorithm', file: 'dsa/graphs/bellman-ford/index.html' }
             ]
           },
           {
             name: 'floyd-warshall',
             label: 'Floyd Warshall',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/floyd-warshall/index.html' }
+              { title: 'Floyd-Warshall Algorithm', file: 'dsa/graphs/floyd-warshall/index.html' }
             ]
           },
           {
@@ -547,6 +547,13 @@ var BLOG_TREE = [
             ]
           },
           {
+            name: 'tarjan-scc',
+            label: "Tarjan's SCC",
+            children: [
+              { title: "Tarjan's SCC Algorithm", file: 'dsa/graphs/tarjan-scc/index.html' }
+            ]
+          },
+          {
             name: 'bridges-articulation-points',
             label: 'Bridges & Articulation Points',
             children: [
@@ -555,6 +562,13 @@ var BLOG_TREE = [
               { title: 'Finding Articulation Points', file: 'dsa/graphs/bridges-articulation-points/articulation-points.html' },
               { title: 'Bridges vs APs Compared', file: 'dsa/graphs/bridges-articulation-points/comparison.html' },
               { title: 'Applications', file: 'dsa/graphs/bridges-articulation-points/applications.html' }
+            ]
+          },
+          {
+            name: 'block-cut-tree',
+            label: 'Block-Cut Tree',
+            children: [
+              { title: 'Block-Cut Tree', file: 'dsa/graphs/block-cut-tree/index.html' }
             ]
           },
           {
@@ -572,10 +586,24 @@ var BLOG_TREE = [
             ]
           },
           {
+            name: 'min-cost-flow',
+            label: 'Min-Cost Flow',
+            children: [
+              { title: 'Min-Cost Maximum Flow', file: 'dsa/graphs/min-cost-flow/index.html' }
+            ]
+          },
+          {
             name: 'graph-coloring',
             label: 'Graph Coloring',
             children: [
               { title: 'Graph Coloring', file: 'dsa/graphs/graph-coloring/index.html' }
+            ]
+          },
+          {
+            name: '2-sat',
+            label: '2-SAT',
+            children: [
+              { title: '2-SAT', file: 'dsa/graphs/2-sat/index.html' }
             ]
           }
         ]
