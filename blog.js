@@ -480,14 +480,14 @@ var BLOG_TREE = [
             name: 'cycle-detection',
             label: 'Cycle Detection',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/cycle-detection/index.html' }
+              { title: 'Cycle Detection in Graphs', file: 'dsa/graphs/cycle-detection/index.html' }
             ]
           },
           {
             name: 'topological-sort',
             label: 'Topological Sort',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/topological-sort/index.html' }
+              { title: 'Topological Sort', file: 'dsa/graphs/topological-sort/index.html' }
             ]
           },
           {
@@ -522,7 +522,7 @@ var BLOG_TREE = [
             name: 'disjoint-set-union',
             label: 'Disjoint Set Union',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/disjoint-set-union/index.html' }
+              { title: 'Disjoint Set Union', file: 'dsa/graphs/disjoint-set-union/index.html' }
             ]
           },
           {
@@ -575,7 +575,7 @@ var BLOG_TREE = [
             name: 'graph-coloring',
             label: 'Graph Coloring',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/graph-coloring/index.html' }
+              { title: 'Graph Coloring', file: 'dsa/graphs/graph-coloring/index.html' }
             ]
           }
         ]
