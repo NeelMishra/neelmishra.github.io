@@ -494,7 +494,7 @@ var BLOG_TREE = [
             name: 'shortest-path',
             label: 'Shortest Path',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/shortest-path/index.html' }
+              { title: 'BFS & 0-1 BFS Shortest Path', file: 'dsa/graphs/shortest-path/index.html' }
             ]
           },
           {
