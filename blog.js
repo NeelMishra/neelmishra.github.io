@@ -529,14 +529,14 @@ var BLOG_TREE = [
             name: 'minimum-spanning-tree',
             label: 'Minimum Spanning Tree',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/minimum-spanning-tree/index.html' }
+              { title: 'Kruskal, Prim & Borůvka', file: 'dsa/graphs/minimum-spanning-tree/index.html' }
             ]
           },
           {
             name: 'bipartite',
             label: 'Bipartite',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/bipartite/index.html' }
+              { title: 'Bipartite Graphs & Matching', file: 'dsa/graphs/bipartite/index.html' }
             ]
           },
           {
