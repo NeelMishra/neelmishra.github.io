@@ -553,6 +553,7 @@ var BLOG_TREE = [
               { title: 'Overview', file: 'dsa/graphs/bridges-articulation-points/index.html' },
               { title: "Tarjan's Bridge Detection", file: 'dsa/graphs/bridges-articulation-points/bridges-algorithm.html' },
               { title: 'Finding Articulation Points', file: 'dsa/graphs/bridges-articulation-points/articulation-points.html' },
+              { title: 'Bridges vs APs Compared', file: 'dsa/graphs/bridges-articulation-points/comparison.html' },
               { title: 'Applications', file: 'dsa/graphs/bridges-articulation-points/applications.html' }
             ]
           },
@@ -560,14 +561,14 @@ var BLOG_TREE = [
             name: 'euler-path',
             label: 'Euler Path',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/euler-path/index.html' }
+              { title: 'Euler Path & Circuit', file: 'dsa/graphs/euler-path/index.html' }
             ]
           },
           {
             name: 'network-flow',
             label: 'Network Flow',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/network-flow/index.html' }
+              { title: 'Network Flow Algorithms', file: 'dsa/graphs/network-flow/index.html' }
             ]
           },
           {
