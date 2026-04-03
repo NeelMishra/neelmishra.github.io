@@ -543,7 +543,7 @@ var BLOG_TREE = [
             name: 'strongly-connected-components',
             label: 'Strongly Connected Components',
             children: [
-              { title: 'Coming Soon', file: 'dsa/graphs/strongly-connected-components/index.html' }
+              { title: "Kosaraju's Algorithm", file: 'dsa/graphs/strongly-connected-components/index.html' }
             ]
           },
           {
