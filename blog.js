@@ -285,6 +285,118 @@ var BLOG_TREE = [
               { title: 'Advanced Techniques', file: 'dsa/trees/serialization/advanced.html', links: ['dsa/trees/serialization/level-order.html', 'dsa/trees/serialization/patterns.html'] },
               { title: 'Interview Patterns', file: 'dsa/trees/serialization/patterns.html', links: ['dsa/trees/serialization/advanced.html'] }
             ]
+          },
+          {
+            name: 'lca',
+            label: 'Lowest Common Ancestor',
+            children: [
+              { title: 'LCA — Binary Lifting & RMQ', file: 'dsa/trees/lca/index.html', links: ['dsa/trees/algorithms/lca.html', 'dsa/trees/euler-tour/index.html'] }
+            ]
+          },
+          {
+            name: 'euler-tour',
+            label: 'Euler Tour Technique',
+            children: [
+              { title: 'Tree Flattening', file: 'dsa/trees/euler-tour/index.html', links: ['dsa/trees/lca/index.html', 'dsa/trees/hld/index.html'] }
+            ]
+          },
+          {
+            name: 'hld',
+            label: 'Heavy-Light Decomposition',
+            children: [
+              { title: 'HLD & Path Queries', file: 'dsa/trees/hld/index.html', links: ['dsa/trees/euler-tour/index.html', 'dsa/trees/centroid-decomposition/index.html'] }
+            ]
+          },
+          {
+            name: 'centroid-decomposition',
+            label: 'Centroid Decomposition',
+            children: [
+              { title: 'Divide & Conquer on Trees', file: 'dsa/trees/centroid-decomposition/index.html', links: ['dsa/trees/hld/index.html', 'dsa/trees/tree-dp/index.html'] }
+            ]
+          },
+          {
+            name: 'tree-dp',
+            label: 'Tree DP',
+            children: [
+              { title: 'DP on Trees & Rerooting', file: 'dsa/trees/tree-dp/index.html', links: ['dsa/trees/centroid-decomposition/index.html', 'dsa/trees/persistent-segment-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'persistent-segment-tree',
+            label: 'Persistent Segment Tree',
+            children: [
+              { title: 'Persistent Segment Trees', file: 'dsa/trees/persistent-segment-tree/index.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/treap/index.html'] }
+            ]
+          },
+          {
+            name: 'treap',
+            label: 'Treaps',
+            children: [
+              { title: 'Treaps & Implicit Treaps', file: 'dsa/trees/treap/index.html', links: ['dsa/trees/persistent-segment-tree/index.html', 'dsa/trees/splay-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'dsu-on-tree',
+            label: 'DSU on Tree',
+            children: [
+              { title: 'Small to Large Merging', file: 'dsa/trees/dsu-on-tree/index.html', links: ['dsa/trees/euler-tour/index.html', 'dsa/trees/mos-on-trees/index.html'] }
+            ]
+          },
+          {
+            name: 'splay-tree',
+            label: 'Splay Trees',
+            children: [
+              { title: 'Splay Trees', file: 'dsa/trees/splay-tree/index.html', links: ['dsa/trees/treap/index.html', 'dsa/trees/link-cut-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'link-cut-tree',
+            label: 'Link-Cut Trees',
+            children: [
+              { title: 'Link-Cut Trees', file: 'dsa/trees/link-cut-tree/index.html', links: ['dsa/trees/splay-tree/index.html', 'dsa/trees/virtual-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'virtual-tree',
+            label: 'Virtual Tree',
+            children: [
+              { title: 'Virtual Tree (Auxiliary Tree)', file: 'dsa/trees/virtual-tree/index.html', links: ['dsa/trees/lca/index.html', 'dsa/trees/link-cut-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'mos-on-trees',
+            label: "Mo's on Trees",
+            children: [
+              { title: "Mo's Algorithm on Trees", file: 'dsa/trees/mos-on-trees/index.html', links: ['dsa/trees/euler-tour/index.html', 'dsa/trees/dsu-on-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'tree-hashing',
+            label: 'Tree Hashing',
+            children: [
+              { title: 'Tree Hashing & Isomorphism', file: 'dsa/trees/tree-hashing/index.html', links: ['dsa/trees/lca/index.html'] }
+            ]
+          },
+          {
+            name: 'li-chao-tree',
+            label: 'Li Chao Tree',
+            children: [
+              { title: 'Li Chao Tree', file: 'dsa/trees/li-chao-tree/index.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/persistent-segment-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'merge-sort-tree',
+            label: 'Merge Sort Tree',
+            children: [
+              { title: 'Merge Sort Tree', file: 'dsa/trees/merge-sort-tree/index.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/persistent-segment-tree/index.html'] }
+            ]
+          },
+          {
+            name: 'palindromic-tree',
+            label: 'Palindromic Tree',
+            children: [
+              { title: 'Palindromic Tree (Eertree)', file: 'dsa/trees/palindromic-tree/index.html', links: ['dsa/trees/trie/index.html'] }
+            ]
           }
         ]
       },
