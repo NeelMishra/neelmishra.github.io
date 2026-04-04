@@ -1,0 +1,1218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design Twitter: tweet service, hybrid fan-out timeline, social graph, real-time search with Elasticsearch, trending topics, Snowflake IDs, and celebrity tweet handling at 400M DAU.">
+  <title>Design: Twitter | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+  <style>
+    .twitter-anim-wrap{background:var(--surface,#fffdf9);border:1.5px solid var(--line,#d9cfba);border-radius:14px;padding:1.2rem 1.2rem .8rem;margin:2rem 0}
+    .twitter-anim-wrap h4{font-family:"Syne",sans-serif;font-size:.95rem;margin:0 0 .8rem;color:var(--ink,#13201a)}
+    .anim-controls{display:flex;gap:.5rem;align-items:center;margin-top:.8rem;flex-wrap:wrap}
+    .anim-controls button{font-family:"Manrope",sans-serif;font-size:.82rem;font-weight:700;padding:.35rem .9rem;border-radius:6px;border:1.5px solid var(--brand,#0a8f6a);background:transparent;color:var(--brand,#0a8f6a);cursor:pointer;transition:all .2s}
+    .anim-controls button:hover{background:var(--brand,#0a8f6a);color:#fff}
+    .anim-controls .anim-status{font-family:"Manrope",sans-serif;font-size:.8rem;color:var(--ink-muted,#4a5a53);margin-left:auto}
+    .schema-table{width:100%;border-collapse:collapse;margin:1.2em 0;font-size:.92rem}
+    .schema-table th,.schema-table td{text-align:left;padding:.45em .7em;border-bottom:1px solid var(--line,#d9cfba)}
+    .schema-table th{font-weight:700;background:rgba(10,143,106,.05);font-family:"Syne",sans-serif;font-size:.85rem}
+    .schema-table code{font-size:.85rem;background:rgba(10,143,106,.07);padding:.1em .35em;border-radius:3px}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series</a><span>&middot; Real-World Designs &middot; Post 58</span></div>
+
+      <h1>Design: Twitter</h1>
+      <p class="post-meta">April 2026 &middot; 28 min read</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 1: Requirements                                       -->
+      <!-- ============================================================ -->
+      <h2 id="requirements">Requirements &amp; Scale</h2>
+      <p>Twitter (now X) is one of the most demanding real-time platforms on the internet. It combines the write-heavy nature of a messaging system with the read-heavy nature of a news feed, all under strict latency constraints. Before we design anything, let&rsquo;s crystallize the requirements.</p>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <ul>
+        <li><strong>Post tweets:</strong> Users create text posts up to 280 characters, optionally with images, videos, or links.</li>
+        <li><strong>Follow users:</strong> Users follow/unfollow other users. The follow relationship is <em>asymmetric</em> &mdash; following someone doesn&rsquo;t mean they follow you back.</li>
+        <li><strong>Home timeline:</strong> Display a reverse-chronological (with ranking) feed of tweets from users you follow.</li>
+        <li><strong>User timeline:</strong> Display all tweets by a specific user.</li>
+        <li><strong>Search:</strong> Full-text real-time search across all tweets.</li>
+        <li><strong>Trending topics:</strong> Surface the most popular hashtags and topics in real time, globally and regionally.</li>
+        <li><strong>Engagement:</strong> Like, retweet, reply, quote-tweet.</li>
+        <li><strong>Notifications:</strong> Mentions, retweets, likes, and new follower alerts.</li>
+      </ul>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Availability:</strong> 99.99% uptime &mdash; Twitter is a global communications platform.</li>
+        <li><strong>Latency:</strong> Home timeline loads in &lt;200ms. Tweet posting confirms in &lt;500ms.</li>
+        <li><strong>Consistency:</strong> Eventual consistency is acceptable for timelines (a few seconds delay is fine). Strong consistency for tweet creation and follow/unfollow.</li>
+        <li><strong>Durability:</strong> Zero tweet loss &mdash; tweets are permanent records.</li>
+      </ul>
+
+      <h3 id="scale-numbers">Scale Estimation</h3>
+      <p>The numbers that drive every design decision:</p>
+      <table class="schema-table">
+        <thead><tr><th>Metric</th><th>Value</th><th>Implications</th></tr></thead>
+        <tbody>
+          <tr><td>Daily Active Users (DAU)</td><td><strong>400M</strong></td><td>Massive read load on timelines</td></tr>
+          <tr><td>New tweets per day</td><td><strong>500M</strong></td><td>~5,800 tweets/sec average, 15K+ peak</td></tr>
+          <tr><td>Average follows per user</td><td><strong>200</strong></td><td>Each tweet fans out to ~200 timelines</td></tr>
+          <tr><td>Timeline reads per day</td><td><strong>100B</strong></td><td>~1.2M reads/sec &mdash; read:write ratio of 200:1</td></tr>
+          <tr><td>Average tweet size</td><td><strong>~300 bytes</strong> (text + metadata)</td><td>~150 GB/day of tweet text alone</td></tr>
+          <tr><td>Media attachments</td><td><strong>~30%</strong> of tweets have media</td><td>~15 TB/day of images and video</td></tr>
+          <tr><td>Search queries per day</td><td><strong>1B</strong></td><td>~12K queries/sec, real-time indexing needed</td></tr>
+          <tr><td>Celebrity accounts (&gt;1M followers)</td><td><strong>~50K</strong></td><td>Fan-out on write is infeasible for these</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The 200:1 read-to-write ratio means we should optimize aggressively for reads. Pre-computing timelines (fan-out on write) trades write amplification for fast reads &mdash; but only for normal users. Celebrity accounts break this model entirely.
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 2: High-Level Architecture                            -->
+      <!-- ============================================================ -->
+      <h2 id="high-level-architecture">High-Level Architecture</h2>
+      <p>The system decomposes into several core services, each scaling independently:</p>
+      <pre><code>                           ┌─────────────────────┐
+                           │    API Gateway /     │
+  Mobile / Web Clients ──▶ │    Load Balancer     │
+                           └──────┬──────────────┘
+                                  │
+           ┌──────────────────────┼──────────────────────┐
+           ▼                      ▼                      ▼
+   ┌──────────────┐    ┌──────────────────┐    ┌──────────────┐
+   │ Tweet Service │    │ Timeline Service │    │ User Service  │
+   │ (write path)  │    │  (read path)     │    │ (profiles,    │
+   │               │    │                  │    │  auth, follow) │
+   └──────┬───────┘    └────────┬─────────┘    └──────┬───────┘
+          │                     │                      │
+          ▼                     ▼                      ▼
+   ┌──────────────┐    ┌──────────────────┐    ┌──────────────┐
+   │  Fan-out     │    │  Timeline Cache  │    │ Social Graph  │
+   │  Service     │    │  (Redis Cluster) │    │ (Graph DB /   │
+   └──────┬───────┘    └──────────────────┘    │  Redis)       │
+          │                                     └──────────────┘
+          ▼
+   ┌──────────────┐    ┌──────────────────┐    ┌──────────────┐
+   │  Tweet Store  │    │ Search Service   │    │ Media Service │
+   │  (MySQL/      │    │ (Elasticsearch)  │    │ (S3 + CDN)   │
+   │   Cassandra)  │    └──────────────────┘    └──────────────┘
+   └──────────────┘
+          │            ┌──────────────────┐    ┌──────────────┐
+          └──────────▶ │ Trending Service │    │ Notification  │
+                       │ (Storm/Flink)    │    │ Service       │
+                       └──────────────────┘    └──────────────┘</code></pre>
+
+      <p>Each service is independently deployable, horizontally scalable, and communicates via a combination of synchronous RPCs (for user-facing paths) and asynchronous message queues (for fan-out, search indexing, and analytics).</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 3: Tweet Service                                      -->
+      <!-- ============================================================ -->
+      <h2 id="tweet-service">Tweet Service</h2>
+      <p>The tweet service handles the critical write path &mdash; accepting a new tweet, persisting it, and kicking off the downstream pipeline (fan-out, search indexing, trending, notifications).</p>
+
+      <h3 id="tweet-creation-flow">Tweet Creation Flow</h3>
+      <ol>
+        <li><strong>Client sends POST /api/tweets</strong> with text (max 280 chars), optional media IDs (pre-uploaded), and metadata (reply_to, quote_tweet_id).</li>
+        <li><strong>API Gateway</strong> authenticates the request (OAuth 2.0 bearer token), checks rate limits (300 tweets/3 hours per user), and routes to the Tweet Service.</li>
+        <li><strong>Tweet Service</strong> validates the payload:
+          <ul>
+            <li>Text length &le; 280 Unicode characters (not bytes &mdash; CJK characters count as one).</li>
+            <li>Media IDs reference valid, uploaded media objects.</li>
+            <li>Spam/abuse check via ML classifier (synchronous, &lt;50ms).</li>
+          </ul>
+        </li>
+        <li><strong>Generate Snowflake ID</strong> (more on this below) &mdash; this becomes the tweet&rsquo;s globally unique, time-sortable identifier.</li>
+        <li><strong>Write to Tweet Store</strong> &mdash; synchronous write to the primary datastore.</li>
+        <li><strong>Publish to message queue</strong> (Kafka) &mdash; a single event triggers multiple downstream consumers:
+          <ul>
+            <li>Fan-out Service (timeline delivery)</li>
+            <li>Search Indexing Pipeline</li>
+            <li>Trending Topics Pipeline</li>
+            <li>Notification Service</li>
+            <li>Analytics Pipeline</li>
+          </ul>
+        </li>
+        <li><strong>Return 201 Created</strong> with the tweet object to the client.</li>
+      </ol>
+
+      <h3 id="tweet-data-model">Tweet Data Model</h3>
+      <p>The tweets table is the heart of the system. It needs to support two access patterns: lookup by tweet_id (O(1)) and range scans by user_id + time (user timeline).</p>
+      <table class="schema-table">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><code>tweet_id</code></td><td>BIGINT (Snowflake ID)</td><td>Primary key, time-sortable</td></tr>
+          <tr><td><code>user_id</code></td><td>BIGINT</td><td>Author, indexed for user timeline</td></tr>
+          <tr><td><code>text</code></td><td>VARCHAR(1120)</td><td>280 chars &times; 4 bytes (UTF-8 max)</td></tr>
+          <tr><td><code>media_ids</code></td><td>JSON / ARRAY</td><td>References to media objects</td></tr>
+          <tr><td><code>reply_to_id</code></td><td>BIGINT, nullable</td><td>Parent tweet for threading</td></tr>
+          <tr><td><code>retweet_of_id</code></td><td>BIGINT, nullable</td><td>Original tweet for retweets</td></tr>
+          <tr><td><code>quote_tweet_id</code></td><td>BIGINT, nullable</td><td>Quoted tweet reference</td></tr>
+          <tr><td><code>like_count</code></td><td>INT</td><td>Denormalized counter</td></tr>
+          <tr><td><code>retweet_count</code></td><td>INT</td><td>Denormalized counter</td></tr>
+          <tr><td><code>reply_count</code></td><td>INT</td><td>Denormalized counter</td></tr>
+          <tr><td><code>hashtags</code></td><td>JSON / ARRAY</td><td>Extracted hashtags for trending</td></tr>
+          <tr><td><code>language</code></td><td>CHAR(2)</td><td>Detected language code</td></tr>
+          <tr><td><code>geo</code></td><td>POINT, nullable</td><td>Optional geolocation</td></tr>
+          <tr><td><code>created_at</code></td><td>TIMESTAMP</td><td>Redundant with Snowflake ID, but useful</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="tweet-store-partitioning">Partitioning Strategy</h3>
+      <p>At 500M tweets/day, a single database is impossible. The tweet store is <strong>partitioned by tweet_id</strong> (specifically, by the Snowflake ID):</p>
+      <ul>
+        <li><strong>Why not partition by user_id?</strong> Because celebrity users (like @barackobama with 130M followers) would create massive hot partitions. Partitioning by tweet_id distributes writes uniformly across shards since Snowflake IDs embed a random worker component.</li>
+        <li><strong>Shard count:</strong> ~4,096 logical shards, mapped to ~256 physical database nodes via consistent hashing. Each shard handles ~120K tweets/day &mdash; well within a single MySQL/Cassandra node&rsquo;s write capacity.</li>
+        <li><strong>User timeline queries</strong> (<code>SELECT * FROM tweets WHERE user_id = ? ORDER BY tweet_id DESC LIMIT 20</code>) require a scatter-gather across shards. This is acceptable because:
+          <ul>
+            <li>User timeline is a secondary access pattern (home timeline is primary).</li>
+            <li>We maintain a <strong>secondary index table</strong> partitioned by user_id that maps to tweet_ids, avoiding full scatter-gather.</li>
+          </ul>
+        </li>
+      </ul>
+      <pre><code>-- Secondary index table (partitioned by user_id)
+CREATE TABLE user_tweets (
+    user_id    BIGINT,
+    tweet_id   BIGINT,     -- Snowflake ID (also encodes timestamp)
+    PRIMARY KEY (user_id, tweet_id)
+) WITH CLUSTERING ORDER BY (tweet_id DESC);
+
+-- Query user timeline: single partition read
+SELECT tweet_id FROM user_tweets
+WHERE user_id = 12345
+LIMIT 20;</code></pre>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 4: Snowflake ID Generation                           -->
+      <!-- ============================================================ -->
+      <h2 id="snowflake-ids">Snowflake ID Generation</h2>
+      <p>Twitter invented the Snowflake ID scheme to generate globally unique, roughly time-ordered 64-bit IDs without coordination between servers. This is critical because:</p>
+      <ul>
+        <li><strong>Time-ordering:</strong> Tweets in a timeline are ordered by ID, which is equivalent to ordering by creation time. No need for a separate timestamp sort.</li>
+        <li><strong>No coordination:</strong> Each worker generates IDs independently &mdash; no central authority, no distributed locks, no database sequences.</li>
+        <li><strong>Compact:</strong> 64-bit integers are cache-friendly and fit in a single CPU register.</li>
+      </ul>
+
+      <h3 id="snowflake-bit-layout">Bit Layout</h3>
+      <pre><code>┌─────────────────────────────────────────────────────────────────┐
+│                        64-bit Snowflake ID                       │
+├──────┬────────────────────────┬──────────┬──────────┬───────────┤
+│ Sign │  Timestamp (ms)        │ Datacenter│ Worker  │ Sequence  │
+│ 1 bit│  41 bits               │ 5 bits    │ 5 bits  │ 12 bits   │
+├──────┼────────────────────────┼──────────┼──────────┼───────────┤
+│  0   │ ms since custom epoch  │  0-31     │  0-31   │  0-4095   │
+│      │ (2010-11-04 01:42:54)  │           │         │           │
+└──────┴────────────────────────┴──────────┴──────────┴───────────┘</code></pre>
+
+      <p>Key properties of this layout:</p>
+      <table class="schema-table">
+        <thead><tr><th>Component</th><th>Bits</th><th>Range</th><th>Implication</th></tr></thead>
+        <tbody>
+          <tr><td>Sign</td><td>1</td><td>Always 0</td><td>Keeps IDs positive in signed 64-bit integers</td></tr>
+          <tr><td>Timestamp</td><td>41</td><td>~69.7 years</td><td>IDs are time-sortable; epoch runs until ~2079</td></tr>
+          <tr><td>Datacenter ID</td><td>5</td><td>0&ndash;31</td><td>Supports 32 datacenters</td></tr>
+          <tr><td>Worker ID</td><td>5</td><td>0&ndash;31</td><td>32 workers per datacenter = 1,024 total workers</td></tr>
+          <tr><td>Sequence</td><td>12</td><td>0&ndash;4095</td><td>4,096 IDs per millisecond per worker</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Total throughput:</strong> 1,024 workers &times; 4,096 IDs/ms = <strong>4,194,304 IDs per millisecond</strong> &mdash; far exceeding Twitter&rsquo;s peak of ~15K tweets/sec. The sequence counter resets every millisecond; if a worker exhausts 4,096 sequences within 1ms, it busy-waits until the next millisecond.</p>
+
+      <h3 id="snowflake-implementation">Implementation Sketch</h3>
+      <pre><code>class SnowflakeGenerator:
+    EPOCH = 1288834974657  # Custom epoch: 2010-11-04T01:42:54.657Z
+
+    def __init__(self, datacenter_id, worker_id):
+        assert 0 &lt;= datacenter_id &lt; 32
+        assert 0 &lt;= worker_id &lt; 32
+        self.datacenter_id = datacenter_id
+        self.worker_id = worker_id
+        self.sequence = 0
+        self.last_timestamp = -1
+
+    def next_id(self):
+        timestamp = current_time_ms()
+
+        if timestamp == self.last_timestamp:
+            self.sequence = (self.sequence + 1) &amp; 0xFFF  # 12-bit mask
+            if self.sequence == 0:
+                timestamp = self._wait_next_ms(timestamp)
+        else:
+            self.sequence = 0
+
+        self.last_timestamp = timestamp
+
+        return ((timestamp - self.EPOCH) &lt;&lt; 22 |
+                (self.datacenter_id &lt;&lt; 17) |
+                (self.worker_id &lt;&lt; 12) |
+                self.sequence)
+
+    def _wait_next_ms(self, last_ts):
+        ts = current_time_ms()
+        while ts &lt;= last_ts:
+            ts = current_time_ms()
+        return ts</code></pre>
+
+      <div class="callout">
+        <strong>Clock skew problem:</strong> If a worker&rsquo;s clock drifts backward (e.g., NTP adjustment), it could generate duplicate IDs or break ordering. Snowflake handles this by refusing to generate IDs when the clock goes backward &mdash; the worker throws an exception and the request is retried on another worker. In practice, operators ensure NTP is configured with <code>tinker panic 0</code> to prevent large jumps.
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 5: Timeline Service (Hybrid Fan-Out)                  -->
+      <!-- ============================================================ -->
+      <h2 id="timeline-service">Timeline Service &mdash; Hybrid Fan-Out</h2>
+      <p>The home timeline is the single most important and most complex feature. Every time a user opens Twitter, they expect to see a fresh, personalized feed of tweets from people they follow &mdash; in under 200ms. This is where the hybrid fan-out approach comes in.</p>
+
+      <h3 id="fanout-approaches">Three Approaches to Timeline Generation</h3>
+
+      <h4>Approach 1: Fan-Out on Read (Pull Model)</h4>
+      <pre><code>GET /home_timeline?user_id=123
+
+1. Look up user 123's following list: [user_A, user_B, user_C, ...]
+2. For each followed user, query their recent tweets
+3. Merge and sort all tweets by timestamp
+4. Return top N tweets
+
+-- SQL equivalent (conceptual):
+SELECT * FROM tweets
+WHERE user_id IN (SELECT followee_id FROM follows WHERE follower_id = 123)
+ORDER BY tweet_id DESC
+LIMIT 20;</code></pre>
+      <p><strong>Problem:</strong> If a user follows 500 people, this is 500 database queries per timeline load. At 1.2M timeline reads/sec, that&rsquo;s 600M database queries/sec &mdash; completely infeasible. Latency would be seconds, not milliseconds.</p>
+
+      <h4>Approach 2: Fan-Out on Write (Push Model)</h4>
+      <pre><code>User A posts a tweet:
+
+1. Look up A's followers: [user_123, user_456, user_789, ...]
+2. For EACH follower, append tweet_id to their timeline cache
+3. When user_123 requests home timeline, just read from their pre-built cache
+
+-- Redis operation:
+LPUSH timeline:123 &lt;tweet_id&gt;
+LPUSH timeline:456 &lt;tweet_id&gt;
+LPUSH timeline:789 &lt;tweet_id&gt;
+LTRIM timeline:123 0 799   -- Keep only last 800 tweets</code></pre>
+      <p><strong>Problem:</strong> When a celebrity with 50M followers tweets, the fan-out service must write to 50 million timeline caches. At 300 bytes per entry, that&rsquo;s 15GB of cache writes for a single tweet. With celebrities tweeting 5&ndash;20 times per day, the write amplification is catastrophic.</p>
+
+      <h4>Approach 3: Hybrid (Twitter&rsquo;s Actual Approach)</h4>
+      <p>Twitter uses a hybrid model that combines the best of both approaches:</p>
+      <ul>
+        <li><strong>Normal users (&lt;10K followers):</strong> Fan-out on write. When they tweet, push tweet_id into each follower&rsquo;s timeline cache. This covers ~99% of all tweets.</li>
+        <li><strong>Celebrity users (&ge;10K followers):</strong> Fan-out on read. Their tweets are <em>not</em> pushed to follower caches. Instead, when a user loads their timeline, the system merges:
+          <ol>
+            <li>Pre-built cache (normal user tweets, pushed)</li>
+            <li>Recent tweets from followed celebrities (pulled in real time)</li>
+          </ol>
+        </li>
+      </ul>
+
+      <div class="callout">
+        <strong>Why 10K as the threshold?</strong> It&rsquo;s a practical heuristic. A user with 10K followers means 10K cache writes per tweet &mdash; that completes in ~20ms on a Redis cluster. At 1M followers, the same operation takes 2+ seconds and consumes significant network/memory resources. The threshold is tunable and varies by system load.
+      </div>
+
+      <h3 id="timeline-cache-redis">Timeline Cache Design in Redis</h3>
+      <p>The timeline cache is a Redis Cluster storing pre-computed timelines. This is the most latency-sensitive component in the entire system.</p>
+
+      <h4>Data Structure</h4>
+      <pre><code>Key:    timeline:{user_id}
+Type:   Sorted Set (ZSET)
+Score:  Snowflake ID (which is time-sortable)
+Member: tweet_id (as string)
+
+-- Fan-out write: celebrity tweets handled separately
+ZADD timeline:123 1780012345678901234 "1780012345678901234"
+
+-- Read home timeline (newest 20 tweets)
+ZREVRANGEBYSCORE timeline:123 +inf -inf LIMIT 0 20
+
+-- Trim to keep cache bounded (800 entries max)
+ZREMRANGEBYRANK timeline:123 0 -801</code></pre>
+
+      <p>Key design decisions for the Redis timeline cache:</p>
+      <table class="schema-table">
+        <thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>Data structure</td><td>Sorted Set (ZSET)</td><td>O(log N) insert and range queries by score. Score = Snowflake ID gives time ordering for free.</td></tr>
+          <tr><td>What we store</td><td>Only tweet_ids, not full tweets</td><td>Keeps cache compact. Full tweet data fetched from Tweet Cache on read (batch MGET). A timeline of 800 tweet_ids is ~6.4KB vs ~240KB for full tweet objects.</td></tr>
+          <tr><td>Cache size per user</td><td>800 tweet_ids</td><td>Covers ~2&ndash;3 days of content for an average user following 200 accounts. Beyond this, we fall back to database queries.</td></tr>
+          <tr><td>Eviction</td><td>Manual trim after each insert</td><td>ZREMRANGEBYRANK keeps exactly 800 entries. No reliance on Redis eviction policies.</td></tr>
+          <tr><td>Cluster topology</td><td>Redis Cluster, 1000+ nodes</td><td>400M users &times; 6.4KB = ~2.5TB minimum. With replication factor 3 and headroom: ~10TB cluster.</td></tr>
+          <tr><td>Persistence</td><td>None (pure cache)</td><td>If a node dies, timelines are rebuilt from the Tweet Store. Cold-start penalty is acceptable for rare events.</td></tr>
+        </tbody>
+      </table>
+
+      <h4>Timeline Read Path (Merged)</h4>
+      <pre><code>def get_home_timeline(user_id, count=20):
+    # Step 1: Get pre-built timeline from cache (normal user tweets)
+    cached_tweet_ids = redis.zrevrangebyscore(
+        f"timeline:{user_id}", "+inf", "-inf",
+        start=0, num=count * 2  # Over-fetch for merge headroom
+    )
+
+    # Step 2: Get followed celebrities
+    celebrity_followees = get_celebrity_followees(user_id)
+
+    # Step 3: Pull recent tweets from each celebrity (fan-out on read)
+    celebrity_tweets = []
+    for celeb_id in celebrity_followees:
+        tweets = redis.zrevrangebyscore(
+            f"user_tweets:{celeb_id}", "+inf", "-inf",
+            start=0, num=count
+        )
+        celebrity_tweets.extend(tweets)
+
+    # Step 4: Merge, sort by Snowflake ID (= chronological), take top N
+    all_tweet_ids = cached_tweet_ids + celebrity_tweets
+    all_tweet_ids.sort(reverse=True)  # Descending = newest first
+    top_ids = all_tweet_ids[:count]
+
+    # Step 5: Hydrate tweet objects (batch fetch from Tweet Cache)
+    tweets = tweet_cache.mget(top_ids)  # Redis MGET, &lt;1ms
+
+    # Step 6: Hydrate user profiles (batch fetch)
+    user_ids = {t.user_id for t in tweets}
+    users = user_cache.mget(user_ids)
+
+    return enrich(tweets, users)</code></pre>
+
+      <p>The average user follows 3&ndash;5 celebrities. So step 3 adds only 3&ndash;5 Redis lookups to the timeline read &mdash; negligible latency overhead.</p>
+
+      <!-- ============================================================ -->
+      <!-- ANIMATION 1: Tweet Delivery Pipeline                          -->
+      <!-- ============================================================ -->
+      <div class="twitter-anim-wrap" id="tweet-anim">
+        <h4>&#9654; Tweet Delivery Pipeline</h4>
+        <svg id="tweet-anim-svg" viewBox="0 0 720 370" width="100%" style="max-width:720px" role="img" aria-label="Animated diagram showing how a tweet is delivered through fan-out on write for normal users and fan-out on read for celebrities"></svg>
+        <div class="anim-controls">
+          <button id="tweet-anim-step">Step</button>
+          <button id="tweet-anim-reset">Reset</button>
+          <span class="anim-status" id="tweet-anim-info">Click Step to begin</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 6: Social Graph Service                               -->
+      <!-- ============================================================ -->
+      <h2 id="social-graph">Social Graph Service</h2>
+      <p>The social graph manages the follow/unfollow relationships between users. It answers three critical questions:</p>
+      <ol>
+        <li><strong>Who does user X follow?</strong> (Following list &mdash; needed for fan-out on read of celebrity tweets)</li>
+        <li><strong>Who follows user X?</strong> (Follower list &mdash; needed for fan-out on write)</li>
+        <li><strong>Does user X follow user Y?</strong> (Follow check &mdash; needed for UI rendering and access control)</li>
+      </ol>
+
+      <h3 id="graph-data-model">Data Model Options</h3>
+
+      <h4>Option A: Adjacency List in Redis</h4>
+      <pre><code>-- Who does user 123 follow?
+Key:   following:123     Type: SET
+Members: {456, 789, 101, ...}
+
+-- Who follows user 456?
+Key:   followers:456     Type: SET
+Members: {123, 555, 888, ...}
+
+-- Follow user
+SADD following:123 456
+SADD followers:456 123
+
+-- Unfollow
+SREM following:123 456
+SREM followers:456 123
+
+-- Check if following
+SISMEMBER following:123 456  → 1 (yes) or 0 (no)
+
+-- Follower count
+SCARD followers:456 → 1,340,201</code></pre>
+      <p><strong>Pros:</strong> O(1) follow check, O(1) count, blazing fast. <strong>Cons:</strong> Memory-intensive. A user with 50M followers has a 50M-member set (~400MB). For celebrities, we store only the count in Redis and page through followers from the database for fan-out operations.</p>
+
+      <h4>Option B: Graph Database (e.g., FlockDB, TAO)</h4>
+      <p>Twitter originally built <strong>FlockDB</strong>, a distributed graph database optimized for adjacency-list queries. Facebook uses <strong>TAO</strong> for the same purpose. Key characteristics:</p>
+      <ul>
+        <li>Stores edges as <code>(source_id, edge_type, destination_id, timestamp)</code></li>
+        <li>Sharded by source_id for fast &ldquo;who do I follow?&rdquo; queries</li>
+        <li>Reverse index sharded by destination_id for &ldquo;who follows me?&rdquo;</li>
+        <li>Supports intersection queries: &ldquo;which of my friends also follow user X?&rdquo;</li>
+      </ul>
+
+      <h4>Recommended: Hybrid</h4>
+      <p>Use <strong>Redis</strong> for hot-path queries (follow check, counts, following list for timeline merge) and a <strong>persistent store</strong> (MySQL or FlockDB-style) as the source of truth. Redis is populated on follow/unfollow and warmed on user login.</p>
+
+      <h3 id="follow-unfollow-flow">Follow/Unfollow Flow</h3>
+      <pre><code>POST /api/users/123/follow  body: { target_user_id: 456 }
+
+1. Validate: user 123 exists, user 456 exists, not already following
+2. Write to persistent store:
+   INSERT INTO follows (follower_id, followee_id, created_at) VALUES (123, 456, NOW())
+3. Update Redis (async via message queue for consistency):
+   SADD following:123 456
+   SADD followers:456 123
+   INCR follower_count:456
+   INCR following_count:123
+4. If user 456 is a normal user (&lt;10K followers):
+   → Backfill: push 456's recent tweets into 123's timeline cache
+5. If user 456 is a celebrity:
+   → Add 456 to 123's celebrity-followee set (for fan-out on read)
+6. Send notification to user 456: "user 123 started following you"</code></pre>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 7: Search Service                                     -->
+      <!-- ============================================================ -->
+      <h2 id="search-service">Search Service</h2>
+      <p>Twitter search must index 500M tweets per day and make them searchable within seconds of posting. This is one of the most demanding real-time search systems in the world.</p>
+
+      <h3 id="search-architecture">Architecture: Earlybird + Elasticsearch</h3>
+      <p>Twitter uses a search architecture called <strong>Earlybird</strong>, which is a custom real-time inverted index optimized for recency. Let&rsquo;s build something similar:</p>
+
+      <h4>Two-Tier Search</h4>
+      <pre><code>┌──────────────────────────────────────────────────┐
+│               Search Query Flow                   │
+│                                                    │
+│  Query ──▶ Blender (merges results from both)     │
+│              │                    │                 │
+│              ▼                    ▼                 │
+│    ┌─────────────────┐  ┌─────────────────────┐   │
+│    │  Earlybird       │  │  Full Index          │   │
+│    │  (Real-Time)     │  │  (Elasticsearch)     │   │
+│    │                   │  │                       │   │
+│    │  Last ~10 sec of  │  │  Historical tweets    │   │
+│    │  tweets, in-memory│  │  (days/weeks/months)  │   │
+│    │  inverted index   │  │  sharded by time      │   │
+│    └─────────────────┘  └─────────────────────┘   │
+└──────────────────────────────────────────────────┘</code></pre>
+
+      <h4>Earlybird: Real-Time Inverted Index</h4>
+      <p>Earlybird is an in-memory, append-only inverted index that processes the most recent tweets (last ~10 seconds). It&rsquo;s designed for the common case: users searching for breaking news and trending topics want the absolute freshest results.</p>
+      <pre><code>class EarlybirdIndex:
+    def __init__(self):
+        self.inverted_index = {}   # token → sorted list of tweet_ids
+        self.tweet_store = {}      # tweet_id → tweet metadata
+
+    def index_tweet(self, tweet):
+        tokens = tokenize(tweet.text)  # Lowercase, remove stopwords, stem
+        for token in tokens:
+            if token not in self.inverted_index:
+                self.inverted_index[token] = []
+            self.inverted_index[token].append(tweet.tweet_id)
+        self.tweet_store[tweet.tweet_id] = tweet
+
+    def search(self, query, limit=20):
+        tokens = tokenize(query)
+        if len(tokens) == 1:
+            posting_list = self.inverted_index.get(tokens[0], [])
+        else:
+            # Intersect posting lists for multi-term queries
+            sets = [set(self.inverted_index.get(t, [])) for t in tokens]
+            posting_list = sorted(set.intersection(*sets), reverse=True)
+        return posting_list[:limit]
+
+    def gc(self, max_age_seconds=10):
+        """Evict tweets older than max_age_seconds to keep memory bounded."""
+        cutoff_id = snowflake_id_from_timestamp(now() - max_age_seconds)
+        # Remove from inverted index and tweet store
+        ...</code></pre>
+
+      <p>Earlybird runs on multiple shards (partitioned by hash of tweet_id) with each shard handling ~500 tweets/sec of indexing throughput. A query fans out to all Earlybird shards in parallel, and results are merged by the Blender service.</p>
+
+      <h4>Full Index: Elasticsearch Cluster</h4>
+      <p>Tweets older than ~10 seconds flow into Elasticsearch for long-term searchability:</p>
+      <ul>
+        <li><strong>Index sharding:</strong> Time-based indices (e.g., <code>tweets-2026-04-15</code>) &mdash; one index per day. Older indices are merged and moved to cheaper storage.</li>
+        <li><strong>Mapping:</strong> Text field analyzed with custom Twitter tokenizer (handles @mentions, #hashtags, URLs, emojis). Keyword fields for exact-match filters (language, user_id).</li>
+        <li><strong>Replication:</strong> 2 replicas per shard for read throughput and fault tolerance.</li>
+        <li><strong>Cluster size:</strong> ~2,000 nodes for the full tweet index. Hot nodes (SSDs) for recent indices, warm nodes (HDDs) for historical data.</li>
+      </ul>
+
+      <h3 id="search-indexing-pipeline">Indexing Pipeline</h3>
+      <pre><code>Tweet posted
+    → Kafka topic: "new-tweets"
+        → Earlybird Consumer: index in-memory (within 1 second)
+        → Elasticsearch Consumer: bulk index (within 5-10 seconds)
+            - Tokenize text (custom analyzer: @mentions, #hashtags, URLs)
+            - Extract entities (people, places, events)
+            - Detect language
+            - Compute engagement signals (initial = 0, updated periodically)
+            - Write to daily ES index with tweet_id as document ID</code></pre>
+
+      <!-- ============================================================ -->
+      <!-- ANIMATION 2: Real-Time Search Indexing                        -->
+      <!-- ============================================================ -->
+      <div class="twitter-anim-wrap" id="search-anim">
+        <h4>&#9654; Real-Time Search Indexing</h4>
+        <svg id="search-anim-svg" viewBox="0 0 720 310" width="100%" style="max-width:720px" role="img" aria-label="Animated diagram showing real-time search indexing pipeline from tweet creation to searchable index"></svg>
+        <div class="anim-controls">
+          <button id="search-anim-step">Step</button>
+          <button id="search-anim-reset">Reset</button>
+          <span class="anim-status" id="search-anim-info">Click Step to begin</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 8: Trending Topics                                    -->
+      <!-- ============================================================ -->
+      <h2 id="trending-topics">Trending Topics</h2>
+      <p>Trending topics surface what the world is talking about <em>right now</em>. The algorithm must be real-time (detect trends within minutes), noise-resistant (filter spam and evergreen topics), and geographically aware.</p>
+
+      <h3 id="trending-algorithm">Trending Algorithm: Sliding Window Frequency Count</h3>
+      <p>The core algorithm uses a <strong>sliding window</strong> approach over hashtag frequencies, detecting <em>acceleration</em> rather than absolute volume:</p>
+      <pre><code>For each hashtag H in the last 5 minutes:
+    current_count   = count(H, window=last_5_min)
+    baseline_count  = count(H, window=last_24_hours) / 288  # Normalized to 5-min
+    trend_score     = (current_count - baseline_count) / max(baseline_count, 1)
+
+Trending if:
+    trend_score &gt; THRESHOLD (e.g., 3.0)  AND
+    current_count &gt; MIN_VOLUME (e.g., 500)  AND
+    NOT in spam_blocklist  AND
+    NOT evergreen (e.g., "love", "good morning")</code></pre>
+
+      <p>This means a hashtag trending isn&rsquo;t about being the most used &mdash; it&rsquo;s about having the highest <em>acceleration</em>. #Love might appear in 100K tweets/5min, but if that&rsquo;s its normal rate, it doesn&rsquo;t trend. #SuperBowl going from 100 to 50K in 5 minutes is a trend.</p>
+
+      <h3 id="trending-implementation">Implementation with Stream Processing</h3>
+      <pre><code>┌──────────┐     ┌──────────────┐     ┌──────────────────┐     ┌────────────┐
+│ Kafka    │ ──▶ │ Flink/Storm  │ ──▶ │ Trend Detector   │ ──▶ │ Trending   │
+│ new-     │     │ Hashtag      │     │ (sliding window  │     │ Cache      │
+│ tweets   │     │ Extractor    │     │  + scoring)      │     │ (Redis)    │
+└──────────┘     └──────────────┘     └──────────────────┘     └────────────┘
+                                             │
+                                             ▼
+                                      ┌──────────────┐
+                                      │ Spam Filter   │
+                                      │ (ML model +   │
+                                      │  blocklist)   │
+                                      └──────────────┘</code></pre>
+
+      <h4>Multi-Level Trending</h4>
+      <ul>
+        <li><strong>Global trends:</strong> Aggregated across all tweets worldwide.</li>
+        <li><strong>Country trends:</strong> Filtered by user&rsquo;s country (from profile or IP geolocation).</li>
+        <li><strong>City trends:</strong> Further localized for major metros. Requires geo-tagged tweets or location inference from user profiles.</li>
+        <li><strong>Personalized trends:</strong> Weighted by the user&rsquo;s interests and following graph. If you follow many sports accounts, sports trends rank higher.</li>
+      </ul>
+
+      <h3 id="trending-noise-filtering">Noise &amp; Spam Filtering</h3>
+      <p>Without filtering, trending topics would be dominated by spam bots and coordinated manipulation campaigns. Multiple layers of defense:</p>
+      <ul>
+        <li><strong>Velocity check:</strong> If a hashtag goes from 0 to 10K in under 60 seconds, it&rsquo;s likely bot-driven. Legitimate trends build over minutes, not seconds.</li>
+        <li><strong>Account diversity:</strong> Count unique accounts, not just tweet volume. 10K tweets from 100 accounts is suspicious; 10K tweets from 8K accounts is organic.</li>
+        <li><strong>Account age &amp; quality:</strong> Weigh tweets from established accounts higher. New accounts (&lt;7 days) and accounts with spam signals get reduced weight.</li>
+        <li><strong>Content analysis:</strong> ML classifier detects coordinated inauthentic behavior &mdash; similar text patterns, same timing, network graph clustering.</li>
+        <li><strong>Evergreen blocklist:</strong> Common everyday phrases (#love, #goodmorning, #tbt) are excluded from trending even if they spike.</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 9: Media Service                                      -->
+      <!-- ============================================================ -->
+      <h2 id="media-service">Media Service</h2>
+      <p>~30% of tweets contain images or video. The media pipeline must handle high-throughput uploads, transcoding, and low-latency delivery.</p>
+
+      <h3 id="media-upload-flow">Upload Flow</h3>
+      <pre><code>1. Client requests upload URL:
+   POST /api/media/upload/init → returns { media_id, upload_url (S3 presigned) }
+
+2. Client uploads directly to S3 (bypasses our servers entirely):
+   PUT &lt;upload_url&gt;  body: &lt;binary image/video data&gt;
+
+3. S3 triggers Lambda/worker for post-processing:
+   - Images: resize to standard dimensions (150x150 thumb, 680px medium, original)
+   - Video: transcode to multiple bitrates (360p, 720p, 1080p) via FFmpeg
+   - Generate blurhash placeholder for progressive loading
+   - Store all variants back in S3
+
+4. Media service marks media_id as "ready"
+
+5. Client includes media_id in tweet creation:
+   POST /api/tweets  body: { text: "...", media_ids: ["abc123"] }</code></pre>
+
+      <h3 id="media-delivery">Delivery via CDN</h3>
+      <ul>
+        <li><strong>CDN:</strong> CloudFront / Akamai with edge caches in 200+ cities. Popular images are served from edge with &lt;10ms latency.</li>
+        <li><strong>URL structure:</strong> <code>https://pbs.twimg.com/media/{media_id}?format=jpg&amp;name=medium</code></li>
+        <li><strong>Cache hit ratio:</strong> ~95% for images (popular tweets get millions of views). Video caching is lower (~70%) due to size.</li>
+        <li><strong>Cost optimization:</strong> Cold media (&gt;30 days, low access) moved to S3 Infrequent Access tier. Glacier for media older than 1 year.</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 10: Notification Service                              -->
+      <!-- ============================================================ -->
+      <h2 id="notification-service">Notification Service</h2>
+      <p>Notifications keep users engaged by alerting them to interactions: mentions, retweets, likes, replies, and new followers.</p>
+
+      <h3 id="notification-types">Notification Types &amp; Priorities</h3>
+      <table class="schema-table">
+        <thead><tr><th>Type</th><th>Trigger</th><th>Priority</th><th>Delivery</th></tr></thead>
+        <tbody>
+          <tr><td>Mention (@user)</td><td>Tweet text parsing</td><td>High</td><td>Push + In-app</td></tr>
+          <tr><td>Reply</td><td>Tweet with reply_to_id</td><td>High</td><td>Push + In-app</td></tr>
+          <tr><td>Retweet</td><td>Retweet action</td><td>Medium</td><td>Push + In-app</td></tr>
+          <tr><td>Like</td><td>Like action</td><td>Low</td><td>In-app only (batched)</td></tr>
+          <tr><td>New follower</td><td>Follow action</td><td>Low</td><td>In-app (batched)</td></tr>
+          <tr><td>Trending topic</td><td>Personalized trend match</td><td>Low</td><td>Push (opt-in)</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="notification-architecture">Architecture</h3>
+      <pre><code>Event Sources (Kafka topics)
+    │
+    ▼
+Notification Router
+    ├── Priority queue (high/medium/low)
+    ├── Deduplication (don't notify same event twice)
+    ├── User preference check (muted? notification settings?)
+    └── Rate limiting (max 50 push notifications/hour per user)
+         │
+         ├──▶ Push Notification Service (APNs / FCM)
+         ├──▶ In-App Notification Store (Cassandra)
+         └──▶ Email Digest Service (batched, daily/weekly)</code></pre>
+
+      <p><strong>Celebrity notification problem:</strong> When a tweet by @KatyPerry (100M+ followers) gets liked, we don&rsquo;t send 100M notifications. Instead, likes are aggregated: &ldquo;@user1, @user2, and 47,382 others liked your tweet.&rdquo; The aggregation happens in the notification store, not in delivery.</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 11: Rate Limiting                                     -->
+      <!-- ============================================================ -->
+      <h2 id="rate-limiting">Rate Limiting</h2>
+      <p>Rate limiting protects the system from abuse, runaway clients, and denial-of-service attacks. Twitter applies limits at multiple layers:</p>
+
+      <h3 id="rate-limit-tiers">Rate Limit Tiers</h3>
+      <table class="schema-table">
+        <thead><tr><th>Endpoint</th><th>Limit</th><th>Window</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>POST /tweets</td><td>300 tweets</td><td>3 hours</td><td>Prevents spam bots from flooding</td></tr>
+          <tr><td>POST /likes</td><td>1,000 likes</td><td>24 hours</td><td>Prevents artificial engagement inflation</td></tr>
+          <tr><td>POST /follows</td><td>400 follows</td><td>24 hours</td><td>Prevents mass follow-unfollow schemes</td></tr>
+          <tr><td>GET /home_timeline</td><td>150 requests</td><td>15 minutes</td><td>Prevents scraping, protects Redis cache</td></tr>
+          <tr><td>GET /search</td><td>180 requests</td><td>15 minutes</td><td>Protects Elasticsearch cluster</td></tr>
+          <tr><td>App-level (OAuth)</td><td>300 requests</td><td>15 minutes</td><td>Per-app rate limit across all users</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="rate-limit-implementation">Implementation</h3>
+      <p>Rate limiting is implemented at the API Gateway using a <strong>sliding window counter</strong> backed by Redis:</p>
+      <pre><code>-- Sliding window rate limit check (Lua script for atomicity)
+local key = KEYS[1]                    -- e.g., "ratelimit:tweets:user:123"
+local window = tonumber(ARGV[1])       -- e.g., 10800 (3 hours in seconds)
+local max_requests = tonumber(ARGV[2]) -- e.g., 300
+local now = tonumber(ARGV[3])          -- current timestamp
+
+-- Remove entries outside the window
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+
+-- Count requests in current window
+local count = redis.call('ZCARD', key)
+
+if count &lt; max_requests then
+    -- Allow: add this request
+    redis.call('ZADD', key, now, now .. ':' .. math.random(1000000))
+    redis.call('EXPIRE', key, window)
+    return {1, max_requests - count - 1}  -- allowed, remaining
+else
+    return {0, 0}  -- denied, 0 remaining
+end</code></pre>
+
+      <p>Rate limit responses include standard headers:</p>
+      <pre><code>HTTP/1.1 429 Too Many Requests
+X-Rate-Limit-Limit: 300
+X-Rate-Limit-Remaining: 0
+X-Rate-Limit-Reset: 1713456789
+Retry-After: 1823</code></pre>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 12: Celebrity Tweet Handling                          -->
+      <!-- ============================================================ -->
+      <h2 id="celebrity-handling">Celebrity Tweet Handling</h2>
+      <p>Celebrities are the hardest scaling problem on Twitter. An account with 50M followers breaks the fan-out model. Here&rsquo;s how the system handles it end-to-end:</p>
+
+      <h3 id="celebrity-classification">Dynamic Celebrity Classification</h3>
+      <pre><code>User Classification Logic:
+    if follower_count &lt; 10,000:
+        user_tier = "normal"      → Fan-out on write
+    elif follower_count &lt; 1,000,000:
+        user_tier = "popular"     → Fan-out on write with async batching
+    else:
+        user_tier = "celebrity"   → Fan-out on read only
+
+-- Classification is updated hourly via a background job
+-- Tier changes trigger timeline cache migration:
+--   normal → celebrity: stop pushing, add to celebrity index
+--   celebrity → normal: start pushing, backfill timelines</code></pre>
+
+      <h3 id="celebrity-tweet-storage">Celebrity Tweet Cache</h3>
+      <p>Celebrity tweets are stored in a dedicated cache for fast retrieval during timeline merge:</p>
+      <pre><code>Key:    celebrity_tweets:{user_id}
+Type:   Sorted Set (ZSET)
+Score:  Snowflake ID
+Member: tweet_id
+
+-- Elon Musk tweets → stored here, NOT pushed to 150M timeline caches
+ZADD celebrity_tweets:44196397 1780099887766554433 "1780099887766554433"
+
+-- When follower 123 loads timeline:
+-- 1. Read their pre-built cache (normal tweets)
+-- 2. For each celebrity they follow, ZREVRANGE celebrity_tweets:{celeb_id}
+-- 3. Merge all results by Snowflake ID</code></pre>
+
+      <p>This trades a small read-time cost (~3&ndash;5 extra Redis calls per timeline read) for <strong>eliminating millions of cache writes</strong> per celebrity tweet.</p>
+
+      <h3 id="celebrity-engagement">Engagement Counts at Scale</h3>
+      <p>A viral celebrity tweet can accumulate millions of likes/retweets per minute. Updating the <code>like_count</code> column directly would create a hot row. Instead:</p>
+      <ul>
+        <li><strong>Count buffering:</strong> Likes are accumulated in Redis (<code>INCR tweet_likes:&lt;tweet_id&gt;</code>) and flushed to the database in batches every 30 seconds.</li>
+        <li><strong>Approximate display:</strong> The UI shows &ldquo;1.2M likes&rdquo; (approximate) rather than &ldquo;1,234,567 likes&rdquo; (exact), allowing eventual consistency.</li>
+        <li><strong>Sharded counters:</strong> For extremely hot tweets, the counter is sharded across multiple Redis keys (<code>tweet_likes:&lt;tweet_id&gt;:shard_0</code> through <code>:shard_15</code>) and summed on read.</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 13: User Timeline                                     -->
+      <!-- ============================================================ -->
+      <h2 id="user-timeline">User Timeline</h2>
+      <p>Unlike the home timeline, the user timeline is straightforward: it shows all tweets by a single user, in reverse chronological order. This is a simpler problem:</p>
+      <pre><code>GET /api/users/456/tweets?cursor=&lt;last_tweet_id&gt;&amp;count=20
+
+Option A: Query the secondary index table
+    SELECT tweet_id FROM user_tweets
+    WHERE user_id = 456
+    AND tweet_id &lt; &lt;cursor&gt;
+    ORDER BY tweet_id DESC
+    LIMIT 20;
+
+Option B: Redis sorted set (for hot profiles)
+    ZREVRANGEBYSCORE user_tweets:456 (&lt;cursor&gt; -inf LIMIT 0 20</code></pre>
+
+      <p>For frequently accessed profiles (celebrities, trending accounts), the user timeline is cached in a Redis sorted set identical to the celebrity tweet cache. For long-tail profiles, the database secondary index is sufficient.</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 14: Infrastructure Deep Dive                          -->
+      <!-- ============================================================ -->
+      <h2 id="infrastructure">Infrastructure &amp; Data Flow Summary</h2>
+
+      <h3 id="kafka-topics">Kafka Topic Architecture</h3>
+      <p>Kafka is the nervous system that connects all services. Every significant event flows through Kafka for decoupled, asynchronous processing:</p>
+      <pre><code>Topic: new-tweets         (partitioned by user_id, 256 partitions)
+  Consumers: fan-out-service, search-indexer, trending-pipeline,
+             notification-router, analytics-pipeline
+
+Topic: engagements        (partitioned by tweet_id, 128 partitions)
+  Consumers: counter-service, notification-router, ranking-pipeline
+
+Topic: social-graph       (partitioned by user_id, 64 partitions)
+  Consumers: timeline-backfill, notification-router, recommendation-engine
+
+Topic: user-activity      (partitioned by user_id, 128 partitions)
+  Consumers: analytics-pipeline, ad-targeting, personalization</code></pre>
+
+      <h3 id="full-data-flow">Complete Write Path: Posting a Tweet</h3>
+      <pre><code>User taps "Tweet" on mobile app
+    │
+    ▼
+API Gateway (rate limit check, auth)
+    │
+    ▼
+Tweet Service
+    ├── Generate Snowflake ID
+    ├── Validate text (280 char limit, spam check)
+    ├── Write to Tweet Store (MySQL/Cassandra)
+    ├── Write to user_tweets secondary index
+    ├── Update user's tweet_count
+    └── Publish to Kafka "new-tweets" topic
+         │
+         ├──▶ Fan-out Service
+         │     ├── Check user tier (normal/popular/celebrity)
+         │     ├── If normal: get follower list, ZADD to each timeline cache
+         │     ├── If celebrity: ZADD to celebrity_tweets:{user_id} only
+         │     └── Async, batched, with backpressure
+         │
+         ├──▶ Search Indexer
+         │     ├── Earlybird: index in-memory (real-time, &lt;1 sec)
+         │     └── Elasticsearch: bulk index (near-real-time, &lt;10 sec)
+         │
+         ├──▶ Trending Pipeline (Flink)
+         │     ├── Extract hashtags
+         │     ├── Update sliding window counters
+         │     └── Recompute trend scores every 30 seconds
+         │
+         ├──▶ Notification Router
+         │     ├── Parse @mentions → notify mentioned users
+         │     ├── If reply → notify parent tweet author
+         │     └── Push via APNs/FCM
+         │
+         └──▶ Analytics Pipeline
+               ├── Tweet volume metrics
+               ├── User engagement tracking
+               └── Ad impression attribution</code></pre>
+
+      <h3 id="complete-read-path">Complete Read Path: Loading Home Timeline</h3>
+      <pre><code>User opens Twitter app
+    │
+    ▼
+API Gateway → Timeline Service
+    │
+    ├── Step 1: Read pre-built timeline from Redis
+    │   ZREVRANGEBYSCORE timeline:123 +inf -inf LIMIT 0 40
+    │   Result: [tweet_id_1, tweet_id_2, ..., tweet_id_40]
+    │
+    ├── Step 2: Get celebrity followees
+    │   SMEMBERS celebrity_followees:123
+    │   Result: [celeb_A, celeb_B, celeb_C]
+    │
+    ├── Step 3: Pull celebrity tweets
+    │   For each celeb: ZREVRANGEBYSCORE celebrity_tweets:{celeb} +inf -inf LIMIT 0 20
+    │   Result: [celeb_tweet_1, celeb_tweet_2, ...]
+    │
+    ├── Step 4: Merge &amp; sort all tweet_ids by Snowflake ID (descending)
+    │   Take top 20
+    │
+    ├── Step 5: Hydrate tweets (batch fetch)
+    │   MGET tweet:id1 tweet:id2 ... tweet:id20
+    │   Cache miss? → Query Tweet Store → populate cache
+    │
+    ├── Step 6: Hydrate user profiles (batch fetch)
+    │   MGET user:uid1 user:uid2 ...
+    │
+    ├── Step 7: (Optional) Apply ranking model
+    │   ML model scores tweets by predicted engagement
+    │   Re-sort by score instead of chronological
+    │
+    └── Return JSON response with tweets, user objects, cursor
+        Total latency target: &lt;200ms (p99)</code></pre>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 15: Failure Handling & Reliability                    -->
+      <!-- ============================================================ -->
+      <h2 id="reliability">Failure Handling &amp; Reliability</h2>
+
+      <h3 id="failure-scenarios">Key Failure Scenarios</h3>
+      <table class="schema-table">
+        <thead><tr><th>Failure</th><th>Impact</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>Redis timeline cache node dies</td><td>Affected users see empty/stale timeline</td><td>Replica takes over. Cold-start rebuild from Tweet Store + Fan-out replay from Kafka.</td></tr>
+          <tr><td>Kafka broker goes down</td><td>Fan-out, search indexing delayed</td><td>Kafka replication factor 3. Consumers resume from last committed offset. No data loss.</td></tr>
+          <tr><td>Tweet Store shard unreachable</td><td>Writes fail for affected partition</td><td>Circuit breaker returns 503. Retries with exponential backoff. Cross-region failover.</td></tr>
+          <tr><td>Elasticsearch cluster degraded</td><td>Search latency increases or partial results</td><td>Reduce replica count, shed load to Earlybird-only results. Graceful degradation.</td></tr>
+          <tr><td>Fan-out service backlog</td><td>Timelines are stale (tweets appear late)</td><td>Backpressure via Kafka lag monitoring. Scale fan-out workers. Celebrity threshold lowered temporarily.</td></tr>
+          <tr><td>Snowflake worker clock skew</td><td>Potential ID collision or ordering issues</td><td>Worker refuses to generate IDs if clock goes backward. Alert + NTP resync.</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="graceful-degradation">Graceful Degradation Strategy</h3>
+      <p>When the system is under extreme load (e.g., Super Bowl, breaking news), degrade gracefully instead of failing entirely:</p>
+      <ol>
+        <li><strong>Level 1 &mdash; Disable non-essential features:</strong> Turn off &ldquo;Who to follow&rdquo; suggestions, personalized trends, and ad injection.</li>
+        <li><strong>Level 2 &mdash; Reduce timeline freshness:</strong> Serve cached timelines even if slightly stale. Skip celebrity tweet merge.</li>
+        <li><strong>Level 3 &mdash; Switch to pull-only:</strong> Temporarily disable fan-out on write entirely. All timelines served via fan-out on read (higher latency but lower write load).</li>
+        <li><strong>Level 4 &mdash; Read-only mode:</strong> Stop accepting new tweets. Serve existing content only. Nuclear option for survival.</li>
+      </ol>
+
+      <!-- ============================================================ -->
+      <!-- Summary                                                       -->
+      <!-- ============================================================ -->
+      <h2 id="summary">Summary &amp; Key Takeaways</h2>
+      <p>Designing Twitter at scale reveals several fundamental distributed systems patterns:</p>
+      <table class="schema-table">
+        <thead><tr><th>Design Decision</th><th>Pattern</th><th>Why It Matters</th></tr></thead>
+        <tbody>
+          <tr><td>Hybrid fan-out</td><td>Push for normal, pull for celebrities</td><td>Balances write amplification vs read latency</td></tr>
+          <tr><td>Snowflake IDs</td><td>Distributed ID generation without coordination</td><td>Time-sortable, globally unique, no bottleneck</td></tr>
+          <tr><td>Timeline cache in Redis</td><td>Pre-computed materialized views</td><td>Trades storage for sub-200ms reads</td></tr>
+          <tr><td>Two-tier search</td><td>Earlybird (real-time) + ES (historical)</td><td>Freshness for trending, depth for historical</td></tr>
+          <tr><td>Trending via acceleration</td><td>Sliding window with baseline comparison</td><td>Detects spikes, not just high volume</td></tr>
+          <tr><td>Kafka as event bus</td><td>Async, decoupled event processing</td><td>One write triggers fan-out, search, trending, notifications</td></tr>
+          <tr><td>Sharded counters</td><td>Distributed counting for hot keys</td><td>Avoids hot rows for viral content</td></tr>
+        </tbody>
+      </table>
+
+      <p>The core lesson: <strong>there is no single &ldquo;best&rdquo; approach</strong>. Fan-out on write is perfect for 99% of users but catastrophic for celebrities. Fan-out on read works universally but can&rsquo;t meet latency targets at scale. The hybrid approach acknowledges that different users have fundamentally different characteristics and optimizes accordingly.</p>
+
+      <nav class="post-nav">
+        <a href="uber.html">
+          <span>Previous</span>
+          <span>&larr; Design: Uber</span>
+        </a>
+        <a class="next" href="ticketmaster.html">
+          <span>Next</span>
+          <span>Design: Ticketmaster &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+
+  <!-- ============================================================ -->
+  <!-- ANIMATION 1: Tweet Delivery Pipeline                          -->
+  <!-- ============================================================ -->
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('tweet-anim-svg');
+    var info=document.getElementById('tweet-anim-info');
+    var step=0, maxStep=6;
+    var B='#0a8f6a',M='#d9cfba',INK='#13201a',CARD='#fffdf9',WARN='#ff6b35',RED='#e74c3c',MUTED='#4a5a53';
+
+    function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    function txt(x,y,s,opts){opts=opts||{};var t=el('text',{x:x,y:y,'font-family':opts.font||'Manrope,sans-serif','font-size':opts.size||'11','font-weight':opts.bold?'700':'400',fill:opts.fill||MUTED,'text-anchor':opts.anchor||'middle'});t.textContent=s;return t;}
+    function box(x,y,w,h,opts){opts=opts||{};var g=el('g',{});var r=el('rect',{x:x,y:y,width:w,height:h,rx:opts.rx||8,fill:opts.fill||CARD,stroke:opts.stroke||M,'stroke-width':opts.sw||1.5});g.appendChild(r);if(opts.label){g.appendChild(txt(x+w/2,y+h/2+4,opts.label,{bold:true,fill:opts.labelFill||INK,size:opts.labelSize||'11'}));}return g;}
+    function arrow(x1,y1,x2,y2,opts){opts=opts||{};var g=el('g',{});var l=el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:opts.color||B,'stroke-width':opts.sw||2,'stroke-dasharray':opts.dash||'none'});g.appendChild(l);var a=el('polygon',{points:''});var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);var ux=dx/len,uy=dy/len;var px=-uy,py=ux;var sz=opts.arrowSize||6;a.setAttribute('points',(x2)+','+(y2)+' '+(x2-ux*sz+px*sz/2)+','+(y2-uy*sz+py*sz/2)+' '+(x2-ux*sz-px*sz/2)+','+(y2-uy*sz-py*sz/2));a.setAttribute('fill',opts.color||B);g.appendChild(a);return g;}
+    function packet(cx,cy,opts){opts=opts||{};var c=el('circle',{cx:cx,cy:cy,r:opts.r||5,fill:opts.fill||B,opacity:opts.opacity||'0.9'});return c;}
+
+    var steps=[
+      'User posts a tweet',
+      'Tweet Service stores tweet & generates Snowflake ID',
+      'Fan-out Service receives event via Kafka',
+      'Check: Does author have <10K followers?',
+      'Normal user → Push tweet_id to each follower\'s timeline cache',
+      'Celebrity → Store in celebrity_tweets cache (no fan-out)',
+      'Followers load timeline: merge cached + celebrity tweets'
+    ];
+
+    function render(){
+      while(svg.firstChild)svg.removeChild(svg.firstChild);
+      var bg=el('rect',{x:0,y:0,width:720,height:370,fill:'transparent'});svg.appendChild(bg);
+
+      // User box
+      var userG=box(20,30,90,50,{stroke:step>=0?B:M,fill:step===0?'rgba(10,143,106,0.08)':CARD,label:'👤 User',labelFill:step>=0?B:INK});
+      svg.appendChild(userG);
+
+      // Tweet Service
+      var tsG=box(170,30,110,50,{stroke:step>=1?B:M,fill:step===1?'rgba(10,143,106,0.08)':CARD,label:'Tweet Service',labelFill:step>=1?B:INK});
+      svg.appendChild(tsG);
+
+      // Kafka
+      var kG=box(340,30,90,50,{stroke:step>=2?B:M,fill:step===2?'rgba(10,143,106,0.08)':CARD,label:'Kafka',labelFill:step>=2?B:INK});
+      svg.appendChild(kG);
+
+      // Fan-out Service
+      var foG=box(490,30,110,50,{stroke:step>=3?B:M,fill:step===3?'rgba(10,143,106,0.08)':CARD,label:'Fan-out Svc',labelFill:step>=3?B:INK});
+      svg.appendChild(foG);
+
+      // Tweet Store (below Tweet Service)
+      var storeG=box(170,130,110,44,{stroke:step>=1?B:M,fill:step===1?'rgba(10,143,106,0.06)':CARD,label:'Tweet Store',labelFill:step>=1?'#555':INK,rx:6});
+      svg.appendChild(storeG);
+
+      // Decision diamond
+      if(step>=3){
+        var dx=545,dy=130;
+        var diamond=el('polygon',{points:(dx)+','+(dy-22)+' '+(dx+50)+','+(dy)+' '+(dx)+','+(dy+22)+' '+(dx-50)+','+(dy),fill:step===3?'rgba(10,143,106,0.10)':CARD,stroke:step>=3?B:M,'stroke-width':1.5});
+        svg.appendChild(diamond);
+        svg.appendChild(txt(dx,dy+4,'<10K?',{bold:true,fill:step>=3?B:INK,size:'11'}));
+      }
+
+      // Normal path: Timeline Caches (left branch going down)
+      var tcG=box(330,230,130,50,{stroke:step>=4?B:M,fill:step===4?'rgba(10,143,106,0.08)':CARD,label:'Timeline Caches',labelFill:step>=4?B:INK});
+      svg.appendChild(tcG);
+      // Follower icons below
+      if(step>=4){
+        for(var i=0;i<4;i++){
+          var fx=345+i*32,fy=300;
+          svg.appendChild(txt(fx,fy,'📱',{size:'16'}));
+          svg.appendChild(txt(fx,fy+16,'F'+(i+1),{size:'9',fill:MUTED}));
+        }
+        svg.appendChild(txt(395,340,'Push: ZADD timeline:{follower} ...',{size:'10',fill:B,font:'Manrope,sans-serif'}));
+      }
+
+      // Celebrity path: Celebrity Cache (right branch going down)
+      var ccG=box(530,230,140,50,{stroke:step>=5?WARN:M,fill:step===5?'rgba(255,107,53,0.08)':CARD,label:'Celebrity Cache',labelFill:step>=5?WARN:INK});
+      svg.appendChild(ccG);
+      if(step>=5){
+        svg.appendChild(txt(600,300,'No fan-out! Stored only once.',{size:'10',fill:WARN}));
+        svg.appendChild(txt(600,316,'Read on demand at timeline load',{size:'10',fill:MUTED}));
+      }
+
+      // Merge box (step 6)
+      if(step>=6){
+        var mergeG=box(30,230,120,50,{stroke:B,fill:'rgba(10,143,106,0.10)',label:'Merge & Sort',labelFill:B});
+        svg.appendChild(mergeG);
+        svg.appendChild(txt(90,300,'Cached tweets + Celebrity tweets',{size:'10',fill:MUTED}));
+        svg.appendChild(txt(90,316,'→ Sorted by Snowflake ID',{size:'10',fill:B}));
+        // arrows from both caches to merge
+        svg.appendChild(arrow(330,255,150,255,{color:B,sw:1.5}));
+        svg.appendChild(arrow(530,255,150,255,{color:WARN,sw:1.5,dash:'5,3'}));
+      }
+
+      // Arrows between top-level boxes
+      if(step>=1) svg.appendChild(arrow(110,55,170,55,{color:B}));
+      if(step>=1) svg.appendChild(arrow(225,80,225,130,{color:B,sw:1.5,dash:'4,3'}));
+      if(step>=2) svg.appendChild(arrow(280,55,340,55,{color:B}));
+      if(step>=3) svg.appendChild(arrow(430,55,490,55,{color:B}));
+
+      // Arrow from fan-out to decision
+      if(step>=3) svg.appendChild(arrow(545,80,545,108,{color:B}));
+
+      // Branch arrows from diamond
+      if(step>=4){
+        svg.appendChild(arrow(495,130,395,230,{color:B,sw:1.5}));
+        svg.appendChild(txt(420,180,'YES',{bold:true,fill:B,size:'10',anchor:'start'}));
+      }
+      if(step>=5){
+        svg.appendChild(arrow(595,130,600,230,{color:WARN,sw:1.5,dash:'5,3'}));
+        svg.appendChild(txt(610,180,'NO (celebrity)',{bold:true,fill:WARN,size:'10',anchor:'start'}));
+      }
+
+      // Packet animations
+      if(step===0) svg.appendChild(packet(65,55,{fill:B}));
+      if(step===1) svg.appendChild(packet(225,100,{fill:B}));
+      if(step===2) svg.appendChild(packet(385,55,{fill:B}));
+
+      info.textContent='Step '+step+'/'+maxStep+': '+steps[step];
+    }
+
+    render();
+    document.getElementById('tweet-anim-step').addEventListener('click',function(){if(step<maxStep){step++;render();}});
+    document.getElementById('tweet-anim-reset').addEventListener('click',function(){step=0;render();});
+  })();
+  </script>
+
+  <!-- ============================================================ -->
+  <!-- ANIMATION 2: Real-Time Search Indexing                        -->
+  <!-- ============================================================ -->
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('search-anim-svg');
+    var info=document.getElementById('search-anim-info');
+    var step=0, maxStep=5;
+    var B='#0a8f6a',M='#d9cfba',INK='#13201a',CARD='#fffdf9',MUTED='#4a5a53',ACCENT='#2d6bcf';
+
+    function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    function txt(x,y,s,opts){opts=opts||{};var t=el('text',{x:x,y:y,'font-family':opts.font||'Manrope,sans-serif','font-size':opts.size||'11','font-weight':opts.bold?'700':'400',fill:opts.fill||MUTED,'text-anchor':opts.anchor||'middle'});t.textContent=s;return t;}
+    function box(x,y,w,h,opts){opts=opts||{};var g=el('g',{});var r=el('rect',{x:x,y:y,width:w,height:h,rx:opts.rx||8,fill:opts.fill||CARD,stroke:opts.stroke||M,'stroke-width':opts.sw||1.5});g.appendChild(r);if(opts.label){var lines=opts.label.split('\n');lines.forEach(function(line,i){g.appendChild(txt(x+w/2,y+h/2+4+(i-(lines.length-1)/2)*14,line,{bold:true,fill:opts.labelFill||INK,size:opts.labelSize||'11'}));});}return g;}
+    function arrow(x1,y1,x2,y2,opts){opts=opts||{};var g=el('g',{});g.appendChild(el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:opts.color||B,'stroke-width':opts.sw||2,'stroke-dasharray':opts.dash||'none'}));var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy)||1;var ux=dx/len,uy=dy/len,px=-uy,py=ux,sz=6;var p=el('polygon',{fill:opts.color||B});p.setAttribute('points',x2+','+y2+' '+(x2-ux*sz+px*sz/2)+','+(y2-uy*sz+py*sz/2)+' '+(x2-ux*sz-px*sz/2)+','+(y2-uy*sz-py*sz/2));g.appendChild(p);return g;}
+
+    var steps=[
+      'Tweet is posted and published to Kafka',
+      'Indexing pipeline consumes the tweet event',
+      'Tokenizer extracts words, hashtags, mentions',
+      'Tokens inserted into inverted index (Earlybird)',
+      'Bulk indexer writes to Elasticsearch (near-real-time)',
+      'Tweet is now searchable via both tiers!'
+    ];
+
+    // Token example
+    var sampleTweet='"Just landed in Tokyo! #travel #japan 🇯🇵"';
+    var sampleTokens=['just','landed','tokyo','#travel','#japan'];
+
+    function render(){
+      while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+      // Tweet source
+      svg.appendChild(box(15,20,100,50,{stroke:step>=0?B:M,fill:step===0?'rgba(10,143,106,0.08)':CARD,label:'Tweet\nPosted'}));
+
+      // Kafka
+      svg.appendChild(box(155,20,80,50,{stroke:step>=0?B:M,fill:step===0?'rgba(10,143,106,0.06)':CARD,label:'Kafka'}));
+
+      // Pipeline
+      svg.appendChild(box(275,20,110,50,{stroke:step>=1?B:M,fill:step===1?'rgba(10,143,106,0.08)':CARD,label:'Indexing\nPipeline'}));
+
+      // Tokenizer
+      svg.appendChild(box(425,20,100,50,{stroke:step>=2?B:M,fill:step===2?'rgba(10,143,106,0.08)':CARD,label:'Tokenizer'}));
+
+      // Earlybird (real-time)
+      svg.appendChild(box(570,20,130,50,{stroke:step>=3?B:M,fill:step===3?'rgba(10,143,106,0.08)':CARD,label:'Earlybird\n(Real-Time)',labelFill:step>=3?B:INK}));
+
+      // Elasticsearch (below, slightly right)
+      svg.appendChild(box(570,120,130,50,{stroke:step>=4?ACCENT:M,fill:step===4?'rgba(45,107,207,0.08)':CARD,label:'Elasticsearch\n(Historical)',labelFill:step>=4?ACCENT:INK}));
+
+      // Arrows across the top
+      if(step>=0) svg.appendChild(arrow(115,45,155,45,{color:B}));
+      if(step>=1) svg.appendChild(arrow(235,45,275,45,{color:B}));
+      if(step>=2) svg.appendChild(arrow(385,45,425,45,{color:B}));
+      if(step>=3) svg.appendChild(arrow(525,45,570,45,{color:B}));
+      if(step>=4) svg.appendChild(arrow(525,50,570,140,{color:ACCENT,dash:'5,3'}));
+
+      // Token display area
+      if(step>=2){
+        var tokenY=110;
+        svg.appendChild(txt(280,tokenY-6,'Tweet text:',{size:'10',fill:MUTED,anchor:'start',bold:true}));
+        svg.appendChild(txt(280,tokenY+10,sampleTweet,{size:'10',fill:INK,anchor:'start'}));
+
+        if(step>=2){
+          svg.appendChild(txt(280,tokenY+32,'Tokens extracted:',{size:'10',fill:MUTED,anchor:'start',bold:true}));
+          sampleTokens.forEach(function(tok,i){
+            var tx=280+i*72;
+            var r=el('rect',{x:tx,y:tokenY+38,width:64,height:20,rx:4,fill:'rgba(10,143,106,0.10)',stroke:B,'stroke-width':1});
+            svg.appendChild(r);
+            svg.appendChild(txt(tx+32,tokenY+52,tok,{size:'9',fill:B,bold:true}));
+          });
+        }
+      }
+
+      // Inverted index visualization
+      if(step>=3){
+        var iy=200;
+        svg.appendChild(txt(585,iy,'Inverted Index (Earlybird)',{size:'10',fill:B,bold:true}));
+        var entries=[
+          {token:'tokyo',ids:'[tw_991, tw_988, tw_980]'},
+          {token:'#travel',ids:'[tw_991, tw_990, tw_987]'},
+          {token:'#japan',ids:'[tw_991, tw_985, tw_972]'}
+        ];
+        entries.forEach(function(entry,i){
+          var ey=iy+10+i*22;
+          var r=el('rect',{x:570,y:ey,width:130,height:18,rx:3,fill:i===0?'rgba(10,143,106,0.12)':CARD,stroke:M,'stroke-width':1});
+          svg.appendChild(r);
+          svg.appendChild(txt(590,ey+13,entry.token,{size:'9',fill:B,bold:true,anchor:'start'}));
+          svg.appendChild(txt(640,ey+13,'→ '+entry.ids,{size:'8',fill:MUTED,anchor:'start'}));
+        });
+      }
+
+      // Elasticsearch index vis
+      if(step>=4){
+        var esY=185;
+        svg.appendChild(txt(20,esY,'Elasticsearch Daily Index',{size:'10',fill:ACCENT,bold:true,anchor:'start'}));
+        var days=['tweets-2026-04-15','tweets-2026-04-14','tweets-2026-04-13'];
+        days.forEach(function(d,i){
+          var bx=20+i*150;
+          var r2=el('rect',{x:bx,y:esY+6,width:140,height:22,rx:4,fill:i===0?'rgba(45,107,207,0.10)':CARD,stroke:i===0?ACCENT:M,'stroke-width':1});
+          svg.appendChild(r2);
+          svg.appendChild(txt(bx+70,esY+21,d,{size:'9',fill:i===0?ACCENT:MUTED}));
+        });
+        svg.appendChild(txt(20,esY+42,'↑ Hot (SSD)',{size:'9',fill:ACCENT,anchor:'start'}));
+        svg.appendChild(txt(320,esY+42,'← Warm (HDD)',{size:'9',fill:MUTED,anchor:'start'}));
+      }
+
+      // Searchable indicator
+      if(step>=5){
+        var sg=el('g',{});
+        var sr=el('rect',{x:200,y:260,width:320,height:34,rx:8,fill:'rgba(10,143,106,0.12)',stroke:B,'stroke-width':2});
+        sg.appendChild(sr);
+        sg.appendChild(txt(360,281,'✅ Tweet searchable in <1s (Earlybird) and <10s (ES)',{size:'11',fill:B,bold:true}));
+        svg.appendChild(sg);
+      }
+
+      info.textContent='Step '+step+'/'+maxStep+': '+steps[step];
+    }
+
+    render();
+    document.getElementById('search-anim-step').addEventListener('click',function(){if(step<maxStep){step++;render();}});
+    document.getElementById('search-anim-reset').addEventListener('click',function(){step=0;render();});
+  })();
+  </script>
+
+  <!-- GoatCounter Analytics -->
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count"
+          async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

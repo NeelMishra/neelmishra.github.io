@@ -1,0 +1,1802 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design: Nearby Friends — real-time location sharing with Redis Pub/Sub, WebSocket scaling, geohash optimization, and battery-aware strategies for 100M DAU.">
+  <title>Design: Nearby Friends | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <style>
+    .arch-table, .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2rem 0;
+      font-size: 0.92rem;
+    }
+    .arch-table th, .compare-table th {
+      background: var(--card);
+      font-weight: 700;
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 2px solid var(--line);
+    }
+    .arch-table td, .compare-table td {
+      padding: 0.55rem 0.8rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .arch-table tr:hover td, .compare-table tr:hover td {
+      background: rgba(10,143,106,0.04);
+    }
+    .pro { color: #0a8f6a; }
+    .con { color: #e74c3c; }
+    .callout {
+      background: var(--card);
+      border-left: 4px solid #0a8f6a;
+      padding: 1rem 1.2rem;
+      margin: 1.2rem 0;
+      border-radius: 0 10px 10px 0;
+      font-size: 0.93rem;
+    }
+    .callout-warn {
+      border-left-color: #f59e0b;
+    }
+    .callout-danger {
+      border-left-color: #e74c3c;
+    }
+    .callout-info {
+      border-left-color: #6366f1;
+    }
+    .callout-quote {
+      border-left-color: #6366f1;
+      font-style: italic;
+    }
+    .def-box {
+      background: var(--card);
+      border: 2px solid #6366f1;
+      padding: 1rem 1.2rem;
+      margin: 1.2rem 0;
+      border-radius: 10px;
+      font-size: 0.93rem;
+    }
+    .def-box h4 {
+      color: #6366f1;
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+    }
+    .metric-badge {
+      display: inline-block;
+      font-family: Consolas, monospace;
+      background: #f0f9ff;
+      border: 1px solid #0ea5e9;
+      border-radius: 5px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.88rem;
+      color: #0369a1;
+    }
+    .metric-badge.warn {
+      background: #fef3c7;
+      border-color: #f59e0b;
+      color: #92400e;
+    }
+    .metric-badge.ok {
+      background: #d1fae5;
+      border-color: #10b981;
+      color: #065f46;
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">High Level Design Series</a>
+        <span>&middot; Real-World Designs</span>
+      </div>
+
+      <h1>Design: Nearby Friends</h1>
+      <p class="post-meta">April 2026 &middot; 24 min read</p>
+
+      <!-- ===== 1. PROBLEM STATEMENT ===== -->
+      <h2 id="problem-statement">Problem Statement</h2>
+
+      <p>Almost every modern social app — Facebook, Snapchat, WhatsApp — offers a "Nearby Friends" feature that lets users see which of their friends are physically close. Unlike a <a href="proximity-service.html">Proximity Service</a> that indexes <em>static</em> businesses and points of interest, Nearby Friends deals with <em>constantly moving users</em> whose locations change in real time. This makes the problem fundamentally different — and significantly harder.</p>
+
+      <p>The challenge boils down to a single question: <strong>How do you continuously match 100 million moving users against each other's friend lists, in real time, at planetary scale, without draining their phone batteries?</strong></p>
+
+      <div class="callout">
+        <strong>Key Difference from Proximity Service:</strong> A proximity service indexes static entities (restaurants, gas stations) into a spatial data structure and answers point queries ("what's near me?"). Nearby Friends must handle <em>bidirectional, real-time location streams</em> between pairs of users — fundamentally a pub/sub problem, not a spatial indexing problem.
+      </div>
+
+      <!-- ===== 2. REQUIREMENTS ===== -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <ul>
+        <li><strong>Real-time friend location:</strong> Show friends within a configurable radius (default 5 miles / 8 km) on a map, updated in near real time</li>
+        <li><strong>Location freshness:</strong> Location updates every ~30 seconds for active users; stale locations (>10 minutes old) disappear from the map</li>
+        <li><strong>Privacy controls:</strong> Users can opt in/out of sharing their location entirely, or hide from specific friends</li>
+        <li><strong>Distance display:</strong> Show the approximate distance and last-updated timestamp for each nearby friend</li>
+        <li><strong>Bidirectional visibility:</strong> If Alice can see Bob, Bob can also see Alice (both must have the feature enabled)</li>
+      </ul>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Scale:</strong> <span class="metric-badge">100M DAU</span> with <span class="metric-badge warn">10% concurrent</span> = ~10M simultaneous active users</li>
+        <li><strong>Latency:</strong> Location updates delivered to friends within <span class="metric-badge ok">&lt;500ms</span> of being sent</li>
+        <li><strong>Throughput:</strong> Each user sends 1 update every 30s → <span class="metric-badge">~334K updates/sec</span> at peak</li>
+        <li><strong>Battery:</strong> Minimal battery drain — must work with OS-level battery optimization (Doze mode, app standby)</li>
+        <li><strong>Availability:</strong> High availability (best-effort delivery is acceptable — missing one update out of 20 is fine)</li>
+        <li><strong>Consistency:</strong> Eventual consistency is acceptable — a few seconds of stale data is tolerable</li>
+      </ul>
+
+      <h3 id="capacity-estimates">Capacity Estimates</h3>
+
+      <pre><code>Concurrent users:     10M (10% of 100M DAU)
+Update frequency:     1 update per 30 seconds per user
+Updates per second:   10,000,000 / 30 ≈ 334,000 updates/sec
+
+Average friends:      ~400 per user
+Friends online:       ~10% of 400 = ~40 concurrent friends
+Nearby friends:       ~10% of 40 = ~4 friends within 5 miles
+
+Fan-out per update:   Each update goes to ~40 online friends
+Total fan-out:        334K × 40 = ~13.4M messages/sec delivered
+                      (each message is small: ~100 bytes)
+
+Location data size:   ~100 bytes per entry (user_id, lat, lng, timestamp)
+Cache size (Redis):   10M × 100 bytes ≈ 1 GB (fits in memory easily)
+
+WebSocket connections: 10M simultaneous (need ~50–100 WS servers
+                       at 100K–200K connections each)</code></pre>
+
+      <div class="callout callout-warn">
+        <strong>The 13.4M messages/sec fan-out</strong> is the real engineering challenge. The location <em>ingestion</em> is relatively easy at 334K/s — it's the <em>fan-out to friends</em> that drives the architecture.
+      </div>
+
+      <!-- ===== 3. WHY NOT PROXIMITY SERVICE? ===== -->
+      <h2 id="proximity-vs-nearby">Proximity Service vs. Nearby Friends</h2>
+
+      <p>Let's understand why we can't simply reuse the <a href="proximity-service.html">Proximity Service</a> design with its geospatial index:</p>
+
+      <table class="compare-table">
+        <thead>
+          <tr><th>Aspect</th><th>Proximity Service</th><th>Nearby Friends</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Data</strong></td>
+            <td>Static businesses (updated rarely)</td>
+            <td>Moving users (updated every 30s)</td>
+          </tr>
+          <tr>
+            <td><strong>Query pattern</strong></td>
+            <td>"What businesses are near lat/lng?"</td>
+            <td>"Which of MY FRIENDS are near me?"</td>
+          </tr>
+          <tr>
+            <td><strong>Index freshness</strong></td>
+            <td>Rebuilt hourly or daily</td>
+            <td>Must be real-time (&lt;1s stale)</td>
+          </tr>
+          <tr>
+            <td><strong>Relationship filter</strong></td>
+            <td>None — return all nearby results</td>
+            <td>Social graph filter — only show friends</td>
+          </tr>
+          <tr>
+            <td><strong>Direction</strong></td>
+            <td>Unidirectional (user → service)</td>
+            <td>Bidirectional (server pushes to friends)</td>
+          </tr>
+          <tr>
+            <td><strong>Communication</strong></td>
+            <td>Request/Response (HTTP)</td>
+            <td>Persistent connections (WebSocket)</td>
+          </tr>
+          <tr>
+            <td><strong>Core mechanism</strong></td>
+            <td>Spatial index (QuadTree, Geohash)</td>
+            <td>Pub/Sub + social graph</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>A naive approach — "store every user's location in a QuadTree and query it every 30 seconds for each user's friends" — would require <strong>10M spatial queries every 30 seconds</strong>, each checking ~400 friend IDs. This is computationally infeasible at scale. Instead, we flip the model: rather than <em>querying</em> for nearby friends, we <em>push</em> location updates to friends and let the client compute distances.</p>
+
+      <!-- ===== 4. HIGH-LEVEL ARCHITECTURE ===== -->
+      <h2 id="high-level-architecture">High-Level Architecture</h2>
+
+      <p>The core insight is that this is a <strong>pub/sub problem</strong>, not a search problem. Each user who opts into Nearby Friends effectively <em>publishes</em> their location to a channel, and their online friends <em>subscribe</em> to that channel. When a user moves, all their subscribing friends are immediately notified.</p>
+
+      <pre><code>┌─────────────┐    WebSocket      ┌──────────────────┐
+│  Mobile App │◄──────────────────►│  WebSocket Server │
+│  (Client)   │  persistent conn  │  (Stateful)       │
+└─────────────┘                   └────────┬─────────┘
+                                           │
+                    ┌──────────────────────┼──────────────────────┐
+                    │                      │                      │
+              ┌─────▼──────┐     ┌─────────▼────────┐   ┌────────▼────────┐
+              │  Location   │     │   Redis Pub/Sub   │   │  Friend Service │
+              │  Cache      │     │   (Fan-out)       │   │  (Social Graph) │
+              │  (Redis)    │     │                   │   │                 │
+              └─────────────┘     └───────────────────┘   └─────────────────┘
+                    │                      │
+              user_id → {lat,        Location channels:
+              lng, timestamp}        user:{id}:location
+              TTL: 10 minutes        (per-user channels)</code></pre>
+
+      <h3 id="component-overview">Component Overview</h3>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Component</th><th>Role</th><th>Technology</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Mobile App</strong></td>
+            <td>Collects GPS location, sends updates, displays friends on map</td>
+            <td>iOS Core Location / Android Fused Location</td>
+          </tr>
+          <tr>
+            <td><strong>WebSocket Servers</strong></td>
+            <td>Maintain persistent connections with clients, relay location updates</td>
+            <td>Go/Node.js, 100K–200K connections per server</td>
+          </tr>
+          <tr>
+            <td><strong>Location Cache</strong></td>
+            <td>Store latest location for each active user with auto-expiry</td>
+            <td>Redis (key-value with TTL)</td>
+          </tr>
+          <tr>
+            <td><strong>Redis Pub/Sub</strong></td>
+            <td>Fan out location updates to subscribing friends in real time</td>
+            <td>Redis Pub/Sub or Redis Streams</td>
+          </tr>
+          <tr>
+            <td><strong>Friend Service</strong></td>
+            <td>Provide the social graph (who is friends with whom)</td>
+            <td>Existing microservice / Graph DB</td>
+          </tr>
+          <tr>
+            <td><strong>Location History DB</strong></td>
+            <td>Persist location trail for features like "timeline" (optional)</td>
+            <td>Cassandra / DynamoDB (append-only writes)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ===== 5. DETAILED DESIGN ===== -->
+      <h2 id="detailed-design">Detailed Design</h2>
+
+      <!-- 5.1 Location Update Flow -->
+      <h3 id="location-update-flow">Location Update Flow</h3>
+
+      <p>Let's trace exactly what happens when User A moves and sends a location update:</p>
+
+      <div class="def-box">
+        <h4>Location Update Flow (Step by Step)</h4>
+        <ol>
+          <li><strong>Mobile app</strong> obtains GPS coordinates via OS location API (every 30 seconds)</li>
+          <li><strong>App sends update</strong> over the existing WebSocket connection: <code>{user_id: "A", lat: 37.7749, lng: -122.4194, ts: 1712345678}</code></li>
+          <li><strong>WebSocket server</strong> receives the update and:
+            <ul>
+              <li>Writes to <strong>Location Cache</strong> (Redis): <code>SET user:A:loc "{lat:37.7749,lng:-122.4194,ts:1712345678}" EX 600</code></li>
+              <li>Publishes to <strong>Redis Pub/Sub</strong> channel: <code>PUBLISH user:A:location "{lat:37.7749,lng:-122.4194,ts:1712345678}"</code></li>
+            </ul>
+          </li>
+          <li><strong>Redis Pub/Sub</strong> delivers the message to all servers subscribed to <code>user:A:location</code></li>
+          <li><strong>Subscribing WebSocket servers</strong> receive the message. For each local client subscribed to A's channel, they:
+            <ul>
+              <li>Check if the subscriber has A as a friend (already verified at subscription time)</li>
+              <li>Compute distance between subscriber's last known location and A's new location</li>
+              <li>If within radius (5 miles), push the update to the subscriber's WebSocket</li>
+            </ul>
+          </li>
+          <li><strong>Friend's mobile app</strong> receives the update and renders A's pin on the map</li>
+        </ol>
+      </div>
+
+      <pre><code>// Redis commands for location update (pseudocode)
+
+// Step 1: Cache user's location with 10-minute TTL
+SET user:{user_id}:loc
+    "{\"lat\":37.7749,\"lng\":-122.4194,\"ts\":1712345678}"
+    EX 600
+
+// Step 2: Publish to user's location channel
+PUBLISH user:{user_id}:location
+    "{\"uid\":\"user_id\",\"lat\":37.7749,\"lng\":-122.4194,\"ts\":1712345678}"
+
+// On the receiving WS server (subscribed to user:{user_id}:location):
+// For each local subscriber of this channel:
+//   1. Look up subscriber's location from local cache
+//   2. Calculate haversine distance
+//   3. If distance < 5 miles → push via WebSocket
+//   4. If distance >= 5 miles → silently drop</code></pre>
+
+      <!-- ===== ANIMATION 1: Location Update Pub/Sub ===== -->
+      <div class="anim-container" id="pubsub-anim">
+        <h4>&#9654; Location Update Pub/Sub</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch User A's location update flow through the system to reach Friend B's map in real time.</p>
+        <svg id="pubsub-svg" width="720" height="370" viewBox="0 0 720 370"></svg>
+        <div id="pubsub-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="pubsub-step">Step &rarr;</button>
+          <button class="anim-btn" id="pubsub-reset">Reset</button>
+          <span class="anim-output" id="pubsub-output"></span>
+        </div>
+      </div>
+
+      <!-- 5.2 WebSocket Connection Initialization -->
+      <h3 id="connection-init">WebSocket Connection Initialization</h3>
+
+      <p>When a user opens the app and enables Nearby Friends, here's the initialization sequence:</p>
+
+      <pre><code>// Client opens WebSocket connection
+ws = new WebSocket("wss://nearby.example.com/ws?token=JWT_TOKEN")
+
+// Server-side initialization handler:
+function onConnect(ws, user_id):
+    // 1. Authenticate via JWT
+    user = verifyJWT(ws.token)
+    if not user: ws.close(4001, "Unauthorized"); return
+
+    // 2. Fetch friend list from Friend Service
+    friends = friendService.getFriends(user_id)
+
+    // 3. Filter to friends who have Nearby Friends enabled
+    eligible = friends.filter(f => privacyService.isNearbyEnabled(f.id))
+
+    // 4. Subscribe to each eligible friend's location channel
+    for friend in eligible:
+        redis.subscribe("user:{friend.id}:location", handler)
+
+    // 5. Send initial snapshot of online friends' locations
+    snapshot = []
+    for friend in eligible:
+        loc = redis.get("user:{friend.id}:loc")
+        if loc and isWithinRadius(user.lastLoc, loc, 5_MILES):
+            snapshot.append({friend_id: friend.id, ...loc})
+    ws.send(JSON.stringify({type: "init", friends: snapshot}))
+
+    // 6. Register this connection in the connection registry
+    connectionRegistry.register(user_id, ws_server_id, ws)
+
+    // 7. Subscribe to own channel so other servers
+    //    can forward messages to this user
+    redis.subscribe("user:{user_id}:incoming", incomingHandler)</code></pre>
+
+      <div class="callout">
+        <strong>Channel count:</strong> Each online user subscribes to ~40 friend channels (10% of 400 friends online). With 10M concurrent users, that's 400M Redis subscriptions. A single Redis instance supports ~1M channels with active subscribers, so we need a <strong>Redis Pub/Sub cluster</strong> (sharded by user ID hash) with ~400+ shards — or use a dedicated message broker like Kafka.
+      </div>
+
+      <!-- 5.3 Redis Pub/Sub Deep Dive -->
+      <h3 id="redis-pubsub">Redis Pub/Sub Deep Dive</h3>
+
+      <p>Redis Pub/Sub is the backbone of the fan-out mechanism. Let's examine why it works well for this use case — and where it falls short:</p>
+
+      <h4>Why Redis Pub/Sub Works</h4>
+      <ul>
+        <li><strong>Fire-and-forget semantics:</strong> Location updates are ephemeral. If a subscriber misses one update (30s), the next update arrives in 30s — no need for message durability or acknowledgment.</li>
+        <li><strong>Extreme low latency:</strong> Redis Pub/Sub delivers messages in <strong>&lt;1ms</strong> within a single instance. Even with network hops, end-to-end delivery stays under 10ms.</li>
+        <li><strong>Per-user channels:</strong> Creating millions of channels in Redis is essentially free — channels are just keys in a hash table, consuming negligible memory when idle.</li>
+        <li><strong>Simple subscribe/unsubscribe:</strong> When a friend goes offline, their channel simply stops receiving publishes. No cleanup needed.</li>
+      </ul>
+
+      <h4>Redis Pub/Sub Limitations</h4>
+      <ul>
+        <li><strong>No persistence:</strong> If a subscriber is disconnected when a message is published, it's lost forever. For our use case, this is acceptable (the next update comes in 30s).</li>
+        <li><strong>No backpressure:</strong> A slow subscriber gets messages queued in its output buffer. If the buffer exceeds Redis's <code>client-output-buffer-limit</code>, the client is disconnected.</li>
+        <li><strong>Single-threaded:</strong> Each Redis instance handles pub/sub on a single thread. With very high message rates, a single instance can become a bottleneck.</li>
+        <li><strong>No message filtering:</strong> All subscribers on a channel receive every message. Distance filtering must happen on the WebSocket server side.</li>
+      </ul>
+
+      <pre><code># Redis Pub/Sub configuration for Nearby Friends
+
+# Client output buffer for pubsub subscribers
+# Hard limit: 256MB, Soft limit: 64MB for 60 seconds
+client-output-buffer-limit pubsub 256mb 64mb 60
+
+# Typical channel pattern:
+#   user:{user_id}:location  — one channel per user
+#
+# Example message flow:
+#   PUBLISH user:alice:location '{"lat":37.77,"lng":-122.42,"ts":1712345678}'
+#
+# All WebSocket servers with subscribers to Alice's channel receive this.
+# Each server then checks which of its LOCAL connections are:
+#   (a) friends with Alice
+#   (b) within 5 miles of Alice's new location
+# and forwards the update to matching clients.
+
+# Scaling: Shard Redis Pub/Sub across N instances
+# Shard key: hash(user_id) % N
+# This ensures all publishes and subscribes for a given user
+# go to the same Redis shard.</code></pre>
+
+      <h4>Redis Pub/Sub Cluster Sharding</h4>
+
+      <p>Since a single Redis instance can't handle 400M subscriptions and 13.4M messages/sec, we shard across multiple instances:</p>
+
+      <pre><code>// Sharding strategy for Redis Pub/Sub
+const NUM_SHARDS = 400;
+
+function getShardForUser(userId) {
+    return consistentHash(userId) % NUM_SHARDS;
+}
+
+// When user A publishes a location update:
+function publishLocation(userId, location) {
+    const shard = getShardForUser(userId);
+    redisShardsPool[shard].publish(
+        `user:${userId}:location`,
+        JSON.stringify(location)
+    );
+}
+
+// When user B wants to subscribe to friend A's updates:
+function subscribeToFriend(friendId, handler) {
+    const shard = getShardForUser(friendId);
+    redisShardsPool[shard].subscribe(
+        `user:${friendId}:location`,
+        handler
+    );
+}
+
+// Each WebSocket server maintains connections to ALL 400 Redis shards
+// (since its local users' friends are distributed across all shards).
+// This means each WS server has 400 Redis connections — manageable.</code></pre>
+
+      <div class="callout callout-warn">
+        <strong>Alternative: Redis Streams</strong> — If you need message durability (e.g., to replay the last few locations for a user who reconnects), consider <code>XADD</code>/<code>XREAD</code> with Redis Streams. The trade-off is higher memory usage and slightly more complex consumer management. For Nearby Friends, the fire-and-forget nature of Pub/Sub is usually sufficient.
+      </div>
+
+      <!-- 5.4 WebSocket Server Design -->
+      <h3 id="websocket-server">WebSocket Server Design</h3>
+
+      <p>WebSocket servers are the stateful glue between clients and Redis. They're the most operationally complex component.</p>
+
+      <h4>Connection Management</h4>
+
+      <pre><code>// In-memory state on each WebSocket server
+struct ServerState {
+    // Map: user_id → WebSocket connection
+    connections: HashMap&lt;UserId, WebSocket&gt;,
+
+    // Map: user_id → set of friend_ids this user subscribes to
+    subscriptions: HashMap&lt;UserId, HashSet&lt;FriendId&gt;&gt;,
+
+    // Map: redis_channel → set of local user_ids listening
+    channelListeners: HashMap&lt;Channel, HashSet&lt;UserId&gt;&gt;,
+
+    // Map: user_id → last known location (local cache)
+    locationCache: HashMap&lt;UserId, Location&gt;,
+}
+
+// When Redis delivers a message on channel "user:alice:location":
+func onRedisMessage(channel, message) {
+    userId = extractUserId(channel)  // "alice"
+    location = parseLocation(message)
+
+    // Find all local users subscribed to Alice's channel
+    listeners = serverState.channelListeners[channel]
+
+    for listenerId in listeners {
+        listenerLoc = serverState.locationCache[listenerId]
+        if listenerLoc == nil { continue }
+
+        distance = haversine(listenerLoc, location)
+        if distance <= 5.0 {  // 5 miles
+            ws = serverState.connections[listenerId]
+            ws.send(JSON.stringify({
+                type: "friend_location",
+                friend_id: userId,
+                lat: location.lat,
+                lng: location.lng,
+                distance: round(distance, 1),
+                ts: location.ts
+            }))
+        }
+    }
+}</code></pre>
+
+      <h4>Scaling WebSocket Servers</h4>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Challenge</th><th>Solution</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>10M concurrent connections</td>
+            <td>50–100 servers, each handling 100K–200K connections (Go with epoll/kqueue)</td>
+          </tr>
+          <tr>
+            <td>Load balancing sticky connections</td>
+            <td>L4 load balancer (HAProxy/Envoy) with connection pinning via user_id hash</td>
+          </tr>
+          <tr>
+            <td>Graceful server restarts</td>
+            <td>Drain connections with <code>GOAWAY</code>; clients reconnect to a different server within 5s</td>
+          </tr>
+          <tr>
+            <td>Uneven connection distribution</td>
+            <td>Consistent hashing with virtual nodes; rebalance by draining overloaded servers</td>
+          </tr>
+          <tr>
+            <td>Server failure detection</td>
+            <td>Health checks every 5s; failed servers removed from LB pool within 15s</td>
+          </tr>
+          <tr>
+            <td>Cross-server communication</td>
+            <td>Not needed — Redis Pub/Sub handles fan-out across servers transparently</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre><code>// WebSocket server sizing calculation
+
+Connections per server:     200,000
+Memory per connection:      ~20 KB (buffers + metadata)
+Memory for connections:     200K × 20 KB = 4 GB
+
+Redis subscriptions:        200K users × 40 friends = 8M subscriptions
+Redis connections per server: 400 (one per Redis shard)
+
+CPU per server:             8-16 cores (goroutine-per-connection model)
+Network:                    ~2 Gbps (200K users × ~1 KB/s bidirectional)
+
+Total servers needed:       10M / 200K = 50 servers
+With 50% headroom:          75 servers</code></pre>
+
+      <!-- 5.5 Subscription Management -->
+      <h3 id="subscription-management">Subscription Management</h3>
+
+      <p>Subscription lifecycle management is critical for correctness and resource efficiency:</p>
+
+      <pre><code>// Subscription lifecycle events
+
+// 1. User A comes online → subscribe to all online friends' channels
+function onUserOnline(userId):
+    friends = friendService.getFriends(userId)
+    onlineFriends = filterOnline(friends)
+
+    for friend in onlineFriends:
+        shard = getShardForUser(friend.id)
+        redis[shard].subscribe(`user:${friend.id}:location`)
+        // Also notify friend that userId is now online
+        // (friend's WS server subscribes to userId's channel)
+        notifyFriendOnline(friend.id, userId)
+
+// 2. User A goes offline → unsubscribe from all channels
+function onUserOffline(userId):
+    for channel in userSubscriptions[userId]:
+        shard = getShardFromChannel(channel)
+        redis[shard].unsubscribe(channel)
+
+    // Remove from location cache (or let TTL expire)
+    redis.del(`user:${userId}:loc`)
+
+    // Notify friends that userId went offline
+    for friend in onlineFriends:
+        notifyFriendOffline(friend.id, userId)
+
+// 3. Friend B comes online → all of B's online friends
+//    subscribe to B's channel
+function notifyFriendOnline(currentUserId, newFriendId):
+    shard = getShardForUser(newFriendId)
+    redis[shard].subscribe(`user:${newFriendId}:location`)
+
+// 4. Friend B goes offline → unsubscribe from B's channel
+function notifyFriendOffline(currentUserId, offlineFriendId):
+    shard = getShardForUser(offlineFriendId)
+    redis[shard].unsubscribe(`user:${offlineFriendId}:location`)
+
+// 5. New friendship created (A befriends B while both online)
+function onNewFriendship(userA, userB):
+    // A subscribes to B's channel and vice versa
+    subscribeToFriend(userA, userB)
+    subscribeToFriend(userB, userA)
+
+// 6. Friendship removed or privacy change
+function onUnfriend(userA, userB):
+    unsubscribeFromFriend(userA, userB)
+    unsubscribeFromFriend(userB, userA)</code></pre>
+
+      <!-- ===== 6. GEOHASH OPTIMIZATION ===== -->
+      <h2 id="geohash-optimization">Geohash Optimization</h2>
+
+      <p>The naive approach — subscribing to <em>all</em> online friends' channels — works, but wastes bandwidth. If you have 40 friends online but only 4 are within 5 miles, 90% of location updates you receive are from distant friends. You still compute the haversine distance and drop them. At scale, this wasted computation and network traffic adds up.</p>
+
+      <p>The optimization: <strong>use geohash cells to filter subscriptions</strong>. Only subscribe to friends who are in your geohash cell or its 8 neighbors.</p>
+
+      <h3 id="geohash-refresher">Geohash Refresher</h3>
+
+      <pre><code>// Geohash divides the world into a grid of cells
+// Precision determines cell size:
+//
+// Precision 4: ~39km × 20km  (too coarse)
+// Precision 5: ~4.9km × 4.9km (≈ 3 miles — good for 5-mile radius)
+// Precision 6: ~1.2km × 0.6km (too fine, too many cells)
+//
+// We use precision 5 → each cell is ~5km × 5km
+// A 5-mile (8km) radius spans the current cell + 8 neighbors = 9 cells
+
+import geohash
+
+lat, lng = 37.7749, -122.4194
+cell = geohash.encode(lat, lng, precision=5)  # "9q8yy"
+neighbors = geohash.neighbors(cell)           # 8 surrounding cells
+relevant = [cell] + neighbors                 # 9 total cells</code></pre>
+
+      <h3 id="geohash-subscription-filter">Geohash Subscription Filter</h3>
+
+      <pre><code>// Enhanced subscription with geohash filtering
+
+function updateSubscriptions(userId, newLat, newLng):
+    newCell = geohash.encode(newLat, newLng, precision=5)
+    newCells = [newCell] + geohash.neighbors(newCell)  // 9 cells
+
+    oldCells = userGeohashCells[userId] || []
+
+    // Find friends in the new relevant cells
+    newRelevantFriends = Set()
+    for friend in onlineFriends[userId]:
+        friendLoc = getLocation(friend.id)
+        if friendLoc:
+            friendCell = geohash.encode(friendLoc.lat, friendLoc.lng, 5)
+            if friendCell in newCells:
+                newRelevantFriends.add(friend.id)
+
+    oldRelevantFriends = userRelevantFriends[userId] || Set()
+
+    // Subscribe to newly relevant friends
+    toSubscribe = newRelevantFriends - oldRelevantFriends
+    for friendId in toSubscribe:
+        redis.subscribe(`user:${friendId}:location`)
+
+    // Unsubscribe from no-longer-relevant friends
+    toUnsubscribe = oldRelevantFriends - newRelevantFriends
+    for friendId in toUnsubscribe:
+        redis.unsubscribe(`user:${friendId}:location`)
+
+    userGeohashCells[userId] = newCells
+    userRelevantFriends[userId] = newRelevantFriends
+
+// Benefit: Instead of subscribing to ~40 friend channels,
+// we subscribe to ~4–8 (only those in nearby cells).
+// Reduces Redis fan-out by ~80–90%!</code></pre>
+
+      <!-- ===== ANIMATION 2: Geohash Optimization ===== -->
+      <div class="anim-container" id="geo-opt-anim">
+        <h4>&#9654; Geohash Optimization</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how geohash cells determine which friends you subscribe to. Moving to a distant cell triggers unsubscription.</p>
+        <svg id="geoopt-svg" width="720" height="400" viewBox="0 0 720 400"></svg>
+        <div id="geoopt-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="geoopt-step">Step &rarr;</button>
+          <button class="anim-btn" id="geoopt-reset">Reset</button>
+          <span class="anim-output" id="geoopt-output"></span>
+        </div>
+      </div>
+
+      <div class="callout callout-info">
+        <strong>Geohash edge case:</strong> Two users can be very close but in different geohash cells (at cell boundaries). That's why we always include the 8 neighboring cells — this guarantees we cover all points within our radius. The trade-off is subscribing to a few extra friends at cell borders, which is an acceptable false positive.
+      </div>
+
+      <h3 id="geohash-impact">Impact of Geohash Optimization</h3>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Metric</th><th>Without Geohash</th><th>With Geohash</th><th>Reduction</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Subscriptions per user</td>
+            <td>~40 (all online friends)</td>
+            <td>~4–8 (nearby friends only)</td>
+            <td><span class="pro">80–90%</span></td>
+          </tr>
+          <tr>
+            <td>Total Redis subscriptions</td>
+            <td>400M</td>
+            <td>40–80M</td>
+            <td><span class="pro">80–90%</span></td>
+          </tr>
+          <tr>
+            <td>Messages delivered/sec</td>
+            <td>13.4M</td>
+            <td>1.3–2.7M</td>
+            <td><span class="pro">80–90%</span></td>
+          </tr>
+          <tr>
+            <td>Distance computations/sec</td>
+            <td>13.4M</td>
+            <td>1.3–2.7M</td>
+            <td><span class="pro">80–90%</span></td>
+          </tr>
+          <tr>
+            <td>Redis Pub/Sub shards needed</td>
+            <td>~400</td>
+            <td>~40–80</td>
+            <td><span class="pro">80–90%</span></td>
+          </tr>
+          <tr>
+            <td>Subscription churn (re-subscriptions on movement)</td>
+            <td>None</td>
+            <td>~5–10% of users per 30s cycle change cells</td>
+            <td><span class="con">New overhead</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ===== 7. PRIVACY DESIGN ===== -->
+      <h2 id="privacy">Privacy Design</h2>
+
+      <p>Location data is among the most sensitive personal information. The privacy design must be robust and defense-in-depth:</p>
+
+      <h3 id="privacy-controls">User-Facing Privacy Controls</h3>
+      <ul>
+        <li><strong>Global toggle:</strong> Enable/disable Nearby Friends entirely. When disabled, the user's location is never sent to the server, and they disappear from all friends' maps.</li>
+        <li><strong>Per-friend hide:</strong> Hide your location from specific friends. Implemented as a server-side blocklist — the server simply does not subscribe that friend to your channel.</li>
+        <li><strong>Ghost mode:</strong> Temporarily invisible for a set duration (1h, 8h, until turned off). Server sets a flag that prevents publishing to your channel.</li>
+        <li><strong>Precision control:</strong> Show approximate location (city-level) instead of exact location. Server rounds coordinates to ~1km precision before publishing.</li>
+      </ul>
+
+      <h3 id="privacy-technical">Technical Privacy Measures</h3>
+
+      <pre><code>// Privacy enforcement at every layer
+
+// 1. Client-side: Don't collect location if feature is disabled
+if (!userSettings.nearbyFriendsEnabled) {
+    locationManager.stopUpdates()
+    return
+}
+
+// 2. WebSocket server: Enforce privacy before publishing
+function onLocationUpdate(userId, location):
+    privacySettings = getPrivacySettings(userId)
+
+    if privacySettings.ghostMode:
+        // Cache location (for user's own map) but don't publish
+        redis.set(`user:${userId}:loc`, location, "EX", 600)
+        return
+
+    if privacySettings.approximateMode:
+        // Round to ~1km precision
+        location.lat = round(location.lat, 2)  // ~1.1km precision
+        location.lng = round(location.lng, 2)
+
+    // Apply per-friend blocklist in subscription management
+    // (blocked friends are never subscribed to this channel)
+
+    redis.set(`user:${userId}:loc`, location, "EX", 600)
+    redis.publish(`user:${userId}:location`, location)
+
+// 3. Location TTL: Locations auto-expire after 10 minutes
+//    If a user stops sending updates (closes app), they
+//    disappear from friends' maps within 10 minutes.
+
+// 4. No persistent storage by default
+//    Location data lives only in Redis (volatile memory).
+//    Only opt-in "Location History" feature writes to durable storage.
+
+// 5. Data minimization: Location messages contain only
+//    {user_id, lat, lng, timestamp} — no device info,
+//    speed, heading, or other metadata.</code></pre>
+
+      <div class="callout callout-danger">
+        <strong>GDPR & Privacy Laws:</strong> Location data is "personal data" under GDPR, "sensitive data" under CCPA. You must: (1) obtain explicit opt-in consent, (2) allow data deletion on request, (3) implement data minimization, (4) log all access for audit trails, (5) encrypt location data in transit (TLS) and at rest (encrypted Redis). Never store precise location history without explicit, granular consent.
+      </div>
+
+      <!-- ===== 8. BATTERY OPTIMIZATION ===== -->
+      <h2 id="battery-optimization">Battery Optimization</h2>
+
+      <p>GPS is one of the most power-hungry sensors on a mobile device. Naive location polling every 30 seconds can drain a battery from 100% to 0% in under 5 hours. Battery optimization isn't optional — it's a <em>launch blocker</em>.</p>
+
+      <h3 id="adaptive-update-frequency">Adaptive Update Frequency</h3>
+
+      <pre><code>// Dynamic update frequency based on movement and context
+
+class LocationUpdateManager {
+    var baseInterval = 30  // seconds
+    var currentInterval = 30
+
+    func adjustFrequency(speed: Double, context: Context) {
+        if speed < 0.5 {
+            // Stationary: slow down to every 5 minutes
+            currentInterval = 300
+        } else if speed < 2.0 {
+            // Walking (~4 mph): every 60 seconds
+            currentInterval = 60
+        } else if speed < 15.0 {
+            // Cycling/jogging: every 30 seconds
+            currentInterval = 30
+        } else {
+            // Driving (>30 mph): every 15 seconds
+            // Moving fast = location changes quickly
+            currentInterval = 15
+        }
+
+        // Battery level adjustment
+        if context.batteryLevel < 0.20 {
+            currentInterval = max(currentInterval * 3, 300)
+        } else if context.batteryLevel < 0.50 {
+            currentInterval = currentInterval * 1.5
+        }
+
+        // Screen state
+        if !context.screenOn {
+            // App in background: use significant location
+            // change API (iOS) or passive location (Android)
+            currentInterval = max(currentInterval, 300)
+        }
+
+        // Thermal state
+        if context.thermalState == .critical {
+            currentInterval = 600  // Reduce to 10 minutes
+        }
+    }
+}</code></pre>
+
+      <h3 id="os-location-apis">Platform-Specific Location APIs</h3>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>API</th><th>Platform</th><th>Battery Impact</th><th>Use Case</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Fused Location Provider</strong></td>
+            <td>Android</td>
+            <td><span class="metric-badge ok">Low–Medium</span></td>
+            <td>Combines GPS, Wi-Fi, cell tower. Use <code>PRIORITY_BALANCED_POWER_ACCURACY</code></td>
+          </tr>
+          <tr>
+            <td><strong>Significant Location Change</strong></td>
+            <td>iOS</td>
+            <td><span class="metric-badge ok">Very Low</span></td>
+            <td>Only fires when user moves ~500m. Uses cell tower triangulation, not GPS.</td>
+          </tr>
+          <tr>
+            <td><strong>Geofencing API</strong></td>
+            <td>Both</td>
+            <td><span class="metric-badge ok">Very Low</span></td>
+            <td>Set geofence around current cell; when user exits, wake app for precise update</td>
+          </tr>
+          <tr>
+            <td><strong>Activity Recognition</strong></td>
+            <td>Both</td>
+            <td><span class="metric-badge ok">Negligible</span></td>
+            <td>Detect if user is still/walking/driving/cycling. Adjust update frequency.</td>
+          </tr>
+          <tr>
+            <td><strong>Passive Location</strong></td>
+            <td>Android</td>
+            <td><span class="metric-badge ok">Zero</span></td>
+            <td>Piggyback on location requests from other apps. No additional battery cost.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 id="battery-strategy">Comprehensive Battery Strategy</h3>
+
+      <pre><code>// Multi-tier battery optimization strategy
+
+Tier 1: App in Foreground (map visible)
+  ├── GPS: High accuracy, every 15–30 seconds
+  ├── Activity Recognition: Adjust interval based on speed
+  ├── WebSocket: Keep-alive with 60s heartbeat
+  └── Expected drain: ~5% per hour
+
+Tier 2: App in Background (recently used)
+  ├── Significant Location Change API (iOS)
+  ├── Fused Location: PRIORITY_LOW_POWER (Android)
+  ├── Update interval: 1–5 minutes
+  ├── WebSocket: Maintained, reduced heartbeat (5 min)
+  └── Expected drain: ~1% per hour
+
+Tier 3: App Suspended (long time in background)
+  ├── Geofence around last known location (500m radius)
+  ├── Only wake app when user leaves geofence
+  ├── WebSocket: Disconnected, use push notification to wake
+  └── Expected drain: ~0.1% per hour
+
+Tier 4: Battery Saver / Low Battery (&lt;20%)
+  ├── GPS: Disabled entirely
+  ├── Location: Cell tower only (passive)
+  ├── Update interval: 10 minutes or on significant change
+  ├── WebSocket: Disconnected, periodic HTTP poll every 5 min
+  └── Expected drain: ~0.05% per hour</code></pre>
+
+      <div class="callout">
+        <strong>The WebSocket battery tax:</strong> Maintaining a WebSocket connection itself consumes battery (keeping the radio awake for heartbeats). On Android, use <code>AlarmManager</code> with <code>setExactAndAllowWhileIdle()</code> for heartbeats. On iOS, use <code>URLSessionWebSocketTask</code> which integrates with the system's connection coalescing. Consider switching to <strong>HTTP long-polling</strong> or <strong>silent push notifications</strong> when the app is backgrounded.
+      </div>
+
+      <!-- ===== 9. HANDLING EDGE CASES ===== -->
+      <h2 id="edge-cases">Handling Edge Cases</h2>
+
+      <h3 id="thundering-herd">Thundering Herd at Peak Times</h3>
+      <p>When a major event ends (concert, sports game), thousands of users in one area simultaneously open the app. All of them send location updates and subscribe to friends' channels at once.</p>
+
+      <pre><code>// Mitigations for thundering herd:
+
+// 1. Jittered connection backoff
+function connectWithJitter():
+    delay = random(0, 5000)  // 0–5 seconds random delay
+    setTimeout(() => websocket.connect(), delay)
+
+// 2. Staggered subscription loading
+function loadSubscriptions(friends):
+    // Don't subscribe to all 40 friends at once
+    // Subscribe in batches of 5 with 100ms delay
+    for batch in chunk(friends, 5):
+        for friend in batch:
+            redis.subscribe(`user:${friend.id}:location`)
+        await sleep(100)
+
+// 3. Rate limiting on location cache writes
+// Use Redis pipeline to batch SET operations
+pipeline = redis.pipeline()
+for update in batchedUpdates:
+    pipeline.set(`user:${update.userId}:loc`, update.data, "EX", 600)
+pipeline.execute()
+
+// 4. Circuit breaker on Redis Pub/Sub
+// If a Redis shard is overloaded (>90% CPU), temporarily
+// switch to polling mode for users on that shard</code></pre>
+
+      <h3 id="ws-reconnection">WebSocket Reconnection</h3>
+
+      <pre><code>// Client-side reconnection with exponential backoff
+
+class WebSocketManager {
+    var retryCount = 0
+    var maxRetries = 10
+
+    func onDisconnect(code, reason):
+        if code == 4001:  // Auth failure
+            refreshToken()
+
+        delay = min(1000 * pow(2, retryCount), 30000)  // Max 30s
+        delay += random(0, 1000)  // Jitter
+
+        setTimeout(() => {
+            ws = new WebSocket(url)
+            ws.onopen = () => {
+                retryCount = 0
+                // Request snapshot of friends' current locations
+                ws.send({type: "sync", since: lastUpdateTimestamp})
+            }
+            retryCount++
+        }, delay)
+}</code></pre>
+
+      <h3 id="friend-limit">Users with Too Many Friends</h3>
+
+      <pre><code>// Problem: Celebrity user with 5000 friends
+// → subscribing to 500 channels, receiving 500 updates/30s
+
+// Solution 1: Cap nearby friends subscriptions
+const MAX_NEARBY_SUBSCRIPTIONS = 100
+
+function selectFriendsToSubscribe(allFriends):
+    // Priority: close friends > recent interactions > random
+    scored = allFriends.map(f => ({
+        id: f.id,
+        score: f.closenessFactor * 10 +
+               f.recentInteractions * 5 +
+               random() * 2
+    }))
+    return scored.sort(byScore).slice(0, MAX_NEARBY_SUBSCRIPTIONS)
+
+// Solution 2: Fan-out-on-read for high-fan-out users
+// Instead of pushing to all 5000 friends,
+// let friends poll the celebrity's location every 30s
+// (HTTP GET instead of Pub/Sub push)</code></pre>
+
+      <!-- ===== 10. DATA MODEL ===== -->
+      <h2 id="data-model">Data Model</h2>
+
+      <h3 id="redis-data">Redis Data Structures</h3>
+
+      <pre><code>// 1. Location Cache (Redis String with TTL)
+Key:    user:{user_id}:loc
+Value:  {"lat": 37.7749, "lng": -122.4194, "ts": 1712345678}
+TTL:    600 seconds (10 minutes)
+
+// 2. User Online Status (Redis Set)
+Key:    nearby:online
+Value:  Set of user_ids currently using Nearby Friends
+Ops:    SADD nearby:online user_123
+        SREM nearby:online user_123
+        SISMEMBER nearby:online user_123
+
+// 3. User Geohash Cell (Redis String)
+Key:    user:{user_id}:geohash
+Value:  "9q8yy"
+TTL:    600 seconds
+
+// 4. Privacy Settings (Redis Hash)
+Key:    user:{user_id}:privacy
+Fields: enabled (1/0), ghost_until (timestamp),
+        blocked_friends (comma-separated IDs),
+        approximate_mode (1/0)
+
+// 5. Connection Registry (Redis Hash)
+Key:    user:{user_id}:conn
+Fields: ws_server_id, connected_at, last_heartbeat
+TTL:    120 seconds (refreshed on heartbeat)</code></pre>
+
+      <h3 id="persistent-storage">Persistent Storage (Optional)</h3>
+
+      <pre><code>// Cassandra table for location history (opt-in only)
+CREATE TABLE location_history (
+    user_id     UUID,
+    timestamp   TIMESTAMP,
+    lat         DOUBLE,
+    lng         DOUBLE,
+    accuracy    FLOAT,
+    speed       FLOAT,
+    PRIMARY KEY (user_id, timestamp)
+) WITH CLUSTERING ORDER BY (timestamp DESC)
+  AND default_time_to_live = 2592000;  -- 30-day retention
+
+// This is append-only, write-heavy, time-series data
+// → perfect fit for Cassandra's write-optimized LSM tree</code></pre>
+
+      <!-- ===== 11. API DESIGN ===== -->
+      <h2 id="api-design">API Design</h2>
+
+      <h3 id="websocket-messages">WebSocket Message Protocol</h3>
+
+      <pre><code>// Client → Server messages
+
+// 1. Location update
+{
+    "type": "location_update",
+    "lat": 37.7749,
+    "lng": -122.4194,
+    "accuracy": 15.0,
+    "speed": 1.2,
+    "ts": 1712345678
+}
+
+// 2. Request friends snapshot
+{
+    "type": "sync",
+    "since": 1712345600  // only friends updated after this timestamp
+}
+
+// 3. Privacy toggle
+{
+    "type": "privacy_update",
+    "enabled": true,
+    "ghost_mode": false,
+    "hidden_friends": ["friend_456"]
+}
+
+// Server → Client messages
+
+// 1. Initial snapshot (on connect)
+{
+    "type": "init",
+    "friends": [
+        {"id": "friend_123", "lat": 37.78, "lng": -122.41,
+         "distance": 0.8, "ts": 1712345650},
+        {"id": "friend_456", "lat": 37.77, "lng": -122.43,
+         "distance": 1.2, "ts": 1712345640}
+    ]
+}
+
+// 2. Friend location update (real-time push)
+{
+    "type": "friend_location",
+    "friend_id": "friend_123",
+    "lat": 37.7812,
+    "lng": -122.4098,
+    "distance": 0.6,
+    "ts": 1712345678
+}
+
+// 3. Friend went offline
+{
+    "type": "friend_offline",
+    "friend_id": "friend_123"
+}
+
+// 4. Friend came online nearby
+{
+    "type": "friend_online",
+    "friend_id": "friend_789",
+    "lat": 37.76,
+    "lng": -122.44,
+    "distance": 2.1,
+    "ts": 1712345700
+}</code></pre>
+
+      <h3 id="rest-api">REST API (Fallback & Management)</h3>
+
+      <pre><code>// For when WebSocket isn't available (battery saver mode, etc.)
+
+GET /api/v1/nearby/friends?lat=37.7749&lng=-122.4194&radius=5
+Authorization: Bearer {jwt}
+Response: {
+    "friends": [
+        {"id": "f123", "lat": 37.78, "lng": -122.41, "distance": 0.8,
+         "last_seen": "2025-04-01T10:30:00Z"}
+    ],
+    "next_poll": 30  // suggested poll interval in seconds
+}
+
+PUT /api/v1/nearby/settings
+Authorization: Bearer {jwt}
+Body: {
+    "enabled": true,
+    "ghost_mode": false,
+    "approximate_location": false,
+    "hidden_friends": ["user_456"]
+}
+
+POST /api/v1/nearby/location
+Authorization: Bearer {jwt}
+Body: {
+    "lat": 37.7749,
+    "lng": -122.4194,
+    "accuracy": 15.0,
+    "ts": 1712345678
+}
+// Used when WebSocket is disconnected (background HTTP fallback)</code></pre>
+
+      <!-- ===== 12. SCALING & RELIABILITY ===== -->
+      <h2 id="scaling">Scaling &amp; Reliability</h2>
+
+      <h3 id="redis-scaling">Redis Pub/Sub Scaling</h3>
+
+      <pre><code>// Redis Pub/Sub cluster topology
+
+┌──────────────┐  ┌──────────────┐      ┌──────────────┐
+│ Redis Shard 0│  │ Redis Shard 1│ ...  │Redis Shard N │
+│ (users 0-99) │  │(users 100-199)│     │              │
+│  Pub/Sub     │  │  Pub/Sub     │      │  Pub/Sub     │
+└──────┬───────┘  └──────┬───────┘      └──────┬───────┘
+       │                 │                      │
+  ┌────▼────┐       ┌────▼────┐           ┌────▼────┐
+  │WS Server│       │WS Server│           │WS Server│
+  │    1    │       │    2    │    ...    │    M    │
+  └─────────┘       └─────────┘           └─────────┘
+
+Each WS server connects to ALL Redis shards (it has users
+whose friends span all shards).
+
+Sharding key: consistent_hash(user_id) % N
+All PUBLISH and SUBSCRIBE operations for a user's channel
+go to the same shard.
+
+// Capacity per Redis shard (empirical):
+//   ~1M active channels
+//   ~100K messages/sec throughput
+//   ~50K subscribers
+
+// With geohash optimization (40-80M total subscriptions):
+//   N = 80 shards (each handling ~500K–1M subscriptions)
+//   Each shard: ~30K–167K messages/sec (well within limits)</code></pre>
+
+      <h3 id="failure-modes">Failure Modes & Mitigation</h3>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Failure</th><th>Impact</th><th>Mitigation</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>WebSocket server crash</td>
+            <td>100K–200K users disconnected</td>
+            <td>Clients auto-reconnect (with jitter) to a different server. Initial snapshot restores state within 5s.</td>
+          </tr>
+          <tr>
+            <td>Redis Pub/Sub shard down</td>
+            <td>Users whose channels are on this shard stop receiving updates</td>
+            <td>Redis Sentinel auto-failover in &lt;30s. During failover, affected users miss 1 update cycle. Clients see "location data may be stale" warning.</td>
+          </tr>
+          <tr>
+            <td>Location cache (Redis) OOM</td>
+            <td>New location writes fail</td>
+            <td>TTL-based eviction ensures old entries expire. Set <code>maxmemory-policy allkeys-lru</code> as safety net. Monitor memory usage with alerts at 80%.</td>
+          </tr>
+          <tr>
+            <td>Friend Service unavailable</td>
+            <td>New connections can't load friend lists</td>
+            <td>Cache friend lists on WebSocket servers (TTL: 5 min). If cache miss and service is down, use stale data or show "temporarily unavailable".</td>
+          </tr>
+          <tr>
+            <td>Network partition (WS ↔ Redis)</td>
+            <td>Location updates not fan'd out</td>
+            <td>Circuit breaker pattern: after 3 failed Redis operations, switch to degraded mode (direct WS-to-WS fan-out for local connections).</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 id="monitoring">Key Metrics to Monitor</h3>
+
+      <pre><code>// Dashboard: Nearby Friends Health
+
+// Throughput
+  location_updates_per_sec          (target: ~334K)
+  pubsub_messages_delivered_per_sec (target: ~2M with geohash)
+  websocket_messages_sent_per_sec   (target: ~2M)
+
+// Latency
+  location_update_e2e_latency_p50   (target: &lt;200ms)
+  location_update_e2e_latency_p99   (target: &lt;500ms)
+  redis_pubsub_latency_p99          (target: &lt;10ms)
+
+// Connections
+  active_websocket_connections      (target: ~10M)
+  connections_per_ws_server          (target: &lt;200K)
+  redis_pubsub_subscriptions_total  (target: ~50M)
+
+// Errors
+  websocket_disconnect_rate         (alert: &gt;5% in 5 min)
+  redis_pubsub_message_drop_rate    (alert: &gt;0.1%)
+  location_update_failure_rate      (alert: &gt;1%)
+
+// Battery proxy
+  avg_location_updates_per_user_per_hour (target: 60–120)
+  users_on_battery_saver_mode       (informational)</code></pre>
+
+      <!-- ===== 13. ALTERNATIVE APPROACHES ===== -->
+      <h2 id="alternatives">Alternative Approaches</h2>
+
+      <h3 id="kafka-alternative">Kafka Instead of Redis Pub/Sub</h3>
+
+      <pre><code>// Kafka-based architecture for higher durability
+
+// Topic per user: user.{user_id}.location
+// Problem: 10M topics is impractical for Kafka
+//          (ZooKeeper/KRaft can't handle that many partitions)
+
+// Better: Topic per geohash cell
+// Topic: location.{geohash_prefix}  (e.g., location.9q8yy)
+// ~100K–1M topics (number of active geohash cells)
+// Each WS server is a consumer group member,
+// consuming only the geohash cells relevant to its local users.
+
+// Tradeoffs vs Redis Pub/Sub:
+// ✅ Message durability (can replay on reconnect)
+// ✅ Better backpressure handling
+// ✅ Natural partitioning by geohash
+// ❌ Higher latency (10–50ms vs &lt;1ms)
+// ❌ More complex consumer management
+// ❌ Higher infrastructure cost
+// ❌ Overkill for ephemeral location data</code></pre>
+
+      <h3 id="pull-based">Pull-Based (Polling) Architecture</h3>
+
+      <pre><code>// Simpler architecture: clients poll every 30s
+
+GET /api/nearby/friends?lat=37.77&lng=-122.42
+
+Server-side:
+1. Fetch user's friend list (cached)
+2. For each friend, check location cache
+3. Compute distances, filter by radius
+4. Return nearby friends
+
+// Tradeoffs vs Push (Pub/Sub):
+// ✅ Much simpler architecture (stateless servers)
+// ✅ No WebSocket complexity
+// ✅ Easy to scale horizontally
+// ❌ 30-second update delay (not real-time)
+// ❌ Wasted requests when no friends are nearby
+// ❌ With 10M users polling every 30s = 334K req/sec
+//    (same load, but server does more work per request)
+// ❌ Higher battery drain (frequent HTTP requests vs idle WebSocket)
+
+// Verdict: Good for MVP, replace with push for production</code></pre>
+
+      <h3 id="hybrid">Hybrid Push/Pull Architecture</h3>
+
+      <pre><code>// Best of both worlds:
+// - Push (WebSocket) when app is in foreground
+// - Pull (HTTP) when app is in background
+// - Silent push notification to wake app for significant changes
+
+State Machine:
+  FOREGROUND → WebSocket active, GPS every 30s
+  BACKGROUND → WebSocket disconnected, HTTP poll every 5 min
+  SUSPENDED  → No polling, push notification if friend nearby
+  TERMINATED → Silent push notification to wake app
+
+// This is what Facebook's implementation actually uses.
+// The hybrid approach reduces WebSocket server load by ~70%
+// (since only ~30% of DAU has the app in foreground at any time).</code></pre>
+
+      <!-- ===== 14. COMPLETE ARCHITECTURE ===== -->
+      <h2 id="complete-architecture">Complete Architecture</h2>
+
+      <pre><code>                            ┌────────────────────────────┐
+                            │      Load Balancer (L4)     │
+                            │  (HAProxy / AWS NLB)        │
+                            └─────────────┬──────────────┘
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    │                     │                     │
+              ┌─────▼──────┐        ┌─────▼──────┐       ┌─────▼──────┐
+              │ WS Server 1│        │ WS Server 2│  ...  │ WS Server N│
+              │ (200K conn)│        │ (200K conn)│       │ (200K conn)│
+              └──┬──┬──┬───┘        └──┬──┬──┬───┘       └──┬──┬──┬───┘
+                 │  │  │               │  │  │               │  │  │
+    ┌────────────┘  │  └────────┐      │  │  │               │  │  │
+    │               │           │      │  │  │               │  │  │
+┌───▼────┐   ┌──────▼──────┐ ┌─▼──────▼──▼──▼───────────────▼──▼──▼─┐
+│Location│   │   Friend    │ │        Redis Pub/Sub Cluster          │
+│ Cache  │   │  Service    │ │  (80 shards, consistent hash)         │
+│(Redis) │   │  (gRPC)     │ │  Channels: user:{id}:location         │
+│        │   │             │ │  ~50M active subscriptions             │
+│10M keys│   │ Social graph│ └───────────────────────────────────────┘
+│ ~1 GB  │   │ 400 avg     │
+│TTL:10m │   │ friends/user│
+└────────┘   └─────────────┘
+
+          ┌─────────────────────────┐
+          │   Optional Components   │
+          ├─────────────────────────┤
+          │ • Location History DB   │  Cassandra (opt-in, 30-day TTL)
+          │ • Analytics Pipeline    │  Kafka → Spark (aggregate stats)
+          │ • Privacy Service       │  Settings DB (PostgreSQL)
+          │ • Push Notification     │  APNs/FCM (background wake)
+          │ • HTTP Fallback API     │  Stateless REST servers
+          └─────────────────────────┘</code></pre>
+
+      <!-- ===== 15. INTERVIEW TIPS ===== -->
+      <h2 id="interview-tips">Interview Tips</h2>
+
+      <div class="callout">
+        <strong>The #1 interviewer trap:</strong> Don't start with "I'll use a QuadTree/Geohash to find nearby users." That's a proximity service for static data. This problem is fundamentally about <strong>real-time pub/sub between friends</strong>. Start with the social graph constraint and work toward the pub/sub architecture.
+      </div>
+
+      <h3 id="key-talking-points">Key Talking Points</h3>
+      <ul>
+        <li><strong>Frame the problem correctly:</strong> "This is a social-graph-filtered, real-time location broadcasting problem, not a spatial search problem."</li>
+        <li><strong>Start with the math:</strong> Back-of-envelope calculation shows the fan-out (13M msg/s) is the bottleneck, not ingestion (334K/s).</li>
+        <li><strong>Introduce pub/sub early:</strong> "Each user has a location channel. Friends subscribe to each other's channels."</li>
+        <li><strong>Mention geohash optimization proactively:</strong> "We can reduce fan-out by 80% by only subscribing to friends in nearby geohash cells."</li>
+        <li><strong>Battery is a first-class concern:</strong> Interviewers love hearing about adaptive update frequency, significant location change APIs, and the foreground/background tier system.</li>
+        <li><strong>Privacy as a design pillar:</strong> Not an afterthought. TTL-based expiry, ghost mode, per-friend controls.</li>
+        <li><strong>Acknowledge trade-offs:</strong> Redis Pub/Sub is fire-and-forget (no durability). Explain why that's acceptable here.</li>
+      </ul>
+
+      <h3 id="common-follow-ups">Common Follow-Up Questions</h3>
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Question</th><th>Key Points</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>"How do you handle a user with 10K friends?"</td>
+            <td>Cap subscriptions at 100, prioritize by closeness/recency. Use fan-out-on-read for celebrity users.</td>
+          </tr>
+          <tr>
+            <td>"What if Redis Pub/Sub is a bottleneck?"</td>
+            <td>Shard by user_id. If still insufficient, use Kafka with geohash-based topics.</td>
+          </tr>
+          <tr>
+            <td>"How do you handle location accuracy?"</td>
+            <td>GPS accuracy metadata included in updates. Client shows accuracy circle on map. Don't display friends if both users have poor accuracy (&gt;500m).</td>
+          </tr>
+          <tr>
+            <td>"Can you add 'friend is heading toward you' feature?"</td>
+            <td>Include speed and heading in location updates. Client computes trajectory. Show ETA if friend is moving toward you.</td>
+          </tr>
+          <tr>
+            <td>"How do you handle different timezones?"</td>
+            <td>All timestamps are UTC. Client converts for display. Geohash is timezone-agnostic.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ===== 16. SUMMARY ===== -->
+      <h2 id="summary">Summary</h2>
+
+      <div class="def-box">
+        <h4>Nearby Friends — Architecture at a Glance</h4>
+        <table class="arch-table" style="margin:0.5rem 0 0;">
+          <tbody>
+            <tr><td><strong>Core pattern</strong></td><td>Pub/Sub with social graph filtering</td></tr>
+            <tr><td><strong>Real-time channel</strong></td><td>WebSocket (foreground), HTTP poll (background), push notification (suspended)</td></tr>
+            <tr><td><strong>Location cache</strong></td><td>Redis key-value with 10-minute TTL</td></tr>
+            <tr><td><strong>Fan-out</strong></td><td>Redis Pub/Sub, sharded by user_id (80 shards)</td></tr>
+            <tr><td><strong>Optimization</strong></td><td>Geohash-based subscription filtering (~80–90% reduction)</td></tr>
+            <tr><td><strong>Privacy</strong></td><td>Opt-in, ghost mode, per-friend hide, TTL auto-expiry</td></tr>
+            <tr><td><strong>Battery</strong></td><td>4-tier adaptive strategy (foreground → background → suspended → low battery)</td></tr>
+            <tr><td><strong>Scale</strong></td><td>10M concurrent users, 334K updates/s, ~2M fan-out messages/s</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The key insight of this design is recognizing that Nearby Friends is <strong>not</strong> a spatial search problem — it's a <strong>real-time pub/sub problem filtered by social graph</strong>. Once you frame it correctly, the architecture flows naturally: WebSockets for persistent connections, Redis Pub/Sub for fan-out, geohash for optimization, and a multi-tier battery strategy for mobile-friendliness.</p>
+
+      <p>In the next post, we'll tackle <a href="google-maps.html">Google Maps</a> — a system that combines spatial indexing, tile rendering, routing algorithms, and real-time traffic data at truly planetary scale.</p>
+
+      <nav class="post-nav">
+        <a class="prev" href="proximity-service.html">
+          <span>Previous</span>
+          <span>&#8592; Proximity Service</span>
+        </a>
+        <a class="next" href="google-maps.html">
+          <span>Next</span>
+          <span>Google Maps &#8594;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* ============================================================
+       ANIMATION 1: Location Update Pub/Sub
+       Shows User A moving → WS Server → Redis Pub/Sub → WS Server → User B
+       ============================================================ */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    (function pubsubAnim(){
+      var svg=document.getElementById('pubsub-svg');
+      var info=document.getElementById('pubsub-info');
+      var out=document.getElementById('pubsub-output');
+      if(!svg)return;
+
+      // Layout positions
+      var nodes={
+        userA:   {x:60,  y:60,  label:'User A (moves)',   color:'#0a8f6a', icon:'📱'},
+        wsA:     {x:240, y:60,  label:'WS Server 1',      color:'#2196f3', icon:'🖥️'},
+        cache:   {x:420, y:60,  label:'Location Cache',   color:'#f59e0b', icon:'💾'},
+        pubsub:  {x:420, y:185, label:'Redis Pub/Sub',    color:'#e74c3c', icon:'📡'},
+        wsB:     {x:240, y:310, label:'WS Server 2',      color:'#2196f3', icon:'🖥️'},
+        userB:   {x:60,  y:310, label:'User B (friend)',   color:'#6366f1', icon:'📱'}
+      };
+
+      // Connection lines
+      var edges=[
+        {from:'userA',to:'wsA'},
+        {from:'wsA',to:'cache'},
+        {from:'wsA',to:'pubsub'},
+        {from:'pubsub',to:'wsB'},
+        {from:'wsB',to:'userB'}
+      ];
+
+      var steps=[
+        {active:[],highlight:[],desc:'System at rest. User A and B are friends. Both connected via WebSocket.',data:null},
+        {active:['userA'],highlight:['userA'],desc:'User A moves to a new location. Phone GPS fires: {lat:37.78, lng:-122.41}',data:'{lat:37.78,lng:-122.41}'},
+        {active:['userA','wsA'],highlight:['userA','wsA'],edge:0,desc:'App sends location update over WebSocket to WS Server 1.',data:'WS: location_update'},
+        {active:['wsA','cache'],highlight:['wsA','cache'],edge:1,desc:'WS Server writes to Location Cache: SET user:A:loc ... EX 600',data:'SET user:A:loc EX 600'},
+        {active:['wsA','pubsub'],highlight:['wsA','pubsub'],edge:2,desc:'WS Server publishes to Redis: PUBLISH user:A:location {...}',data:'PUBLISH user:A:location'},
+        {active:['pubsub','wsB'],highlight:['pubsub','wsB'],edge:3,desc:'Redis delivers message to WS Server 2 (subscribed to user:A:location).',data:'→ subscriber notification'},
+        {active:['wsB'],highlight:['wsB'],desc:'WS Server 2 checks: Is User B within 5 miles of A? Haversine → 0.8 miles ✓',data:'distance=0.8mi ✓'},
+        {active:['wsB','userB'],highlight:['wsB','userB'],edge:4,desc:'WS Server 2 pushes update to User B via WebSocket.',data:'friend_location: A'},
+        {active:['userB'],highlight:['userB'],desc:'User B\'s map updates showing A\'s new position. Total latency: ~200ms.',data:'🗺️ Pin updated!'}
+      ];
+
+      function drawNode(n,isActive,isHighlight){
+        var g=el('g',{});
+        var w=130,h=50,rx=10;
+        var x=n.x-w/2,y=n.y-h/2;
+        var fill=isHighlight?n.color+'22':'#f8f9fa';
+        var stroke=isHighlight?n.color:'#d1d5db';
+        var sw=isHighlight?'2.5':'1.5';
+        g.appendChild(el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,rx:''+rx,fill:fill,stroke:stroke,'stroke-width':sw}));
+        if(isActive){
+          g.appendChild(el('rect',{x:''+(x-3),y:''+(y-3),width:''+(w+6),height:''+(h+6),rx:''+(rx+2),fill:'none',stroke:n.color,'stroke-width':'2','stroke-dasharray':'6,3',opacity:'0.6'}));
+        }
+        g.appendChild(txt(n.icon,{x:''+n.x,y:''+(n.y-4),'text-anchor':'middle','font-size':'16'}));
+        g.appendChild(txt(n.label,{x:''+n.x,y:''+(n.y+18),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:isHighlight?n.color:'#374151'}));
+        return g;
+      }
+
+      function drawEdge(from,to,active){
+        var g=el('g',{});
+        var x1=from.x,y1=from.y,x2=to.x,y2=to.y;
+        var dx=x2-x1,dy=y2-y1;
+        var len=Math.sqrt(dx*dx+dy*dy);
+        var ux=dx/len,uy=dy/len;
+        var sx=x1+ux*68,sy=y1+uy*28;
+        var ex=x2-ux*68,ey=y2-uy*28;
+        var color=active?'#0a8f6a':'#d1d5db';
+        var sw=active?'2.5':'1.5';
+        g.appendChild(el('line',{x1:''+sx,y1:''+sy,x2:''+ex,y2:''+ey,stroke:color,'stroke-width':sw,'stroke-dasharray':active?'':'4,4'}));
+        // arrowhead
+        var ax=ex-ux*8+uy*5,ay=ey-uy*8-ux*5;
+        var bx=ex-ux*8-uy*5,by=ey-uy*8+ux*5;
+        g.appendChild(el('polygon',{points:ex+','+ey+' '+ax+','+ay+' '+bx+','+by,fill:color}));
+        if(active){
+          // animated pulse dot
+          var mx=(sx+ex)/2,my=(sy+ey)/2;
+          var pulse=el('circle',{cx:''+mx,cy:''+my,r:'5',fill:color,opacity:'0.8'});
+          var animR=el('animate',{attributeName:'r',from:'4',to:'10',dur:'0.6s',repeatCount:'indefinite'});
+          var animO=el('animate',{attributeName:'opacity',from:'0.8',to:'0',dur:'0.6s',repeatCount:'indefinite'});
+          pulse.appendChild(animR);
+          pulse.appendChild(animO);
+          g.appendChild(pulse);
+        }
+        return g;
+      }
+
+      function draw(stepIdx){
+        clearSvg(svg);
+        // background
+        svg.appendChild(el('rect',{x:'0',y:'0',width:'720',height:'370',fill:'#fafbfc',rx:'12'}));
+        svg.appendChild(txt('Location Update Pub/Sub Flow',{x:'360',y:'355','text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:'#9ca3af'}));
+
+        var s=stepIdx>=0&&stepIdx<steps.length?steps[stepIdx]:{active:[],highlight:[],desc:'Click Step to begin.',data:null};
+        var activeSet=new Set(s.active||[]);
+        var highlightSet=new Set(s.highlight||[]);
+
+        // Draw edges
+        edges.forEach(function(e,i){
+          drawEdge(nodes[e.from],nodes[e.to],s.edge===i).childNodes.forEach(function(c){svg.appendChild(c.cloneNode(true));});
+          var g=drawEdge(nodes[e.from],nodes[e.to],s.edge===i);
+          svg.appendChild(g);
+        });
+
+        // Draw nodes
+        Object.keys(nodes).forEach(function(k){
+          svg.appendChild(drawNode(nodes[k],activeSet.has(k),highlightSet.has(k)));
+        });
+
+        // Data bubble
+        if(s.data){
+          svg.appendChild(el('rect',{x:'500',y:'150',width:'200',height:'32',rx:'8',fill:'#0a8f6a',opacity:'0.1'}));
+          svg.appendChild(txt(s.data,{x:'600',y:'170','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:'#0a8f6a'}));
+        }
+
+        info.textContent=s.desc;
+        out.textContent=stepIdx>=0?'Step '+(stepIdx+1)+' of '+steps.length:'Ready';
+      }
+
+      draw(-1);
+      var step=0;
+      document.getElementById('pubsub-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('pubsub-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+
+    /* ============================================================
+       ANIMATION 2: Geohash Optimization
+       Grid of geohash cells. User subscribes to friends in nearby cells.
+       ============================================================ */
+    (function geoOptAnim(){
+      var svg=document.getElementById('geoopt-svg');
+      var info=document.getElementById('geoopt-info');
+      var out=document.getElementById('geoopt-output');
+      if(!svg)return;
+
+      var CELL=70;
+      var GRID_X=40,GRID_Y=30;
+      var COLS=5,ROWS=4;
+
+      // Geohash cell labels
+      var cellLabels=[
+        ['9q8yw','9q8yx','9q8yy','9q8yz','9q8zp'],
+        ['9q8yt','9q8yu','9q8yv','9q8yw','9q8zn'],
+        ['9q8ys','9q8ye','9q8yf','9q8yg','9q8zm'],
+        ['9q8yd','9q8y7','9q8yk','9q8ym','9q8zj']
+      ];
+
+      // Users
+      var users={
+        me:   {name:'You',     color:'#0a8f6a',emoji:'🧑'},
+        f1:   {name:'Alice',   color:'#2196f3',emoji:'👩'},
+        f2:   {name:'Bob',     color:'#f59e0b',emoji:'👨'},
+        f3:   {name:'Carol',   color:'#e74c3c',emoji:'👩'},
+        f4:   {name:'Dave',    color:'#6366f1',emoji:'👨'}
+      };
+
+      var steps=[
+        {
+          desc:'Grid of geohash cells (precision 5, ~5km each). You are at center. 4 friends shown.',
+          me:{r:2,c:2},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:2,c:3},f4:{r:0,c:4},
+          subscribed:['f1','f2','f3'],
+          highlight:[{r:1,c:1},{r:1,c:2},{r:1,c:3},{r:2,c:1},{r:2,c:2},{r:2,c:3},{r:3,c:1},{r:3,c:2},{r:3,c:3}],
+          note:'Subscribe zone: your cell + 8 neighbors (green)'
+        },
+        {
+          desc:'You subscribe to Alice, Bob, Carol (in nearby cells). Dave is too far → NOT subscribed.',
+          me:{r:2,c:2},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:2,c:3},f4:{r:0,c:4},
+          subscribed:['f1','f2','f3'],
+          highlight:[{r:1,c:1},{r:1,c:2},{r:1,c:3},{r:2,c:1},{r:2,c:2},{r:2,c:3},{r:3,c:1},{r:3,c:2},{r:3,c:3}],
+          note:'Dave (cell 9q8zp) outside neighbor zone → skip'
+        },
+        {
+          desc:'Alice sends a location update. You receive it (subscribed). Distance: 1.2 mi → show on map.',
+          me:{r:2,c:2},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:2,c:3},f4:{r:0,c:4},
+          subscribed:['f1','f2','f3'],
+          activeEdge:'f1',
+          highlight:[{r:1,c:1},{r:1,c:2},{r:1,c:3},{r:2,c:1},{r:2,c:2},{r:2,c:3},{r:3,c:1},{r:3,c:2},{r:3,c:3}],
+          note:'PUBLISH user:alice:location → You receive ✓'
+        },
+        {
+          desc:'Carol moves far away to cell 9q8zp (top-right). She leaves your neighbor zone.',
+          me:{r:2,c:2},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:0,c:4},f4:{r:0,c:4},
+          subscribed:['f1','f2'],
+          unsubscribed:['f3'],
+          highlight:[{r:1,c:1},{r:1,c:2},{r:1,c:3},{r:2,c:1},{r:2,c:2},{r:2,c:3},{r:3,c:1},{r:3,c:2},{r:3,c:3}],
+          note:'Carol moved out → UNSUBSCRIBE user:carol:location'
+        },
+        {
+          desc:'You now only subscribe to Alice and Bob. Carol and Dave are outside your zone. Bandwidth saved!',
+          me:{r:2,c:2},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:0,c:4},f4:{r:0,c:4},
+          subscribed:['f1','f2'],
+          highlight:[{r:1,c:1},{r:1,c:2},{r:1,c:3},{r:2,c:1},{r:2,c:2},{r:2,c:3},{r:3,c:1},{r:3,c:2},{r:3,c:3}],
+          note:'Subscriptions: 2 (down from 4). ~50% bandwidth saved.'
+        },
+        {
+          desc:'You move to a new cell (right). Neighbor zone shifts. Bob leaves zone, Carol re-enters!',
+          me:{r:2,c:3},f1:{r:2,c:1},f2:{r:1,c:2},f3:{r:0,c:4},f4:{r:0,c:4},
+          subscribed:['f3'],
+          unsubscribed:['f1','f2'],
+          newSubscribed:['f3'],
+          highlight:[{r:1,c:2},{r:1,c:3},{r:1,c:4},{r:2,c:2},{r:2,c:3},{r:2,c:4},{r:3,c:2},{r:3,c:3},{r:3,c:4}],
+          note:'Zone shifted → unsub Alice,Bob; sub Carol (now neighbor)'
+        }
+      ];
+
+      function cellCenter(r,c){
+        return {x:GRID_X+c*CELL+CELL/2, y:GRID_Y+r*CELL+CELL/2};
+      }
+
+      function draw(stepIdx){
+        clearSvg(svg);
+        svg.appendChild(el('rect',{x:'0',y:'0',width:'720',height:'400',fill:'#fafbfc',rx:'12'}));
+
+        var s=stepIdx>=0&&stepIdx<steps.length?steps[stepIdx]:steps[0];
+
+        // Highlight cells (neighbor zone)
+        var hlSet=new Set();
+        (s.highlight||[]).forEach(function(h){hlSet.add(h.r+','+h.c);});
+
+        // Draw grid
+        for(var r=0;r<ROWS;r++){
+          for(var c=0;c<COLS;c++){
+            var x=GRID_X+c*CELL,y=GRID_Y+r*CELL;
+            var isHl=hlSet.has(r+','+c);
+            svg.appendChild(el('rect',{x:''+x,y:''+y,width:''+CELL,height:''+CELL,fill:isHl?'rgba(10,143,106,0.1)':'#fff',stroke:isHl?'#0a8f6a':'#e5e7eb','stroke-width':isHl?'2':'1'}));
+            svg.appendChild(txt(cellLabels[r][c],{x:''+(x+CELL/2),y:''+(y+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'#9ca3af'}));
+          }
+        }
+
+        // Draw users
+        var userPositions={};
+        ['me','f1','f2','f3','f4'].forEach(function(uid){
+          if(!s[uid])return;
+          var pos=cellCenter(s[uid].r,s[uid].c);
+          var u=users[uid];
+          // Offset if multiple users in same cell
+          var key=s[uid].r+','+s[uid].c;
+          if(!userPositions[key])userPositions[key]=0;
+          var offset=userPositions[key]*18;
+          userPositions[key]++;
+          var px=pos.x-10+offset,py=pos.y+6;
+
+          svg.appendChild(txt(u.emoji,{x:''+px,y:''+(py-2),'text-anchor':'middle','font-size':'20'}));
+          svg.appendChild(txt(u.name,{x:''+px,y:''+(py+14),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'700',fill:u.color}));
+
+          // Subscription indicator
+          if((s.subscribed||[]).indexOf(uid)>=0){
+            svg.appendChild(el('circle',{cx:''+px,cy:''+(py-12),r:'3',fill:'#0a8f6a'}));
+          }
+          if((s.unsubscribed||[]).indexOf(uid)>=0){
+            svg.appendChild(el('line',{x1:''+(px-5),y1:''+(py-15),x2:''+(px+5),y2:''+(py-9),stroke:'#e74c3c','stroke-width':'2'}));
+            svg.appendChild(el('line',{x1:''+(px+5),y1:''+(py-15),x2:''+(px-5),y2:''+(py-9),stroke:'#e74c3c','stroke-width':'2'}));
+          }
+        });
+
+        // Active edge (message in flight)
+        if(s.activeEdge){
+          var mePos=cellCenter(s.me.r,s.me.c);
+          var fPos=cellCenter(s[s.activeEdge].r,s[s.activeEdge].c);
+          svg.appendChild(el('line',{x1:''+fPos.x,y1:''+fPos.y,x2:''+mePos.x,y2:''+mePos.y,stroke:'#0a8f6a','stroke-width':'2.5','stroke-dasharray':'6,3'}));
+          var mx=(fPos.x+mePos.x)/2,my=(fPos.y+mePos.y)/2;
+          var pulse=el('circle',{cx:''+mx,cy:''+my,r:'5',fill:'#0a8f6a'});
+          var animR=el('animate',{attributeName:'r',from:'4',to:'12',dur:'0.8s',repeatCount:'indefinite'});
+          var animO=el('animate',{attributeName:'opacity',from:'0.8',to:'0',dur:'0.8s',repeatCount:'indefinite'});
+          pulse.appendChild(animR);
+          pulse.appendChild(animO);
+          svg.appendChild(pulse);
+        }
+
+        // Legend panel (right side)
+        var lx=420,ly=40;
+        svg.appendChild(el('rect',{x:''+lx,y:''+ly,width:'280',height:'300',rx:'10',fill:'#fff',stroke:'#e5e7eb','stroke-width':'1'}));
+        svg.appendChild(txt('Subscription Status',{x:''+(lx+140),y:''+(ly+22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'13','font-weight':'700',fill:'#374151'}));
+
+        var legendY=ly+45;
+        ['f1','f2','f3','f4'].forEach(function(uid,i){
+          var u=users[uid];
+          var isSub=(s.subscribed||[]).indexOf(uid)>=0;
+          var isUnsub=(s.unsubscribed||[]).indexOf(uid)>=0;
+          var isNew=(s.newSubscribed||[]).indexOf(uid)>=0;
+          var fy=legendY+i*40;
+
+          svg.appendChild(txt(u.emoji+' '+u.name,{x:''+(lx+20),y:''+(fy+4),'font-family':'Manrope,sans-serif','font-size':'12','font-weight':'600',fill:u.color}));
+
+          var status,statusColor;
+          if(isNew){status='📩 NEW SUB';statusColor='#0a8f6a';}
+          else if(isSub){status='✅ Subscribed';statusColor='#0a8f6a';}
+          else if(isUnsub){status='❌ Unsubscribed';statusColor='#e74c3c';}
+          else{status='⬜ Not subscribed';statusColor='#9ca3af';}
+
+          svg.appendChild(txt(status,{x:''+(lx+20),y:''+(fy+20),'font-family':'Consolas,monospace','font-size':'10',fill:statusColor}));
+        });
+
+        // Note box
+        if(s.note){
+          var ny=legendY+175;
+          svg.appendChild(el('rect',{x:''+(lx+10),y:''+ny,width:'260',height:'55',rx:'6',fill:'#f0f9ff',stroke:'#0ea5e9','stroke-width':'1'}));
+          // Word-wrap the note
+          var words=s.note.split(' ');
+          var line='',lineY=ny+16,lineNum=0;
+          words.forEach(function(w){
+            if((line+w).length>38){
+              svg.appendChild(txt(line,{x:''+(lx+20),y:''+lineY,'font-family':'Consolas,monospace','font-size':'9.5',fill:'#0369a1'}));
+              lineY+=13;lineNum++;line='';
+            }
+            line+=w+' ';
+          });
+          if(line)svg.appendChild(txt(line,{x:''+(lx+20),y:''+lineY,'font-family':'Consolas,monospace','font-size':'9.5',fill:'#0369a1'}));
+        }
+
+        // Cell legend at bottom
+        svg.appendChild(el('rect',{x:'40',y:'325',width:'15',height:'15',fill:'rgba(10,143,106,0.1)',stroke:'#0a8f6a','stroke-width':'1.5'}));
+        svg.appendChild(txt('= Your neighbor zone (subscribed)',{x:'62',y:'337','font-family':'Manrope,sans-serif','font-size':'10',fill:'#374151'}));
+        svg.appendChild(el('circle',{cx:'250',cy:'333',r:'3',fill:'#0a8f6a'}));
+        svg.appendChild(txt('= Subscribed friend',{x:'260',y:'337','font-family':'Manrope,sans-serif','font-size':'10',fill:'#374151'}));
+
+        info.textContent=s.desc;
+        out.textContent=stepIdx>=0?'Step '+(stepIdx+1)+' of '+steps.length:'Ready';
+      }
+
+      draw(0);
+      var step=1;
+      document.getElementById('geoopt-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('geoopt-reset').addEventListener('click',function(){step=1;draw(0);});
+    })();
+  })();
+  </script>
+</body>
+</html>

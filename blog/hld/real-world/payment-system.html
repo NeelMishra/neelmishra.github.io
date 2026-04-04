@@ -1,0 +1,1730 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design a Payment System: payment flow from customer to issuing bank, double-entry ledger, idempotency, PSP integration with Stripe, reconciliation, refunds, webhooks, and PCI DSS compliance.">
+  <title>Design: Payment System | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Post 62 of 70</span></div>
+
+      <h1>Design: Payment System</h1>
+      <p class="post-meta">April 2026 &middot; 30 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           1. THE PROBLEM — WHY PAYMENTS ARE HARD
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="problem">Why Payment Systems Are Hard</h2>
+      <p>Moving money between parties seems simple on the surface &mdash; debit one account, credit another. In practice, payment systems are among the most challenging distributed systems to build. Money cannot be lost, duplicated, or silently dropped. A single bug can mean millions in financial losses, regulatory fines, or permanent loss of customer trust.</p>
+
+      <p>The challenges stem from three fundamental truths:</p>
+      <ul>
+        <li><strong>Exactly-once semantics</strong> &mdash; A customer must never be charged twice for the same purchase, and a merchant must never receive double payment. In a distributed system where networks fail, services crash, and retries happen, achieving exactly-once is extraordinarily difficult.</li>
+        <li><strong>Multi-party coordination</strong> &mdash; A single payment touches your API, your payment service, a Payment Service Provider (Stripe, PayPal), a card network (Visa, Mastercard), and an issuing bank. Each of these can fail independently.</li>
+        <li><strong>Regulatory compliance</strong> &mdash; PCI DSS mandates that raw card numbers never touch your servers. Financial regulations require an auditable ledger where every cent is accounted for. Getting this wrong is not just a bug &mdash; it is a legal violation.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Scale context:</strong> Stripe processes over $1 trillion in payment volume annually. Visa handles 65,000 transactions per second at peak. Our design targets 1 million transactions/day (~12 TPS average, ~100 TPS peak) &mdash; a mid-sized payment platform.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           2. REQUIREMENTS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Requirement</th><th style="text-align:left; padding:0.5em;">Details</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Process payments</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Accept credit/debit card payments. Customer pays merchant through our platform. Support authorization &amp; capture (hold funds then collect) and direct charge flows.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Handle refunds</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Full and partial refunds. Reverse the original transaction, credit the customer, debit the merchant. Refunds must reference the original payment.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Multi-currency support</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Accept payments in USD, EUR, GBP, JPY, etc. Handle currency conversion at point of capture. Store amounts in smallest currency unit (cents, pence).</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Exactly-once processing</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Every payment must be processed exactly once. Retries must not cause duplicate charges. Idempotency keys ensure this.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Webhook notifications</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Notify merchants asynchronously of payment outcomes: succeeded, failed, disputed, refunded.</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Reconciliation</strong></td><td style="padding:0.5em;">Compare internal ledger with PSP settlement reports daily. Flag and resolve any discrepancies.</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Requirement</th><th style="text-align:left; padding:0.5em;">Target</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Throughput</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 million transactions/day (~12 TPS average, ~100 TPS peak)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Latency</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&lt; 2 seconds for payment authorization (p99). Most latency is from PSP/bank.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Availability</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">99.99% uptime. Payment downtime directly costs revenue.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Consistency</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Strong consistency for ledger entries. Every debit has a matching credit. Ledger must always balance.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Durability</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Zero data loss for financial records. Synchronous replication to at least 2 replicas.</td></tr>
+          <tr><td style="padding:0.5em;"><strong>PCI DSS compliance</strong></td><td style="padding:0.5em;">Never store raw card numbers (PAN). Use tokenization via PSP. All card data encrypted in transit (TLS 1.2+).</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           3. THE PAYMENT FLOW — END TO END
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="payment-flow">The Payment Flow &mdash; End to End</h2>
+      <p>A card payment involves <strong>six parties</strong> communicating in a precise sequence. Understanding this flow is critical before designing the system.</p>
+
+      <h3 id="six-parties">The Six Parties</h3>
+      <ul>
+        <li><strong>Customer (Cardholder)</strong> &mdash; The person paying. They enter card details on the merchant's checkout page.</li>
+        <li><strong>Merchant</strong> &mdash; The business receiving payment. They integrate with our payment service via API.</li>
+        <li><strong>Payment Service (Us)</strong> &mdash; Our platform. Accepts payment requests from merchants, routes to PSPs, maintains the ledger, handles retries and idempotency.</li>
+        <li><strong>PSP (Payment Service Provider)</strong> &mdash; Stripe, PayPal, Adyen, Square. They connect to card networks and handle the low-level card processing. We never touch raw card data &mdash; the PSP does.</li>
+        <li><strong>Card Network</strong> &mdash; Visa, Mastercard, American Express. They route authorization requests between the PSP (acquiring bank) and the issuing bank. They set interchange fees.</li>
+        <li><strong>Issuing Bank</strong> &mdash; The customer's bank that issued the card. They approve or decline the transaction based on the customer's available funds, fraud rules, and spending limits.</li>
+      </ul>
+
+      <h3 id="three-phases">Three Phases: Authorization, Capture, Settlement</h3>
+      <p>Every card payment goes through three distinct phases:</p>
+
+      <pre><code>Phase 1: AUTHORIZATION (real-time, ~200-500ms)
+═══════════════════════════════════════════════
+Customer → Merchant → Payment Service → PSP → Card Network → Issuing Bank
+                                                                    │
+"Can this customer pay $100?"                                       │
+                                                                    ▼
+                                                         Check: sufficient funds?
+                                                         Check: card not blocked?
+                                                         Check: fraud score OK?
+                                                                    │
+                                                                    ▼
+Issuing Bank → Card Network → PSP → Payment Service → Merchant → Customer
+                                                                    
+"Yes — authorization code: AUTH-7X92. Funds held (not yet moved)."
+
+
+Phase 2: CAPTURE (async, within 1-7 days of auth)
+═══════════════════════════════════════════════════
+Payment Service → PSP → Card Network → Issuing Bank
+
+"Transfer the $100 we authorized under AUTH-7X92."
+
+The issuing bank moves the funds from "held" to "captured."
+Auth without capture expires after 7 days (Visa) or 30 days (Mastercard).
+
+
+Phase 3: SETTLEMENT (batch, T+1 to T+3 business days)
+══════════════════════════════════════════════════════
+Issuing Bank → Card Network → Acquiring Bank → PSP → Payment Service → Merchant
+
+Card network batches all captured transactions.
+Issuing bank sends money to acquiring bank.
+PSP deposits into merchant's bank account.
+Minus interchange fees (1.5-3.5%) and PSP fees (2.9% + $0.30 for Stripe).
+
+Timeline: Authorization happens in real-time. Settlement takes 2-3 business days.</code></pre>
+
+      <div class="callout">
+        <strong>Auth vs Capture:</strong> Hotels and car rentals authorize (hold) a large amount at check-in, then capture (charge) the actual amount at check-out. If they only need $150 of a $500 hold, they capture $150 and the remaining $350 hold is released. This is why you sometimes see a "pending charge" on your statement that later changes.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           ANIMATION 1: PAYMENT TRANSACTION FLOW
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h3 id="payment-anim-section">Interactive: Payment Transaction Flow</h3>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="payment-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="payment-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="payment-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="payment-anim" viewBox="0 0 820 370" style="width:100%;max-width:820px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="payment-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           4. SYSTEM ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="architecture">System Architecture</h2>
+      <p>Our payment service sits between merchants and PSPs. It must be reliable, auditable, and idempotent.</p>
+
+      <pre><code>┌─────────────────────────────────────────────────────────────────────────┐
+│                          PAYMENT PLATFORM                               │
+│                                                                         │
+│  ┌──────────┐    ┌──────────────────┐    ┌──────────────────────────┐   │
+│  │ API      │    │ Payment Service   │    │ PSP Integration Layer   │   │
+│  │ Gateway  │───→│                  │───→│                          │   │
+│  │          │    │ • Validate req    │    │ • Stripe adapter         │   │
+│  │ • Auth   │    │ • Check idempot.  │    │ • PayPal adapter         │   │
+│  │ • Rate   │    │ • Route to PSP    │    │ • Adyen adapter          │   │
+│  │   limit  │    │ • Update ledger   │    │ • Retry logic            │   │
+│  │ • TLS    │    │ • Fire webhooks   │    │ • Circuit breaker        │   │
+│  └──────────┘    └────────┬─────────┘    └────────────┬─────────────┘   │
+│                           │                            │                 │
+│                    ┌──────▼──────┐              ┌──────▼──────┐         │
+│                    │   Ledger    │              │  Webhook    │         │
+│                    │   Service   │              │  Dispatcher │         │
+│                    │             │              │             │         │
+│                    │ Double-entry│              │ • Queue     │         │
+│                    │ bookkeeping │              │ • Retry     │         │
+│                    │ Immutable   │              │ • Signing   │         │
+│                    └──────┬──────┘              └─────────────┘         │
+│                           │                                             │
+│                    ┌──────▼──────┐     ┌───────────────────┐           │
+│                    │  PostgreSQL │     │  Reconciliation   │           │
+│                    │  (Primary)  │────→│  Service          │           │
+│                    │             │     │                   │           │
+│                    │ Sync repli- │     │ • Daily matching  │           │
+│                    │ cation to   │     │ • Discrepancy     │           │
+│                    │ 2 replicas  │     │   alerting        │           │
+│                    └─────────────┘     └───────────────────┘           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+External:
+  ┌─────────┐     ┌──────────┐     ┌─────────────┐     ┌──────────────┐
+  │ Merchant│────→│ Our API  │────→│ PSP (Stripe) │────→│ Card Network │
+  │ (Client)│     │ Gateway  │     │              │     │ (Visa, MC)   │
+  └─────────┘     └──────────┘     └──────────────┘     └──────┬───────┘
+                                                                │
+                                                         ┌──────▼───────┐
+                                                         │ Issuing Bank │
+                                                         └──────────────┘</code></pre>
+
+      <h3 id="component-responsibilities">Component Responsibilities</h3>
+
+      <p><strong>API Gateway:</strong> TLS termination, authentication (API keys), rate limiting (per-merchant), request validation, and routing. Every request is logged with a correlation ID for tracing.</p>
+
+      <p><strong>Payment Service:</strong> The core orchestrator. It receives payment requests, checks idempotency, selects the appropriate PSP, coordinates the authorization/capture flow, updates the ledger, and dispatches webhooks. This is a stateless service &mdash; all state lives in the database.</p>
+
+      <p><strong>PSP Integration Layer:</strong> An adapter pattern that abstracts away PSP-specific APIs. Each PSP (Stripe, PayPal, Adyen) has its own adapter implementing a common interface. This layer handles retries, circuit breaking, and timeout management.</p>
+
+      <p><strong>Ledger Service:</strong> Maintains the double-entry bookkeeping system. Every financial operation results in balanced debit/credit entries. The ledger is append-only and immutable &mdash; corrections are made with new reversing entries, never by modifying existing ones.</p>
+
+      <p><strong>Webhook Dispatcher:</strong> Sends asynchronous notifications to merchants about payment events. Uses a queue (SQS/Kafka) with exponential backoff retries. Signs payloads with HMAC for verification.</p>
+
+      <p><strong>Reconciliation Service:</strong> Runs daily, comparing our internal ledger against PSP settlement reports. Flags discrepancies for manual review. This is the financial safety net.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           5. DATABASE SCHEMA
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="database">Database Schema</h2>
+
+      <pre><code>-- Payments table: one row per payment intent
+CREATE TABLE payments (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idempotency_key VARCHAR(255) UNIQUE NOT NULL,  -- client-provided, ensures exactly-once
+    merchant_id     UUID NOT NULL REFERENCES merchants(id),
+    amount          BIGINT NOT NULL,                -- in smallest currency unit (cents)
+    currency        CHAR(3) NOT NULL,               -- ISO 4217: USD, EUR, GBP
+    status          VARCHAR(20) NOT NULL DEFAULT 'CREATED',
+                    -- CREATED → AUTHORIZED → CAPTURED → SETTLED
+                    -- CREATED → AUTHORIZED → VOIDED
+                    -- CREATED → DECLINED
+                    -- CAPTURED → REFUNDED / PARTIALLY_REFUNDED
+    psp_provider    VARCHAR(50),                    -- stripe, paypal, adyen
+    psp_payment_id  VARCHAR(255),                   -- external ID from PSP
+    auth_code       VARCHAR(100),                   -- authorization code from issuing bank
+    description     TEXT,
+    metadata        JSONB,                          -- arbitrary merchant-provided data
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    captured_at     TIMESTAMPTZ,
+    settled_at      TIMESTAMPTZ,
+
+    CONSTRAINT valid_status CHECK (status IN (
+        'CREATED', 'AUTHORIZED', 'CAPTURED', 'SETTLED',
+        'DECLINED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED', 'FAILED'
+    )),
+    CONSTRAINT positive_amount CHECK (amount > 0)
+);
+
+CREATE INDEX idx_payments_merchant ON payments(merchant_id);
+CREATE INDEX idx_payments_status ON payments(status);
+CREATE INDEX idx_payments_created ON payments(created_at);
+CREATE INDEX idx_payments_psp ON payments(psp_provider, psp_payment_id);
+
+
+-- Idempotency table: prevents duplicate processing
+CREATE TABLE idempotency_keys (
+    key             VARCHAR(255) PRIMARY KEY,
+    merchant_id     UUID NOT NULL,
+    payment_id      UUID REFERENCES payments(id),
+    request_hash    VARCHAR(64) NOT NULL,   -- SHA-256 of request body
+    response_code   INT,
+    response_body   JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+
+-- Refunds table: tracks refund operations
+CREATE TABLE refunds (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    payment_id      UUID NOT NULL REFERENCES payments(id),
+    amount          BIGINT NOT NULL,        -- refund amount in cents
+    reason          TEXT,
+    status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                    -- PENDING → PROCESSING → SUCCEEDED → FAILED
+    psp_refund_id   VARCHAR(255),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+
+    CONSTRAINT valid_refund_status CHECK (status IN (
+        'PENDING', 'PROCESSING', 'SUCCEEDED', 'FAILED'
+    ))
+);
+
+
+-- Double-entry ledger: the financial heart of the system
+CREATE TABLE ledger_entries (
+    id              BIGSERIAL PRIMARY KEY,
+    transaction_id  UUID NOT NULL,          -- groups debit + credit pair
+    payment_id      UUID REFERENCES payments(id),
+    account_id      UUID NOT NULL REFERENCES accounts(id),
+    entry_type      CHAR(1) NOT NULL,       -- 'D' = debit, 'C' = credit
+    amount          BIGINT NOT NULL,        -- always positive
+    currency        CHAR(3) NOT NULL,
+    description     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_entry_type CHECK (entry_type IN ('D', 'C')),
+    CONSTRAINT positive_ledger_amount CHECK (amount > 0)
+);
+
+CREATE INDEX idx_ledger_transaction ON ledger_entries(transaction_id);
+CREATE INDEX idx_ledger_payment ON ledger_entries(payment_id);
+CREATE INDEX idx_ledger_account ON ledger_entries(account_id);
+
+
+-- Accounts: represents ledger accounts
+CREATE TABLE accounts (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            VARCHAR(255) NOT NULL,
+    type            VARCHAR(20) NOT NULL,   -- ASSET, LIABILITY, EQUITY, REVENUE, EXPENSE
+    currency        CHAR(3) NOT NULL,
+    balance         BIGINT NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_account_type CHECK (type IN (
+        'ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE'
+    ))
+);
+
+-- Example accounts:
+-- 'merchant_receivable' (ASSET)     — money owed to us by PSPs
+-- 'merchant_payable' (LIABILITY)    — money we owe to merchants
+-- 'platform_revenue' (REVENUE)      — our fee income
+-- 'customer_refund' (LIABILITY)     — refunds owed to customers</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           6. IDEMPOTENCY — THE MOST CRITICAL CONCEPT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="idempotency">Idempotency &mdash; The Most Critical Concept</h2>
+
+      <p>In a payment system, <strong>idempotency is not optional &mdash; it is the single most important correctness guarantee</strong>. Without it, a network timeout during payment processing could result in the customer being charged twice. This is the nightmare scenario.</p>
+
+      <h3 id="how-idempotency-works">How Idempotency Works</h3>
+      <p>Every payment request includes a client-generated <strong>idempotency key</strong> &mdash; a unique identifier (usually a UUID) that represents "this specific payment attempt." The server uses this key to detect and deduplicate retries.</p>
+
+      <pre><code>// Client sends payment with idempotency key in header
+POST /v1/payments
+Idempotency-Key: pay_8f14e45f-ceea-467f-a830-5c1e3b4a0a72
+Content-Type: application/json
+
+{
+  "amount": 10000,       // $100.00 in cents
+  "currency": "usd",
+  "merchant_id": "merch_abc123",
+  "payment_method": "tok_visa_4242",
+  "description": "Order #ORD-9901"
+}</code></pre>
+
+      <h3 id="idempotency-flow">Server-Side Idempotency Flow</h3>
+      <pre><code>async function processPayment(req: PaymentRequest): PaymentResponse {
+    const { idempotencyKey, merchantId } = req;
+
+    // Step 1: Check if we've seen this idempotency key before
+    const existing = await db.query(
+        'SELECT payment_id, response_code, response_body FROM idempotency_keys WHERE key = $1',
+        [idempotencyKey]
+    );
+
+    if (existing.rows.length > 0) {
+        const row = existing.rows[0];
+
+        // Step 2a: Verify request body matches (prevent key reuse with different params)
+        const requestHash = sha256(JSON.stringify(req.body));
+        if (row.request_hash !== requestHash) {
+            throw new Error(
+                'Idempotency key already used with different parameters. '
+                + 'Generate a new key for a different payment.'
+            );
+        }
+
+        // Step 2b: Return the cached response — DO NOT reprocess
+        console.log(`Idempotent replay for key=${idempotencyKey}`);
+        return { statusCode: row.response_code, body: row.response_body };
+    }
+
+    // Step 3: New request — acquire a lock on the idempotency key
+    // This prevents two concurrent requests with the same key from both proceeding
+    const lock = await db.query(
+        `INSERT INTO idempotency_keys (key, merchant_id, request_hash, created_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (key) DO NOTHING
+         RETURNING key`,
+        [idempotencyKey, merchantId, sha256(JSON.stringify(req.body))]
+    );
+
+    if (lock.rows.length === 0) {
+        // Another concurrent request already claimed this key
+        // Wait briefly and retry — it will hit the cache path above
+        await sleep(500);
+        return processPayment(req);  // recursive retry hits cached response
+    }
+
+    try {
+        // Step 4: Process the payment (call PSP, update ledger, etc.)
+        const result = await executePayment(req);
+
+        // Step 5: Store the response for future idempotent replays
+        await db.query(
+            `UPDATE idempotency_keys
+             SET payment_id = $1, response_code = $2, response_body = $3
+             WHERE key = $4`,
+            [result.paymentId, 200, JSON.stringify(result), idempotencyKey]
+        );
+
+        return result;
+    } catch (error) {
+        // If payment fails, store the error response too
+        // so retries get the same error (don't retry a declined card)
+        if (error instanceof DeclinedError) {
+            await db.query(
+                `UPDATE idempotency_keys SET response_code = $1, response_body = $2 WHERE key = $3`,
+                [400, JSON.stringify({ error: error.message }), idempotencyKey]
+            );
+        } else {
+            // For transient errors (timeout, 5xx), DELETE the idempotency key
+            // so the client can safely retry
+            await db.query('DELETE FROM idempotency_keys WHERE key = $1', [idempotencyKey]);
+        }
+        throw error;
+    }
+}</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The idempotency key + INSERT ON CONFLICT pattern is a distributed lock. If two identical requests arrive simultaneously, only one will successfully insert. The other will see the conflict, wait, and return the cached response. This guarantees exactly-once processing even under concurrent retries.
+      </div>
+
+      <h3 id="idempotency-key-rules">Idempotency Key Best Practices</h3>
+      <ul>
+        <li><strong>Client generates the key</strong> &mdash; Typically a UUID v4. The client must store this key and reuse it for retries of the same payment.</li>
+        <li><strong>Keys expire</strong> &mdash; 24 hours is typical. After expiry, the key can be reused (though it shouldn't be for the same payment).</li>
+        <li><strong>Hash the request body</strong> &mdash; Prevent misuse where the same key is sent with different payment amounts.</li>
+        <li><strong>Store the full response</strong> &mdash; Retries return the exact same response, including error responses for declined cards.</li>
+        <li><strong>Transient vs permanent failures</strong> &mdash; Delete the key on transient failures (timeout) so the client can retry. Keep the key on permanent failures (declined) so the client gets a consistent error.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           7. DOUBLE-ENTRY LEDGER
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="double-entry-ledger">Double-Entry Ledger</h2>
+
+      <p>The <strong>double-entry bookkeeping system</strong> is the foundation of every financial system since 15th-century Venice. The core rule is simple but inviolable:</p>
+
+      <div class="callout">
+        <strong>The Accounting Equation:</strong> <code>Assets = Liabilities + Equity</code><br>
+        Every transaction creates <strong>exactly two entries</strong>: a debit and a credit of equal amount. The ledger must always balance. If it doesn't, money has been lost or created from nothing — both are catastrophic.
+      </div>
+
+      <h3 id="debit-credit-rules">Debit and Credit Rules</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Account Type</th><th style="text-align:left; padding:0.5em;">Debit (DR) Increases</th><th style="text-align:left; padding:0.5em;">Credit (CR) Increases</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Asset</strong> (cash, receivables)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">✅ Yes</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">❌ (decreases)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Liability</strong> (payables, refunds owed)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">❌ (decreases)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">✅ Yes</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Revenue</strong> (fees earned)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">❌ (decreases)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">✅ Yes</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Expense</strong> (PSP fees, costs)</td><td style="padding:0.5em;">✅ Yes</td><td style="padding:0.5em;">❌ (decreases)</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="payment-ledger-example">Payment Example: Customer Pays $100</h3>
+      <p>When a customer pays $100 through our platform (with a 2.9% platform fee):</p>
+
+      <pre><code>Transaction: Customer pays $100 to Merchant
+Platform fee: 2.9% = $2.90
+Merchant receives: $97.10
+
+Ledger Entries (all within a single DB transaction):
+┌──────────────────────────┬───────┬────────┬────────┐
+│ Account                  │ Type  │ Debit  │ Credit │
+├──────────────────────────┼───────┼────────┼────────┤
+│ PSP Receivable (Asset)   │ ASSET │ $100.00│        │  ← PSP owes us $100
+│ Merchant Payable (Liab.) │ LIAB  │        │ $97.10 │  ← We owe merchant $97.10
+│ Platform Revenue (Rev.)  │ REV   │        │  $2.90 │  ← We earned $2.90
+├──────────────────────────┼───────┼────────┼────────┤
+│ TOTALS                   │       │ $100.00│ $100.00│  ← BALANCED ✓
+└──────────────────────────┴───────┴────────┴────────┘
+
+SQL:
+BEGIN;
+  -- Debit: PSP owes us the full amount
+  INSERT INTO ledger_entries (transaction_id, payment_id, account_id, entry_type, amount, currency, description)
+  VALUES ('txn-001', 'pay-001', 'acct_psp_receivable', 'D', 10000, 'USD', 'Payment received via Stripe');
+
+  -- Credit: We owe the merchant their share
+  INSERT INTO ledger_entries (transaction_id, payment_id, account_id, entry_type, amount, currency, description)
+  VALUES ('txn-001', 'pay-001', 'acct_merchant_payable', 'C', 9710, 'USD', 'Merchant payout for order #ORD-9901');
+
+  -- Credit: Our platform fee revenue
+  INSERT INTO ledger_entries (transaction_id, payment_id, account_id, entry_type, amount, currency, description)
+  VALUES ('txn-001', 'pay-001', 'acct_platform_revenue', 'C', 290, 'USD', 'Platform fee 2.9%');
+
+  -- Verify balance: total debits must equal total credits
+  -- This check runs as a DB constraint or application-level assertion
+COMMIT;</code></pre>
+
+      <h3 id="balance-verification">Balance Verification</h3>
+      <pre><code>-- This query must ALWAYS return 0. If it doesn't, you have a bug.
+SELECT
+    SUM(CASE WHEN entry_type = 'D' THEN amount ELSE 0 END) -
+    SUM(CASE WHEN entry_type = 'C' THEN amount ELSE 0 END) AS imbalance
+FROM ledger_entries
+WHERE transaction_id = 'txn-001';
+
+-- Result: 0 ✓ (10000 debits - 9710 - 290 credits = 0)
+
+
+-- Global balance check (run daily in reconciliation):
+SELECT
+    SUM(CASE WHEN entry_type = 'D' THEN amount ELSE 0 END) AS total_debits,
+    SUM(CASE WHEN entry_type = 'C' THEN amount ELSE 0 END) AS total_credits,
+    SUM(CASE WHEN entry_type = 'D' THEN amount ELSE 0 END) -
+    SUM(CASE WHEN entry_type = 'C' THEN amount ELSE 0 END) AS imbalance
+FROM ledger_entries;
+
+-- If imbalance ≠ 0, ALERT IMMEDIATELY. Money is missing or duplicated.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           ANIMATION 2: DOUBLE-ENTRY LEDGER
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h3 id="ledger-anim-section">Interactive: Double-Entry Ledger</h3>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="ledger-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="ledger-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="ledger-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="ledger-anim" viewBox="0 0 820 420" style="width:100%;max-width:820px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="ledger-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           8. PSP INTEGRATION — STRIPE API EXAMPLES
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="psp-integration">PSP Integration &mdash; Stripe API Examples</h2>
+
+      <p>Our system integrates with PSPs through an adapter pattern. Here is the Stripe integration in detail, including error handling and retry logic.</p>
+
+      <h3 id="stripe-payment-intent">Creating a Payment Intent (Stripe)</h3>
+      <pre><code>// Stripe uses the PaymentIntent API for the authorize → capture flow
+
+// Step 1: Create a PaymentIntent (authorization)
+const stripe = require('stripe')('sk_live_...');
+
+async function createPaymentIntent(req: InternalPaymentRequest) {
+    try {
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: req.amount,                    // 10000 = $100.00
+            currency: req.currency,                // 'usd'
+            payment_method: req.paymentMethodToken, // 'pm_card_visa' (tokenized)
+            confirm: true,                         // authorize immediately
+            capture_method: 'manual',              // hold funds, capture later
+            metadata: {
+                internal_payment_id: req.paymentId,
+                merchant_id: req.merchantId,
+                order_id: req.orderId,
+            },
+            idempotency_key: req.idempotencyKey,  // Stripe's built-in idempotency
+        }, {
+            idempotencyKey: req.idempotencyKey,    // header-level idempotency
+        });
+
+        return {
+            pspPaymentId: paymentIntent.id,        // 'pi_3N7vJ2...'
+            status: mapStripeStatus(paymentIntent.status),
+            authCode: paymentIntent.charges?.data[0]?.authorization_code,
+        };
+    } catch (error) {
+        if (error.type === 'StripeCardError') {
+            // Card declined — permanent failure
+            return { status: 'DECLINED', declineCode: error.decline_code };
+            // decline_code: 'insufficient_funds', 'stolen_card', 'expired_card'
+        }
+        if (error.type === 'StripeAPIError' || error.type === 'StripeConnectionError') {
+            // Transient — safe to retry with same idempotency key
+            throw new RetryableError(error.message);
+        }
+        throw error;
+    }
+}
+
+function mapStripeStatus(stripeStatus: string): string {
+    const mapping = {
+        'requires_payment_method': 'FAILED',
+        'requires_confirmation':   'CREATED',
+        'requires_action':         'PENDING_3DS',   // 3D Secure needed
+        'processing':              'PROCESSING',
+        'requires_capture':        'AUTHORIZED',     // funds held, ready to capture
+        'canceled':                'VOIDED',
+        'succeeded':               'CAPTURED',       // auto-captured payments
+    };
+    return mapping[stripeStatus] || 'UNKNOWN';
+}</code></pre>
+
+      <h3 id="stripe-capture">Capturing a Payment</h3>
+      <pre><code>// Step 2: Capture — transfer the held funds (called when order ships)
+
+async function capturePayment(pspPaymentId: string, amount?: number) {
+    try {
+        const captured = await stripe.paymentIntents.capture(pspPaymentId, {
+            amount_to_capture: amount,  // optional: partial capture
+        });
+
+        // Update our ledger
+        await ledger.recordCapture({
+            paymentId: captured.metadata.internal_payment_id,
+            amount: captured.amount_received,
+            currency: captured.currency,
+        });
+
+        return { status: 'CAPTURED', amountCaptured: captured.amount_received };
+    } catch (error) {
+        if (error.code === 'payment_intent_unexpected_state') {
+            // Already captured, expired, or canceled
+            // Check current state and reconcile
+            const current = await stripe.paymentIntents.retrieve(pspPaymentId);
+            return { status: mapStripeStatus(current.status) };
+        }
+        throw error;
+    }
+}
+
+
+// Step 3: Refund
+
+async function refundPayment(pspPaymentId: string, amount: number, reason: string) {
+    const refund = await stripe.refunds.create({
+        payment_intent: pspPaymentId,
+        amount: amount,             // partial refund amount in cents
+        reason: reason,             // 'requested_by_customer', 'duplicate', 'fraudulent'
+    });
+
+    // Record refund in ledger (reverse entries)
+    await ledger.recordRefund({
+        paymentId: refund.payment_intent,
+        refundId: refund.id,
+        amount: refund.amount,
+        currency: refund.currency,
+    });
+
+    return { refundId: refund.id, status: refund.status }; // 'succeeded' or 'pending'
+}</code></pre>
+
+      <h3 id="psp-adapter">PSP Adapter Pattern</h3>
+      <pre><code>// Common interface — all PSP adapters implement this
+interface PSPAdapter {
+    createPayment(req: PaymentRequest): Promise&lt;PSPPaymentResult&gt;;
+    capturePayment(pspId: string, amount?: number): Promise&lt;CaptureResult&gt;;
+    refundPayment(pspId: string, amount: number): Promise&lt;RefundResult&gt;;
+    getPaymentStatus(pspId: string): Promise&lt;PaymentStatus&gt;;
+}
+
+// Stripe adapter
+class StripeAdapter implements PSPAdapter { /* ... as above ... */ }
+
+// PayPal adapter
+class PayPalAdapter implements PSPAdapter {
+    async createPayment(req: PaymentRequest): Promise&lt;PSPPaymentResult&gt; {
+        // PayPal uses Orders API instead of PaymentIntents
+        const order = await paypal.orders.create({
+            intent: 'AUTHORIZE',
+            purchase_units: [{
+                amount: { currency_code: req.currency.toUpperCase(), value: (req.amount / 100).toFixed(2) },
+                reference_id: req.paymentId,
+            }],
+        });
+        return { pspPaymentId: order.id, status: mapPayPalStatus(order.status) };
+    }
+    // ... capture, refund, getStatus
+}
+
+// PSP router — selects the right adapter based on merchant config or payment method
+class PSPRouter {
+    private adapters: Map&lt;string, PSPAdapter&gt;;
+
+    async route(req: PaymentRequest): Promise&lt;PSPAdapter&gt; {
+        // Routing logic:
+        // 1. Check merchant preference (some merchants prefer specific PSPs)
+        // 2. Check payment method (PayPal for PayPal payments, Stripe for cards)
+        // 3. Check geographic optimization (Adyen for EU, Stripe for US)
+        // 4. Check PSP health (circuit breaker status)
+        const preferredPSP = req.merchantConfig.preferredPSP || 'stripe';
+        const adapter = this.adapters.get(preferredPSP);
+
+        if (!adapter || this.circuitBreaker.isOpen(preferredPSP)) {
+            return this.adapters.get(this.getFallbackPSP(preferredPSP));
+        }
+        return adapter;
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           9. HANDLING FAILURES
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="failure-handling">Handling Failures</h2>
+
+      <p>In payment systems, the failure modes are more important than the happy path. Every failure must be handled without losing money or double-charging customers.</p>
+
+      <h3 id="psp-timeout">Failure 1: PSP Timeout</h3>
+      <p>The most dangerous failure. You sent a payment request to Stripe. The network timed out after 30 seconds. <strong>Did the payment go through or not?</strong></p>
+
+      <pre><code>// WRONG: Don't just retry blindly!
+// If Stripe processed the first request, retrying without idempotency = double charge!
+
+// CORRECT: Check status first, then retry with idempotency key
+async function handlePSPTimeout(paymentId: string, idempotencyKey: string) {
+    // Step 1: Check if the PSP actually processed the payment
+    try {
+        const status = await pspAdapter.getPaymentStatus(paymentId);
+        if (status === 'AUTHORIZED' || status === 'CAPTURED') {
+            // Payment went through despite timeout — update our records
+            await updatePaymentStatus(paymentId, status);
+            return { status, message: 'Payment succeeded (recovered from timeout)' };
+        }
+        if (status === 'DECLINED') {
+            await updatePaymentStatus(paymentId, 'DECLINED');
+            return { status: 'DECLINED' };
+        }
+    } catch (checkError) {
+        // Can't even check status — PSP is completely down
+        console.error('PSP status check failed:', checkError);
+    }
+
+    // Step 2: If status unknown or PSP unreachable, retry with the SAME idempotency key
+    // The idempotency key guarantees the PSP won't process it twice
+    try {
+        const result = await pspAdapter.createPayment({
+            ...originalRequest,
+            idempotencyKey: idempotencyKey,  // SAME key as original attempt
+        });
+        return result;
+    } catch (retryError) {
+        // Step 3: If retry also fails, mark payment as PENDING_REVIEW
+        // A human or reconciliation process will resolve it
+        await updatePaymentStatus(paymentId, 'PENDING_REVIEW');
+        await alertOpsTeam({
+            type: 'PSP_TIMEOUT_UNRESOLVED',
+            paymentId,
+            message: 'Payment in unknown state after PSP timeout and retry failure',
+        });
+        return { status: 'PENDING_REVIEW' };
+    }
+}</code></pre>
+
+      <h3 id="network-failure">Failure 2: Network Failure (Between Client and Our Service)</h3>
+      <pre><code>// The merchant's server sends us a payment request.
+// Our service processes it and sends back the response.
+// The response is lost due to network failure.
+// The merchant never gets the response.
+
+// Without idempotency:
+// Merchant retries → we process AGAIN → customer charged TWICE!
+
+// With idempotency:
+// Merchant retries with SAME idempotency key →
+// We find the cached response → return it immediately →
+// Customer charged ONCE ✓
+
+// This is why EVERY payment API must support idempotency keys.
+// It's not a nice-to-have. It's a correctness requirement.</code></pre>
+
+      <h3 id="bank-decline">Failure 3: Bank Declines the Transaction</h3>
+      <pre><code>// The issuing bank declines the transaction.
+// Common decline codes (Stripe):
+
+const DECLINE_CODES = {
+    'insufficient_funds':     'Card has insufficient funds',
+    'lost_card':              'Card reported lost',
+    'stolen_card':            'Card reported stolen',
+    'expired_card':           'Card has expired',
+    'incorrect_cvc':          'CVC verification failed',
+    'processing_error':       'Bank processing error — may be retried',
+    'do_not_honor':           'Bank refuses (generic) — do not retry',
+    'fraudulent':             'Bank suspects fraud',
+    'withdrawal_count_limit': 'Daily transaction limit exceeded',
+};
+
+async function handleDecline(paymentId: string, declineCode: string) {
+    // Update payment status
+    await db.query(
+        'UPDATE payments SET status = $1, updated_at = NOW() WHERE id = $2',
+        ['DECLINED', paymentId]
+    );
+
+    // Store the decline in idempotency cache
+    // so retries with same key get the same decline (not a new attempt)
+    await cacheDeclineResponse(paymentId, declineCode);
+
+    // Notify the merchant via webhook
+    await webhookDispatcher.send(merchantId, {
+        type: 'payment.declined',
+        payment_id: paymentId,
+        decline_code: declineCode,
+        message: DECLINE_CODES[declineCode] || 'Payment declined by bank',
+        retryable: declineCode === 'processing_error',  // only this one is retryable
+    });
+
+    // For 'processing_error' ONLY: schedule an automatic retry after 1 hour
+    if (declineCode === 'processing_error') {
+        await retryQueue.enqueue({
+            paymentId,
+            retryAt: Date.now() + 3600000,  // 1 hour
+            maxRetries: 3,
+            currentRetry: 0,
+        });
+    }
+}</code></pre>
+
+      <h3 id="retry-strategy">Retry Strategy with Exponential Backoff</h3>
+      <pre><code>class PaymentRetryPolicy {
+    // Only retry on transient failures. NEVER retry on:
+    // - Card declined (insufficient funds, stolen, expired)
+    // - Invalid request (bad amount, missing fields)
+    // - Authentication failure (bad API key)
+
+    private static RETRYABLE_ERRORS = new Set([
+        'StripeAPIError',           // 500 from Stripe
+        'StripeConnectionError',    // Network timeout
+        'ECONNRESET',               // TCP connection reset
+        'ETIMEDOUT',                // Connection timeout
+    ]);
+
+    static shouldRetry(error: Error, attempt: number): boolean {
+        if (attempt >= 3) return false;  // max 3 retries
+        return this.RETRYABLE_ERRORS.has(error.name || error.code);
+    }
+
+    static getDelay(attempt: number): number {
+        // Exponential backoff with jitter
+        const baseDelay = 1000;  // 1 second
+        const maxDelay = 30000;  // 30 seconds
+        const exponential = baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 1000;
+        return Math.min(exponential + jitter, maxDelay);
+        // Attempt 0: ~1s, Attempt 1: ~2s, Attempt 2: ~4s
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           10. WEBHOOK HANDLING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="webhooks">Webhook Handling</h2>
+
+      <p>PSPs send asynchronous notifications (webhooks) for events that happen outside of direct API calls: successful settlements, disputes, chargebacks, and refund completions. Reliable webhook handling is critical.</p>
+
+      <h3 id="webhook-receiving">Receiving Webhooks from Stripe</h3>
+      <pre><code>const express = require('express');
+const stripe = require('stripe')('sk_live_...');
+
+// Webhook endpoint — receives POST from Stripe
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;  // 'whsec_...'
+
+    let event;
+    try {
+        // Step 1: VERIFY the webhook signature (CRITICAL for security)
+        // Prevents attackers from sending fake webhook events
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+        console.error('Webhook signature verification failed:', err.message);
+        return res.status(400).send('Invalid signature');
+    }
+
+    // Step 2: Deduplicate — check if we've already processed this event
+    const alreadyProcessed = await db.query(
+        'SELECT id FROM processed_webhooks WHERE event_id = $1',
+        [event.id]
+    );
+    if (alreadyProcessed.rows.length > 0) {
+        console.log(`Webhook ${event.id} already processed, skipping`);
+        return res.status(200).json({ received: true });  // Return 200 to stop retries
+    }
+
+    // Step 3: Process the event based on type
+    try {
+        switch (event.type) {
+            case 'payment_intent.succeeded':
+                await handlePaymentSucceeded(event.data.object);
+                break;
+            case 'payment_intent.payment_failed':
+                await handlePaymentFailed(event.data.object);
+                break;
+            case 'charge.dispute.created':
+                await handleDisputeCreated(event.data.object);
+                break;
+            case 'charge.refunded':
+                await handleRefundCompleted(event.data.object);
+                break;
+            case 'payout.paid':
+                await handleSettlementReceived(event.data.object);
+                break;
+            default:
+                console.log(`Unhandled webhook type: ${event.type}`);
+        }
+
+        // Step 4: Mark as processed
+        await db.query(
+            'INSERT INTO processed_webhooks (event_id, event_type, processed_at) VALUES ($1, $2, NOW())',
+            [event.id, event.type]
+        );
+
+        res.status(200).json({ received: true });
+    } catch (processingError) {
+        console.error(`Error processing webhook ${event.id}:`, processingError);
+        // Return 500 so Stripe retries the webhook
+        // Stripe retries up to 3 days with exponential backoff
+        res.status(500).json({ error: 'Processing failed, will retry' });
+    }
+});
+
+
+async function handlePaymentSucceeded(paymentIntent) {
+    const internalPaymentId = paymentIntent.metadata.internal_payment_id;
+
+    await db.query(
+        'UPDATE payments SET status = $1, captured_at = NOW(), updated_at = NOW() WHERE id = $2',
+        ['CAPTURED', internalPaymentId]
+    );
+
+    // Notify our merchant via our own webhook system
+    await webhookDispatcher.send(paymentIntent.metadata.merchant_id, {
+        type: 'payment.succeeded',
+        payment_id: internalPaymentId,
+        amount: paymentIntent.amount_received,
+        currency: paymentIntent.currency,
+    });
+}
+
+async function handleDisputeCreated(dispute) {
+    // A customer disputed (chargeback) a payment.
+    // The merchant has ~7 days to respond with evidence.
+    const paymentId = dispute.payment_intent;
+
+    await db.query(
+        'UPDATE payments SET status = $1, updated_at = NOW() WHERE psp_payment_id = $2',
+        ['DISPUTED', paymentId]
+    );
+
+    // Create a ledger hold — the disputed amount is frozen
+    await ledger.recordDispute({
+        paymentId,
+        amount: dispute.amount,
+        currency: dispute.currency,
+    });
+
+    // URGENT notification to merchant
+    await webhookDispatcher.send(merchantId, {
+        type: 'payment.disputed',
+        dispute_id: dispute.id,
+        amount: dispute.amount,
+        reason: dispute.reason,          // 'fraudulent', 'product_not_received', etc.
+        evidence_due_by: dispute.evidence_details.due_by,
+    });
+}</code></pre>
+
+      <h3 id="sending-webhooks">Sending Webhooks to Merchants</h3>
+      <pre><code>class WebhookDispatcher {
+    // Our merchants register webhook URLs: https://merchant.com/webhooks/payments
+
+    async send(merchantId: string, payload: WebhookPayload): Promise&lt;void&gt; {
+        const merchant = await db.query(
+            'SELECT webhook_url, webhook_secret FROM merchants WHERE id = $1',
+            [merchantId]
+        );
+
+        if (!merchant.rows[0]?.webhook_url) return;
+
+        const { webhook_url, webhook_secret } = merchant.rows[0];
+
+        // Sign the payload with HMAC-SHA256
+        const timestamp = Math.floor(Date.now() / 1000);
+        const payloadStr = JSON.stringify(payload);
+        const signature = crypto
+            .createHmac('sha256', webhook_secret)
+            .update(`${timestamp}.${payloadStr}`)
+            .digest('hex');
+
+        // Enqueue for reliable delivery
+        await webhookQueue.enqueue({
+            id: uuidv4(),
+            merchantId,
+            url: webhook_url,
+            payload: payloadStr,
+            signature: `t=${timestamp},v1=${signature}`,
+            attempts: 0,
+            maxAttempts: 5,
+            nextRetryAt: Date.now(),
+        });
+    }
+}
+
+// Webhook delivery worker (processes the queue)
+async function deliverWebhook(job: WebhookJob): Promise&lt;void&gt; {
+    try {
+        const response = await fetch(job.url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Webhook-Signature': job.signature,
+                'X-Webhook-Id': job.id,
+            },
+            body: job.payload,
+            signal: AbortSignal.timeout(10000),  // 10s timeout
+        });
+
+        if (response.status >= 200 && response.status < 300) {
+            await markWebhookDelivered(job.id);
+        } else {
+            throw new Error(`Webhook returned ${response.status}`);
+        }
+    } catch (error) {
+        job.attempts++;
+        if (job.attempts >= job.maxAttempts) {
+            await markWebhookFailed(job.id);
+            await alertOpsTeam({ type: 'WEBHOOK_DELIVERY_FAILED', jobId: job.id });
+        } else {
+            // Exponential backoff: 1min, 5min, 25min, 2hrs, 10hrs
+            const delays = [60, 300, 1500, 7200, 36000];
+            job.nextRetryAt = Date.now() + delays[job.attempts - 1] * 1000;
+            await webhookQueue.reschedule(job);
+        }
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           11. REFUND FLOW
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="refund-flow">Refund Flow</h2>
+
+      <p>Refunds reverse the original payment. In a double-entry ledger, a refund creates new <em>reversing entries</em> &mdash; we never delete or modify the original entries.</p>
+
+      <pre><code>async function processRefund(paymentId: string, amount: number, reason: string) {
+    // Step 1: Validate the refund
+    const payment = await db.query('SELECT * FROM payments WHERE id = $1', [paymentId]);
+    if (!payment.rows[0]) throw new Error('Payment not found');
+
+    const pay = payment.rows[0];
+    if (pay.status !== 'CAPTURED' && pay.status !== 'PARTIALLY_REFUNDED') {
+        throw new Error(`Cannot refund payment in status: ${pay.status}`);
+    }
+
+    // Check total refunds don't exceed original amount
+    const totalRefunded = await db.query(
+        "SELECT COALESCE(SUM(amount), 0) as total FROM refunds WHERE payment_id = $1 AND status = 'SUCCEEDED'",
+        [paymentId]
+    );
+    if (totalRefunded.rows[0].total + amount > pay.amount) {
+        throw new Error('Refund amount exceeds original payment');
+    }
+
+    // Step 2: Create refund record
+    const refundId = uuidv4();
+    await db.query(
+        'INSERT INTO refunds (id, payment_id, amount, reason, status) VALUES ($1, $2, $3, $4, $5)',
+        [refundId, paymentId, amount, reason, 'PROCESSING']
+    );
+
+    // Step 3: Call PSP to process refund
+    const pspResult = await pspAdapter.refundPayment(pay.psp_payment_id, amount);
+
+    // Step 4: Record REVERSING ledger entries
+    await ledger.recordRefund(paymentId, refundId, amount, pay.currency);
+
+    // Step 5: Update statuses
+    const newStatus = (totalRefunded.rows[0].total + amount === pay.amount)
+        ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+
+    await db.query(
+        'UPDATE payments SET status = $1, updated_at = NOW() WHERE id = $2',
+        [newStatus, paymentId]
+    );
+    await db.query(
+        'UPDATE refunds SET status = $1, psp_refund_id = $2, completed_at = NOW() WHERE id = $3',
+        ['SUCCEEDED', pspResult.refundId, refundId]
+    );
+
+    return { refundId, status: 'SUCCEEDED', amount };
+}</code></pre>
+
+      <h3 id="refund-ledger">Refund Ledger Entries</h3>
+      <pre><code>Refund $100: Reverse the original payment entries
+
+Original payment entries:
+  DR  PSP Receivable     $100.00
+  CR  Merchant Payable    $97.10
+  CR  Platform Revenue     $2.90
+
+Refund reversal entries:
+┌──────────────────────────┬───────┬────────┬────────┐
+│ Account                  │ Type  │ Debit  │ Credit │
+├──────────────────────────┼───────┼────────┼────────┤
+│ Merchant Payable (Liab.) │ LIAB  │ $97.10 │        │  ← We no longer owe merchant
+│ Platform Revenue (Rev.)  │ REV   │  $2.90 │        │  ← Reverse our fee
+│ PSP Receivable (Asset)   │ ASSET │        │ $100.00│  ← PSP no longer owes us
+├──────────────────────────┼───────┼────────┼────────┤
+│ TOTALS                   │       │ $100.00│ $100.00│  ← BALANCED ✓
+└──────────────────────────┴───────┴────────┴────────┘
+
+After refund, the net effect across both transactions is $0.00 on every account.
+This is the beauty of double-entry: refunds are just mirror-image entries.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           12. RECONCILIATION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="reconciliation">Reconciliation</h2>
+
+      <p>Reconciliation is the process of comparing our internal ledger against PSP settlement reports to ensure they match. It's the financial safety net that catches bugs, fraud, and integration errors.</p>
+
+      <h3 id="recon-process">The Reconciliation Process</h3>
+      <pre><code>// Reconciliation runs daily at 2 AM UTC
+
+class ReconciliationService {
+    async runDailyReconciliation(date: string): Promise&lt;ReconReport&gt; {
+        const report: ReconReport = {
+            date,
+            matched: 0,
+            mismatched: 0,
+            missingInLedger: 0,
+            missingInPSP: 0,
+            discrepancies: [],
+        };
+
+        // Step 1: Fetch PSP settlement report for the day
+        // Stripe provides this via the Balance Transactions API
+        const pspTransactions = await stripe.balanceTransactions.list({
+            created: {
+                gte: Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000),
+                lt: Math.floor(new Date(`${date}T23:59:59Z`).getTime() / 1000),
+            },
+            limit: 100,  // paginate for more
+            type: 'charge',
+        });
+
+        // Step 2: Fetch our internal ledger entries for the same day
+        const internalTransactions = await db.query(
+            `SELECT p.id, p.amount, p.currency, p.psp_payment_id, p.status,
+                    SUM(CASE WHEN le.entry_type = 'D' THEN le.amount ELSE 0 END) as total_debits,
+                    SUM(CASE WHEN le.entry_type = 'C' THEN le.amount ELSE 0 END) as total_credits
+             FROM payments p
+             LEFT JOIN ledger_entries le ON le.payment_id = p.id
+             WHERE p.created_at >= $1 AND p.created_at < $2
+             GROUP BY p.id`,
+            [`${date}T00:00:00Z`, `${date}T23:59:59Z`]
+        );
+
+        // Step 3: Match PSP transactions with internal records
+        const internalMap = new Map(internalTransactions.rows.map(r => [r.psp_payment_id, r]));
+        const pspMap = new Map(pspTransactions.data.map(t => [t.source, t]));
+
+        // Check every PSP transaction has a matching internal record
+        for (const pspTxn of pspTransactions.data) {
+            const internal = internalMap.get(pspTxn.source);
+
+            if (!internal) {
+                report.missingInLedger++;
+                report.discrepancies.push({
+                    type: 'MISSING_IN_LEDGER',
+                    pspId: pspTxn.source,
+                    pspAmount: pspTxn.amount,
+                    severity: 'HIGH',
+                    // PSP charged the customer but we have no record!
+                });
+                continue;
+            }
+
+            // Compare amounts
+            if (internal.amount !== pspTxn.amount) {
+                report.mismatched++;
+                report.discrepancies.push({
+                    type: 'AMOUNT_MISMATCH',
+                    paymentId: internal.id,
+                    pspId: pspTxn.source,
+                    internalAmount: internal.amount,
+                    pspAmount: pspTxn.amount,
+                    difference: internal.amount - pspTxn.amount,
+                    severity: 'CRITICAL',
+                });
+                continue;
+            }
+
+            // Verify ledger balances (debits = credits for this payment)
+            if (internal.total_debits !== internal.total_credits) {
+                report.discrepancies.push({
+                    type: 'LEDGER_IMBALANCE',
+                    paymentId: internal.id,
+                    debits: internal.total_debits,
+                    credits: internal.total_credits,
+                    severity: 'CRITICAL',
+                });
+                continue;
+            }
+
+            report.matched++;
+        }
+
+        // Check for internal records with no PSP match
+        for (const [pspId, internal] of internalMap) {
+            if (!pspMap.has(pspId) && internal.status === 'CAPTURED') {
+                report.missingInPSP++;
+                report.discrepancies.push({
+                    type: 'MISSING_IN_PSP',
+                    paymentId: internal.id,
+                    internalAmount: internal.amount,
+                    severity: 'HIGH',
+                    // We think we captured, but PSP has no record!
+                });
+            }
+        }
+
+        // Step 4: Alert on discrepancies
+        if (report.discrepancies.length > 0) {
+            await alertFinanceTeam(report);
+        }
+
+        // Step 5: Store the report
+        await db.query(
+            'INSERT INTO reconciliation_reports (date, report_json) VALUES ($1, $2)',
+            [date, JSON.stringify(report)]
+        );
+
+        return report;
+    }
+}</code></pre>
+
+      <div class="callout">
+        <strong>Real-world insight:</strong> Even well-built payment systems have a small discrepancy rate (0.01–0.1%). Common causes include: PSP settlement timing differences (T+2 vs your T+1 cutoff), currency conversion rounding, partial captures, and race conditions between webhooks and batch settlement files. The reconciliation system must handle these gracefully &mdash; not all discrepancies are bugs.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           13. PCI DSS COMPLIANCE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="pci-compliance">PCI DSS Compliance</h2>
+
+      <p><strong>PCI DSS (Payment Card Industry Data Security Standard)</strong> is a mandatory security standard for any system that handles credit card data. Non-compliance can result in fines of $5,000–$100,000 per month and the inability to process card payments.</p>
+
+      <h3 id="pci-levels">PCI Compliance Levels</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Level</th><th style="text-align:left; padding:0.5em;">Criteria</th><th style="text-align:left; padding:0.5em;">Validation</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Level 1</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&gt; 6 million transactions/year</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Annual on-site audit by QSA</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Level 2</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1–6 million transactions/year</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Self-Assessment Questionnaire (SAQ)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Level 3</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">20,000–1 million e-commerce</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">SAQ + quarterly network scan</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Level 4</strong></td><td style="padding:0.5em;">&lt; 20,000 e-commerce</td><td style="padding:0.5em;">SAQ (simplified)</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="tokenization">Tokenization: Never Touch Raw Card Numbers</h3>
+      <pre><code>// THE GOLDEN RULE: Raw card numbers (PAN) never touch our servers.
+// The customer's browser sends card data DIRECTLY to the PSP (Stripe.js / Stripe Elements).
+// We receive a token that represents the card.
+
+// Frontend (customer's browser):
+// Stripe Elements collects card data and returns a token
+const { paymentMethod } = await stripe.createPaymentMethod({
+    type: 'card',
+    card: cardElement,  // Stripe Elements UI component
+    billing_details: { name: 'Alice Johnson' },
+});
+// paymentMethod.id = 'pm_1N7vJ2...' (this is a TOKEN, not a card number)
+
+// Our server ONLY receives the token — never the actual card number
+// 'pm_1N7vJ2...' → represents card 4242 **** **** 4242 inside Stripe's vault
+
+// Backend (our server):
+app.post('/api/payments', async (req, res) => {
+    const { paymentMethodToken, amount, currency } = req.body;
+
+    // paymentMethodToken = 'pm_1N7vJ2...' — a safe, non-sensitive token
+    // We NEVER see: card number, CVV, expiry date
+
+    const payment = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: currency,
+        payment_method: paymentMethodToken,  // pass the token to Stripe
+        confirm: true,
+    });
+});
+
+// Data flow:
+//
+//  Customer Browser                    Our Server           Stripe
+//  ─────────────────                   ──────────           ──────
+//  Card: 4242424242424242     ────────────────────────────→ Stores card
+//  CVV: 123, Exp: 12/28                                    Returns token
+//  ←───────────────────────────────────────────────────────
+//  Token: pm_1N7vJ2...       ─────→ Receives token ──────→ Charges card
+//                                   (no card data!)         using token
+//
+// Our server NEVER sees the raw card number. PCI scope = minimal (SAQ-A).</code></pre>
+
+      <h3 id="pci-requirements">Key PCI DSS Requirements</h3>
+      <ul>
+        <li><strong>Requirement 3: Protect stored cardholder data</strong> &mdash; With tokenization, we don't store any. Our PCI scope is minimal (SAQ-A or SAQ A-EP).</li>
+        <li><strong>Requirement 4: Encrypt transmission</strong> &mdash; All communication uses TLS 1.2+. No card data over HTTP. Certificate pinning for PSP connections.</li>
+        <li><strong>Requirement 6: Develop secure systems</strong> &mdash; Code reviews, dependency scanning, no storing tokens in logs, parameterized SQL queries.</li>
+        <li><strong>Requirement 8: Identify and authenticate access</strong> &mdash; MFA for all admin access, unique user IDs, strong passwords, API key rotation every 90 days.</li>
+        <li><strong>Requirement 10: Track and monitor all access</strong> &mdash; Log every access to cardholder data environment. Centralized logging with 1-year retention. Real-time alerting on suspicious activity.</li>
+        <li><strong>Requirement 11: Regular security testing</strong> &mdash; Quarterly vulnerability scans, annual penetration tests, WAF in front of payment APIs.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Pro tip:</strong> Use Stripe Elements or Stripe.js to collect card data on the frontend. This means card numbers never touch your servers, reducing your PCI scope from SAQ-D (300+ requirements) to SAQ-A (22 requirements). This is by far the easiest path to PCI compliance.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           14. MULTI-CURRENCY HANDLING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="multi-currency">Multi-Currency Handling</h2>
+
+      <pre><code>// Rule 1: Always store amounts in the SMALLEST currency unit (cents, pence, yen)
+// This avoids floating-point precision errors
+
+// WRONG:
+amount = 19.99;   // floating-point: 19.99 * 100 = 1998.9999999999998
+
+// CORRECT:
+amount = 1999;    // $19.99 stored as 1999 cents — integer, precise
+
+
+// Rule 2: Currency-specific smallest units
+const CURRENCY_DECIMALS = {
+    'USD': 2,   // $1.00 = 100 cents
+    'EUR': 2,   // €1.00 = 100 cents
+    'GBP': 2,   // £1.00 = 100 pence
+    'JPY': 0,   // ¥1 = 1 (no decimal subdivision)
+    'BHD': 3,   // 1 BHD = 1000 fils (3 decimal places!)
+};
+
+function toSmallestUnit(amount: number, currency: string): number {
+    const decimals = CURRENCY_DECIMALS[currency.toUpperCase()] ?? 2;
+    return Math.round(amount * Math.pow(10, decimals));
+}
+// toSmallestUnit(19.99, 'USD') = 1999
+// toSmallestUnit(1000, 'JPY') = 1000 (already smallest unit)
+
+
+// Rule 3: Currency conversion at capture time
+// Authorization may be in EUR, but settlement is in USD
+// Use the exchange rate at the moment of capture, not authorization
+
+async function convertCurrency(amount: number, from: string, to: string): Promise&lt;number&gt; {
+    const rate = await exchangeRateService.getRate(from, to);
+    // rate = 1.08 for EUR → USD
+
+    // Convert and round to smallest unit of target currency
+    const converted = Math.round(amount * rate);
+
+    // Store the conversion for audit trail
+    await db.query(
+        `INSERT INTO currency_conversions (original_amount, original_currency,
+         converted_amount, converted_currency, exchange_rate, converted_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [amount, from, converted, to, rate]
+    );
+
+    return converted;
+}
+
+// Rule 4: Separate ledger accounts per currency
+// Don't mix USD and EUR in the same account!
+// Account: 'merchant_payable_USD', 'merchant_payable_EUR', etc.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           15. PAYMENT STATE MACHINE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="state-machine">Payment State Machine</h2>
+
+      <pre><code>Payment Status Transitions:
+
+  ┌─────────┐
+  │ CREATED │─────────────────────────────────┐
+  └────┬────┘                                 │
+       │ authorize()                          │ decline
+       ▼                                      ▼
+  ┌────────────┐                        ┌──────────┐
+  │ AUTHORIZED │                        │ DECLINED │ (terminal)
+  └─────┬──────┘                        └──────────┘
+        │
+   ┌────┴─────┐
+   │          │
+   │ capture()│ void()
+   ▼          ▼
+┌──────────┐  ┌────────┐
+│ CAPTURED │  │ VOIDED │ (terminal: auth expired or cancelled)
+└────┬─────┘  └────────┘
+     │
+     │ settle()                    refund()
+     ▼                          ┌─────────────────┐
+┌─────────┐    full refund      │                 │
+│ SETTLED │───────────────────→ │    REFUNDED     │ (terminal)
+└────┬────┘                     └─────────────────┘
+     │         partial refund
+     └───────────────────────→ PARTIALLY_REFUNDED ──→ REFUNDED
+
+
+Valid transitions (enforced in code):
+  CREATED     → AUTHORIZED, DECLINED, FAILED
+  AUTHORIZED  → CAPTURED, VOIDED
+  CAPTURED    → SETTLED, REFUNDED, PARTIALLY_REFUNDED, DISPUTED
+  SETTLED     → REFUNDED, PARTIALLY_REFUNDED
+  DISPUTED    → CAPTURED (dispute won), REFUNDED (dispute lost)
+
+Invalid transitions (throw error):
+  DECLINED    → anything (terminal state)
+  VOIDED      → anything (terminal state)
+  REFUNDED    → anything (terminal state)</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           16. KEY TAKEAWAYS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="takeaways">Key Takeaways</h2>
+      <ul>
+        <li><strong>Idempotency is non-negotiable.</strong> Every payment operation must use idempotency keys. Without it, network failures cause double charges. This is the #1 correctness requirement.</li>
+        <li><strong>Double-entry ledger is the source of truth.</strong> Every cent must be accounted for with balanced debit/credit entries. The ledger is append-only and immutable. Run balance checks constantly.</li>
+        <li><strong>Three phases:</strong> Authorization (hold funds) → Capture (transfer funds) → Settlement (money moves between banks, T+2 days). Each phase can fail independently.</li>
+        <li><strong>Never store raw card numbers.</strong> Use PSP tokenization (Stripe Elements). This reduces PCI scope from 300+ requirements to ~22. Let the PSP handle the hard security.</li>
+        <li><strong>Reconciliation is your safety net.</strong> Compare internal ledger vs PSP settlement daily. Flag discrepancies. Even perfect systems have small mismatches due to timing and rounding.</li>
+        <li><strong>Handle every failure mode explicitly.</strong> PSP timeout? Check status, then retry with idempotency key. Bank decline? Cache the decline, don't retry. Network failure? Client retries with same idempotency key.</li>
+        <li><strong>Webhooks need deduplication and signature verification.</strong> PSPs send events asynchronously. Verify signatures to prevent fake events. Deduplicate by event ID. Retry on failure with exponential backoff.</li>
+        <li><strong>Multi-currency: use smallest unit integers.</strong> Never use floating-point for money. Store in cents/pence. Convert at capture time, not authorization time. Separate ledger accounts per currency.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="web-crawler.html"><span>Previous</span><span>&#8592; Design: Web Crawler</span></a>
+        <a class="next" href="hotel-reservation.html"><span>Next</span><span>Design: Hotel Reservation &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  // ═══════════════════════════════════════════════════════════════════════
+  // ANIMATION 1: Payment Transaction Flow
+  // ═══════════════════════════════════════════════════════════════════════
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+
+    var svg=document.getElementById('payment-anim');
+    var info=document.getElementById('payment-info');
+    var out=document.getElementById('payment-output');
+    var step=0;
+    var totalSteps=9;
+
+    // Entity positions
+    var entities=[
+      {label:'Customer',     short:'CUST', x:20,  color:'#6366f1'},
+      {label:'Merchant',     short:'MERCH',x:150, color:'#8b5cf6'},
+      {label:'Payment\nService',short:'PAY', x:280, color:'#0a8f6a'},
+      {label:'PSP\n(Stripe)',short:'PSP',  x:410, color:'#f59e0b'},
+      {label:'Card\nNetwork',short:'VISA', x:540, color:'#e74c3c'},
+      {label:'Issuing\nBank',short:'BANK', x:670, color:'#3b82f6'}
+    ];
+    var boxW=110, boxH=50, topY=30;
+
+    // Steps: arrow from → to, message, direction
+    var steps=[
+      {from:0,to:1,msg:'Checkout: Pay $100',     dir:'right', phase:'AUTHORIZATION'},
+      {from:1,to:2,msg:'POST /v1/payments',       dir:'right', phase:'AUTHORIZATION'},
+      {from:2,to:3,msg:'paymentIntents.create()', dir:'right', phase:'AUTHORIZATION'},
+      {from:3,to:4,msg:'Auth request $100',        dir:'right', phase:'AUTHORIZATION'},
+      {from:4,to:5,msg:'Verify funds & fraud',     dir:'right', phase:'AUTHORIZATION'},
+      {from:5,to:0,msg:'✓ Approved (AUTH-7X92)',   dir:'left',  phase:'AUTHORIZATION'},
+      {from:2,to:3,msg:'capture(AUTH-7X92)',       dir:'right', phase:'CAPTURE'},
+      {from:5,to:2,msg:'$100 transferred (T+0)',   dir:'left',  phase:'SETTLEMENT'},
+    ];
+
+    var msgs=[
+      'Click Step to walk through a $100 card payment flow. Six parties involved.',
+      'Step 1 — Customer clicks "Pay $100" on merchant checkout page.',
+      'Step 2 — Merchant sends POST /v1/payments with idempotency key to our Payment Service.',
+      'Step 3 — Payment Service calls Stripe\'s paymentIntents.create() API with tokenized card.',
+      'Step 4 — Stripe forwards the authorization request to Visa card network.',
+      'Step 5 — Visa routes to customer\'s issuing bank. Bank checks: funds? fraud? limits?',
+      'Step 6 — Bank APPROVES. Auth code AUTH-7X92 flows back through all parties to customer. Funds are HELD (not moved yet).',
+      'Step 7 — CAPTURE: When order ships, Payment Service calls capture(). Stripe converts the hold into a real charge.',
+      'Step 8 — SETTLEMENT (T+2 days): Issuing bank transfers $100 → card network → PSP → our account. Minus fees: merchant receives $97.10.',
+    ];
+
+    function draw(){
+      while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+      // Phase banner
+      if(step>0){
+        var phase=step<=6?'AUTHORIZATION':step===7?'CAPTURE':'SETTLEMENT';
+        var phaseColor=phase==='AUTHORIZATION'?'#6366f1':phase==='CAPTURE'?'#f59e0b':'#0a8f6a';
+        svg.appendChild(el('rect',{x:'300',y:'5',width:phase.length*12+20+'',height:'22',rx:'6',fill:phaseColor,opacity:'0.15'}));
+        svg.appendChild(txt('Phase: '+phase,{x:'310',y:'20','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:phaseColor}));
+      }
+
+      // Draw entity boxes
+      for(var i=0;i<entities.length;i++){
+        var ent=entities[i];
+        var active=false;
+        if(step>0){
+          var s=steps[step-1];
+          if(s)active=(i===s.from||i===s.to);
+        }
+
+        svg.appendChild(el('rect',{x:''+ent.x,y:''+topY,width:''+boxW,height:''+boxH,rx:'10',fill:ent.color,opacity:active?'0.2':'0.08'}));
+        svg.appendChild(el('rect',{x:''+ent.x,y:''+topY,width:''+boxW,height:''+boxH,rx:'10',fill:'none',stroke:ent.color,'stroke-width':active?'2.5':'1.5'}));
+
+        // Label (handle multiline)
+        var lines=ent.label.split('\n');
+        for(var ln=0;ln<lines.length;ln++){
+          svg.appendChild(txt(lines[ln],{x:''+(ent.x+boxW/2),y:''+(topY+22+ln*16),'text-anchor':'middle','dominant-baseline':'central','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:ent.color}));
+        }
+
+        // Vertical timeline line
+        svg.appendChild(el('line',{x1:''+(ent.x+boxW/2),y1:''+(topY+boxH),x2:''+(ent.x+boxW/2),y2:'350',stroke:ent.color,'stroke-width':'1','stroke-dasharray':'4,4',opacity:'0.3'}));
+      }
+
+      // Draw all arrows up to current step
+      for(var s=0;s<step;s++){
+        var st=steps[s];
+        if(!st)continue;
+        var isCurrent=(s===step-1);
+        var fromX=entities[st.from].x+boxW/2;
+        var toX=entities[st.to].x+boxW/2;
+        var arrowY=topY+boxH+30+s*32;
+
+        var arrowColor=isCurrent?'#0a8f6a':'var(--ink-muted)';
+        var arrowOp=isCurrent?'1':'0.4';
+
+        // Arrow line
+        svg.appendChild(el('line',{x1:''+fromX,y1:''+arrowY,x2:''+toX,y2:''+arrowY,stroke:arrowColor,'stroke-width':isCurrent?'2.5':'1.5',opacity:arrowOp,'marker-end':'none'}));
+
+        // Arrowhead
+        var ahX=st.dir==='right'?toX-8:toX+8;
+        var ahY1=arrowY-5, ahY2=arrowY+5;
+        svg.appendChild(el('polygon',{points:toX+','+arrowY+' '+ahX+','+ahY1+' '+ahX+','+ahY2,fill:arrowColor,opacity:arrowOp}));
+
+        // Label on arrow
+        var midX=(fromX+toX)/2;
+        svg.appendChild(txt(st.msg,{x:''+midX,y:''+(arrowY-8),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':isCurrent?'11':'10','font-weight':isCurrent?'700':'400',fill:isCurrent?'var(--ink)':'var(--ink-muted)'}));
+
+        // Timing dots at source and target
+        svg.appendChild(el('circle',{cx:''+fromX,cy:''+arrowY,r:isCurrent?'4':'2.5',fill:arrowColor,opacity:arrowOp}));
+        svg.appendChild(el('circle',{cx:''+toX,cy:''+arrowY,r:isCurrent?'4':'2.5',fill:arrowColor,opacity:arrowOp}));
+      }
+
+      // Settlement summary box (final step)
+      if(step>=8){
+        var sumY=305;
+        svg.appendChild(el('rect',{x:'140',y:''+sumY,width:'540',height:'55',rx:'10',fill:'#0a8f6a',opacity:'0.08'}));
+        svg.appendChild(el('rect',{x:'140',y:''+sumY,width:'540',height:'55',rx:'10',fill:'none',stroke:'#0a8f6a','stroke-width':'2','stroke-dasharray':'6,3'}));
+        svg.appendChild(txt('Settlement Complete (T+2 business days)',{x:'410',y:''+(sumY+18),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#0a8f6a'}));
+        svg.appendChild(txt('Customer: -$100.00  |  Merchant: +$97.10  |  Platform fee: $2.90',{x:'410',y:''+(sumY+38),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+      }
+
+      info.textContent=msgs[step]||'';
+      out.textContent=step+' of '+(totalSteps-1);
+    }
+
+    draw();
+    document.getElementById('payment-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+    document.getElementById('payment-reset').addEventListener('click',function(){step=0;draw();});
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ANIMATION 2: Double-Entry Ledger
+  // ═══════════════════════════════════════════════════════════════════════
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+
+    var svg=document.getElementById('ledger-anim');
+    var info=document.getElementById('ledger-info');
+    var out=document.getElementById('ledger-output');
+    var step=0;
+    var totalSteps=8;
+
+    // Accounts
+    var accounts=[
+      {name:'PSP Receivable',  type:'ASSET',    x:30,  w:180},
+      {name:'Merchant Payable', type:'LIABILITY', x:230, w:180},
+      {name:'Platform Revenue', type:'REVENUE',  x:430, w:180},
+      {name:'Balance Check',    type:'CHECK',    x:630, w:160}
+    ];
+
+    // Ledger entries per step
+    // Each step adds entries and updates running totals
+    var ledgerSteps=[
+      // step 0: initial state
+      {entries:[],totals:{pspDR:0,pspCR:0,merchDR:0,merchCR:0,revDR:0,revCR:0},balanced:true,label:'Initial state — all accounts at $0.'},
+      // step 1: payment comes in - debit PSP receivable
+      {entries:[{acct:0,type:'DR',amt:'$100.00',color:'#0a8f6a'}],totals:{pspDR:10000,pspCR:0,merchDR:0,merchCR:0,revDR:0,revCR:0},balanced:false,label:'Customer pays $100. First entry: DEBIT PSP Receivable $100 (asset increases — PSP owes us money).'},
+      // step 2: credit merchant payable
+      {entries:[{acct:0,type:'DR',amt:'$100.00',color:'#0a8f6a'},{acct:1,type:'CR',amt:'$97.10',color:'#6366f1'}],totals:{pspDR:10000,pspCR:0,merchDR:0,merchCR:9710,revDR:0,revCR:0},balanced:false,label:'Second entry: CREDIT Merchant Payable $97.10 (liability increases — we owe the merchant).'},
+      // step 3: credit platform revenue
+      {entries:[{acct:0,type:'DR',amt:'$100.00',color:'#0a8f6a'},{acct:1,type:'CR',amt:'$97.10',color:'#6366f1'},{acct:2,type:'CR',amt:'$2.90',color:'#f59e0b'}],totals:{pspDR:10000,pspCR:0,merchDR:0,merchCR:9710,revDR:0,revCR:290},balanced:true,label:'Third entry: CREDIT Platform Revenue $2.90 (our fee). Now: $100 DR = $97.10 + $2.90 CR. BALANCED ✓'},
+      // step 4: refund header
+      {entries:[{acct:0,type:'DR',amt:'$100.00',color:'#0a8f6a'},{acct:1,type:'CR',amt:'$97.10',color:'#6366f1'},{acct:2,type:'CR',amt:'$2.90',color:'#f59e0b'}],totals:{pspDR:10000,pspCR:0,merchDR:0,merchCR:9710,revDR:0,revCR:290},balanced:true,label:'Now the customer requests a FULL REFUND. We create REVERSING entries — never delete originals.'},
+      // step 5: refund - debit merchant payable (reverse)
+      {entries:[{acct:1,type:'DR',amt:'$97.10',color:'#e74c3c'}],totals:{pspDR:10000,pspCR:0,merchDR:9710,merchCR:9710,revDR:0,revCR:290},balanced:false,label:'Refund entry 1: DEBIT Merchant Payable $97.10 (reduce liability — we no longer owe the merchant).'},
+      // step 6: refund - debit platform revenue (reverse)
+      {entries:[{acct:1,type:'DR',amt:'$97.10',color:'#e74c3c'},{acct:2,type:'DR',amt:'$2.90',color:'#e74c3c'}],totals:{pspDR:10000,pspCR:0,merchDR:9710,merchCR:9710,revDR:290,revCR:290},balanced:false,label:'Refund entry 2: DEBIT Platform Revenue $2.90 (reverse our fee — we give it back).'},
+      // step 7: refund - credit PSP receivable (reverse)
+      {entries:[{acct:1,type:'DR',amt:'$97.10',color:'#e74c3c'},{acct:2,type:'DR',amt:'$2.90',color:'#e74c3c'},{acct:0,type:'CR',amt:'$100.00',color:'#e74c3c'}],totals:{pspDR:10000,pspCR:10000,merchDR:9710,merchCR:9710,revDR:290,revCR:290},balanced:true,label:'Refund entry 3: CREDIT PSP Receivable $100 (asset decreases). All accounts net to $0. Full refund BALANCED ✓'}
+    ];
+
+    function fmtCents(c){return '$'+(c/100).toFixed(2);}
+
+    function draw(){
+      while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+      var isRefundPhase=(step>=4);
+      var phaseLabel=isRefundPhase?'REFUND REVERSAL':'PAYMENT $100.00';
+      var phaseColor=isRefundPhase?'#e74c3c':'#0a8f6a';
+
+      // Phase banner
+      svg.appendChild(el('rect',{x:'280',y:'8',width:''+(phaseLabel.length*9+30),height:'24',rx:'6',fill:phaseColor,opacity:'0.12'}));
+      svg.appendChild(txt(phaseLabel,{x:'295',y:'24','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:phaseColor}));
+
+      // Account column headers
+      for(var i=0;i<3;i++){
+        var a=accounts[i];
+        svg.appendChild(el('rect',{x:''+a.x,y:'45',width:''+a.w,height:'42',rx:'8',fill:'var(--surface)',stroke:'var(--line)','stroke-width':'1.5'}));
+        svg.appendChild(txt(a.name,{x:''+(a.x+a.w/2),y:'62','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+        svg.appendChild(txt(a.type,{x:''+(a.x+a.w/2),y:'80','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)'}));
+
+        // DR / CR sub-headers
+        svg.appendChild(txt('Debit',{x:''+(a.x+a.w*0.3),y:'105','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('Credit',{x:''+(a.x+a.w*0.75),y:'105','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:'var(--ink-muted)'}));
+        svg.appendChild(el('line',{x1:''+a.x,y1:'110',x2:''+(a.x+a.w),y2:'110',stroke:'var(--line)','stroke-width':'1'}));
+      }
+
+      // Current step data
+      var sd=ledgerSteps[step];
+
+      // Draw payment entries (steps 1-3)
+      if(step>=1 && step<=3){
+        var ents=sd.entries;
+        for(var e=0;e<ents.length;e++){
+          var ent=ents[e];
+          var acct=accounts[ent.acct];
+          var yPos=120+e*28;
+          var xPos=(ent.type==='DR')?(acct.x+acct.w*0.3):(acct.x+acct.w*0.75);
+          var isCurr=(e===ents.length-1);
+
+          if(isCurr){
+            svg.appendChild(el('rect',{x:''+(xPos-35),y:''+(yPos-10),width:'70',height:'22',rx:'4',fill:ent.color,opacity:'0.15'}));
+          }
+          svg.appendChild(txt(ent.amt,{x:''+xPos,y:''+yPos,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12','font-weight':isCurr?'700':'500',fill:isCurr?ent.color:'var(--ink)'}));
+        }
+      }
+
+      // Draw payment entries (persistent) for refund phase
+      if(step>=4){
+        var payEnts=ledgerSteps[3].entries;
+        for(var e=0;e<payEnts.length;e++){
+          var ent=payEnts[e];
+          var acct=accounts[ent.acct];
+          var yPos=120+e*28;
+          var xPos=(ent.type==='DR')?(acct.x+acct.w*0.3):(acct.x+acct.w*0.75);
+          svg.appendChild(txt(ent.amt,{x:''+xPos,y:''+yPos,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12','font-weight':'400',fill:'var(--ink-muted)',opacity:'0.5'}));
+        }
+
+        // Separator line
+        svg.appendChild(el('line',{x1:'30',y1:'210',x2:'610',y2:'210',stroke:'#e74c3c','stroke-width':'1','stroke-dasharray':'4,3',opacity:'0.5'}));
+        svg.appendChild(txt('Refund Reversal Entries ↓',{x:'320',y:'226','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'#e74c3c'}));
+
+        // Draw refund entries (steps 5-7)
+        if(step>=5){
+          var refEnts=sd.entries;
+          for(var e=0;e<refEnts.length;e++){
+            var ent=refEnts[e];
+            var acct=accounts[ent.acct];
+            var yPos=240+e*28;
+            var xPos=(ent.type==='DR')?(acct.x+acct.w*0.3):(acct.x+acct.w*0.75);
+            var isCurr=(e===refEnts.length-1);
+
+            if(isCurr){
+              svg.appendChild(el('rect',{x:''+(xPos-35),y:''+(yPos-10),width:'70',height:'22',rx:'4',fill:'#e74c3c',opacity:'0.15'}));
+            }
+            svg.appendChild(txt(ent.amt,{x:''+xPos,y:''+yPos,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12','font-weight':isCurr?'700':'500',fill:isCurr?'#e74c3c':'var(--ink)'}));
+          }
+        }
+      }
+
+      // Balance check column
+      var bc=accounts[3];
+      svg.appendChild(el('rect',{x:''+bc.x,y:'45',width:''+bc.w,height:'42',rx:'8',fill:sd.balanced?'#0a8f6a':'#e74c3c',opacity:'0.08'}));
+      svg.appendChild(el('rect',{x:''+bc.x,y:'45',width:''+bc.w,height:'42',rx:'8',fill:'none',stroke:sd.balanced?'#0a8f6a':'#e74c3c','stroke-width':'2'}));
+      svg.appendChild(txt(sd.balanced?'✓ BALANCED':'✗ UNBALANCED',{x:''+(bc.x+bc.w/2),y:'62','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:sd.balanced?'#0a8f6a':'#e74c3c'}));
+      svg.appendChild(txt('Assets = Liab + Equity',{x:''+(bc.x+bc.w/2),y:'80','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+
+      // Totals row
+      var totY=step>=4?340:200;
+      svg.appendChild(el('line',{x1:'30',y1:''+(totY-5),x2:'610',y2:''+(totY-5),stroke:'var(--line)','stroke-width':'1.5'}));
+      svg.appendChild(txt('NET TOTALS',{x:'30',y:''+(totY+12),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'var(--ink)'}));
+
+      var t=sd.totals;
+      // PSP Net
+      var pspNet=t.pspDR-t.pspCR;
+      svg.appendChild(txt('Net: '+fmtCents(pspNet),{x:''+(accounts[0].x+accounts[0].w/2),y:''+(totY+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:pspNet>0?'#0a8f6a':pspNet<0?'#e74c3c':'var(--ink-muted)'}));
+
+      // Merch Net
+      var merchNet=t.merchCR-t.merchDR;
+      svg.appendChild(txt('Net: '+fmtCents(merchNet),{x:''+(accounts[1].x+accounts[1].w/2),y:''+(totY+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:merchNet>0?'#6366f1':merchNet<0?'#e74c3c':'var(--ink-muted)'}));
+
+      // Rev Net
+      var revNet=t.revCR-t.revDR;
+      svg.appendChild(txt('Net: '+fmtCents(revNet),{x:''+(accounts[2].x+accounts[2].w/2),y:''+(totY+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:revNet>0?'#f59e0b':revNet<0?'#e74c3c':'var(--ink-muted)'}));
+
+      // Balance equation
+      var eqY=totY+35;
+      var totalDR=t.pspDR+t.merchDR+t.revDR;
+      var totalCR=t.pspCR+t.merchCR+t.revCR;
+      svg.appendChild(el('rect',{x:'130',y:''+(eqY-12),width:'560',height:'26',rx:'6',fill:sd.balanced?'#0a8f6a':'#e74c3c',opacity:'0.08'}));
+      svg.appendChild(txt('Total Debits: '+fmtCents(totalDR)+'   |   Total Credits: '+fmtCents(totalCR)+'   |   Difference: '+fmtCents(totalDR-totalCR),{x:'410',y:''+(eqY+2),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:sd.balanced?'#0a8f6a':'#e74c3c'}));
+
+      // Final net-zero summary (step 7)
+      if(step===7){
+        svg.appendChild(el('rect',{x:'130',y:''+(eqY+22),width:'560',height:'24',rx:'6',fill:'#0a8f6a',opacity:'0.12'}));
+        svg.appendChild(txt('All accounts net to $0.00 — full refund complete. Ledger integrity preserved.',{x:'410',y:''+(eqY+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#0a8f6a'}));
+      }
+
+      info.textContent=sd.label;
+      out.textContent=step+' of '+(totalSteps-1);
+    }
+
+    draw();
+    document.getElementById('ledger-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+    document.getElementById('ledger-reset').addEventListener('click',function(){step=0;draw();});
+  })();
+  </script>
+</body>
+</html>

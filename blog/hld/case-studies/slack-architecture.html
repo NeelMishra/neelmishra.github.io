@@ -1,0 +1,1284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Case Study: Slack's Architecture — Vitess for MySQL sharding, Flannel edge caching, real-time WebSocket messaging, job queues, search infrastructure, enterprise features, and deployment strategies at 20M+ DAU scale.">
+  <title>Case Study: Slack's Architecture | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Case Studies</a><span>&middot; Post 69 of 70</span></div>
+
+      <h1>Case Study: Slack&rsquo;s Architecture</h1>
+      <p class="post-meta">April 2026 &middot; 22 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           1. INTRODUCTION — SLACK AT SCALE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="introduction">Slack at Scale</h2>
+      <p>Slack is the workplace messaging platform used by over <strong>20 million daily active users</strong> across 750,000+ organizations. At peak, Slack handles <strong>millions of WebSocket connections simultaneously</strong>, delivers messages in under 500&nbsp;ms globally, and stores trillions of messages across enterprise workspaces. Every second, hundreds of thousands of messages flow through its infrastructure — each triggering writes, notifications, indexing, and real-time delivery.</p>
+
+      <p>What makes Slack architecturally fascinating is the sheer number of hard problems it solves at once:</p>
+      <ul>
+        <li><strong>Real-time delivery</strong> — messages must appear for all channel members within milliseconds, not seconds.</li>
+        <li><strong>Enterprise-grade reliability</strong> — banks, governments, and Fortune 500 companies depend on Slack for mission-critical communication. SLA targets of 99.99% uptime are expected.</li>
+        <li><strong>Multi-tenancy at extreme scale</strong> — workspaces range from 5-person startups to 500,000-person enterprises, all sharing infrastructure.</li>
+        <li><strong>Search over trillions of messages</strong> — users expect sub-second full-text search across years of conversation history.</li>
+        <li><strong>Compliance and security</strong> — data retention policies, encryption key management, audit logs, and compliance exports for regulated industries.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key Slack Stats (circa 2024–2025):</strong> 20M+ DAU · 750K+ paid workspaces · 1.5B+ messages sent per week · 2,600+ apps in the App Directory · 99.99% uptime target · Messages delivered in &lt;500ms P99
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           2. TECH STACK EVOLUTION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="tech-stack">Tech Stack Evolution</h2>
+      <p>Slack&rsquo;s technology stack has undergone significant evolution since its founding in 2013. Understanding this journey illuminates why certain architectural decisions were made.</p>
+
+      <h3 id="early-stack">The Early Days: PHP &amp; Hack</h3>
+      <p>Slack was originally built as a monolithic PHP application — a pragmatic choice for rapid prototyping during its origin as an internal tool at Tiny Speck (the game company that pivoted to create Slack). The initial stack:</p>
+      <pre><code>Early Slack Stack (2013–2016):
+├── Language: PHP (later migrated to Hack/HHVM)
+├── Web Server: Apache → Nginx + PHP-FPM
+├── Database: MySQL (single primary, multiple replicas)
+├── Cache: Memcached (session state, query results)
+├── Queue: Redis-based job queue
+├── Search: Apache Solr
+├── Real-time: Custom WebSocket server (Node.js)
+├── File Storage: Amazon S3
+└── CDN: CloudFront for static assets and file delivery</code></pre>
+
+      <p>PHP served Slack well to ~1M DAU, but several pain points emerged:</p>
+      <ul>
+        <li><strong>Monolith coupling</strong> — a change in message sending could break notification delivery, search indexing, or file previews.</li>
+        <li><strong>Type safety</strong> — dynamic typing in PHP made refactoring risky at scale, leading to adoption of Hack (Facebook&rsquo;s typed PHP superset running on HHVM).</li>
+        <li><strong>Performance ceilings</strong> — the request-per-process model couldn&rsquo;t efficiently handle long-lived WebSocket connections or CPU-intensive operations like message rendering.</li>
+        <li><strong>Database bottlenecks</strong> — a single MySQL primary became the choke point well before 1M workspaces.</li>
+      </ul>
+
+      <h3 id="modern-stack">The Modern Stack: Java Services</h3>
+      <p>Starting around 2017, Slack began decomposing the monolith into Java-based microservices. The migration was <em>incremental</em> — the PHP monolith still handles some traffic today, but critical paths run on the Java service mesh:</p>
+      <pre><code>Modern Slack Stack (2020+):
+├── API Layer
+│   ├── Hack (HHVM): Legacy API endpoints, web app rendering
+│   └── Java (JDK 17+): New API services, high-throughput paths
+│
+├── Service Mesh
+│   ├── gRPC for inter-service communication
+│   ├── Envoy sidecar proxies for load balancing, observability
+│   └── Service discovery via Consul
+│
+├── Data Layer
+│   ├── MySQL: Primary data store (messages, channels, users)
+│   ├── Vitess: MySQL sharding proxy (workspace-level sharding)
+│   ├── Memcached: Hot data caching (billions of gets/day)
+│   └── Redis: Ephemeral state, presence, rate limiting
+│
+├── Async Processing
+│   ├── Kafka: Event streaming backbone
+│   ├── Custom Job Queue: Async task execution
+│   └── Redis Streams: Lightweight pub/sub for presence
+│
+├── Search &amp; Analytics
+│   ├── Solr/Elasticsearch: Message search (per-workspace indexes)
+│   └── Presto + Hive: Analytics, data warehouse
+│
+├── Real-time
+│   ├── WebSocket Gateway (Java): Persistent connections
+│   ├── Channel-based pub/sub fan-out
+│   └── Flannel: Edge caching layer
+│
+└── Infrastructure
+    ├── AWS (primary cloud)
+    ├── Terraform for infrastructure-as-code
+    ├── Kubernetes for container orchestration
+    └── Datadog + PagerDuty for monitoring/alerting</code></pre>
+
+      <div class="callout">
+        <strong>Why Java?</strong> Slack chose Java for new services due to: (1) mature concurrency primitives (virtual threads, Netty), (2) excellent profiling/debugging tooling, (3) strong type system for large team collaboration, (4) massive ecosystem of battle-tested libraries, and (5) predictable GC performance with ZGC/Shenandoah.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           3. VITESS FOR MYSQL SHARDING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="vitess">Vitess for MySQL Sharding</h2>
+      <p>Vitess is the cornerstone of Slack&rsquo;s data tier. Originally developed at YouTube and later donated to CNCF, Vitess provides <strong>horizontal sharding for MySQL</strong> while preserving the MySQL wire protocol — applications connect to Vitess as if it were a regular MySQL server.</p>
+
+      <h3 id="why-vitess">Why Slack Chose Vitess</h3>
+      <p>By 2016, Slack&rsquo;s single-primary MySQL setup was hitting hard limits. The options were:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Option</th><th style="text-align:left; padding:0.5em;">Pros</th><th style="text-align:left; padding:0.5em;">Cons</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Vertical scaling</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">No code changes</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hard ceiling, exponential cost</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>NoSQL migration</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Built-in sharding</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Massive rewrite, lose ACID, risky at scale</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Application-level sharding</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Full control</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Every service needs shard-aware code</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Vitess</strong></td><td style="padding:0.5em;">MySQL compatible, proven at YouTube, transparent sharding</td><td style="padding:0.5em;">Operational complexity, learning curve</td></tr>
+        </tbody>
+      </table>
+
+      <p>Slack chose Vitess because it allowed them to <strong>shard MySQL horizontally without rewriting application code</strong>. Existing MySQL queries continued to work — Vitess transparently routes them to the correct shard.</p>
+
+      <h3 id="vitess-architecture">Vitess Architecture at Slack</h3>
+      <pre><code>                         ┌─────────────────────────┐
+                         │      Application         │
+                         │   (Java / Hack services)  │
+                         └────────────┬──────────────┘
+                                      │ MySQL protocol
+                                      ▼
+                         ┌─────────────────────────┐
+                         │        VTGate            │
+                         │   (Stateless proxy)      │
+                         │   • SQL parsing          │
+                         │   • Query routing        │
+                         │   • Scatter-gather       │
+                         │   • Connection pooling   │
+                         └────────────┬──────────────┘
+                                      │ gRPC
+                    ┌─────────────────┼─────────────────┐
+                    ▼                 ▼                  ▼
+          ┌──────────────┐ ┌──────────────┐  ┌──────────────┐
+          │   VTTablet   │ │   VTTablet   │  │   VTTablet   │
+          │   (Shard 0)  │ │   (Shard 1)  │  │   (Shard N)  │
+          │              │ │              │  │              │
+          │ ┌──────────┐ │ │ ┌──────────┐ │  │ ┌──────────┐ │
+          │ │  MySQL    │ │ │ │  MySQL   │ │  │ │  MySQL   │ │
+          │ │ Primary + │ │ │ │ Primary +│ │  │ │ Primary +│ │
+          │ │ Replicas  │ │ │ │ Replicas │ │  │ │ Replicas │ │
+          │ └──────────┘ │ │ └──────────┘ │  │ └──────────┘ │
+          └──────────────┘ └──────────────┘  └──────────────┘
+
+          Topology Server (etcd): Stores shard map, tablet health,
+          serving state, and schema versions for all keyspaces.</code></pre>
+
+      <h3 id="vitess-components">Key Vitess Components</h3>
+      <ul>
+        <li><strong>VTGate</strong> — Stateless proxy that receives MySQL connections from applications. It parses SQL, resolves the target shard(s) using the VSchema (Vitess schema mapping), and forwards queries via gRPC to the appropriate VTTablet. For cross-shard queries, VTGate performs scatter-gather: it sends the query to all relevant shards and merges results.</li>
+        <li><strong>VTTablet</strong> — Runs alongside each MySQL instance. It manages the MySQL process, enforces query restrictions (e.g., blocking full table scans), handles connection pooling to MySQL, and reports health to the topology server. Each tablet knows if it&rsquo;s a primary or replica and its serving state.</li>
+        <li><strong>Topology Server (etcd)</strong> — Stores the global cluster state: which shards exist, which tablets serve which shards, their health status, and the VSchema. VTGate reads this at startup and watches for changes.</li>
+        <li><strong>VSchema</strong> — A JSON configuration that defines the sharding strategy for each table. It tells Vitess how to map rows to shards.</li>
+      </ul>
+
+      <h3 id="workspace-sharding">Workspace-Level Sharding</h3>
+      <p>Slack shards primarily by <strong>workspace ID</strong>. This is the natural partition boundary because:</p>
+      <ul>
+        <li>Most queries are workspace-scoped (messages in a channel, members of a workspace, search within a workspace).</li>
+        <li>Cross-workspace queries are rare (shared channels are handled separately).</li>
+        <li>Workspace-level sharding provides strong data locality — all data for a workspace lives on the same shard.</li>
+      </ul>
+
+      <pre><code>// Vitess VSchema — workspace-based sharding
+{
+  "sharded": true,
+  "vindexes": {
+    "workspace_hash": {
+      "type": "xxhash"  // Consistent hashing on workspace_id
+    }
+  },
+  "tables": {
+    "messages": {
+      "column_vindexes": [
+        { "column": "workspace_id", "name": "workspace_hash" }
+      ]
+    },
+    "channels": {
+      "column_vindexes": [
+        { "column": "workspace_id", "name": "workspace_hash" }
+      ]
+    },
+    "users_workspace": {
+      "column_vindexes": [
+        { "column": "workspace_id", "name": "workspace_hash" }
+      ]
+    },
+    "files_metadata": {
+      "column_vindexes": [
+        { "column": "workspace_id", "name": "workspace_hash" }
+      ]
+    }
+  }
+}
+
+// Query routing example:
+// App sends: SELECT * FROM messages WHERE workspace_id = 'T12345' AND channel_id = 'C98765'
+// VTGate:
+//   1. Extracts workspace_id = 'T12345'
+//   2. Computes xxhash('T12345') → shard range 40-60
+//   3. Routes to VTTablet for shard 40-60
+//   4. VTTablet executes query on local MySQL
+//   5. Returns result to VTGate → Application</code></pre>
+
+      <h3 id="vitess-resharding">Online Resharding</h3>
+      <p>One of Vitess&rsquo;s killer features is <strong>online resharding</strong> — splitting or merging shards without downtime. When a shard becomes hot (e.g., a massive enterprise workspace dominates a shard), Slack can split it:</p>
+      <pre><code>Resharding Process (splitting shard 40-60 → 40-50, 50-60):
+
+Step 1: Create new VTTablets for shards 40-50 and 50-60
+Step 2: Start VReplication — stream row changes from old shard to new shards
+        (VReplication filters rows by their vindex hash value)
+Step 3: Catch-up phase — new shards lag behind by seconds, then milliseconds
+Step 4: Cut-over:
+        a. Stop writes to old shard (brief ~100ms pause)
+        b. Verify new shards are fully caught up
+        c. Update topology server: new shards are now serving
+        d. Resume writes — now routed to new shards
+Step 5: Old shard decommissioned after verification period
+
+Total downtime: &lt;1 second (during cut-over)
+Application awareness: Zero — VTGate handles the routing change transparently</code></pre>
+
+      <div class="callout">
+        <strong>Vitess at Slack&rsquo;s scale:</strong> Slack operates hundreds of MySQL shards managed by Vitess, handling billions of queries per day. Each shard runs MySQL 8.0 with one primary and two replicas (one for failover, one for analytics reads).
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           4. JOB QUEUE SYSTEM
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="job-queue">Job Queue System</h2>
+      <p>Not everything in Slack happens synchronously. Sending a message triggers a cascade of async work — and Slack&rsquo;s <strong>job queue system</strong> is the backbone of this asynchronous processing.</p>
+
+      <h3 id="async-tasks">Async Task Categories</h3>
+      <p>When a message is sent, the API server writes it to MySQL and returns immediately. Everything else is async:</p>
+      <pre><code>Message Post → API Server (synchronous: ~50ms)
+  │
+  ├── Enqueue: "index_message" (Search indexing)
+  ├── Enqueue: "send_push_notifications" (iOS/Android push)
+  ├── Enqueue: "send_email_notification" (for offline users)
+  ├── Enqueue: "execute_workflows" (Workflow Builder triggers)
+  ├── Enqueue: "update_unread_counts" (Badge counts)
+  ├── Enqueue: "run_app_event_subscriptions" (Bot events)
+  ├── Enqueue: "generate_link_previews" (URL unfurling)
+  ├── Enqueue: "process_file_attachments" (Thumbnails, virus scan)
+  └── Enqueue: "update_analytics" (Message volume metrics)</code></pre>
+
+      <h3 id="queue-architecture">Queue Architecture</h3>
+      <p>Slack&rsquo;s job queue evolved from a simple Redis-backed queue to a more sophisticated system:</p>
+      <pre><code>Job Queue Architecture:
+
+┌─────────────┐    ┌───────────────────────────────────────┐
+│  Producers   │    │           Kafka Topic                 │
+│ (API servers)│───▶│  "async-jobs" (partitioned by type)   │
+└─────────────┘    └───────────────┬───────────────────────┘
+                                   │
+                   ┌───────────────┼───────────────┐
+                   ▼               ▼               ▼
+            ┌────────────┐ ┌────────────┐ ┌────────────┐
+            │ Worker Pool│ │ Worker Pool│ │ Worker Pool│
+            │ "search"   │ │ "notify"   │ │ "webhooks" │
+            │ 200 workers│ │ 150 workers│ │ 100 workers│
+            └────────────┘ └────────────┘ └────────────┘
+
+Job Priorities:
+  P0 (Critical): Push notifications, real-time events — &lt;1s
+  P1 (High):     Search indexing, unread counts — &lt;5s
+  P2 (Normal):   Link previews, file processing — &lt;30s
+  P3 (Low):      Analytics, compliance logging — &lt;5min
+
+Retry Policy:
+  • Exponential backoff: 1s → 2s → 4s → 8s → ... → max 5min
+  • Max retries: 5 (P0), 10 (P1), 20 (P2/P3)
+  • Dead letter queue for permanently failed jobs
+  • Idempotency keys prevent duplicate execution</code></pre>
+
+      <h3 id="job-queue-guarantees">Delivery Guarantees</h3>
+      <p>Slack&rsquo;s job queue provides <strong>at-least-once delivery</strong> with idempotency:</p>
+      <ul>
+        <li><strong>At-least-once</strong> — Jobs are retried on failure, ensuring no work is silently dropped. Workers must be idempotent because the same job may execute more than once.</li>
+        <li><strong>Idempotency keys</strong> — Each job carries a unique key (e.g., <code>msg:{message_ts}:index</code>). Workers check this key before executing. If the key is already marked complete, the duplicate job is discarded.</li>
+        <li><strong>Poison pill protection</strong> — Jobs that crash workers repeatedly are automatically routed to the dead letter queue after max retries, preventing a single bad message from blocking an entire worker pool.</li>
+        <li><strong>Back-pressure</strong> — When worker pools are saturated, Kafka consumer lag increases. Monitoring triggers auto-scaling of worker instances and alerts the on-call team if lag exceeds thresholds.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           5. REAL-TIME MESSAGING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="realtime">Real-Time Messaging</h2>
+      <p>Real-time message delivery is Slack&rsquo;s core product experience. When Alice sends a message in <code>#engineering</code>, every member of that channel must see it appear within milliseconds — even if there are 10,000 members distributed across 50 countries.</p>
+
+      <h3 id="websocket-layer">WebSocket Connection Layer</h3>
+      <p>Each Slack client (desktop, mobile, browser) maintains a persistent <strong>WebSocket connection</strong> to Slack&rsquo;s WebSocket Gateway:</p>
+      <pre><code>WebSocket Gateway Architecture:
+
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  Client App  │  │  Client App  │  │  Client App  │
+│  (Desktop)   │  │  (Mobile)    │  │  (Browser)   │
+└──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+       │ WSS             │ WSS             │ WSS
+       ▼                 ▼                 ▼
+┌──────────────────────────────────────────────────┐
+│             Load Balancer (L4/L7)                 │
+│         (HAProxy / AWS NLB)                       │
+│  • Sticky sessions by connection ID               │
+│  • Health check WebSocket gateways                │
+│  • TLS termination                                │
+└──────────────────────┬───────────────────────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+   ┌────────────┐┌────────────┐┌────────────┐
+   │ WS Gateway ││ WS Gateway ││ WS Gateway │
+   │  Server 1  ││  Server 2  ││  Server N  │
+   │            ││            ││            │
+   │ ~100K conn ││ ~100K conn ││ ~100K conn │
+   │            ││            ││            │
+   │ In-memory: ││ In-memory: ││ In-memory: │
+   │ user→conn  ││ user→conn  ││ user→conn  │
+   │ channel→   ││ channel→   ││ channel→   │
+   │   users    ││   users    ││   users    │
+   └─────┬──────┘└─────┬──────┘└─────┬──────┘
+         │             │             │
+         └─────────────┼─────────────┘
+                       │ Subscribe
+                       ▼
+              ┌──────────────────┐
+              │   Message Bus    │
+              │ (Redis Pub/Sub   │
+              │  or Kafka)       │
+              └──────────────────┘</code></pre>
+
+      <h3 id="channel-pubsub">Channel-Based Pub/Sub Fan-Out</h3>
+      <p>When a message is posted to a channel, the fan-out process delivers it to every connected member:</p>
+      <pre><code>Fan-out Process:
+
+1. API server writes message to MySQL (via Vitess)
+2. API server publishes event to Message Bus:
+   {
+     "type": "message",
+     "channel": "C98765",
+     "workspace": "T12345",
+     "user": "U111",
+     "text": "Deploying v2.3.1 to production",
+     "ts": "1714567890.000100"
+   }
+
+3. All WS Gateway servers subscribed to workspace T12345 receive the event
+4. Each WS Gateway:
+   a. Looks up local channel membership: "Which of MY connected users are in C98765?"
+   b. For each matching user, serializes the event and writes to their WebSocket
+   c. For users with multiple connected devices, sends to ALL connections
+
+Fan-out complexity:
+  • Small channel (10 members, 1 gateway): 10 WebSocket writes
+  • Large channel (10,000 members, 50 gateways):
+    Each gateway sends to its local subset — average 200 writes each
+    Total: 10,000 WebSocket writes across 50 servers in parallel</code></pre>
+
+      <h3 id="message-ordering">Message Ordering Guarantees</h3>
+      <p>Slack uses <strong>Lamport-style timestamps</strong> (<code>ts</code> field) for message ordering within a channel:</p>
+      <ul>
+        <li>The <code>ts</code> (timestamp) is a unique, monotonically increasing value per channel — formatted as <code>epoch.sequence</code> (e.g., <code>1714567890.000100</code>).</li>
+        <li>The API server holds a per-channel lock (via Redis) when generating timestamps to prevent conflicts.</li>
+        <li>Clients sort messages by <code>ts</code> — even if messages arrive out of order via WebSocket, the display order is correct.</li>
+        <li>Edits and deletions reference the original <code>ts</code>, ensuring they modify the correct message.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           ANIMATION 1: SLACK MESSAGE FLOW
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="msg-flow-visual">Animation: Slack Message Flow</h2>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="slack-msg-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="slack-msg-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="slack-msg-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="slack-msg-anim" viewBox="0 0 800 420" style="width:100%;max-width:800px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="slack-msg-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           6. FLANNEL — EDGE CACHING LAYER
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="flannel">Flannel: Slack&rsquo;s Edge Caching Layer</h2>
+      <p>Flannel is Slack&rsquo;s custom <strong>client-aware caching layer</strong> that sits between the API servers and the clients. It is one of Slack&rsquo;s most innovative architectural components — purpose-built to solve the <em>boot problem</em>.</p>
+
+      <h3 id="boot-problem">The Boot Problem</h3>
+      <p>When a Slack client opens, it needs to load <em>everything</em> about the user&rsquo;s workspace:</p>
+      <pre><code>Client boot payload ("rtm.start" or "client.boot"):
+├── Workspace metadata (name, icon, settings, plan)
+├── User list (every member of the workspace: id, name, avatar, status)
+├── Channel list (every channel: name, purpose, membership, unread counts)
+├── IM/Group list (direct messages, multi-party DMs)
+├── Emoji list (custom emoji: name → URL mappings)
+├── User groups (handle groups, their members)
+├── Saved items, reminders, preferences
+└── Bot users and app configurations
+
+For a 50,000-person workspace, this payload is 5–20 MB of JSON.</code></pre>
+
+      <p>Without Flannel, every client boot required the API server to query dozens of MySQL tables, join and serialize massive result sets. At Slack&rsquo;s scale, this created devastating load — especially after outages when <em>every client reconnects simultaneously</em> (the &ldquo;thundering herd&rdquo; problem).</p>
+
+      <h3 id="flannel-architecture">Flannel Architecture</h3>
+      <pre><code>Flannel Architecture:
+
+┌──────────────┐
+│  Slack Client │
+└──────┬───────┘
+       │ "Give me everything for workspace T12345"
+       ▼
+┌──────────────────────────────────────────────────┐
+│                  Flannel Server                   │
+│                                                   │
+│  ┌─────────────────────────────────────────────┐  │
+│  │          In-Memory Cache (per workspace)     │  │
+│  │                                              │  │
+│  │  T12345 → {                                  │  │
+│  │    users: [50,000 user objects],             │  │
+│  │    channels: [8,000 channel objects],        │  │
+│  │    emoji: [2,000 custom emoji],              │  │
+│  │    ...                                       │  │
+│  │    version: 4,827,301                        │  │
+│  │  }                                           │  │
+│  │                                              │  │
+│  │  Cache hit? → Return instantly (~5ms)        │  │
+│  │  Cache miss? → Fetch from API, cache, return │  │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─────────────────────────────────────────────┐  │
+│  │       Change Stream Consumer (Kafka)         │  │
+│  │                                              │  │
+│  │  Listens for workspace mutation events:      │  │
+│  │  • user_joined, user_left, profile_updated   │  │
+│  │  • channel_created, channel_archived         │  │
+│  │  • emoji_added, emoji_removed                │  │
+│  │  • preferences_changed                       │  │
+│  │                                              │  │
+│  │  On event → Apply incremental update to      │  │
+│  │  cached workspace state, bump version        │  │
+│  └─────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
+
+Key Design Decisions:
+  1. Per-workspace caching: Each workspace's full state is a single cache entry
+  2. Incremental updates: Flannel never re-fetches the full workspace — it
+     applies events as diffs (user added → append to users list)
+  3. Versioned state: Every mutation bumps a version counter. Clients can
+     request "give me changes since version X" for efficient reconnection
+  4. Sharded by workspace: Flannel servers are assigned workspace ranges,
+     ensuring each workspace's state lives on exactly one Flannel server</code></pre>
+
+      <h3 id="flannel-delta">Delta Updates and Reconnection</h3>
+      <p>Flannel&rsquo;s versioned state enables <strong>delta reconnection</strong> — when a client reconnects, it sends its last known version and receives only the changes:</p>
+      <pre><code>// Client reconnects after brief disconnection:
+GET /api/flannel.delta?workspace=T12345&since_version=4827290
+
+// Flannel returns only the 11 changes since that version:
+{
+  "version": 4827301,
+  "changes": [
+    { "type": "user_status_changed", "user": "U555", "status": "🏖️ PTO" },
+    { "type": "channel_created", "channel": { "id": "C99999", "name": "new-project" } },
+    { "type": "user_joined_channel", "user": "U123", "channel": "C98765" },
+    // ... 8 more incremental changes
+  ]
+}
+
+// Instead of re-downloading 15 MB, the client receives ~2 KB of deltas.
+// This reduces reconnection load by 99.9% during thundering herd scenarios.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           7. SEARCH INFRASTRUCTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="search">Search Infrastructure</h2>
+      <p>Slack search allows users to find any message, file, or conversation across their workspace&rsquo;s entire history. At scale, this means searching across <strong>trillions of messages</strong> with sub-second latency.</p>
+
+      <h3 id="search-stack">Search Stack</h3>
+      <p>Slack uses a combination of <strong>Solr and Elasticsearch</strong> for its search infrastructure, with the stack evolving over time:</p>
+      <pre><code>Search Architecture:
+
+┌────────────┐    ┌──────────────────────────────────────┐
+│  User types │    │          Search API Service          │
+│  query      │───▶│                                      │
+└────────────┘    │  1. Parse query (operators, filters)  │
+                  │  2. Resolve workspace shard            │
+                  │  3. Build Solr/ES query DSL            │
+                  │  4. Execute against workspace index    │
+                  │  5. Re-rank results                    │
+                  │  6. Hydrate (load full messages)       │
+                  │  7. Apply access control filtering     │
+                  │  8. Return results                     │
+                  └───────────────┬──────────────────────┘
+                                  │
+                                  ▼
+                  ┌──────────────────────────────────────┐
+                  │     Search Cluster (per workspace)    │
+                  │                                       │
+                  │  Index per workspace:                  │
+                  │  ┌───────────────────────────────┐    │
+                  │  │ messages: {                    │    │
+                  │  │   ts, text, user_id,           │    │
+                  │  │   channel_id, channel_type,    │    │
+                  │  │   has_file, has_link,           │    │
+                  │  │   reactions, thread_ts,         │    │
+                  │  │   workspace_id                  │    │
+                  │  │ }                               │    │
+                  │  │ files: {                        │    │
+                  │  │   name, content_text,           │    │
+                  │  │   file_type, user_id,           │    │
+                  │  │   channel_id, upload_ts         │    │
+                  │  │ }                               │    │
+                  │  └───────────────────────────────┘    │
+                  └──────────────────────────────────────┘</code></pre>
+
+      <h3 id="search-indexing">Indexing Pipeline</h3>
+      <p>Messages are indexed asynchronously via the job queue system. The indexing pipeline:</p>
+      <pre><code>Indexing Pipeline:
+
+1. Message written to MySQL (via Vitess)
+2. "index_message" job enqueued to Kafka
+3. Search Indexer Worker picks up job:
+   a. Fetches full message from MySQL (with context: channel name, user info)
+   b. Tokenizes text content
+   c. Extracts entities (mentions, links, emoji, code blocks)
+   d. Generates search document:
+      {
+        "ts": "1714567890.000100",
+        "text": "Deploying v2.3.1 to production @oncall",
+        "text_analyzed": ["deploy", "v2.3.1", "production", "oncall"],
+        "user_id": "U111",
+        "user_name": "alice",
+        "channel_id": "C98765",
+        "channel_name": "engineering",
+        "channel_type": "public",
+        "has_mention": true,
+        "mentioned_users": ["U222"],
+        "has_link": false,
+        "has_file": false,
+        "reactions": [],
+        "thread_ts": null,
+        "workspace_id": "T12345"
+      }
+   e. Sends document to Solr/ES for the workspace's index
+   f. Acknowledges job completion
+
+Indexing Latency: P50 = 2s, P99 = 8s (messages become searchable within seconds)
+Throughput: Hundreds of thousands of messages indexed per second globally</code></pre>
+
+      <h3 id="search-access-control">Access Control in Search</h3>
+      <p>Search results must respect channel permissions. A user cannot find messages from private channels they&rsquo;re not a member of:</p>
+      <ul>
+        <li><strong>Public channels</strong> — searchable by anyone in the workspace.</li>
+        <li><strong>Private channels</strong> — results filtered to current members only. The search service queries the channel membership cache at query time.</li>
+        <li><strong>DMs/Group DMs</strong> — only participants can search.</li>
+        <li><strong>Shared channels</strong> — searchable by members from both workspaces, with each workspace&rsquo;s compliance policies applied.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Search operators</strong> Slack supports rich query syntax: <code>from:@alice</code>, <code>in:#engineering</code>, <code>has:link</code>, <code>before:2024-01-01</code>, <code>during:March</code>. These are parsed by the Search API into structured filters applied at the Solr/ES level, avoiding full-text scans for filtered queries.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           8. CHANNEL AND DM ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="channels">Channel &amp; DM Architecture</h2>
+      <p>Channels are the fundamental abstraction in Slack — every conversation happens in a channel, whether it&rsquo;s a public team channel, a private group, or a direct message.</p>
+
+      <h3 id="channel-types">Channel Types</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Type</th><th style="text-align:left; padding:0.5em;">Prefix</th><th style="text-align:left; padding:0.5em;">Max Members</th><th style="text-align:left; padding:0.5em;">Visibility</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Public Channel</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>C</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Unlimited</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Discoverable, joinable by anyone</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Private Channel</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>G</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Unlimited</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Invite-only, hidden from non-members</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">DM (1:1)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>D</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">2</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Private between two users</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Group DM (MPDM)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>G</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">9</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Private group conversation</td></tr>
+          <tr><td style="padding:0.5em;">Shared Channel</td><td style="padding:0.5em;"><code>C</code></td><td style="padding:0.5em;">Unlimited</td><td style="padding:0.5em;">Spans multiple workspaces (Slack Connect)</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="message-schema">Message Data Model</h3>
+      <pre><code>-- Core message schema (simplified from Slack's actual schema)
+CREATE TABLE messages (
+    workspace_id   VARCHAR(12) NOT NULL,   -- Shard key (Vitess vindex)
+    channel_id     VARCHAR(12) NOT NULL,
+    ts             VARCHAR(20) NOT NULL,   -- "1714567890.000100" (unique per channel)
+    user_id        VARCHAR(12) NOT NULL,
+    text           TEXT,
+    thread_ts      VARCHAR(20),            -- Parent message ts (NULL if not in thread)
+    subtype        VARCHAR(30),            -- 'bot_message', 'file_share', etc.
+    edited_ts      VARCHAR(20),            -- Timestamp of last edit
+    is_deleted     BOOLEAN DEFAULT FALSE,
+    reactions      JSON,                   -- [{"name":"thumbsup","users":["U111","U222"]}]
+    files          JSON,                   -- Attached file metadata
+    blocks         JSON,                   -- Block Kit structured content
+    PRIMARY KEY (workspace_id, channel_id, ts)
+) ENGINE=InnoDB;
+
+-- Channel membership (denormalized for fast lookups)
+CREATE TABLE channel_members (
+    workspace_id   VARCHAR(12) NOT NULL,
+    channel_id     VARCHAR(12) NOT NULL,
+    user_id        VARCHAR(12) NOT NULL,
+    joined_at      BIGINT NOT NULL,
+    last_read_ts   VARCHAR(20),           -- For unread tracking
+    is_muted       BOOLEAN DEFAULT FALSE,
+    notification_pref VARCHAR(20) DEFAULT 'default',
+    PRIMARY KEY (workspace_id, channel_id, user_id),
+    INDEX idx_user_channels (workspace_id, user_id)
+) ENGINE=InnoDB;</code></pre>
+
+      <h3 id="threads">Thread Support</h3>
+      <p>Threads are implemented as messages with a non-null <code>thread_ts</code> that references the parent message:</p>
+      <ul>
+        <li><strong>Parent message</strong> — <code>thread_ts = NULL</code>, appears in the main channel timeline.</li>
+        <li><strong>Reply</strong> — <code>thread_ts = parent.ts</code>, appears in the thread view. Optionally also broadcasts to the channel (&ldquo;Also send to #channel&rdquo;).</li>
+        <li><strong>Thread summary</strong> — The parent message includes a <code>reply_count</code> and <code>latest_reply</code> for UI preview without loading the full thread.</li>
+        <li><strong>Thread followers</strong> — Users who have replied or explicitly followed the thread receive notifications for new replies.</li>
+      </ul>
+      <pre><code>// Thread query pattern:
+// Load all replies in a thread
+SELECT * FROM messages
+WHERE workspace_id = 'T12345'
+  AND channel_id = 'C98765'
+  AND thread_ts = '1714567890.000100'
+ORDER BY ts ASC;
+
+// This query is efficient because (workspace_id, channel_id, ts)
+// is the primary key, and thread_ts is indexed.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           9. FILE HANDLING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="files">File Handling</h2>
+      <p>Slack processes billions of file uploads — images, PDFs, code snippets, videos. The file pipeline must handle upload, processing, storage, and delivery at scale.</p>
+
+      <h3 id="file-pipeline">File Pipeline</h3>
+      <pre><code>File Upload Pipeline:
+
+Client → Upload API (multipart/form-data)
+           │
+           ├── 1. Validate (file size, type, workspace quota)
+           ├── 2. Generate unique file ID and S3 key
+           ├── 3. Stream to Amazon S3 (multi-part upload for large files)
+           ├── 4. Write metadata to MySQL:
+           │      { file_id, workspace_id, user_id, channel_id,
+           │        filename, mimetype, size_bytes, s3_key,
+           │        upload_ts, is_public }
+           ├── 5. Return file URL to client (via CDN)
+           │
+           └── 6. Enqueue async processing jobs:
+                  ├── "generate_thumbnail" (images/videos → multiple sizes)
+                  ├── "virus_scan" (ClamAV scan)
+                  ├── "extract_text" (PDFs/docs → plain text for search)
+                  ├── "generate_preview" (code syntax highlighting)
+                  └── "transcode_video" (if video, convert to streamable format)
+
+Storage Tiers:
+  • Hot (S3 Standard): Recent files, frequently accessed
+  • Warm (S3 IA): Files older than 90 days
+  • Cold (S3 Glacier): Enterprise retention archive
+  • CDN (CloudFront): Thumbnails, previews — cached at edge
+
+URL Pattern:
+  https://files.slack.com/{workspace_id}/{file_id}/{filename}
+  ↓ CloudFront resolves → S3 origin with signed URL (time-limited access)</code></pre>
+
+      <h3 id="file-security">File Access Security</h3>
+      <ul>
+        <li><strong>Signed URLs</strong> — File URLs contain time-limited signatures. Even if a URL is shared externally, it expires within hours.</li>
+        <li><strong>Channel-scoped access</strong> — The file service checks whether the requesting user is a member of the channel where the file was shared before generating a signed URL.</li>
+        <li><strong>Enterprise Key Management (EKM)</strong> — For EKM customers, files are encrypted with customer-managed keys. Slack cannot decrypt without the customer&rsquo;s key.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           10. ENTERPRISE FEATURES
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="enterprise">Enterprise Features</h2>
+      <p>Enterprise Grid is Slack&rsquo;s tier for the largest organizations. It adds critical features for compliance, security, and administration at scale.</p>
+
+      <h3 id="data-retention">Data Retention Policies</h3>
+      <pre><code>Retention Policy Engine:
+
+┌──────────────────────────────────────────────────┐
+│           Retention Policy Configuration          │
+│                                                   │
+│  Workspace-level defaults:                        │
+│    • Keep all messages: forever                   │
+│    • Delete messages older than: 1y / 2y / custom │
+│    • Delete files older than: 90d / 1y / custom   │
+│                                                   │
+│  Channel-level overrides:                         │
+│    • #legal-hold: retain forever (override)       │
+│    • #temp-project: delete after 30 days          │
+│                                                   │
+│  User-level (DMs):                                │
+│    • Follow workspace default or custom policy    │
+└──────────────────────┬───────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────┐
+│          Retention Worker (daily cron)            │
+│                                                   │
+│  For each workspace with retention policies:      │
+│    1. Query messages older than retention period   │
+│    2. Check legal hold status (skip if held)       │
+│    3. Soft-delete (mark is_deleted = true)         │
+│    4. Remove from search index                     │
+│    5. After grace period, hard-delete from MySQL   │
+│    6. Remove files from S3                         │
+│    7. Log deletion for compliance audit trail      │
+└──────────────────────────────────────────────────┘</code></pre>
+
+      <h3 id="compliance-exports">Compliance Exports</h3>
+      <p>Regulated organizations (finance, healthcare, government) need to export all Slack data for legal discovery. Slack&rsquo;s compliance export system:</p>
+      <ul>
+        <li><strong>Full export</strong> — All messages, files, and metadata for a workspace or date range. Used for e-discovery and regulatory audits.</li>
+        <li><strong>Incremental export</strong> — Only data created/modified since the last export. Enables daily compliance pipelines.</li>
+        <li><strong>DLP integration</strong> — Data Loss Prevention tools can scan messages in real-time and flag or block messages containing sensitive data (credit card numbers, SSNs, proprietary code).</li>
+        <li><strong>Legal hold</strong> — Administrators can place specific users or channels on legal hold, preventing data deletion regardless of retention policies.</li>
+      </ul>
+
+      <h3 id="ekm">Enterprise Key Management (EKM)</h3>
+      <p>EKM gives customers <strong>control over their encryption keys</strong>, stored in their own AWS KMS account. This means:</p>
+      <pre><code>EKM Architecture:
+
+┌──────────────────────────────────────────────────────────────┐
+│                     Customer's AWS Account                    │
+│                                                               │
+│   ┌───────────────────────────┐                               │
+│   │    AWS KMS                │                               │
+│   │    Customer Master Key    │◀── Customer controls access   │
+│   │    (CMK)                  │    via IAM policies            │
+│   └────────────┬──────────────┘                               │
+└────────────────┼─────────────────────────────────────────────┘
+                 │ Slack requests key access
+                 ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     Slack's Infrastructure                    │
+│                                                               │
+│   Message/File encryption flow:                               │
+│   1. Slack generates a data encryption key (DEK) per object   │
+│   2. DEK encrypts the message/file content                    │
+│   3. DEK itself is encrypted by the customer's CMK (KMS)      │
+│   4. Encrypted DEK stored alongside the encrypted content     │
+│                                                               │
+│   Decryption flow:                                            │
+│   1. Slack retrieves the encrypted DEK                        │
+│   2. Calls customer's KMS to decrypt the DEK                  │
+│   3. Uses decrypted DEK to decrypt the message/file           │
+│   4. DEK is never stored in plaintext, only held in memory    │
+│                                                               │
+│   Customer kill switch:                                       │
+│   • Revoke Slack's IAM access to KMS                          │
+│   • All data becomes immediately unreadable                   │
+│   • Slack cannot decrypt any messages or files                │
+│   • Used as emergency data access revocation                  │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           11. INCIDENT MANAGEMENT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="incidents">Incident Management</h2>
+      <p>Slack has experienced several high-profile outages. Their incident management and postmortem culture is considered industry-leading.</p>
+
+      <h3 id="incident-response">Incident Response Process</h3>
+      <pre><code>Slack Incident Lifecycle:
+
+Detection (automated):
+  • Datadog monitors → latency spikes, error rate increases
+  • Synthetic canary tests → health check failures
+  • Customer reports → status page auto-correlation
+      │
+      ▼
+Triage (0–5 min):
+  • PagerDuty alerts on-call engineer
+  • Incident Commander (IC) role assigned
+  • Severity classified: SEV-1 (full outage) → SEV-4 (minor degradation)
+  • War room opened (ironically, in Slack — or backup: Zoom bridge)
+      │
+      ▼
+Mitigation (5–60 min):
+  • IC coordinates parallel investigation streams
+  • Common mitigations attempted:
+    - Rollback last deployment (if correlated)
+    - Drain traffic from unhealthy region
+    - Disable feature flag that may be causing issues
+    - Scale up capacity if load-related
+    - Failover to replica database if primary is unhealthy
+      │
+      ▼
+Resolution:
+  • Root cause identified and fixed
+  • Monitoring confirms metrics return to normal
+  • Customer-facing status page updated
+      │
+      ▼
+Postmortem (within 72 hours):
+  • Blameless postmortem document written
+  • Timeline reconstruction (minute-by-minute)
+  • Root cause analysis (5 Whys)
+  • Action items with owners and due dates
+  • Shared across engineering org for learning</code></pre>
+
+      <h3 id="postmortem-culture">Postmortem Culture</h3>
+      <p>Slack&rsquo;s postmortem process is <strong>blameless</strong> — the focus is on systemic improvements, not individual blame. Key principles:</p>
+      <ul>
+        <li><strong>Every SEV-1 and SEV-2 gets a postmortem</strong> — no exceptions. The postmortem is a first-class artifact, as important as the fix.</li>
+        <li><strong>Action items are tracked to completion</strong> — postmortem action items go into the engineering backlog with assigned owners and SLA for completion.</li>
+        <li><strong>Patterns are identified</strong> — if the same category of issue recurs (e.g., &ldquo;deploy caused cascading failure&rdquo;), systemic solutions are prioritized (e.g., improved canary deployment).</li>
+        <li><strong>Chaos engineering</strong> — Slack proactively tests failure modes: database failovers, region outages, dependency failures. The goal is to discover weaknesses before customers do.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           12. DEPLOYMENT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="deployment">Deployment Strategy</h2>
+      <p>Slack deploys to production <strong>multiple times per day</strong> with a sophisticated deployment pipeline designed to minimize blast radius.</p>
+
+      <h3 id="canary-deployments">Canary Deployments</h3>
+      <pre><code>Canary Deployment Pipeline:
+
+┌─────────┐    ┌───────────┐    ┌──────────────┐    ┌───────────┐
+│  Build   │───▶│  Staging   │───▶│    Canary     │───▶│  Full     │
+│  &amp; Test  │    │  Deploy    │    │  (1% traffic) │    │  Rollout  │
+└─────────┘    └───────────┘    └──────────────┘    └───────────┘
+                                       │
+                                       ▼
+                                ┌──────────────┐
+                                │  Automated    │
+                                │  Health Check │
+                                │              │
+                                │  • Error rate │
+                                │  • Latency    │
+                                │  • CPU/Memory │
+                                │  • Business   │
+                                │    metrics    │
+                                └──────┬───────┘
+                                       │
+                              Pass?  ──┤── Fail?
+                              │        │
+                              ▼        ▼
+                         Expand   Auto-rollback
+                         to 5%    (revert to
+                         → 25%    previous
+                         → 100%   version)</code></pre>
+
+      <h3 id="feature-flags">Feature Flags</h3>
+      <p>Slack uses feature flags extensively to decouple deployment from release:</p>
+      <pre><code>Feature Flag System:
+
+Flag Definition:
+{
+  "flag_name": "new_message_composer_v2",
+  "default": false,
+  "rules": [
+    // Slack employees: always on (dogfood)
+    { "workspace_ids": ["T012SLACK"], "value": true },
+    // Beta testers: on
+    { "user_segment": "beta_testers", "value": true },
+    // Enterprise tier: gradual rollout 25%
+    { "plan": "enterprise", "percentage": 25 },
+    // Everyone else: off
+    { "default": false }
+  ],
+  "kill_switch": true,
+  "owner": "team-messaging",
+  "created": "2026-03-15"
+}
+
+Evaluation at Runtime:
+  1. Request hits API server with user context (workspace, user, plan)
+  2. Flag evaluator checks rules top-to-bottom
+  3. First matching rule determines flag value
+  4. Kill switch: set to false for ALL users instantly (no deploy needed)
+
+Flag Categories:
+  • Release flags: Gate new features during gradual rollout
+  • Ops flags: Circuit breakers, capacity controls
+  • Experiment flags: A/B tests with metric tracking
+  • Permission flags: Feature entitlements by plan tier</code></pre>
+
+      <h3 id="gradual-rollout">Gradual Rollout Strategy</h3>
+      <p>New features follow a multi-stage rollout:</p>
+      <ul>
+        <li><strong>Stage 0 — Dogfood:</strong> Slack&rsquo;s own workspace gets the feature first. Internal teams use it daily and report issues.</li>
+        <li><strong>Stage 1 — Beta:</strong> Opt-in workspaces (developer partners, power users) test the feature. Feedback loop is tight.</li>
+        <li><strong>Stage 2 — Gradual:</strong> 1% → 5% → 25% → 50% → 100% rollout. Each stage has a bake period (24–72 hours) where metrics are monitored.</li>
+        <li><strong>Stage 3 — GA:</strong> Feature is generally available. Feature flag is cleaned up (removed from code) within 30 days.</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           ANIMATION 2: VITESS SHARDING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="vitess-visual">Animation: Vitess Sharding</h2>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="vitess-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="vitess-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="vitess-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="vitess-anim" viewBox="0 0 800 440" style="width:100%;max-width:800px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="vitess-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           13. KEY TAKEAWAYS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="takeaways">Key Takeaways</h2>
+      <ul>
+        <li><strong>Vitess for sharding</strong> — transparent MySQL sharding preserves existing code while enabling horizontal scaling. Workspace-level sharding provides natural data locality.</li>
+        <li><strong>Flannel solves the boot problem</strong> — caching full workspace state at the edge with incremental delta updates reduces reconnection load by 99.9%.</li>
+        <li><strong>Async everything</strong> — only the MySQL write is synchronous. Notifications, search indexing, link previews, and analytics are all asynchronous via the job queue.</li>
+        <li><strong>WebSocket fan-out</strong> — channel-based pub/sub across a fleet of WebSocket gateways enables real-time delivery to millions of concurrent users.</li>
+        <li><strong>Search per workspace</strong> — per-workspace search indexes enable fast queries and isolate tenant data naturally.</li>
+        <li><strong>Feature flags decouple deploy from release</strong> — canary deployments catch issues at 1% traffic; feature flags enable instant rollback without redeployment.</li>
+        <li><strong>EKM gives enterprises control</strong> — customer-managed encryption keys provide a kill switch for data access, enabling adoption in regulated industries.</li>
+        <li><strong>Blameless postmortems</strong> — treating incidents as systemic learning opportunities builds a culture of reliability and continuous improvement.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="discord-infrastructure.html"><span>Previous</span><span>&#8592; Discord Infrastructure</span></a>
+        <a class="next" href="interview-framework.html"><span>Next</span><span>Interview Framework &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function roundRect(svg,x,y,w,h,fill,stroke,label,labelColor,fontSize){
+      svg.appendChild(el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,rx:'8',fill:fill,stroke:stroke,'stroke-width':'2'}));
+      if(label){
+        var lines=label.split('\n');
+        for(var i=0;i<lines.length;i++){
+          svg.appendChild(txt(lines[i],{x:''+(x+w/2),y:''+(y+h/2+(i-(lines.length-1)/2)*16),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':''+(fontSize||12),'font-weight':'600',fill:labelColor||'#fff'}));
+        }
+      }
+    }
+    function arrow(svg,x1,y1,x2,y2,color,sw){
+      svg.appendChild(el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':''+(sw||2)}));
+      var a=Math.atan2(y2-y1,x2-x1),s=8;
+      svg.appendChild(el('polygon',{points:(x2-s*Math.cos(a-0.4))+','+(y2-s*Math.sin(a-0.4))+' '+x2+','+y2+' '+(x2-s*Math.cos(a+0.4))+','+(y2-s*Math.sin(a+0.4)),fill:color}));
+    }
+    function dashedLine(svg,x1,y1,x2,y2,color){
+      svg.appendChild(el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'2','stroke-dasharray':'6,4'}));
+    }
+    function pulseCircle(svg,cx,cy,color){
+      var c=el('circle',{cx:''+cx,cy:''+cy,r:'6',fill:color,opacity:'0.9'});
+      var anim=el('animate',{attributeName:'r',values:'4;10;4',dur:'1s',repeatCount:'indefinite'});
+      c.appendChild(anim);
+      var anim2=el('animate',{attributeName:'opacity',values:'0.9;0.3;0.9',dur:'1s',repeatCount:'indefinite'});
+      c.appendChild(anim2);
+      svg.appendChild(c);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+       ANIMATION 1: SLACK MESSAGE FLOW
+       ══════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('slack-msg-anim');
+      var info=document.getElementById('slack-msg-info');
+      var out=document.getElementById('slack-msg-output');
+      var step=0,totalSteps=7;
+
+      var steps=[
+        {label:'User sends message via Slack client.',color:'#6366f1'},
+        {label:'API server receives the message and validates it.',color:'#0a8f6a'},
+        {label:'Message is written to MySQL via Vitess (workspace shard).',color:'#e67e22'},
+        {label:'Notification and indexing jobs are enqueued to Kafka.',color:'#e74c3c'},
+        {label:'WebSocket gateways fan out the message to channel members.',color:'#8b5cf6'},
+        {label:'Search indexer processes the job and indexes the message in Solr/ES.',color:'#0ea5e9'},
+        {label:'All channel members see the message in real-time. Search becomes available within seconds.',color:'#0a8f6a'}
+      ];
+
+      function draw(){
+        clearSvg(svg);
+        var s=step;
+
+        // Background label
+        svg.appendChild(txt('Slack Message Flow',{x:'400',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'15',fill:'var(--ink)'}));
+
+        // Components
+        var boxes=[
+          {x:20, y:55,w:110,h:50,label:'Slack\nClient',     fill:'#6366f1',border:'#4f46e5'},
+          {x:180,y:55,w:110,h:50,label:'API\nServer',        fill:'#0a8f6a',border:'#078a62'},
+          {x:345,y:55,w:120,h:50,label:'MySQL\n(Vitess)',     fill:'#e67e22',border:'#d35400'},
+          {x:345,y:160,w:120,h:50,label:'Kafka\nJob Queue',   fill:'#e74c3c',border:'#c0392b'},
+          {x:540,y:55,w:120,h:50,label:'WebSocket\nGateway',  fill:'#8b5cf6',border:'#7c3aed'},
+          {x:540,y:160,w:120,h:50,label:'Search\nIndexer',    fill:'#0ea5e9',border:'#0284c7'},
+          {x:710,y:55,w:75,h:50,label:'Channel\nMembers',     fill:'#10b981',border:'#059669'}
+        ];
+
+        for(var i=0;i<boxes.length;i++){
+          var b=boxes[i];
+          var active=false;
+          if(i===0 && s>=0) active=true;
+          if(i===1 && s>=1) active=true;
+          if(i===2 && s>=2) active=true;
+          if(i===3 && s>=3) active=true;
+          if(i===4 && s>=4) active=true;
+          if(i===5 && s>=5) active=true;
+          if(i===6 && s>=6) active=true;
+          var opacity=active?'1':'0.25';
+          var g=el('g',{opacity:opacity});
+          var r=el('rect',{x:''+b.x,y:''+b.y,width:''+b.w,height:''+b.h,rx:'10',fill:b.fill,stroke:b.border,'stroke-width':'2'});
+          g.appendChild(r);
+          var lines=b.label.split('\n');
+          for(var li=0;li<lines.length;li++){
+            g.appendChild(txt(lines[li],{x:''+(b.x+b.w/2),y:''+(b.y+b.h/2+(li-(lines.length-1)/2)*15),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#fff'}));
+          }
+          svg.appendChild(g);
+        }
+
+        // Arrows between steps
+        var arrows=[
+          {x1:130,y1:80,x2:180,y2:80,step:1,color:'#0a8f6a'},
+          {x1:290,y1:80,x2:345,y2:80,step:2,color:'#e67e22'},
+          {x1:405,y1:105,x2:405,y2:160,step:3,color:'#e74c3c'},
+          {x1:465,y1:80,x2:540,y2:80,step:4,color:'#8b5cf6'},
+          {x1:540,y1:185,x2:465,y2:185,step:5,color:'#0ea5e9'},
+          {x1:660,y1:80,x2:710,y2:80,step:6,color:'#10b981'}
+        ];
+
+        for(var ai=0;ai<arrows.length;ai++){
+          var ar=arrows[ai];
+          if(s>=ar.step){
+            arrow(svg,ar.x1,ar.y1,ar.x2,ar.y2,ar.color,2);
+            if(s===ar.step) pulseCircle(svg,(ar.x1+ar.x2)/2,(ar.y1+ar.y2)/2,ar.color);
+          }
+        }
+
+        // Fan-out detail when step >= 4
+        if(s>=4){
+          var fanY=250;
+          svg.appendChild(txt('WebSocket Fan-Out Detail',{x:'400',y:''+(fanY-5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+
+          var gwX=160;
+          roundRect(svg,gwX,fanY+5,130,40,'#8b5cf6','#7c3aed','WS Gateway','#fff',11);
+
+          var members=[
+            {label:'Alice (Desktop)',x:400,y:fanY},
+            {label:'Bob (Mobile)',x:400,y:fanY+50},
+            {label:'Carol (Browser)',x:400,y:fanY+100},
+            {label:'Dave (Desktop)',x:580,y:fanY},
+            {label:'Eve (Mobile)',x:580,y:fanY+50}
+          ];
+          for(var mi=0;mi<members.length;mi++){
+            var m=members[mi];
+            var mActive=(s>=5 && mi<=2) || (s>=6);
+            var mOpacity=mActive?'1':'0.35';
+            svg.appendChild(el('rect',{x:''+m.x,y:''+(m.y+5),width:'130',height:'30',rx:'6',fill:'#10b981',stroke:'#059669','stroke-width':'1.5',opacity:mOpacity}));
+            svg.appendChild(txt(m.label,{x:''+(m.x+65),y:''+(m.y+20),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'#fff',opacity:mOpacity}));
+            if(mActive){
+              arrow(svg,gwX+130,fanY+25,m.x,m.y+20,'#8b5cf6',1.5);
+            } else {
+              dashedLine(svg,gwX+130,fanY+25,m.x,m.y+20,'var(--line)');
+            }
+          }
+        }
+
+        // Step info
+        info.textContent=steps[s]?steps[s].label:'Click Step to see the message flow.';
+        out.textContent=s+' of '+(totalSteps-1);
+      }
+
+      draw();
+      document.getElementById('slack-msg-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('slack-msg-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+
+    /* ══════════════════════════════════════════════════════════════════
+       ANIMATION 2: VITESS SHARDING
+       ══════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('vitess-anim');
+      var info=document.getElementById('vitess-info');
+      var out=document.getElementById('vitess-output');
+      var step=0,totalSteps=8;
+
+      var steps=[
+        'Click Step to see how Vitess routes queries and reshards.',
+        'Application sends query: SELECT * FROM messages WHERE workspace_id = "T-Acme"',
+        'VTGate parses SQL, extracts workspace_id, computes hash → Shard 0-50.',
+        'VTGate routes query via gRPC to VTTablet for Shard 0-50.',
+        'VTTablet executes query on local MySQL and returns result to VTGate.',
+        'Shard 0-50 is hot! Vitess initiates online resharding → split into 0-25 and 25-50.',
+        'VReplication streams data from old shard to new shards. Catch-up in progress...',
+        'Cut-over complete! New shards are serving. VTGate routes T-Acme to Shard 0-25. Zero downtime.'
+      ];
+
+      function draw(){
+        clearSvg(svg);
+        var s=step;
+
+        svg.appendChild(txt('Vitess Sharding at Slack',{x:'400',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'15',fill:'var(--ink)'}));
+
+        // Application box
+        var appActive=s>=1;
+        roundRect(svg,320,38,160,40,appActive?'#6366f1':'#ccc',appActive?'#4f46e5':'#aaa','Application (Java)','#fff',11);
+
+        // VTGate
+        var vtgActive=s>=2;
+        roundRect(svg,320,115,160,45,vtgActive?'#0a8f6a':'#ccc',vtgActive?'#078a62':'#aaa','VTGate\n(Stateless Proxy)','#fff',11);
+
+        // Arrow App → VTGate
+        if(s>=1){
+          arrow(svg,400,78,400,115,'#6366f1',2);
+          if(s===1) pulseCircle(svg,400,96,'#6366f1');
+        }
+
+        // Topology server
+        svg.appendChild(el('rect',{x:'600',y:'118',width:'140',height:'38',rx:'8',fill:s>=2?'#f59e0b':'#ddd',stroke:s>=2?'#d97706':'#bbb','stroke-width':'2','stroke-dasharray':'5,3'}));
+        svg.appendChild(txt('Topology (etcd)',{x:'670',y:'137','text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'600',fill:s>=2?'#fff':'#999'}));
+        if(s>=2) dashedLine(svg,480,137,600,137,'#f59e0b');
+
+        // Shards - change after resharding step
+        var shardY=210;
+        if(s<5){
+          // Original 3 shards
+          var shards=[
+            {x:60,y:shardY,label:'Shard 0-50',sub:'T-Acme, T-Beta',color:'#e67e22',border:'#d35400'},
+            {x:310,y:shardY,label:'Shard 50-80',sub:'T-Gamma, T-Delta',color:'#3b82f6',border:'#2563eb'},
+            {x:560,y:shardY,label:'Shard 80-100',sub:'T-Epsilon',color:'#8b5cf6',border:'#7c3aed'}
+          ];
+          for(var si=0;si<shards.length;si++){
+            var sh=shards[si];
+            var shActive=(s>=3 && si===0)||s<3;
+            var op=shActive||s<3?'1':'0.3';
+            var g=el('g',{opacity:op});
+            g.appendChild(el('rect',{x:''+sh.x,y:''+sh.y,width:'180',height:'55',rx:'10',fill:sh.color,stroke:sh.border,'stroke-width':'2'}));
+            g.appendChild(txt(sh.label,{x:''+(sh.x+90),y:''+(sh.y+20),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12','font-weight':'700',fill:'#fff'}));
+            g.appendChild(txt(sh.sub,{x:''+(sh.x+90),y:''+(sh.y+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'400',fill:'rgba(255,255,255,0.8)'}));
+
+            // VTTablet label
+            g.appendChild(el('rect',{x:''+(sh.x+30),y:''+(sh.y+60),width:'120',height:'28',rx:'6',fill:'var(--surface)',stroke:sh.border,'stroke-width':'1.5'}));
+            g.appendChild(txt('VTTablet + MySQL',{x:''+(sh.x+90),y:''+(sh.y+74),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)'}));
+            svg.appendChild(g);
+          }
+
+          // Arrow VTGate → correct shard
+          if(s>=3){
+            arrow(svg,400,160,150,shardY,'#0a8f6a',2);
+            if(s===3) pulseCircle(svg,275,shardY-25,'#0a8f6a');
+          }
+          if(s>=4){
+            arrow(svg,150,shardY,400,160,'#e67e22',2);
+            svg.appendChild(txt('Result',{x:'260',y:''+(shardY-35),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:'#e67e22'}));
+          }
+
+          // Hot shard indicator
+          if(s===4){
+            svg.appendChild(txt('⚠ Shard 0-50 is hot!',{x:'150',y:''+(shardY+110),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#e74c3c'}));
+          }
+        } else {
+          // Resharding visualization (steps 5-7)
+          if(s===5){
+            // Show old shard splitting
+            var oldX=120,oldY=shardY;
+            svg.appendChild(el('rect',{x:''+oldX,y:''+oldY,width:'180',height:'55',rx:'10',fill:'#e67e22',stroke:'#d35400','stroke-width':'2','stroke-dasharray':'6,3',opacity:'0.5'}));
+            svg.appendChild(txt('Shard 0-50 (splitting...)',{x:''+(oldX+90),y:''+(oldY+20),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#d35400'}));
+            svg.appendChild(txt('T-Acme, T-Beta',{x:''+(oldX+90),y:''+(oldY+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'#d35400'}));
+
+            // New shards appearing
+            var newY=shardY+90;
+            svg.appendChild(el('rect',{x:'60',y:''+newY,width:'140',height:'50',rx:'10',fill:'#10b981',stroke:'#059669','stroke-width':'2',opacity:'0.6'}));
+            svg.appendChild(txt('Shard 0-25 (new)',{x:'130',y:''+(newY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#fff'}));
+            svg.appendChild(txt('T-Acme',{x:'130',y:''+(newY+35),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'rgba(255,255,255,0.8)'}));
+
+            svg.appendChild(el('rect',{x:'220',y:''+newY,width:'140',height:'50',rx:'10',fill:'#10b981',stroke:'#059669','stroke-width':'2',opacity:'0.6'}));
+            svg.appendChild(txt('Shard 25-50 (new)',{x:'290',y:''+(newY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#fff'}));
+            svg.appendChild(txt('T-Beta',{x:'290',y:''+(newY+35),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'rgba(255,255,255,0.8)'}));
+
+            // Arrows from old to new
+            dashedLine(svg,210,oldY+55,130,newY,'#10b981');
+            dashedLine(svg,210,oldY+55,290,newY,'#10b981');
+
+            // Other shards faded
+            svg.appendChild(el('rect',{x:'450',y:''+shardY,width:'140',height:'50',rx:'10',fill:'#3b82f6',stroke:'#2563eb','stroke-width':'2',opacity:'0.3'}));
+            svg.appendChild(txt('Shard 50-80',{x:'520',y:''+(shardY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'600',fill:'#fff',opacity:'0.3'}));
+            svg.appendChild(el('rect',{x:'620',y:''+shardY,width:'140',height:'50',rx:'10',fill:'#8b5cf6',stroke:'#7c3aed','stroke-width':'2',opacity:'0.3'}));
+            svg.appendChild(txt('Shard 80-100',{x:'690',y:''+(shardY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'600',fill:'#fff',opacity:'0.3'}));
+          }
+
+          if(s===6){
+            // VReplication in progress
+            var oldX=120,oldY=shardY;
+            svg.appendChild(el('rect',{x:''+oldX,y:''+oldY,width:'180',height:'55',rx:'10',fill:'#e67e22',stroke:'#d35400','stroke-width':'2','stroke-dasharray':'6,3',opacity:'0.35'}));
+            svg.appendChild(txt('Shard 0-50 (draining)',{x:''+(oldX+90),y:''+(oldY+27),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'600',fill:'#d35400',opacity:'0.7'}));
+
+            var newY=shardY+90;
+            svg.appendChild(el('rect',{x:'60',y:''+newY,width:'140',height:'50',rx:'10',fill:'#10b981',stroke:'#059669','stroke-width':'2'}));
+            svg.appendChild(txt('Shard 0-25',{x:'130',y:''+(newY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#fff'}));
+            svg.appendChild(txt('VReplicating...',{x:'130',y:''+(newY+35),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'rgba(255,255,255,0.8)'}));
+            pulseCircle(svg,130,newY+25,'#10b981');
+
+            svg.appendChild(el('rect',{x:'220',y:''+newY,width:'140',height:'50',rx:'10',fill:'#10b981',stroke:'#059669','stroke-width':'2'}));
+            svg.appendChild(txt('Shard 25-50',{x:'290',y:''+(newY+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'#fff'}));
+            svg.appendChild(txt('VReplicating...',{x:'290',y:''+(newY+35),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'rgba(255,255,255,0.8)'}));
+            pulseCircle(svg,290,newY+25,'#10b981');
+
+            // Stream arrows
+            arrow(svg,oldX+90,oldY+55,130,newY,'#10b981',2);
+            arrow(svg,oldX+90,oldY+55,290,newY,'#10b981',2);
+
+            // Progress bar
+            svg.appendChild(el('rect',{x:'450',y:''+(shardY+30),width:'200',height:'16',rx:'8',fill:'var(--line)'}));
+            svg.appendChild(el('rect',{x:'450',y:''+(shardY+30),width:'140',height:'16',rx:'8',fill:'#10b981'}));
+            svg.appendChild(txt('VReplication: 70%',{x:'550',y:''+(shardY+38),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:'#fff'}));
+
+            svg.appendChild(el('rect',{x:'450',y:''+shardY,width:'140',height:'22',rx:'6',fill:'var(--surface)',stroke:'var(--line)','stroke-width':'1'}));
+            svg.appendChild(txt('Shard 50-80',{x:'520',y:''+(shardY+11),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)',opacity:'0.4'}));
+            svg.appendChild(el('rect',{x:'620',y:''+shardY,width:'140',height:'22',rx:'6',fill:'var(--surface)',stroke:'var(--line)','stroke-width':'1'}));
+            svg.appendChild(txt('Shard 80-100',{x:'690',y:''+(shardY+11),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)',opacity:'0.4'}));
+          }
+
+          if(s===7){
+            // Resharding complete — 4 shards
+            var finalShards=[
+              {x:30, label:'Shard 0-25', sub:'T-Acme',color:'#10b981',border:'#059669'},
+              {x:210,label:'Shard 25-50',sub:'T-Beta', color:'#10b981',border:'#059669'},
+              {x:410,label:'Shard 50-80',sub:'T-Gamma, T-Delta',color:'#3b82f6',border:'#2563eb'},
+              {x:610,label:'Shard 80-100',sub:'T-Epsilon',color:'#8b5cf6',border:'#7c3aed'}
+            ];
+            for(var fi=0;fi<finalShards.length;fi++){
+              var fs=finalShards[fi];
+              svg.appendChild(el('rect',{x:''+fs.x,y:''+shardY,width:'160',height:'55',rx:'10',fill:fs.color,stroke:fs.border,'stroke-width':'2'}));
+              svg.appendChild(txt(fs.label,{x:''+(fs.x+80),y:''+(shardY+20),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12','font-weight':'700',fill:'#fff'}));
+              svg.appendChild(txt(fs.sub,{x:''+(fs.x+80),y:''+(shardY+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'rgba(255,255,255,0.8)'}));
+              // VTTablet
+              svg.appendChild(el('rect',{x:''+(fs.x+20),y:''+(shardY+60),width:'120',height:'25',rx:'6',fill:'var(--surface)',stroke:fs.border,'stroke-width':'1.5'}));
+              svg.appendChild(txt('VTTablet + MySQL',{x:''+(fs.x+80),y:''+(shardY+72),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)'}));
+            }
+
+            // Arrow from VTGate to new shard 0-25
+            arrow(svg,400,160,110,shardY,'#0a8f6a',2);
+            svg.appendChild(txt('T-Acme → Shard 0-25',{x:'280',y:''+(shardY-8),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:'#0a8f6a'}));
+
+            // Success badge
+            svg.appendChild(el('rect',{x:'240',y:''+(shardY+100),width:'320',height:'32',rx:'8',fill:'#0a8f6a',opacity:'0.12'}));
+            svg.appendChild(el('rect',{x:'240',y:''+(shardY+100),width:'320',height:'32',rx:'8',fill:'none',stroke:'#0a8f6a','stroke-width':'2'}));
+            svg.appendChild(txt('✓ Online resharding complete — zero downtime!',{x:'400',y:''+(shardY+116),'text-anchor':'middle','dominant-baseline':'central','font-family':'Manrope,sans-serif','font-size':'12','font-weight':'700',fill:'#0a8f6a'}));
+          }
+        }
+
+        info.textContent=steps[s];
+        out.textContent=s+' of '+(totalSteps-1);
+      }
+
+      draw();
+      document.getElementById('vitess-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('vitess-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+  })();
+  </script>
+</body>
+</html>

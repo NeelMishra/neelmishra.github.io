@@ -1,0 +1,1355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design a chat system like WhatsApp: WebSocket architecture, 1-on-1 and group messaging, presence service, Cassandra message storage, end-to-end encryption, media handling, and delivery guarantees.">
+  <title>Design: Chat System (WhatsApp) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Part 49 of 70</span></div>
+
+      <h1>Design: Chat System (WhatsApp)</h1>
+      <p class="post-meta">April 2026 &middot; 32 min read</p>
+
+      <p>The chat system — specifically a WhatsApp-scale messenger — is <strong>the most frequently asked system design interview question</strong>. It tests your understanding of real-time communication, message ordering, delivery guarantees, presence systems, and storage at scale. WhatsApp serves over <strong>2 billion users</strong> with 100 billion messages per day. In this post, we design a system that handles 50 million daily active users (DAU) with sub-second message delivery.</p>
+
+      <p>What makes this problem fascinating is that it touches nearly every pillar of distributed systems: persistent connections (WebSockets), reliable message delivery (at-least-once semantics), global ordering (vector clocks), efficient storage (wide-column databases), end-to-end encryption (Signal Protocol), and real-time presence tracking (heartbeat + pub/sub). Let's build it from scratch.</p>
+
+      <!-- ================================================================ -->
+      <!--  1. REQUIREMENTS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3>Functional Requirements</h3>
+      <ol>
+        <li><strong>1-on-1 messaging</strong> — send and receive text messages between two users in real-time</li>
+        <li><strong>Group chat</strong> — create groups of up to 500 members, broadcast messages to all members</li>
+        <li><strong>Online/offline status</strong> — show whether a user is currently online or their "last seen" time</li>
+        <li><strong>Read receipts</strong> — single tick (sent), double tick (delivered), blue tick (read)</li>
+        <li><strong>Media sharing</strong> — images, videos, audio, and documents up to 100 MB</li>
+        <li><strong>Message history</strong> — persistent storage, searchable chat history</li>
+        <li><strong>Multi-device sync</strong> — messages available across phone, tablet, and desktop</li>
+        <li><strong>Push notifications</strong> — notify offline users of new messages</li>
+      </ol>
+
+      <h3>Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Low latency</strong> — messages delivered in &lt; 500 ms for online recipients</li>
+        <li><strong>High availability</strong> — 99.99% uptime (chat is mission-critical)</li>
+        <li><strong>Consistency</strong> — eventual consistency acceptable, but messages must <em>never</em> be lost</li>
+        <li><strong>Ordering</strong> — messages within a single chat must appear in correct order</li>
+        <li><strong>Security</strong> — end-to-end encryption for all messages</li>
+      </ul>
+
+      <h3>Scale Estimates</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Value</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Daily Active Users (DAU)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">50 million</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Messages per user per day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~40</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Total messages per day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">2 billion</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Messages per second (avg)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~23,000</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Peak messages per second</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~70,000 (3× average)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Concurrent WebSocket connections</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~15 million (30% of DAU online at once)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Average message size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~200 bytes (text)</td></tr>
+          <tr><td style="padding:0.5em;">Storage per day (text only)</td><td style="padding:0.5em;">~400 GB</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Connection math:</strong> Each WebSocket connection consumes ~10 KB of memory on the server. With 15 million concurrent connections, we need <strong>15M × 10 KB = 150 GB</strong> of memory just for connection state. At 500K connections per server, that's <strong>30 chat servers</strong> minimum — and we should plan for 2× headroom, so roughly <strong>60 chat servers</strong>.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  2. COMMUNICATION PROTOCOL                                       -->
+      <!-- ================================================================ -->
+      <h2 id="protocol">Communication Protocol</h2>
+
+      <p>The choice of communication protocol is the <strong>single most important architectural decision</strong> for a chat system. Let's evaluate the options:</p>
+
+      <h3>Option 1: HTTP Polling</h3>
+      <p>The client periodically sends HTTP requests asking "any new messages?" This is the simplest approach but is incredibly wasteful:</p>
+      <ul>
+        <li>If you poll every second, 15M clients generate <strong>15 million requests/second</strong> — most with empty responses</li>
+        <li>Each HTTP request has ~200 bytes of headers overhead</li>
+        <li>Average latency: half the polling interval (e.g., 500 ms for 1-second polling)</li>
+      </ul>
+      <p><strong>Verdict:</strong> Unacceptable at scale. Wastes bandwidth and server resources.</p>
+
+      <h3>Option 2: Long Polling</h3>
+      <p>The client opens an HTTP connection and the server holds it open until a new message arrives (or a timeout, typically 30 seconds). Better than polling, but still problematic:</p>
+      <ul>
+        <li>Each "held" connection ties up a server thread/socket</li>
+        <li>If a message arrives right after a timeout, the user waits for the next connection</li>
+        <li>Load balancers may route subsequent requests to a different server, losing context</li>
+        <li>The sender doesn't know which server holds the recipient's long-poll connection</li>
+      </ul>
+      <p><strong>Verdict:</strong> Better, but still not ideal for real-time bidirectional communication.</p>
+
+      <h3>Option 3: Server-Sent Events (SSE)</h3>
+      <p>A unidirectional server-to-client stream over HTTP. Good for pushing updates, but:</p>
+      <ul>
+        <li>Only one-way (server → client); sending messages still requires separate HTTP POSTs</li>
+        <li>Limited to text data (no binary)</li>
+        <li>Max 6 connections per domain in HTTP/1.1 browsers</li>
+      </ul>
+      <p><strong>Verdict:</strong> Suitable for notifications, not for full-duplex chat.</p>
+
+      <h3>Option 4: WebSocket ✓</h3>
+      <p>WebSocket is the <strong>correct choice</strong> for a chat system. It provides:</p>
+      <ul>
+        <li><strong>Full-duplex</strong> — both client and server can send data simultaneously</li>
+        <li><strong>Persistent connection</strong> — established once, reused for the session lifetime</li>
+        <li><strong>Low overhead</strong> — after the initial HTTP handshake, frames have only 2–6 bytes of overhead</li>
+        <li><strong>Real-time</strong> — sub-100 ms delivery once the connection is established</li>
+        <li><strong>Binary support</strong> — can transmit both text and binary data</li>
+      </ul>
+
+      <h3>The WebSocket Handshake</h3>
+      <p>A WebSocket connection starts with an HTTP Upgrade request:</p>
+
+      <pre><code>-- Client sends HTTP Upgrade request --
+GET /chat HTTP/1.1
+Host: chat.example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+Authorization: Bearer &lt;jwt_token&gt;
+
+-- Server responds with 101 Switching Protocols --
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+-- Now both sides communicate via WebSocket frames --
+-- Frame header: 2 bytes (opcode + length) + optional 4-byte mask --</code></pre>
+
+      <div class="callout">
+        <strong>After the handshake</strong>, the TCP connection is "upgraded" to a WebSocket connection. The HTTP server hands off the socket to the WebSocket handler. All subsequent communication uses the WebSocket protocol — lightweight binary frames, no HTTP headers.
+      </div>
+
+      <h3>Hybrid Approach</h3>
+      <p>In practice, we use <strong>both</strong> protocols:</p>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Operation</th><th style="text-align:left; padding:0.5em;">Protocol</th><th style="text-align:left; padding:0.5em;">Reason</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Send/receive messages</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WebSocket</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Real-time, bidirectional</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Typing indicators</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WebSocket</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Ephemeral, real-time</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read receipts</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WebSocket</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Low-latency status update</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">User registration / login</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">HTTPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Stateless, request-response</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Profile updates</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">HTTPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Infrequent, not real-time</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Media upload</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">HTTPS (+ S3 presigned)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Large files, multipart upload</td></tr>
+          <tr><td style="padding:0.5em;">Group management</td><td style="padding:0.5em;">HTTPS</td><td style="padding:0.5em;">CRUD operations</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  3. HIGH-LEVEL ARCHITECTURE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+
+      <p>The system is composed of several specialized services, each handling a distinct concern:</p>
+
+      <h3>Core Components</h3>
+      <ol>
+        <li><strong>API Gateway / Load Balancer</strong> — terminates TLS, authenticates users, routes WebSocket connections to chat servers using <strong>consistent hashing</strong> (by user_id) for sticky sessions</li>
+        <li><strong>Chat Servers (WebSocket Servers)</strong> — maintain persistent WebSocket connections with clients, route messages between users, handle message acknowledgments</li>
+        <li><strong>Presence Servers</strong> — track online/offline status using heartbeats, maintain a presence cache (Redis), publish status changes to subscribers</li>
+        <li><strong>Message Queue (Apache Kafka)</strong> — decouple message production from consumption, buffer messages during traffic spikes, ensure reliable delivery with at-least-once semantics</li>
+        <li><strong>Message Store (Apache Cassandra)</strong> — persistent storage for all chat messages, optimized for write-heavy workloads with time-series data patterns</li>
+        <li><strong>Media Storage (Amazon S3 + CDN)</strong> — store images, videos, audio, documents; generate presigned upload/download URLs</li>
+        <li><strong>Push Notification Service</strong> — send push notifications (APNs, FCM) to offline users, integrate with OS-level notification systems</li>
+        <li><strong>User Service</strong> — user profiles, contacts, block lists, settings (backed by MySQL/PostgreSQL)</li>
+        <li><strong>Group Service</strong> — group metadata, membership management, admin roles</li>
+        <li><strong>Session Service (Redis)</strong> — maps user_id → (chat_server_id, websocket_connection_id) so any chat server can look up where a recipient is connected</li>
+      </ol>
+
+      <pre><code>┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Client A  │     │   Client B  │     │   Client C  │
+│  (Mobile)   │     │  (Desktop)  │     │  (Mobile)   │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │ WSS              │ WSS              │ WSS
+       ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────┐
+│              Load Balancer (L4/L7)                   │
+│        (sticky sessions via user_id hash)            │
+└───────┬──────────────┬──────────────┬───────────────┘
+        ▼              ▼              ▼
+  ┌───────────┐  ┌───────────┐  ┌───────────┐
+  │Chat Server│  │Chat Server│  │Chat Server│
+  │    #1     │  │    #2     │  │    #3     │
+  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
+        │              │              │
+        ▼              ▼              ▼
+  ┌─────────────────────────────────────────┐
+  │         Session Store (Redis)            │
+  │    user_id → {server_id, conn_id}        │
+  └─────────────────┬───────────────────────┘
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+  ┌───────────┐ ┌────────┐ ┌───────────┐
+  │  Message   │ │Presence│ │   Push     │
+  │  Queue     │ │Service │ │Notification│
+  │  (Kafka)   │ │(Redis) │ │  Service   │
+  └─────┬─────┘ └────────┘ └───────────┘
+        ▼
+  ┌───────────┐  ┌───────────┐
+  │  Message   │  │  Media     │
+  │  Store     │  │  Storage   │
+  │(Cassandra) │  │  (S3+CDN)  │
+  └───────────┘  └───────────┘</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  4. 1-ON-1 MESSAGING FLOW                                        -->
+      <!-- ================================================================ -->
+      <h2 id="one-on-one">1-on-1 Messaging Flow</h2>
+
+      <p>This is the core of the system. Let's trace the complete lifecycle of a single message from User A to User B:</p>
+
+      <h3>Step-by-Step Flow (User B Online)</h3>
+      <ol>
+        <li><strong>User A types a message</strong> and taps send. The client generates a <em>client_message_id</em> (UUID) for idempotency.</li>
+        <li><strong>Client A sends via WebSocket</strong> to the chat server it's connected to (Chat Server #1). The frame contains:
+          <pre><code>{
+  "type": "message",
+  "client_msg_id": "550e8400-e29b-41d4-a716-446655440000",
+  "from": "user_A",
+  "to": "user_B",
+  "chat_id": "chat_AB",
+  "content": "Hey, are you free tonight?",
+  "content_type": "text",
+  "timestamp": 1714000000000
+}</code></pre>
+        </li>
+        <li><strong>Chat Server #1 receives the message</strong>, assigns a server-side <em>message_id</em> (monotonically increasing per chat, e.g., Snowflake ID), and immediately sends an <strong>ACK</strong> back to User A (single ✓):
+          <pre><code>{
+  "type": "ack",
+  "client_msg_id": "550e8400-...",
+  "server_msg_id": "msg_174200001",
+  "status": "sent",
+  "timestamp": 1714000000050
+}</code></pre>
+        </li>
+        <li><strong>Chat Server #1 persists the message</strong> to Kafka (topic: <code>messages</code>, partition key: <code>chat_AB</code>) for durable storage. A Kafka consumer writes it to Cassandra asynchronously.</li>
+        <li><strong>Chat Server #1 looks up User B's connection</strong> in the Session Store (Redis): <code>GET session:user_B</code> → <code>{"server": "chat_server_2", "conn": "ws_889"}</code></li>
+        <li><strong>Chat Server #1 forwards the message</strong> to Chat Server #2 via an internal service mesh (gRPC or direct TCP). Chat Server #2 finds the WebSocket connection for User B and delivers the message.</li>
+        <li><strong>User B's client receives the message</strong> and sends a <strong>delivery ACK</strong> back through Chat Server #2. This triggers a "delivered" status (double ✓✓) that propagates back to User A.</li>
+        <li><strong>User B opens the chat and reads the message</strong>. The client sends a <strong>read receipt</strong>. User A now sees a blue ✓✓.</li>
+      </ol>
+
+      <h3>Step-by-Step Flow (User B Offline)</h3>
+      <ol>
+        <li>Steps 1–4 are identical: User A sends, Chat Server acknowledges and persists.</li>
+        <li><strong>Session Store lookup returns NULL</strong> — User B is not connected to any chat server.</li>
+        <li><strong>Chat Server publishes to the push notification service</strong>, which sends a push notification via APNs (iOS) or FCM (Android).</li>
+        <li><strong>The message remains in Cassandra</strong>, awaiting sync when User B comes online.</li>
+        <li><strong>User B opens the app</strong> → establishes a WebSocket connection → sends a <strong>sync request</strong> with the last known <code>server_msg_id</code> for each chat → Chat Server queries Cassandra for all messages with IDs greater than the last known → delivers them in bulk.</li>
+      </ol>
+
+      <!-- 1-on-1 Animation -->
+      <div class="anim-container" id="dm-anim">
+        <h4>&#9654; 1-on-1 Message Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch a message travel from User A → Chat Server → User B (online), then see the offline flow with push notification and sync.</p>
+        <svg id="dm-svg" width="700" height="320" viewBox="0 0 700 320"></svg>
+        <div id="dm-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="dm-step">Step &rarr;</button>
+          <button class="anim-btn" id="dm-reset">Reset</button>
+          <span class="anim-output" id="dm-output"></span>
+        </div>
+      </div>
+
+      <h3>Message Deduplication</h3>
+      <p>Networks are unreliable. A client may retry a send if it doesn't receive an ACK. The server uses the <strong>client_message_id</strong> (UUID) for idempotency:</p>
+      <pre><code>-- On the chat server (pseudocode):
+def handle_message(msg):
+    # Check if we already processed this client_msg_id
+    if redis.sismember(f"dedup:{msg.chat_id}", msg.client_msg_id):
+        # Already processed — resend the ACK but don't duplicate the message
+        return send_ack(msg.client_msg_id, existing_server_msg_id)
+    
+    server_msg_id = snowflake.next_id()
+    kafka.produce("messages", key=msg.chat_id, value=msg)
+    redis.sadd(f"dedup:{msg.chat_id}", msg.client_msg_id)
+    redis.expire(f"dedup:{msg.chat_id}", 86400)  # 24h TTL
+    
+    return send_ack(msg.client_msg_id, server_msg_id)</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  5. GROUP CHAT                                                   -->
+      <!-- ================================================================ -->
+      <h2 id="group-chat">Group Chat Design</h2>
+
+      <p>Group messaging introduces a <strong>fan-out problem</strong>: one message must be delivered to potentially hundreds of recipients. There are two strategies:</p>
+
+      <h3>Strategy 1: Fan-out on Write (Write-Heavy)</h3>
+      <p>When a message is sent to a group, the server immediately copies it into every member's personal inbox (message queue). Each member's chat server then delivers from their inbox.</p>
+      <ul>
+        <li><strong>Pro:</strong> Reads are fast — each user just reads from their own inbox</li>
+        <li><strong>Con:</strong> One message to a 500-member group creates 500 copies — write amplification</li>
+        <li><strong>Used by:</strong> WeChat (for small groups)</li>
+      </ul>
+
+      <h3>Strategy 2: Fan-out on Read (Read-Heavy)</h3>
+      <p>The message is written once to the group's message store. When a member opens the group chat, they query the group's timeline.</p>
+      <ul>
+        <li><strong>Pro:</strong> Only one write per message regardless of group size</li>
+        <li><strong>Con:</strong> Reads require joining group timeline with user's "last read" pointer</li>
+        <li><strong>Used by:</strong> Discord (for large servers)</li>
+      </ul>
+
+      <h3>Our Hybrid Approach</h3>
+      <p>We use a <strong>hybrid fan-out</strong> — the message is stored once in the group's Cassandra table, but we also push a lightweight notification entry into each member's message queue (via Kafka) so their chat server knows to deliver in real-time:</p>
+
+      <pre><code>-- Group message flow:
+1. User A sends message to group_xyz
+2. Chat Server writes message to Kafka topic "group_messages"
+   (partition key: group_xyz)
+3. Kafka consumer writes to Cassandra: messages_by_group table
+4. For each member in group_xyz (fetched from Group Service):
+   a. Look up member's session in Redis
+   b. If online → forward message via their chat server's WebSocket
+   c. If offline → enqueue push notification
+5. Each receiving client sends delivery ACK per message</code></pre>
+
+      <!-- Group Chat Animation -->
+      <div class="anim-container" id="group-anim">
+        <h4>&#9654; Group Chat Fan-out</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">User A sends a message to a group of 5. Watch it fan out to each member's message queue and get delivered via WebSocket.</p>
+        <svg id="group-svg" width="700" height="350" viewBox="0 0 700 350"></svg>
+        <div id="group-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="group-step">Step &rarr;</button>
+          <button class="anim-btn" id="group-reset">Reset</button>
+          <span class="anim-output" id="group-output"></span>
+        </div>
+      </div>
+
+      <h3>Group Message Ordering</h3>
+      <p>Within a group, all messages are produced to the <strong>same Kafka partition</strong> (partitioned by <code>group_id</code>), which guarantees a total order. The Kafka consumer assigns monotonically increasing sequence numbers as it writes to Cassandra. Clients use these sequence numbers to display messages in the correct order.</p>
+
+      <div class="callout">
+        <strong>Hot partition problem:</strong> A very active group (e.g., a 500-member school group) can become a hot partition in Kafka. Mitigation: use a dedicated Kafka topic for "hot" groups, or sub-partition messages within a group by time buckets.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  6. PRESENCE SYSTEM                                              -->
+      <!-- ================================================================ -->
+      <h2 id="presence">Online Presence System</h2>
+
+      <p>The presence system answers: "Is User X online right now?" This seems simple but is surprisingly tricky at scale — especially when a user has millions of contacts who all want real-time status updates.</p>
+
+      <h3>Heartbeat Mechanism</h3>
+      <p>Each connected client sends a <strong>heartbeat</strong> to the presence server every 30 seconds. If no heartbeat is received for 90 seconds (3 missed heartbeats), the user is marked offline:</p>
+
+      <pre><code>-- Heartbeat handling (Presence Server):
+def handle_heartbeat(user_id):
+    # Update last_active timestamp in Redis
+    redis.hset(f"presence:{user_id}", mapping={
+        "status": "online",
+        "last_active": current_timestamp(),
+        "server_id": this_server_id
+    })
+    # Set a TTL — if no heartbeat within 90s, key expires → offline
+    redis.expire(f"presence:{user_id}", 90)
+
+def on_key_expired(user_id):
+    # Redis keyspace notification: key expired → user went offline
+    publish_status_change(user_id, "offline", last_active_time)
+
+def on_websocket_close(user_id):
+    # Immediate offline detection when connection drops cleanly
+    redis.hset(f"presence:{user_id}", "status", "offline")
+    redis.hset(f"presence:{user_id}", "last_active", current_timestamp())
+    publish_status_change(user_id, "offline", current_timestamp())</code></pre>
+
+      <h3>Status Fan-out via Pub/Sub</h3>
+      <p>When User A's status changes, all friends who have User A's chat open need to be notified. Naive approach: look up all of User A's contacts and push to each — this is <strong>O(friends)</strong> per status change and extremely expensive for popular users.</p>
+
+      <p>Better approach: <strong>subscription-based pub/sub</strong>:</p>
+      <ol>
+        <li>When User B opens a chat with User A, User B <em>subscribes</em> to User A's presence channel: <code>SUBSCRIBE presence:user_A</code></li>
+        <li>When User A's status changes, the presence server publishes: <code>PUBLISH presence:user_A {status: "online"}</code></li>
+        <li>Only actively interested users receive the update — no wasted fan-out</li>
+        <li>When User B closes the chat or goes offline, the subscription is removed</li>
+      </ol>
+
+      <p>For group chats, when User B opens a group, they subscribe to presence channels of all group members. The presence server uses Redis Pub/Sub for this.</p>
+
+      <!-- Presence Animation -->
+      <div class="anim-container" id="presence-anim">
+        <h4>&#9654; Presence System: Heartbeat &amp; Status Updates</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch a user come online, heartbeats maintain status, and friends subscribed to the channel receive real-time updates.</p>
+        <svg id="presence-svg" width="700" height="300" viewBox="0 0 700 300"></svg>
+        <div id="presence-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="presence-step">Step &rarr;</button>
+          <button class="anim-btn" id="presence-reset">Reset</button>
+          <span class="anim-output" id="presence-output"></span>
+        </div>
+      </div>
+
+      <h3>Handling Edge Cases</h3>
+      <ul>
+        <li><strong>Flapping</strong> — a user with a bad connection rapidly toggles online/offline. Solution: add a <strong>debounce window</strong> (e.g., don't publish "offline" until 30 seconds after the last heartbeat miss). Only publish "online" immediately.</li>
+        <li><strong>Multi-device</strong> — User has phone and desktop. "Online" if <em>any</em> device is connected; "offline" only when <em>all</em> devices disconnect. Maintain a per-device presence set: <code>SADD presence_devices:user_A "phone" "desktop"</code></li>
+        <li><strong>Large groups</strong> — subscribing to 500 presence channels when opening a large group is expensive. Solution: only subscribe to presence for <em>visible</em> members (viewport-based), and batch presence queries for the rest: <code>MGET presence:user_1 presence:user_2 ...</code></li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  7. MESSAGE STORAGE — CASSANDRA                                  -->
+      <!-- ================================================================ -->
+      <h2 id="storage">Message Storage (Cassandra)</h2>
+
+      <p>Why Cassandra for chat messages? It's the <strong>perfect fit</strong>:</p>
+      <ul>
+        <li><strong>Write-optimized</strong> — uses an LSM-tree (Log-Structured Merge-tree), which converts random writes into sequential writes. Chat is extremely write-heavy.</li>
+        <li><strong>Time-series friendly</strong> — messages are naturally ordered by time, and Cassandra excels at range queries within a partition.</li>
+        <li><strong>Linearly scalable</strong> — add nodes to handle more data/traffic, no single point of failure.</li>
+        <li><strong>Tunable consistency</strong> — use <code>QUORUM</code> writes for durability, <code>LOCAL_ONE</code> reads for speed.</li>
+      </ul>
+
+      <h3>Schema Design</h3>
+
+      <pre><code>-- 1-on-1 messages: partitioned by chat_id, clustered by message_id (time-ordered)
+CREATE TABLE messages_by_chat (
+    chat_id       TEXT,          -- deterministic: sorted(user_A, user_B)
+    message_id    BIGINT,        -- Snowflake ID (encodes timestamp + server + seq)
+    sender_id     TEXT,
+    content       BLOB,          -- encrypted message body
+    content_type  TEXT,          -- 'text', 'image', 'video', 'audio', 'document'
+    media_url     TEXT,          -- S3 URL for media messages
+    thumbnail     BLOB,          -- base64 thumbnail for images/videos
+    status        TEXT,          -- 'sent', 'delivered', 'read'
+    created_at    TIMESTAMP,
+    PRIMARY KEY (chat_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_unit': 'DAYS',
+                    'compaction_window_size': 7}
+  AND gc_grace_seconds = 864000
+  AND default_time_to_live = 0;</code></pre>
+
+      <pre><code>-- Group messages: partitioned by group_id, clustered by message_id
+CREATE TABLE messages_by_group (
+    group_id      TEXT,
+    message_id    BIGINT,        -- Snowflake ID
+    sender_id     TEXT,
+    content       BLOB,
+    content_type  TEXT,
+    media_url     TEXT,
+    thumbnail     BLOB,
+    created_at    TIMESTAMP,
+    PRIMARY KEY (group_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_unit': 'DAYS',
+                    'compaction_window_size': 7};</code></pre>
+
+      <pre><code>-- Per-user chat index: which chats does a user belong to, ordered by last activity
+CREATE TABLE chats_by_user (
+    user_id           TEXT,
+    last_message_at   TIMESTAMP,
+    chat_id           TEXT,
+    chat_type         TEXT,       -- 'dm' or 'group'
+    other_user_id     TEXT,       -- NULL for group chats
+    group_name        TEXT,       -- NULL for DMs
+    last_message_preview TEXT,    -- first 100 chars of last message
+    unread_count      INT,
+    PRIMARY KEY (user_id, last_message_at, chat_id)
+) WITH CLUSTERING ORDER BY (last_message_at DESC, chat_id ASC);</code></pre>
+
+      <pre><code>-- Read receipts: track per-user read position in each chat
+CREATE TABLE read_receipts (
+    chat_id       TEXT,
+    user_id       TEXT,
+    last_read_msg_id  BIGINT,    -- the highest message_id this user has read
+    read_at       TIMESTAMP,
+    PRIMARY KEY (chat_id, user_id)
+);</code></pre>
+
+      <div class="callout">
+        <strong>Why <code>chat_id</code> as partition key?</strong> All messages in a conversation live in the same Cassandra partition. This means fetching a page of chat history is a <strong>single-partition range query</strong> — extremely fast, O(log N) seek + sequential read. The trade-off: a very active chat could create a large partition. Mitigation: add a <code>bucket</code> column (e.g., monthly buckets) to split large chats across partitions.
+      </div>
+
+      <h3>Query Patterns</h3>
+      <pre><code>-- Fetch latest 50 messages in a chat (pagination)
+SELECT * FROM messages_by_chat
+WHERE chat_id = 'chat_AB'
+ORDER BY message_id DESC
+LIMIT 50;
+
+-- Fetch messages after a sync point (for offline → online sync)
+SELECT * FROM messages_by_chat
+WHERE chat_id = 'chat_AB'
+AND message_id > 174200001     -- last known message_id
+ORDER BY message_id ASC;
+
+-- Fetch user's chat list (inbox)
+SELECT * FROM chats_by_user
+WHERE user_id = 'user_A'
+LIMIT 20;
+
+-- Get unread count across all chats
+SELECT chat_id, unread_count FROM chats_by_user
+WHERE user_id = 'user_A' AND unread_count > 0;</code></pre>
+
+      <h3>Partition Sizing</h3>
+      <p>Let's estimate partition sizes:</p>
+      <ul>
+        <li>Average message size (encrypted): ~500 bytes</li>
+        <li>Active 1-on-1 chat: ~50 messages/day × 365 days = ~18,250 messages/year</li>
+        <li>Partition size per year: 18,250 × 500 bytes ≈ <strong>9 MB</strong> — well within Cassandra's recommended 100 MB per partition</li>
+        <li>Very active group (100 messages/day): ~36,500 messages/year ≈ <strong>18 MB</strong> — still fine</li>
+        <li>Extremely active group (1,000 messages/day): ~180 MB/year — needs <strong>time-bucketed partitions</strong></li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  8. MESSAGE ORDERING                                             -->
+      <!-- ================================================================ -->
+      <h2 id="ordering">Message Ordering &amp; Delivery Guarantees</h2>
+
+      <p>Correct message ordering is <strong>critical</strong> for a chat application. Imagine seeing "Yes!" before "Do you want to grab dinner?" — the conversation becomes nonsensical.</p>
+
+      <h3>Ordering Strategies</h3>
+
+      <h4>1. Client Timestamp (Unreliable)</h4>
+      <p>Using the sender's device clock is tempting but fundamentally broken:</p>
+      <ul>
+        <li>Device clocks can be wrong (manual changes, timezone bugs, NTP drift)</li>
+        <li>Two users' clocks may differ by seconds or minutes</li>
+        <li>A message sent "later" could have an earlier timestamp</li>
+      </ul>
+
+      <h4>2. Server Timestamp (Better)</h4>
+      <p>The chat server assigns a timestamp when it receives the message. Problems:</p>
+      <ul>
+        <li>Multiple chat servers have slightly different clocks (even with NTP, drift can be ~1 ms)</li>
+        <li>If two messages arrive at different servers within the same millisecond, ordering is ambiguous</li>
+      </ul>
+
+      <h4>3. Snowflake ID (Our Choice) ✓</h4>
+      <p>We use <strong>Twitter Snowflake-style IDs</strong>: 64-bit integers that embed a timestamp and guarantee global uniqueness and roughly chronological ordering:</p>
+
+      <pre><code>┌──────────────────────────────────────────────────────────────────┐
+│                     64-bit Snowflake ID                          │
+├──────────┬────────────┬──────────────┬──────────────────────────┤
+│  1 bit   │  41 bits   │   10 bits    │       12 bits            │
+│  (sign)  │ timestamp  │  machine ID  │   sequence number        │
+│          │ (ms since  │  (1024       │   (4096 IDs per ms       │
+│          │  epoch)    │   servers)   │    per server)            │
+└──────────┴────────────┴──────────────┴──────────────────────────┘
+
+-- 41 bits of timestamp: ~69 years from custom epoch
+-- 10 bits of machine ID: supports 1024 chat servers
+-- 12 bits of sequence: 4096 messages per millisecond per server</code></pre>
+
+      <p>For <strong>within a single chat</strong>, we add an extra guarantee: all messages for a chat flow through the same Kafka partition (partitioned by <code>chat_id</code>), and the Kafka consumer assigns a <strong>per-chat sequence number</strong>. This gives us a total order within each conversation.</p>
+
+      <h3>Delivery Guarantees</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Guarantee</th><th style="text-align:left; padding:0.5em;">How We Achieve It</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>At-least-once delivery</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Client retries on ACK timeout + server deduplicates via <code>client_msg_id</code></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>No message loss</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Kafka persists messages to disk before ACKing (<code>acks=all</code>); Cassandra replicates to 3 nodes</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Per-chat ordering</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Single Kafka partition per chat + per-chat sequence number in Cassandra</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Exactly-once semantics (effective)</strong></td><td style="padding:0.5em;">Client dedup on <code>server_msg_id</code> + server dedup on <code>client_msg_id</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Handling Out-of-Order Delivery</h3>
+      <p>Even with all guarantees, messages can arrive out of order at the client (e.g., network jitter, reconnection). The client maintains a <strong>local buffer</strong>:</p>
+      <pre><code>// Client-side ordering logic:
+class MessageBuffer {
+    constructor(chatId) {
+        this.chatId = chatId;
+        this.expectedSeq = lastKnownSeq + 1;
+        this.buffer = new Map(); // seq → message
+    }
+
+    onMessageReceived(msg) {
+        if (msg.seq === this.expectedSeq) {
+            // In order — display immediately
+            this.display(msg);
+            this.expectedSeq++;
+            // Flush any buffered messages that are now in order
+            while (this.buffer.has(this.expectedSeq)) {
+                this.display(this.buffer.get(this.expectedSeq));
+                this.buffer.delete(this.expectedSeq);
+                this.expectedSeq++;
+            }
+        } else if (msg.seq > this.expectedSeq) {
+            // Out of order — buffer it, wait for missing messages
+            this.buffer.set(msg.seq, msg);
+            // If gap persists for > 2 seconds, request missing messages
+            this.scheduleGapFill(this.expectedSeq, msg.seq - 1);
+        }
+        // msg.seq < expectedSeq → duplicate, ignore
+    }
+}</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  9. END-TO-END ENCRYPTION                                        -->
+      <!-- ================================================================ -->
+      <h2 id="encryption">End-to-End Encryption</h2>
+
+      <p>WhatsApp uses the <strong>Signal Protocol</strong> (developed by Open Whisper Systems) for end-to-end encryption. The server <em>never</em> sees plaintext messages — it only relays encrypted blobs.</p>
+
+      <h3>Key Concepts</h3>
+      <ol>
+        <li><strong>Identity Key Pair</strong> — a long-term Curve25519 key pair generated on first install. The public key is uploaded to the server as the user's identity.</li>
+        <li><strong>Signed Pre-Key</strong> — a medium-term key pair, signed by the identity key. Rotated periodically (e.g., weekly).</li>
+        <li><strong>One-Time Pre-Keys</strong> — a batch of ephemeral key pairs uploaded to the server. Each is used only once for initial key exchange, then deleted.</li>
+        <li><strong>Session Key (Ratchet)</strong> — a symmetric key derived from the Diffie-Hellman exchange. Uses the <strong>Double Ratchet Algorithm</strong> to generate a new key for every single message — providing <strong>forward secrecy</strong>.</li>
+      </ol>
+
+      <h3>Initial Key Exchange (X3DH)</h3>
+      <pre><code>-- User A wants to message User B for the first time:
+
+1. User A fetches User B's "key bundle" from the server:
+   - Identity Key (IKb)
+   - Signed Pre-Key (SPKb) + signature
+   - One-Time Pre-Key (OPKb)
+
+2. User A verifies SPKb's signature using IKb
+
+3. User A performs X3DH (Extended Triple Diffie-Hellman):
+   DH1 = DH(IKa, SPKb)    -- A's identity × B's signed pre-key
+   DH2 = DH(EKa, IKb)     -- A's ephemeral × B's identity
+   DH3 = DH(EKa, SPKb)    -- A's ephemeral × B's signed pre-key
+   DH4 = DH(EKa, OPKb)    -- A's ephemeral × B's one-time pre-key
+
+   Master Secret = KDF(DH1 || DH2 || DH3 || DH4)
+
+4. Derive initial chain keys from Master Secret
+5. Encrypt first message with derived key
+6. Send: encrypted message + IKa (public) + EKa (public) + used OPKb ID
+
+-- User B receives and performs the same DH calculations to derive
+-- the same Master Secret, then decrypts the message.</code></pre>
+
+      <h3>Double Ratchet Algorithm</h3>
+      <p>After the initial exchange, every message uses a <strong>new encryption key</strong> derived via two "ratchets":</p>
+      <ul>
+        <li><strong>Symmetric ratchet (KDF chain)</strong> — each message advances a hash chain: <code>key_n+1 = HMAC(key_n, constant)</code>. Even if one key is compromised, past keys cannot be derived (forward secrecy).</li>
+        <li><strong>Diffie-Hellman ratchet</strong> — periodically (on each message exchange), parties generate new DH key pairs and mix fresh DH output into the chain. This provides <strong>future secrecy</strong> (aka break-in recovery) — if a key is compromised, future keys become secure again after the next ratchet step.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>What the server sees:</strong> Only encrypted blobs, sender/recipient IDs, timestamps, and message sizes. The server <em>cannot</em> read message content, even under a court order. This is a fundamental design choice — and a frequent interview discussion point.
+      </div>
+
+      <h3>Group Encryption</h3>
+      <p>For group chats, WhatsApp uses the <strong>Sender Keys</strong> protocol:</p>
+      <ol>
+        <li>Each group member generates a <em>Sender Key</em> for the group</li>
+        <li>The Sender Key is distributed to all group members via pairwise encrypted channels (using the 1-on-1 encryption above)</li>
+        <li>Messages to the group are encrypted once with the sender's Sender Key (symmetric encryption)</li>
+        <li>All members can decrypt using the sender's Sender Key — <strong>O(1) encryption per message</strong> instead of O(N)</li>
+        <li>When a member leaves, all Sender Keys are regenerated and redistributed</li>
+      </ol>
+
+      <!-- ================================================================ -->
+      <!--  10. MEDIA HANDLING                                              -->
+      <!-- ================================================================ -->
+      <h2 id="media">Media Handling</h2>
+
+      <p>Sending a photo, video, or document follows a different flow than text messages:</p>
+
+      <h3>Upload Flow</h3>
+      <ol>
+        <li><strong>Client encrypts the media</strong> locally using a random AES-256 key</li>
+        <li><strong>Client requests a presigned S3 upload URL</strong> from the API server (via HTTPS):
+          <pre><code>POST /api/v1/media/upload-url
+{
+  "content_type": "image/jpeg",
+  "file_size": 2456789,
+  "chat_id": "chat_AB"
+}
+
+Response:
+{
+  "upload_url": "https://s3.amazonaws.com/chat-media/...",
+  "media_id": "media_8a7f3c",
+  "expires_in": 3600
+}</code></pre>
+        </li>
+        <li><strong>Client uploads encrypted media directly to S3</strong> (bypasses chat servers — no unnecessary load)</li>
+        <li><strong>Client generates a thumbnail</strong> (e.g., 100×100 JPEG for images, first-frame for videos)</li>
+        <li><strong>Client sends a message via WebSocket</strong> containing the media_id, encryption key (encrypted with the chat's session key), thumbnail, and metadata:
+          <pre><code>{
+  "type": "message",
+  "content_type": "image",
+  "media_id": "media_8a7f3c",
+  "media_url": "https://cdn.example.com/media/media_8a7f3c",
+  "encryption_key": "&lt;base64_aes_key_encrypted_with_session_key&gt;",
+  "thumbnail": "&lt;base64_blurred_thumbnail&gt;",
+  "file_size": 2456789,
+  "dimensions": {"width": 1920, "height": 1080},
+  "caption": "Look at this sunset!"
+}</code></pre>
+        </li>
+        <li><strong>Recipient receives the message</strong>, displays the thumbnail immediately, downloads the full media from S3/CDN in the background, decrypts with the AES key</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Why not send media over WebSocket?</strong> WebSocket connections are precious (each server holds 500K connections). Sending a 50 MB video over a WebSocket would block that connection for seconds, delay other messages, and risk timeout. S3 presigned URLs offload the heavy lifting to dedicated storage infrastructure with built-in CDN, multipart upload, and retry support.
+      </div>
+
+      <h3>Media Processing Pipeline</h3>
+      <p>After upload, a background pipeline processes the media:</p>
+      <ul>
+        <li><strong>Virus scanning</strong> — ClamAV or similar scans the encrypted media (if scanning before encryption) or validates file headers</li>
+        <li><strong>Content moderation</strong> — for profile photos and group icons (not E2E encrypted content)</li>
+        <li><strong>Transcoding</strong> — generate multiple resolutions for video (360p, 720p, 1080p)</li>
+        <li><strong>CDN distribution</strong> — replicate to edge locations for fast download globally</li>
+        <li><strong>Expiration</strong> — media not accessed for 30 days is moved to Glacier/cold storage</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  11. READ RECEIPTS & DELIVERY STATUS                             -->
+      <!-- ================================================================ -->
+      <h2 id="receipts">Read Receipts &amp; Delivery Status</h2>
+
+      <p>The three-tick system is a core UX feature of chat apps:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Status</th><th style="text-align:left; padding:0.5em;">Visual</th><th style="text-align:left; padding:0.5em;">Trigger</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Sent</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">✓ (single gray tick)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Server ACKs the message (persisted to Kafka)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Delivered</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">✓✓ (double gray tick)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Recipient's device receives the message and sends delivery ACK</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Read</strong></td><td style="padding:0.5em;">✓✓ (double blue tick)</td><td style="padding:0.5em;">Recipient opens the chat (scrolls message into viewport)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Implementation</h3>
+      <pre><code>-- Delivery receipt (sent by recipient's device automatically):
+{
+  "type": "receipt",
+  "receipt_type": "delivered",
+  "chat_id": "chat_AB",
+  "message_ids": [174200001, 174200002, 174200003],
+  "user_id": "user_B",
+  "timestamp": 1714000005000
+}
+
+-- Read receipt (sent when user opens the chat):
+{
+  "type": "receipt",
+  "receipt_type": "read",
+  "chat_id": "chat_AB",
+  "up_to_msg_id": 174200003,    -- "I've read everything up to this ID"
+  "user_id": "user_B",
+  "timestamp": 1714000010000
+}</code></pre>
+
+      <p>Note the optimization: read receipts use <code>up_to_msg_id</code> instead of listing every message ID. This means "I've read all messages up to and including this ID" — <strong>one receipt covers any number of messages</strong>.</p>
+
+      <h3>Group Read Receipts</h3>
+      <p>In groups, tracking read status is more complex. Each member's read position is stored independently:</p>
+      <pre><code>-- Query: "Who has read message X in group_xyz?"
+SELECT user_id, read_at FROM read_receipts
+WHERE chat_id = 'group_xyz'
+AND last_read_msg_id >= 174200050;
+
+-- This is an expensive query for large groups, so:
+-- 1. Cache frequently-accessed read receipt data in Redis
+-- 2. Only compute detailed "seen by" lists on user request (tap on message)
+-- 3. Show a simple count ("Read by 45 of 100") by default</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  12. MULTI-DEVICE SYNC                                           -->
+      <!-- ================================================================ -->
+      <h2 id="sync">Multi-Device Synchronization</h2>
+
+      <p>Users expect to access their messages on multiple devices — phone, desktop app, and web. This creates a <strong>sync challenge</strong>: how do you keep all devices in sync without duplicating every message N times?</p>
+
+      <h3>Sync Protocol</h3>
+      <ol>
+        <li><strong>Each device maintains a sync cursor</strong> — the <code>last_server_msg_id</code> it has received for each chat</li>
+        <li><strong>On connect/reconnect</strong>, the device sends its sync cursors to the server:
+          <pre><code>{
+  "type": "sync_request",
+  "device_id": "phone_001",
+  "cursors": {
+    "chat_AB": 174200001,
+    "chat_AC": 174100050,
+    "group_xyz": 174150020
+  }
+}</code></pre>
+        </li>
+        <li><strong>The server computes deltas</strong> for each chat (messages with <code>server_msg_id > cursor</code>) and sends them in batches</li>
+        <li><strong>Real-time messages</strong> are delivered to <em>all</em> connected devices simultaneously — the Session Store maps <code>user_id → [{server, conn}, {server, conn}, ...]</code></li>
+      </ol>
+
+      <h3>Primary vs. Companion Devices</h3>
+      <p>WhatsApp's original model uses a <strong>primary device</strong> (phone) with companion devices (desktop, web) that mirror through the phone. The newer multi-device architecture (WhatsApp Multi-Device) is fully independent:</p>
+      <ul>
+        <li>Each device has its own identity key pair and encrypts/decrypts independently</li>
+        <li>Sending a message to User B actually sends <em>N copies</em> (one per device of User B), each encrypted with that device's session key</li>
+        <li>Trade-off: more encryption overhead, but no dependency on a single primary device</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  13. PUSH NOTIFICATIONS                                          -->
+      <!-- ================================================================ -->
+      <h2 id="notifications">Push Notifications</h2>
+
+      <p>When a recipient is offline, we must deliver a push notification. The push notification service:</p>
+
+      <ol>
+        <li>Receives events from chat servers (via Kafka topic <code>push_notifications</code>)</li>
+        <li>Looks up the user's device tokens (stored in a device registry)</li>
+        <li>Formats the notification payload (sender name, message preview — if not E2E encrypted, or just "New message from X")</li>
+        <li>Sends via <strong>APNs</strong> (Apple Push Notification service) for iOS or <strong>FCM</strong> (Firebase Cloud Messaging) for Android</li>
+        <li>Handles token invalidation (device unregistered), rate limiting (don't spam), and notification collapsing (group multiple messages into one notification)</li>
+      </ol>
+
+      <pre><code>-- Push notification payload (FCM example):
+{
+  "to": "&lt;device_fcm_token&gt;",
+  "notification": {
+    "title": "User A",
+    "body": "New message"      // Can't show content due to E2E encryption
+  },
+  "data": {
+    "chat_id": "chat_AB",
+    "sender_id": "user_A",
+    "msg_count": 3,
+    "type": "new_message"
+  },
+  "android": {
+    "priority": "high"         // Wake device from Doze mode
+  }
+}</code></pre>
+
+      <div class="callout">
+        <strong>E2E encryption vs. notification preview:</strong> Since the server can't decrypt messages, push notifications can only show "New message from User A" — not the actual content. To show content in notifications, some apps (like Signal) include the encrypted message payload in the push notification and decrypt it on the device before displaying.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  14. SCALABILITY & FAULT TOLERANCE                               -->
+      <!-- ================================================================ -->
+      <h2 id="scalability">Scalability &amp; Fault Tolerance</h2>
+
+      <h3>Chat Server Scaling</h3>
+      <ul>
+        <li><strong>Horizontal scaling</strong> — add more chat servers as connections grow. Each server handles ~500K concurrent WebSocket connections.</li>
+        <li><strong>Sticky sessions</strong> — the load balancer routes each user to the same chat server (consistent hashing on <code>user_id</code>). On server failure, connections are re-established and the LB routes to a different server.</li>
+        <li><strong>Graceful shutdown</strong> — before taking a server down for maintenance, drain connections: stop accepting new ones, send a "reconnect" frame to existing clients, wait for all to disconnect.</li>
+      </ul>
+
+      <h3>Kafka Scaling</h3>
+      <ul>
+        <li><strong>Partitioning</strong> — messages partitioned by <code>chat_id</code> (1-on-1) or <code>group_id</code> (group). Start with 256 partitions, increase as needed.</li>
+        <li><strong>Replication factor 3</strong> — each partition replicated to 3 brokers for durability</li>
+        <li><strong>Consumer groups</strong> — multiple consumers in a group for parallel processing of Cassandra writes</li>
+      </ul>
+
+      <h3>Cassandra Scaling</h3>
+      <ul>
+        <li><strong>Replication factor 3</strong> with <code>NetworkTopologyStrategy</code> across multiple data centers</li>
+        <li><strong>Write consistency: QUORUM</strong> (2 of 3 nodes acknowledge) — strong durability</li>
+        <li><strong>Read consistency: LOCAL_ONE</strong> — fast reads from the nearest replica</li>
+        <li><strong>Compaction: TimeWindowCompactionStrategy</strong> — optimal for time-series data (chat messages)</li>
+      </ul>
+
+      <h3>Handling Chat Server Failures</h3>
+      <pre><code>Scenario: Chat Server #2 crashes while holding 500K connections
+
+1. All 500K WebSocket connections drop immediately
+2. Clients detect disconnect (TCP keepalive or missing heartbeat)
+3. Clients reconnect with exponential backoff (1s, 2s, 4s, 8s...)
+4. Load balancer routes to healthy servers (Chat Server #1, #3, ...)
+5. New chat server registers the connection in Session Store (Redis)
+6. Clients send sync requests to fetch missed messages
+7. No messages are lost — they're all in Kafka/Cassandra
+
+Recovery time: ~5-10 seconds for reconnection + sync</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  15. INTERVIEW CHEAT SHEET                                       -->
+      <!-- ================================================================ -->
+      <h2 id="interview">Interview Cheat Sheet</h2>
+
+      <p>When asked "Design WhatsApp / a chat system" in an interview, here's the framework:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Topic</th><th style="text-align:left; padding:0.5em;">Key Points</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Protocol</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WebSocket for real-time, HTTP for non-real-time. Explain the handshake.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Architecture</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Chat servers (WS) + Session Store (Redis) + Message Queue (Kafka) + Message Store (Cassandra) + Push Notifications</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>1-on-1 flow</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Sender → Chat Server → Session lookup → forward to recipient's server → deliver via WS. Offline: push + store.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Group chat</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hybrid fan-out: store once, notify each member. Mention small-group vs. large-group trade-offs.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Presence</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Heartbeat-based (every 30s), Redis cache, pub/sub for updates. Debounce for flapping.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Storage</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cassandra: partition by chat_id, cluster by message_id (Snowflake). TimeWindow compaction.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Ordering</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Snowflake IDs + single Kafka partition per chat + per-chat sequence numbers.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Encryption</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Signal Protocol (X3DH + Double Ratchet). Mention forward secrecy. Server sees only ciphertext.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Media</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">S3 presigned URL upload, send thumbnail + URL over WS. Don't send large files over WS.</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Delivery</strong></td><td style="padding:0.5em;">At-least-once via client retry + server dedup. Three-tick system for receipts.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Common Follow-Up Questions</h3>
+      <ul>
+        <li><strong>"How do you handle message ordering across devices?"</strong> — Server-assigned Snowflake IDs, per-chat sequence numbers, client-side reorder buffer</li>
+        <li><strong>"What if a chat server crashes mid-delivery?"</strong> — Message is already in Kafka; client detects disconnect, reconnects, syncs from last known ID</li>
+        <li><strong>"How does E2E encryption work with multi-device?"</strong> — Each device has independent keys; sender encrypts N copies (one per device)</li>
+        <li><strong>"How do you handle a celebrity with 10M followers going online?"</strong> — Don't fan out presence to followers; only show presence to mutual contacts or active chat partners</li>
+        <li><strong>"What about message search?"</strong> — Client-side search (decrypt + local index) since server can't read E2E content. For non-E2E platforms: Elasticsearch index.</li>
+        <li><strong>"How do you handle typing indicators?"</strong> — Ephemeral WebSocket events, NOT persisted. Throttle to max 1 per 3 seconds per chat.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="notification-system.html"><span>Previous</span><span>&#8592; Notification System</span></a>
+        <a class="next" href="search-autocomplete.html"><span>Next</span><span>Search Autocomplete &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ============================================================
+       ANIMATION 1 — 1-on-1 Message Flow (dm-anim)
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('dm-svg'),
+          info=document.getElementById('dm-info'),
+          out=document.getElementById('dm-output');
+
+      // Node positions
+      var nodes={
+        userA:{x:70,y:60,label:'User A',color:'#2196f3'},
+        chatS1:{x:280,y:60,label:'Chat Server #1',color:'#6366f1'},
+        session:{x:455,y:60,label:'Session Store',color:'#f59e0b'},
+        chatS2:{x:610,y:60,label:'Chat Server #2',color:'#6366f1'},
+        userB:{x:610,y:200,label:'User B',color:'#0a8f6a'},
+        kafka:{x:280,y:200,label:'Kafka + Cassandra',color:'#e74c3c'},
+        push:{x:455,y:200,label:'Push Notification',color:'#ec4899'}
+      };
+
+      var steps=[
+        {desc:'User A types "Hey!" and taps send. Client generates a UUID (client_msg_id) for idempotency.',
+         highlight:['userA'],arrows:[]},
+        {desc:'Message sent via WebSocket to Chat Server #1. Frame: {from: A, to: B, content: "Hey!"}',
+         highlight:['userA','chatS1'],arrows:[['userA','chatS1','WSS frame']]},
+        {desc:'Chat Server #1 assigns Snowflake ID, persists to Kafka, sends ACK (✓ sent) back to User A.',
+         highlight:['chatS1','kafka','userA'],arrows:[['chatS1','kafka','persist'],['chatS1','userA','ACK ✓']]},
+        {desc:'Chat Server #1 queries Session Store: "Where is User B connected?" → chat_server_2, ws_889',
+         highlight:['chatS1','session'],arrows:[['chatS1','session','GET user_B']]},
+        {desc:'User B is ONLINE! Chat Server #1 forwards message to Chat Server #2 via internal gRPC.',
+         highlight:['chatS1','chatS2'],arrows:[['chatS1','chatS2','forward msg']]},
+        {desc:'Chat Server #2 delivers the message to User B via WebSocket. User B sees the message!',
+         highlight:['chatS2','userB'],arrows:[['chatS2','userB','deliver']]},
+        {desc:'User B\'s device sends delivery ACK → Chat Server #2 → Chat Server #1 → User A sees ✓✓ (delivered).',
+         highlight:['userB','chatS2','chatS1','userA'],arrows:[['userB','chatS2','delivered'],['chatS2','chatS1','relay'],['chatS1','userA','✓✓']]},
+        {desc:'User B reads the message → sends read receipt → User A sees blue ✓✓ (read). Flow complete!',
+         highlight:['userB','userA'],arrows:[['userB','userA','read ✓✓']]},
+        {desc:'OFFLINE CASE: Session Store returns NULL — User B is not connected to any server.',
+         highlight:['chatS1','session'],arrows:[['chatS1','session','GET user_B → NULL']]},
+        {desc:'Chat Server routes to Push Notification service → APNs/FCM sends "New message from User A".',
+         highlight:['chatS1','push'],arrows:[['chatS1','push','push event']]},
+        {desc:'User B comes online later → WebSocket established → sends sync request with last known msg ID.',
+         highlight:['userB','chatS2'],arrows:[['userB','chatS2','sync req']]},
+        {desc:'Chat Server #2 queries Cassandra for missed messages, delivers them in bulk. User B is caught up!',
+         highlight:['chatS2','kafka','userB'],arrows:[['chatS2','kafka','query missed'],['chatS2','userB','bulk deliver']]}
+      ];
+
+      function drawBase(highlightSet,arrows){
+        clearSvg(svg);
+        // Draw nodes
+        for(var key in nodes){
+          var n=nodes[key];
+          var isHl=highlightSet && highlightSet.indexOf(key)!==-1;
+          var rx=key==='userA'||key==='userB'?22:50;
+          var ry=key==='userA'||key==='userB'?22:18;
+          var w=key==='userA'||key==='userB'?44:110;
+          var h=key==='userA'||key==='userB'?44:36;
+          if(key==='userA'||key==='userB'){
+            svg.appendChild(el('circle',{cx:''+n.x,cy:''+n.y,r:'22',
+              fill:isHl?n.color:'#f5f5f5',stroke:n.color,'stroke-width':isHl?'3':'1.5',opacity:isHl?'1':'0.7'}));
+          } else {
+            svg.appendChild(el('rect',{x:''+(n.x-55),y:''+(n.y-18),width:'110',height:'36',rx:'8',
+              fill:isHl?n.color:'#f5f5f5',stroke:n.color,'stroke-width':isHl?'3':'1.5',opacity:isHl?'1':'0.7'}));
+          }
+          svg.appendChild(txt(n.label,{x:''+n.x,y:''+(n.y+(key==='userA'||key==='userB'?38:35)),
+            'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',
+            fill:isHl?'var(--ink)':'var(--ink-muted)'}));
+          // Icon text inside node
+          if(key==='userA'||key==='userB'){
+            svg.appendChild(txt(key==='userA'?'A':'B',{x:''+n.x,y:''+(n.y+5),
+              'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'16','font-weight':'700',
+              fill:isHl?'#fff':'#666'}));
+          }
+        }
+        // Draw arrows
+        if(arrows){
+          for(var i=0;i<arrows.length;i++){
+            var a=arrows[i];
+            var from=nodes[a[0]],to=nodes[a[1]],label=a[2];
+            var fx=from.x,fy=from.y,tx=to.x,ty=to.y;
+            // Offset from edges
+            var dx=tx-fx,dy=ty-fy,dist=Math.sqrt(dx*dx+dy*dy);
+            if(dist>0){
+              var offF=30,offT=30;
+              fx+=dx/dist*offF; fy+=dy/dist*offF;
+              tx-=dx/dist*offT; ty-=dy/dist*offT;
+            }
+            svg.appendChild(el('line',{x1:''+fx,y1:''+fy,x2:''+tx,y2:''+ty,
+              stroke:'#6366f1','stroke-width':'2','stroke-dasharray':'6,3',
+              'marker-end':'url(#dm-arrow)'}));
+            var mx=(fx+tx)/2,my=(fy+ty)/2-8;
+            svg.appendChild(txt(label,{x:''+mx,y:''+my,'text-anchor':'middle',
+              'font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:'#6366f1'}));
+          }
+        }
+        // Arrow marker
+        var defs=el('defs',{});
+        var marker=el('marker',{id:'dm-arrow',viewBox:'0 0 10 10',refX:'9',refY:'5',
+          markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'});
+        marker.appendChild(el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#6366f1'}));
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+      }
+
+      function drawInit(){
+        drawBase(null,null);
+        svg.appendChild(txt('Click "Step" to trace message flow',{x:'350',y:'155',
+          'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'var(--ink-muted)'}));
+        info.textContent='';out.textContent='';
+      }
+
+      drawInit();
+      var step=0;
+
+      document.getElementById('dm-step').addEventListener('click',function(){
+        if(step>=steps.length) return;
+        var s=steps[step];
+        drawBase(s.highlight,s.arrows);
+        info.textContent=s.desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length;
+        step++;
+      });
+      document.getElementById('dm-reset').addEventListener('click',function(){step=0;drawInit();});
+    })();
+
+    /* ============================================================
+       ANIMATION 2 — Group Chat Fan-out (group-anim)
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('group-svg'),
+          info=document.getElementById('group-info'),
+          out=document.getElementById('group-output');
+
+      var members=['Bob','Carol','Dave','Eve','Frank'];
+      var mColors=['#2196f3','#0a8f6a','#f59e0b','#e74c3c','#ec4899'];
+
+      var steps=[
+        {desc:'Alice sends "Meeting at 3pm" to the group chat (5 members: Bob, Carol, Dave, Eve, Frank).',
+         phase:'send',activeMember:-1},
+        {desc:'Chat Server receives the message, assigns Snowflake ID, writes to Kafka (topic: group_messages, partition: group_xyz).',
+         phase:'server',activeMember:-1},
+        {desc:'Kafka consumer persists to Cassandra (messages_by_group table). Single write, not N writes.',
+         phase:'persist',activeMember:-1},
+        {desc:'Fan-out: Chat Server looks up each member\'s session. Bob is on Server #1, Carol on Server #2, etc.',
+         phase:'lookup',activeMember:-1},
+        {desc:'Bob (online) → message delivered via WebSocket to his chat server → Bob\'s device. ✓✓',
+         phase:'deliver',activeMember:0},
+        {desc:'Carol (online) → message delivered via WebSocket. Carol sees the message. ✓✓',
+         phase:'deliver',activeMember:1},
+        {desc:'Dave (online) → message delivered via WebSocket. Dave sees the message. ✓✓',
+         phase:'deliver',activeMember:2},
+        {desc:'Eve (OFFLINE) → no active session found. Push notification sent via APNs/FCM.',
+         phase:'offline',activeMember:3},
+        {desc:'Frank (online) → message delivered via WebSocket. Frank sees the message. ✓✓',
+         phase:'deliver',activeMember:4},
+        {desc:'Complete! 4 online members received instantly, 1 offline member gets push notification + sync later.',
+         phase:'done',activeMember:-1}
+      ];
+
+      function drawBase(phase,activeMember){
+        clearSvg(svg);
+        // Arrow marker
+        var defs=el('defs',{});
+        var marker=el('marker',{id:'grp-arrow',viewBox:'0 0 10 10',refX:'9',refY:'5',
+          markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'});
+        marker.appendChild(el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#6366f1'}));
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+
+        // Alice (sender)
+        var aliceHl=phase==='send'||phase==='server';
+        svg.appendChild(el('circle',{cx:'60',cy:'170',r:'24',
+          fill:aliceHl?'#6366f1':'#f5f5f5',stroke:'#6366f1','stroke-width':aliceHl?'3':'1.5'}));
+        svg.appendChild(txt('Alice',{x:'60',y:'175','text-anchor':'middle',
+          'font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:aliceHl?'#fff':'#666'}));
+        svg.appendChild(txt('Sender',{x:'60',y:'208','text-anchor':'middle',
+          'font-family':'Manrope,sans-serif','font-size':'9',fill:'var(--ink-muted)'}));
+
+        // Chat Server
+        var srvHl=phase==='server'||phase==='persist'||phase==='lookup'||phase==='deliver'||phase==='offline';
+        svg.appendChild(el('rect',{x:'155',y:'152',width:'110',height:'36',rx:'8',
+          fill:srvHl?'#6366f1':'#f5f5f5',stroke:'#6366f1','stroke-width':srvHl?'3':'1.5'}));
+        svg.appendChild(txt('Chat Server',{x:'210',y:'175','text-anchor':'middle',
+          'font-family':'Manrope,sans-serif','font-size':'11','font-weight':'600',fill:srvHl?'#fff':'#666'}));
+
+        // Kafka/Cassandra
+        var kafkaHl=phase==='persist';
+        svg.appendChild(el('rect',{x:'155',y:'250',width:'110',height:'36',rx:'8',
+          fill:kafkaHl?'#e74c3c':'#f5f5f5',stroke:'#e74c3c','stroke-width':kafkaHl?'3':'1.5'}));
+        svg.appendChild(txt('Kafka → Cassandra',{x:'210',y:'273','text-anchor':'middle',
+          'font-family':'Manrope,sans-serif','font-size':'9','font-weight':'600',fill:kafkaHl?'#fff':'#666'}));
+
+        // Arrow: Alice → Server
+        if(phase!=='send' || phase==='send'){
+          svg.appendChild(el('line',{x1:'84',y1:'170',x2:'152',y2:'170',
+            stroke:phase==='send'?'#6366f1':'#ddd','stroke-width':'2',
+            'marker-end':'url(#grp-arrow)','stroke-dasharray':phase==='send'?'none':'4,3'}));
+        }
+
+        // Arrow: Server → Kafka
+        if(phase==='persist'||phase==='lookup'||phase==='deliver'||phase==='offline'||phase==='done'){
+          svg.appendChild(el('line',{x1:'210',y1:'190',x2:'210',y2:'248',
+            stroke:'#e74c3c','stroke-width':'2','marker-end':'url(#grp-arrow)'}));
+          svg.appendChild(txt('persist',{x:'230',y:'225','font-family':'Consolas,monospace','font-size':'9',fill:'#e74c3c'}));
+        }
+
+        // Member queues
+        var queueX=370, queueStartY=40, queueSpacing=60;
+        for(var i=0;i<members.length;i++){
+          var my=queueStartY+i*queueSpacing;
+          var isActive=activeMember===i;
+          var isDelivered=(phase==='deliver'||phase==='done')&&(
+            (i<activeMember)||(phase==='done'&&i!==3));
+          var isOffline=i===3&&(phase==='offline'||phase==='done');
+
+          // Message queue box
+          var qFill='#f5f5f5';
+          if(isActive&&phase==='deliver') qFill=mColors[i];
+          else if(isActive&&phase==='offline') qFill='#888';
+          else if(isDelivered) qFill=mColors[i];
+          else if(isOffline) qFill='#888';
+
+          svg.appendChild(el('rect',{x:''+queueX,y:''+my,width:'90',height:'30',rx:'6',
+            fill:qFill,stroke:mColors[i],'stroke-width':isActive?'3':'1.5',opacity:isActive||isDelivered||isOffline?'1':'0.5'}));
+          svg.appendChild(txt(members[i]+(i===3?' (offline)':''),{x:''+(queueX+45),y:''+(my+19),
+            'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',
+            fill:(isActive||isDelivered||isOffline)?'#fff':'#999'}));
+
+          // Arrow from server to queue
+          if(phase==='lookup'||phase==='deliver'||phase==='offline'||phase==='done'){
+            var arrowColor=isDelivered?mColors[i]:isOffline?'#888':'#ddd';
+            if(isActive) arrowColor=mColors[i];
+            svg.appendChild(el('line',{x1:'265',y1:'170',x2:''+queueX,y2:''+(my+15),
+              stroke:arrowColor,'stroke-width':'1.5','stroke-dasharray':'4,3',
+              'marker-end':'url(#grp-arrow)'}));
+          }
+
+          // Delivery status or device
+          var statusX=queueX+110;
+          if(isDelivered){
+            svg.appendChild(txt('✓✓',{x:''+statusX,y:''+(my+20),'font-family':'Consolas,monospace','font-size':'14','font-weight':'700',fill:mColors[i]}));
+          } else if(isOffline){
+            svg.appendChild(txt('📱 push',{x:''+statusX,y:''+(my+20),'font-family':'Consolas,monospace','font-size':'10',fill:'#888'}));
+          }
+
+          // Device icon for delivered
+          if(isDelivered||isActive&&phase==='deliver'){
+            svg.appendChild(el('rect',{x:''+(statusX+30),y:''+(my+2),width:'26',height:'26',rx:'4',
+              fill:'none',stroke:mColors[i],'stroke-width':'1.5'}));
+            svg.appendChild(txt('📱',{x:''+(statusX+43),y:''+(my+20),'text-anchor':'middle','font-size':'12'}));
+          }
+        }
+      }
+
+      function drawInit(){
+        drawBase(null,-1);
+        svg.appendChild(txt('Click "Step" to trace group message fan-out',{x:'350',y:'175',
+          'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'var(--ink-muted)'}));
+        info.textContent='';out.textContent='';
+      }
+
+      drawInit();
+      var step=0;
+
+      document.getElementById('group-step').addEventListener('click',function(){
+        if(step>=steps.length) return;
+        var s=steps[step];
+        drawBase(s.phase,s.activeMember);
+        info.textContent=s.desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length;
+        step++;
+      });
+      document.getElementById('group-reset').addEventListener('click',function(){step=0;drawInit();});
+    })();
+
+    /* ============================================================
+       ANIMATION 3 — Presence System (presence-anim)
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('presence-svg'),
+          info=document.getElementById('presence-info'),
+          out=document.getElementById('presence-output');
+
+      var steps=[
+        {desc:'User A opens the app → WebSocket connection established → initial heartbeat sent to Presence Server.',
+         nodes:{userA:'connecting',presCache:'idle',friendB:'idle',friendC:'idle'},
+         arrows:[]},
+        {desc:'Presence Server sets Redis key: presence:user_A = {status: "online", last_active: now}. TTL = 90 seconds.',
+         nodes:{userA:'online',presCache:'writing',friendB:'idle',friendC:'idle'},
+         arrows:[['userA','presCache','heartbeat']]},
+        {desc:'Friend B has User A\'s chat open → subscribed to presence:user_A via Redis Pub/Sub.',
+         nodes:{userA:'online',presCache:'active',friendB:'subscribing',friendC:'idle'},
+         arrows:[['friendB','presCache','SUBSCRIBE\npresence:user_A']]},
+        {desc:'PUBLISH presence:user_A {status: "online"} → Friend B receives the update instantly!',
+         nodes:{userA:'online',presCache:'active',friendB:'notified',friendC:'idle'},
+         arrows:[['presCache','friendB','online ●']]},
+        {desc:'Friend C also has User A\'s chat open → subscribes and immediately gets current status: "online".',
+         nodes:{userA:'online',presCache:'active',friendB:'notified',friendC:'notified'},
+         arrows:[['presCache','friendC','online ●']]},
+        {desc:'30 seconds later: User A\'s client sends another heartbeat. Redis TTL refreshed to 90s.',
+         nodes:{userA:'heartbeat',presCache:'writing',friendB:'notified',friendC:'notified'},
+         arrows:[['userA','presCache','♥ heartbeat']]},
+        {desc:'Another 30 seconds: heartbeat again. As long as heartbeats arrive, User A stays "online".',
+         nodes:{userA:'heartbeat',presCache:'writing',friendB:'notified',friendC:'notified'},
+         arrows:[['userA','presCache','♥ heartbeat']]},
+        {desc:'User A\'s network drops! No more heartbeats. 90-second TTL starts counting down...',
+         nodes:{userA:'disconnected',presCache:'expiring',friendB:'notified',friendC:'notified'},
+         arrows:[]},
+        {desc:'90 seconds pass with no heartbeat → Redis key expires → keyspace notification triggers "offline" event.',
+         nodes:{userA:'offline',presCache:'expired',friendB:'notified',friendC:'notified'},
+         arrows:[]},
+        {desc:'PUBLISH presence:user_A {status: "offline", last_seen: timestamp} → Friends B and C see "last seen X ago".',
+         nodes:{userA:'offline',presCache:'active',friendB:'offline-notified',friendC:'offline-notified'},
+         arrows:[['presCache','friendB','offline ○'],['presCache','friendC','offline ○']]}
+      ];
+
+      var layout={
+        userA:{x:80,y:90},
+        presCache:{x:350,y:90},
+        friendB:{x:580,y:50},
+        friendC:{x:580,y:160}
+      };
+
+      var stateColors={
+        'idle':'#ddd','connecting':'#f59e0b','online':'#0a8f6a','heartbeat':'#2196f3',
+        'disconnected':'#e74c3c','offline':'#888',
+        'writing':'#f59e0b','active':'#0a8f6a','expiring':'#e74c3c','expired':'#888',
+        'subscribing':'#f59e0b','notified':'#0a8f6a','offline-notified':'#888'
+      };
+
+      function drawBase(nodeStates,arrows){
+        clearSvg(svg);
+        // Defs
+        var defs=el('defs',{});
+        var marker=el('marker',{id:'pres-arrow',viewBox:'0 0 10 10',refX:'9',refY:'5',
+          markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'});
+        marker.appendChild(el('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#6366f1'}));
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+
+        // Draw nodes
+        var labels={userA:'User A',presCache:'Presence Cache\n(Redis)',friendB:'Friend B',friendC:'Friend C'};
+        for(var key in layout){
+          var pos=layout[key];
+          var state=nodeStates?nodeStates[key]:'idle';
+          var color=stateColors[state]||'#ddd';
+          var isUser=key==='userA'||key==='friendB'||key==='friendC';
+
+          if(isUser){
+            svg.appendChild(el('circle',{cx:''+pos.x,cy:''+pos.y,r:'24',
+              fill:color,stroke:color,'stroke-width':'2',opacity:'0.9'}));
+            var statusDot=state==='online'||state==='heartbeat'||state==='notified'?'●':'○';
+            var dotColor=state==='online'||state==='heartbeat'||state==='notified'?'#0a8f6a':'#888';
+            if(key!=='userA'){
+              svg.appendChild(txt(statusDot,{x:''+(pos.x+18),y:''+(pos.y-14),
+                'font-size':'12',fill:dotColor,'font-weight':'700'}));
+            }
+          } else {
+            svg.appendChild(el('rect',{x:''+(pos.x-60),y:''+(pos.y-22),width:'120',height:'44',rx:'8',
+              fill:color,stroke:color,'stroke-width':'2',opacity:'0.9'}));
+          }
+
+          var labelLines=labels[key].split('\n');
+          for(var li=0;li<labelLines.length;li++){
+            svg.appendChild(txt(labelLines[li],{x:''+pos.x,y:''+(pos.y+4+li*13),
+              'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',
+              fill:'#fff'}));
+          }
+          // Status label below
+          var stateLabel=state.charAt(0).toUpperCase()+state.slice(1);
+          svg.appendChild(txt(stateLabel,{x:''+pos.x,y:''+(pos.y+(isUser?40:42)),
+            'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+        }
+
+        // Draw arrows
+        if(arrows){
+          for(var i=0;i<arrows.length;i++){
+            var a=arrows[i];
+            var from=layout[a[0]],to=layout[a[1]],label=a[2];
+            var fx=from.x,fy=from.y,tx=to.x,ty=to.y;
+            var dx=tx-fx,dy=ty-fy,dist=Math.sqrt(dx*dx+dy*dy);
+            if(dist>0){fx+=dx/dist*30;fy+=dy/dist*30;tx-=dx/dist*30;ty-=dy/dist*30;}
+            svg.appendChild(el('line',{x1:''+fx,y1:''+fy,x2:''+tx,y2:''+ty,
+              stroke:'#6366f1','stroke-width':'2','stroke-dasharray':'6,3',
+              'marker-end':'url(#pres-arrow)'}));
+            var mx=(fx+tx)/2,my=(fy+ty)/2-8;
+            var labelLines=label.split('\n');
+            for(var li=0;li<labelLines.length;li++){
+              svg.appendChild(txt(labelLines[li],{x:''+mx,y:''+(my+li*11),
+                'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:'#6366f1'}));
+            }
+          }
+        }
+      }
+
+      function drawInit(){
+        drawBase(null,null);
+        svg.appendChild(txt('Click "Step" to watch the presence system in action',{x:'350',y:'250',
+          'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'var(--ink-muted)'}));
+        info.textContent='';out.textContent='';
+      }
+
+      drawInit();
+      var step=0;
+
+      document.getElementById('presence-step').addEventListener('click',function(){
+        if(step>=steps.length) return;
+        var s=steps[step];
+        drawBase(s.nodes,s.arrows);
+        info.textContent=s.desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length;
+        step++;
+      });
+      document.getElementById('presence-reset').addEventListener('click',function(){step=0;drawInit();});
+    })();
+
+  })();
+  </script>
+</body>
+</html>

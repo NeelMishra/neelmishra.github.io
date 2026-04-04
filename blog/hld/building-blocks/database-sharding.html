@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Database Sharding & Partitioning: strategies (hash, range, directory, geographic), shard key selection, cross-shard queries, resharding, consistent hashing, and real-world examples from Instagram, Discord, Slack, and Uber.">
+  <title>Database Sharding &amp; Partitioning | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Building Blocks &middot; Part 2</a><span>&middot; Post 12 of 70</span></div>
+
+      <h1>Database Sharding &amp; Partitioning</h1>
+      <p class="post-meta">April 2026 &middot; 22 min read</p>
+
+      <!-- ───────────────────────────── 1. WHY SHARD ───────────────────────────── -->
+      <h2 id="why-shard">Why Shard?</h2>
+      <p>Every database has limits. A single PostgreSQL instance can comfortably handle a few terabytes of data and a few thousand connections. Beyond that, you hit walls:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Bottleneck</th><th style="text-align:left; padding:0.5em;">Symptom</th><th style="text-align:left; padding:0.5em;">Scale Limit</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Storage</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Disk full, backups take hours</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~2–10 TB practical limit</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Write throughput</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WAL bottleneck, lock contention, replication lag</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~50K–100K writes/sec</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Connection limits</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Connection pool exhaustion, "too many clients"</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~5K–10K connections</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Query performance</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Table scans on billions of rows</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Indexes grow too large for RAM</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Availability</strong></td><td style="padding:0.5em;">Single point of failure</td><td style="padding:0.5em;">One region, one machine</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Vertical scaling</strong> (bigger machine) can only take you so far. At some point you need <strong>horizontal scaling</strong>: splitting data across multiple database instances, each handling a subset of the load. This is <em>sharding</em>.</p>
+
+      <div class="callout">
+        <strong>When is sharding premature?</strong> Sharding adds enormous complexity — cross-shard queries, distributed transactions, operational burden. Exhaust these first:
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>Read replicas</strong> — offload read traffic</li>
+          <li><strong>Caching</strong> (Redis/Memcached) — reduce DB hits</li>
+          <li><strong>Connection pooling</strong> (PgBouncer) — handle more connections</li>
+          <li><strong>Query optimization</strong> — proper indexes, query rewriting</li>
+          <li><strong>Vertical scaling</strong> — bigger instance (cheapest engineering time)</li>
+        </ul>
+        Sharding is a <em>last resort</em>, not a first choice. But when you need it, you <em>really</em> need it.
+      </div>
+
+      <!-- ───────────────────── 2. HORIZONTAL VS VERTICAL ───────────────────── -->
+      <h2 id="horizontal-vs-vertical">Horizontal vs Vertical Partitioning</h2>
+      <p>These are fundamentally different approaches to splitting data:</p>
+
+      <h3>Horizontal Partitioning (Sharding)</h3>
+      <p>Split <strong>rows</strong> across multiple databases. Each shard has the same schema but holds a different subset of rows.</p>
+      <pre><code>-- All shards have identical schema:
+CREATE TABLE orders (
+    order_id   BIGINT PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    product_id BIGINT NOT NULL,
+    amount     DECIMAL(10,2),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Shard 0: orders where user_id % 4 = 0
+-- Shard 1: orders where user_id % 4 = 1
+-- Shard 2: orders where user_id % 4 = 2
+-- Shard 3: orders where user_id % 4 = 3</code></pre>
+
+      <h3>Vertical Partitioning</h3>
+      <p>Split <strong>columns or tables</strong> across databases, typically by feature domain. Each database has a different schema.</p>
+      <pre><code>-- User DB (handles auth & profiles)
+CREATE TABLE users (
+    user_id  BIGINT PRIMARY KEY,
+    email    VARCHAR(255),
+    password_hash VARCHAR(255),
+    name     VARCHAR(100)
+);
+
+-- Order DB (handles e-commerce)
+CREATE TABLE orders (
+    order_id   BIGINT PRIMARY KEY,
+    user_id    BIGINT NOT NULL,  -- FK is now cross-DB, enforced at app level
+    product_id BIGINT NOT NULL,
+    amount     DECIMAL(10,2)
+);
+
+-- Analytics DB (handles reporting)
+CREATE TABLE page_views (
+    view_id    BIGINT PRIMARY KEY,
+    user_id    BIGINT,
+    page_url   TEXT,
+    viewed_at  TIMESTAMP
+);</code></pre>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Aspect</th><th style="text-align:left; padding:0.5em;">Horizontal (Sharding)</th><th style="text-align:left; padding:0.5em;">Vertical</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">What's split</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Rows of the same table</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Different tables/columns</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Schema per shard</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Identical</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Different</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Scales</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Write throughput + storage linearly</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Isolates load by domain</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Complexity</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Shard routing, cross-shard queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cross-DB joins, distributed TX</td></tr>
+          <tr><td style="padding:0.5em;">When to use</td><td style="padding:0.5em;">Single table too large/hot</td><td style="padding:0.5em;">Feature isolation, microservices</td></tr>
+        </tbody>
+      </table>
+
+      <p>In practice, most systems use <strong>vertical partitioning first</strong> (split by microservice) and add <strong>horizontal sharding later</strong> within each service when a single table grows too large.</p>
+
+      <!-- ───────────────────────── 3. SHARDING STRATEGIES ───────────────────── -->
+      <h2 id="strategies">Sharding Strategies</h2>
+
+      <h3 id="hash-based">Hash-Based (Key-Based) Sharding</h3>
+      <p>Apply a hash function to the shard key and use modulo to determine the shard:</p>
+      <pre><code>shard_id = hash(shard_key) % num_shards
+
+-- Example with 4 shards:
+-- user_id=101 → hash(101) % 4 = 1 → Shard 1
+-- user_id=205 → hash(205) % 4 = 3 → Shard 3
+-- user_id=307 → hash(307) % 4 = 3 → Shard 3
+-- user_id=412 → hash(412) % 4 = 0 → Shard 0</code></pre>
+
+      <p>In application code (Python example):</p>
+      <pre><code>import hashlib
+
+NUM_SHARDS = 4
+shard_connections = {
+    0: get_db_connection("shard-0.db.internal"),
+    1: get_db_connection("shard-1.db.internal"),
+    2: get_db_connection("shard-2.db.internal"),
+    3: get_db_connection("shard-3.db.internal"),
+}
+
+def get_shard(user_id: int) -> int:
+    """Deterministic shard assignment using hash."""
+    h = hashlib.md5(str(user_id).encode()).hexdigest()
+    return int(h, 16) % NUM_SHARDS
+
+def insert_order(user_id, product_id, amount):
+    shard_id = get_shard(user_id)
+    conn = shard_connections[shard_id]
+    conn.execute(
+        "INSERT INTO orders (user_id, product_id, amount) VALUES (%s, %s, %s)",
+        (user_id, product_id, amount)
+    )
+
+def get_user_orders(user_id):
+    shard_id = get_shard(user_id)
+    conn = shard_connections[shard_id]
+    return conn.execute(
+        "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC",
+        (user_id,)
+    )</code></pre>
+
+      <p><strong>Pros:</strong> Even data distribution (with good hash function), simple to implement, O(1) lookup.<br>
+      <strong>Cons:</strong> Range queries impossible without scatter-gather. <em>Resharding is painful</em> — changing <code>num_shards</code> moves almost all data (see animation below).</p>
+
+      <!-- ─── ANIMATION 1: Hash-Based Sharding ─── -->
+      <div class="anim-container" id="hash-shard-anim">
+        <h4>&#9654; Hash-Based Sharding</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how user IDs are distributed across shards, and what happens when you add a 5th shard.</p>
+        <svg id="hash-svg" width="700" height="320" viewBox="0 0 700 320"></svg>
+        <div id="hash-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="hash-step">Step &rarr;</button>
+          <button class="anim-btn" id="hash-reset">Reset</button>
+          <span class="anim-output" id="hash-output"></span>
+        </div>
+      </div>
+
+      <h3 id="range-based">Range-Based Sharding</h3>
+      <p>Assign contiguous ranges of the shard key to different shards:</p>
+      <pre><code>-- Range-based sharding by user_id
+Shard 0: user_id     1 – 1,000,000
+Shard 1: user_id 1,000,001 – 2,000,000
+Shard 2: user_id 2,000,001 – 3,000,000
+Shard 3: user_id 3,000,001 – 4,000,000
+
+-- Or by timestamp (time-series data)
+Shard 0: created_at in 2024-Q1
+Shard 1: created_at in 2024-Q2
+Shard 2: created_at in 2024-Q3
+Shard 3: created_at in 2024-Q4</code></pre>
+
+      <p>Range routing logic:</p>
+      <pre><code>def get_shard_range(user_id: int) -> int:
+    """Route to shard based on ID range."""
+    RANGE_SIZE = 1_000_000
+    return (user_id - 1) // RANGE_SIZE
+
+# Alphabetical range for usernames
+def get_shard_alpha(username: str) -> int:
+    first_char = username[0].upper()
+    if first_char <= 'F':   return 0  # A-F → Shard 0
+    elif first_char <= 'L': return 1  # G-L → Shard 1
+    elif first_char <= 'R': return 2  # M-R → Shard 2
+    else:                   return 3  # S-Z → Shard 3</code></pre>
+
+      <p><strong>Pros:</strong> Range queries stay on one shard (huge win for time-series). Easy to understand. Easy to split a hot shard by adjusting boundaries.<br>
+      <strong>Cons:</strong> Uneven distribution (hotspots) if key distribution is skewed. New data clusters on the "latest" shard for monotonically increasing keys.</p>
+
+      <!-- ─── ANIMATION 2: Range-Based Sharding ─── -->
+      <div class="anim-container" id="range-shard-anim">
+        <h4>&#9654; Range-Based Sharding &amp; Hotspot Problem</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">See how alphabetical range sharding creates hotspots and how rebalancing fixes them.</p>
+        <svg id="range-svg" width="700" height="300" viewBox="0 0 700 300"></svg>
+        <div id="range-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="range-step">Step &rarr;</button>
+          <button class="anim-btn" id="range-reset">Reset</button>
+          <span class="anim-output" id="range-output"></span>
+        </div>
+      </div>
+
+      <h3 id="directory-based">Directory-Based Sharding</h3>
+      <p>Maintain a <strong>lookup table</strong> that maps each key (or key range) to a shard:</p>
+      <pre><code>-- Lookup table (stored in a fast, replicated metadata DB)
+CREATE TABLE shard_directory (
+    shard_key_min  BIGINT,
+    shard_key_max  BIGINT,
+    shard_id       INT,
+    PRIMARY KEY (shard_key_min)
+);
+
+INSERT INTO shard_directory VALUES
+    (1,       500000,  0),
+    (500001,  1200000, 1),  -- larger range: this shard is beefy
+    (1200001, 1800000, 2),
+    (1800001, 2500000, 3);
+
+-- Routing query
+SELECT shard_id FROM shard_directory
+WHERE %s BETWEEN shard_key_min AND shard_key_max;</code></pre>
+
+      <pre><code>class DirectoryRouter:
+    def __init__(self):
+        self.directory = {}  # key → shard_id
+        self._load_from_db()
+
+    def _load_from_db(self):
+        """Cache the directory in memory for fast lookups."""
+        rows = metadata_db.execute("SELECT shard_key_min, shard_key_max, shard_id FROM shard_directory")
+        for row in rows:
+            self.ranges.append((row['shard_key_min'], row['shard_key_max'], row['shard_id']))
+
+    def get_shard(self, key: int) -> int:
+        for min_key, max_key, shard_id in self.ranges:
+            if min_key <= key <= max_key:
+                return shard_id
+        raise ValueError(f"No shard found for key {key}")
+
+    def move_range(self, min_key, max_key, new_shard_id):
+        """Resharding: update the directory to point a range to a new shard."""
+        metadata_db.execute(
+            "UPDATE shard_directory SET shard_id = %s WHERE shard_key_min = %s",
+            (new_shard_id, min_key)
+        )
+        self._load_from_db()</code></pre>
+
+      <p><strong>Pros:</strong> Maximum flexibility — move any key to any shard. Resharding is just a directory update. No hash function constraints.<br>
+      <strong>Cons:</strong> The directory is a single point of failure and a bottleneck. Must be fast (in-memory cache) and highly available (replicated).</p>
+
+      <h3 id="geographic">Geographic Sharding</h3>
+      <p>Route data to shards based on geographic region:</p>
+      <pre><code>-- Geographic shard assignment
+Shard EU:  users in Europe        → eu-west-1.db.internal
+Shard US:  users in North America → us-east-1.db.internal
+Shard APAC: users in Asia-Pacific → ap-southeast-1.db.internal
+
+def get_shard_geo(user_country: str) -> str:
+    EU_COUNTRIES = {'DE', 'FR', 'GB', 'ES', 'IT', 'NL', ...}
+    APAC_COUNTRIES = {'JP', 'KR', 'AU', 'IN', 'SG', ...}
+    if user_country in EU_COUNTRIES:
+        return "shard-eu"
+    elif user_country in APAC_COUNTRIES:
+        return "shard-apac"
+    else:
+        return "shard-us"  # default</code></pre>
+
+      <p><strong>Pros:</strong> Low latency (data near users), GDPR/data residency compliance, natural disaster isolation.<br>
+      <strong>Cons:</strong> Uneven distribution (US has more users than APAC for many services). Cross-region queries are slow.</p>
+
+      <h3>Strategy Comparison</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Strategy</th><th style="text-align:left; padding:0.5em;">Distribution</th><th style="text-align:left; padding:0.5em;">Range Queries</th><th style="text-align:left; padding:0.5em;">Resharding</th><th style="text-align:left; padding:0.5em;">Best For</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hash-based</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Even</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; Poor</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; Painful</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Key-value lookups</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Range-based</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733; Depends</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Great</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733; Split ranges</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Time-series, sorted data</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Directory-based</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Flexible</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733; Moderate</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Easy</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Complex routing needs</td></tr>
+          <tr><td style="padding:0.5em;">Geographic</td><td style="padding:0.5em;">&#9733; Uneven</td><td style="padding:0.5em;">&#9733;&#9733; Regional</td><td style="padding:0.5em;">&#9733;&#9733; Add regions</td><td style="padding:0.5em;">Compliance, low latency</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ─────────────────────── 4. SHARD KEY SELECTION ─────────────────────── -->
+      <h2 id="shard-key">Shard Key Selection</h2>
+      <p>This is <strong>the single most important decision</strong> in sharding. A bad shard key can make your system <em>worse</em> than a single database. The ideal shard key satisfies three criteria:</p>
+
+      <ol>
+        <li><strong>High cardinality</strong> — many distinct values so data distributes evenly. <code>user_id</code> (millions of values) is good; <code>country</code> (200 values, uneven) is bad.</li>
+        <li><strong>Even distribution</strong> — values should be uniformly distributed across the key space. Monotonically increasing IDs push all writes to the latest shard.</li>
+        <li><strong>Query locality</strong> — most queries should hit a single shard. If you shard <code>orders</code> by <code>user_id</code>, then "get all orders for user X" hits one shard. If you shard by <code>order_id</code>, that query scatters across all shards.</li>
+      </ol>
+
+      <h3>Good vs Bad Shard Keys — Detailed Analysis</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Shard Key</th><th style="text-align:left; padding:0.5em;">Cardinality</th><th style="text-align:left; padding:0.5em;">Distribution</th><th style="text-align:left; padding:0.5em;">Query Locality</th><th style="text-align:left; padding:0.5em;">Verdict</th></tr></thead>
+        <tbody>
+          <tr style="background:rgba(10,143,106,0.06);"><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>user_id</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Millions</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Even (hashed)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; User queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>&#10003; Excellent</strong></td></tr>
+          <tr style="background:rgba(10,143,106,0.06);"><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>order_id</code> (UUID)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Unlimited</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Perfect</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; Poor for user queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>&#9888; Depends on access</strong></td></tr>
+          <tr style="background:rgba(231,76,60,0.06);"><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>country</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; ~200</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; Very skewed</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733; Geo queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>&#10007; Bad — US shard overloaded</strong></td></tr>
+          <tr style="background:rgba(231,76,60,0.06);"><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>created_at</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; High</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733; Append-only hotspot</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#9733;&#9733;&#9733; Time ranges</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>&#10007; Bad — all writes to latest shard</strong></td></tr>
+          <tr style="background:rgba(231,76,60,0.06);"><td style="padding:0.5em;"><code>status</code></td><td style="padding:0.5em;">&#9733; 3–5 values</td><td style="padding:0.5em;">&#9733; Very skewed</td><td style="padding:0.5em;">&#9733; Rarely queried alone</td><td style="padding:0.5em;"><strong>&#10007; Terrible</strong></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Compound Shard Keys</h3>
+      <p>Sometimes no single field works well. Use compound keys:</p>
+      <pre><code>-- MongoDB compound shard key example
+db.orders.createIndex({ "region": 1, "user_id": 1 })
+sh.shardCollection("mydb.orders", { "region": 1, "user_id": 1 })
+
+-- This allows:
+-- 1. Geo-local queries: all data for region="US" on nearby shards
+-- 2. User queries: within a region, one user's data is co-located
+-- 3. Better distribution than region alone</code></pre>
+
+      <h3>The Celebrity Problem (Hot Keys)</h3>
+      <p>Even with a good shard key like <code>user_id</code>, some users are "hot" — a celebrity with 100M followers generates vastly more read traffic. Solutions:</p>
+      <pre><code>-- Option 1: Add a random suffix to spread the celebrity's data
+shard_key = f"{user_id}_{random.randint(0, 9)}"
+-- user 12345 becomes 12345_0 through 12345_9 → 10 shards
+-- Reads must fan out to all 10 sub-shards
+
+-- Option 2: Dedicated shard for hot keys
+HOT_USERS = {12345: "shard-celebrity-1", 67890: "shard-celebrity-2"}
+def get_shard(user_id):
+    if user_id in HOT_USERS:
+        return HOT_USERS[user_id]
+    return hash_based_shard(user_id)
+
+-- Option 3: Cache the hot key's data aggressively
+-- Read from cache, write to shard + invalidate cache</code></pre>
+
+      <!-- ─────────────────────── 5. CROSS-SHARD QUERIES ─────────────────────── -->
+      <h2 id="cross-shard">Cross-Shard Queries</h2>
+      <p>This is the <strong>biggest operational challenge</strong> of sharding. Any query that can't be routed to a single shard becomes expensive.</p>
+
+      <h3>Scatter-Gather Pattern</h3>
+      <p>Query all shards, merge results in the application layer:</p>
+      <pre><code>def get_top_orders_by_amount(limit=10):
+    """Scatter-gather: query all shards, merge results."""
+    all_results = []
+
+    # Scatter: send query to all shards in parallel
+    futures = []
+    for shard_id, conn in shard_connections.items():
+        future = executor.submit(
+            conn.execute,
+            "SELECT * FROM orders ORDER BY amount DESC LIMIT %s",
+            (limit,)
+        )
+        futures.append(future)
+
+    # Gather: collect results
+    for future in futures:
+        all_results.extend(future.result())
+
+    # Merge: sort and truncate
+    all_results.sort(key=lambda x: x['amount'], reverse=True)
+    return all_results[:limit]</code></pre>
+
+      <p><strong>Performance impact:</strong> Scatter-gather latency = max(shard latencies) + merge time. With 64 shards, one slow shard delays the entire query. Tail latency p99 gets <em>much</em> worse.</p>
+
+      <h3>Cross-Shard Joins (Avoid Them)</h3>
+      <p>JOINs across shards are extremely expensive. Instead, <strong>denormalize</strong>:</p>
+      <pre><code>-- BAD: Cross-shard join (user on Shard 2, orders on Shard 7)
+SELECT u.name, o.amount
+FROM users u JOIN orders o ON u.user_id = o.user_id
+WHERE o.order_id = 12345;
+
+-- GOOD: Denormalize — store user_name in the orders table
+ALTER TABLE orders ADD COLUMN user_name VARCHAR(100);
+
+-- Now the query only hits one shard:
+SELECT user_name, amount FROM orders WHERE order_id = 12345;</code></pre>
+
+      <div class="callout">
+        <strong>Denormalization trade-off:</strong> You trade storage (duplicated data) and write complexity (must update user_name in orders when it changes) for read performance. In sharded systems, this trade-off is almost always worth it.
+      </div>
+
+      <h3>Cross-Shard Transactions</h3>
+      <p>ACID transactions across shards are very hard. Two approaches:</p>
+
+      <p><strong>Two-Phase Commit (2PC):</strong></p>
+      <pre><code>-- Phase 1: PREPARE — each shard votes
+Shard 1: PREPARE TRANSACTION 'tx-001';  → OK
+Shard 3: PREPARE TRANSACTION 'tx-001';  → OK
+
+-- Phase 2: COMMIT — if all voted OK
+Shard 1: COMMIT PREPARED 'tx-001';
+Shard 3: COMMIT PREPARED 'tx-001';
+
+-- If any shard fails:
+Shard 1: ROLLBACK PREPARED 'tx-001';
+Shard 3: ROLLBACK PREPARED 'tx-001';</code></pre>
+
+      <p><strong>Problem with 2PC:</strong> It's a blocking protocol. If the coordinator crashes between PREPARE and COMMIT, all participants are stuck holding locks. In practice, 2PC is slow and fragile.</p>
+
+      <p><strong>Saga Pattern (preferred for microservices):</strong></p>
+      <pre><code>-- Saga: sequence of local transactions with compensating actions
+Step 1: Shard A — debit user's wallet          (compensate: credit back)
+Step 2: Shard B — create order record           (compensate: cancel order)
+Step 3: Shard C — reserve inventory             (compensate: release inventory)
+
+-- If Step 3 fails:
+Compensate Step 2: cancel the order on Shard B
+Compensate Step 1: credit the wallet on Shard A</code></pre>
+
+      <h3>Aggregation Queries</h3>
+      <pre><code>-- "How many orders were placed today?" across all shards
+def count_today_orders():
+    total = 0
+    for shard_id, conn in shard_connections.items():
+        result = conn.execute(
+            "SELECT COUNT(*) as cnt FROM orders WHERE created_at >= CURRENT_DATE"
+        )
+        total += result['cnt']
+    return total
+
+-- Better approach: maintain a real-time aggregation table
+-- on a dedicated analytics shard or use CDC to stream to a data warehouse</code></pre>
+
+      <!-- ──────────────────────────── 6. RESHARDING ──────────────────────────── -->
+      <h2 id="resharding">Resharding</h2>
+      <p>Resharding is the process of changing the number of shards or reassigning data between shards. It's triggered by:</p>
+      <ul>
+        <li><strong>Capacity:</strong> A shard is running out of disk space or hitting performance limits.</li>
+        <li><strong>Hotspots:</strong> One shard receives disproportionate traffic.</li>
+        <li><strong>Growth:</strong> You need to go from 4 shards to 16 as your user base grows 4×.</li>
+      </ul>
+
+      <h3>Strategy 1: Consistent Hashing (Minimal Movement)</h3>
+      <p>Instead of <code>hash(key) % N</code>, use a consistent hash ring. Adding a shard only moves ~<code>1/N</code> of keys instead of nearly all of them. See the <a href="#consistent-hashing-sharding">next section</a> for details.</p>
+
+      <h3>Strategy 2: Double-Write Migration</h3>
+      <pre><code># Phase 1: Start double-writing to old AND new shard
+def insert_order(user_id, product_id, amount):
+    old_shard = get_shard_v1(user_id)  # old routing
+    new_shard = get_shard_v2(user_id)  # new routing
+
+    old_shard.execute("INSERT INTO orders ...")
+    new_shard.execute("INSERT INTO orders ...")  # double-write
+
+# Phase 2: Backfill — copy historical data from old to new shards
+for shard in old_shards:
+    for row in shard.execute("SELECT * FROM orders"):
+        new_shard = get_shard_v2(row['user_id'])
+        new_shard.upsert(row)  # idempotent upsert
+
+# Phase 3: Verify — compare row counts, checksums
+# Phase 4: Cutover — switch reads to new shards
+# Phase 5: Stop double-writes, decommission old shards</code></pre>
+
+      <h3>Strategy 3: Backfill + Cutover (Vitess / gh-ost)</h3>
+      <pre><code># Vitess resharding workflow for MySQL:
+# 1. Create new shards with the desired key ranges
+$ vtctl CreateShard -- mydb/-40     # left half
+$ vtctl CreateShard -- mydb/40-     # right half
+
+# 2. Start VReplication streams (online, no downtime)
+$ vtctl Reshard -- --source_shards '0' --target_shards '-40,40-' Create
+
+# 3. Vitess copies existing data while replicating new writes
+$ vtctl Reshard -- --source_shards '0' --target_shards '-40,40-' SwitchTraffic
+
+# 4. When caught up, atomically switch traffic (< 1s downtime)
+$ vtctl Reshard -- --source_shards '0' --target_shards '-40,40-' Complete</code></pre>
+
+      <div class="callout">
+        <strong>Vitess</strong> (developed at YouTube) is the gold standard for MySQL sharding. It handles shard routing, connection pooling, query rewriting, online resharding, and schema migrations. Slack, GitHub, Square, and HubSpot use it in production.
+      </div>
+
+      <!-- ───────────────── 7. CONSISTENT HASHING FOR SHARDING ───────────────── -->
+      <h2 id="consistent-hashing-sharding">Consistent Hashing for Sharding</h2>
+      <p>Standard hash-based sharding (<code>hash(key) % N</code>) has a catastrophic flaw: changing <code>N</code> redistributes almost every key. Consistent hashing solves this.</p>
+
+      <h3>How It Works</h3>
+      <ol>
+        <li><strong>Hash ring:</strong> Both shard IDs and data keys are hashed onto a circular ring (0 to 2³²−1).</li>
+        <li><strong>Assignment:</strong> Each key is assigned to the next shard clockwise on the ring.</li>
+        <li><strong>Add shard:</strong> Only keys between the new shard and its predecessor move. ~<code>K/N</code> keys move (where K = total keys, N = shards).</li>
+        <li><strong>Remove shard:</strong> Only that shard's keys move to the next shard clockwise.</li>
+      </ol>
+
+      <pre><code>import hashlib
+import bisect
+
+class ConsistentHashRing:
+    def __init__(self, shards, virtual_nodes=150):
+        self.ring = {}
+        self.sorted_keys = []
+        self.virtual_nodes = virtual_nodes
+
+        for shard in shards:
+            self.add_shard(shard)
+
+    def _hash(self, key: str) -> int:
+        return int(hashlib.md5(key.encode()).hexdigest(), 16)
+
+    def add_shard(self, shard: str):
+        """Add a shard with virtual nodes for better distribution."""
+        for i in range(self.virtual_nodes):
+            virtual_key = f"{shard}:vn{i}"
+            h = self._hash(virtual_key)
+            self.ring[h] = shard
+            bisect.insort(self.sorted_keys, h)
+
+    def remove_shard(self, shard: str):
+        """Remove a shard — its keys automatically go to the next shard."""
+        for i in range(self.virtual_nodes):
+            virtual_key = f"{shard}:vn{i}"
+            h = self._hash(virtual_key)
+            del self.ring[h]
+            self.sorted_keys.remove(h)
+
+    def get_shard(self, key: str) -> str:
+        """Find which shard owns this key."""
+        if not self.ring:
+            raise ValueError("No shards in the ring")
+        h = self._hash(str(key))
+        idx = bisect.bisect_right(self.sorted_keys, h)
+        if idx == len(self.sorted_keys):
+            idx = 0  # wrap around
+        return self.ring[self.sorted_keys[idx]]
+
+# Usage
+ring = ConsistentHashRing(["shard-0", "shard-1", "shard-2", "shard-3"])
+
+# Route queries
+shard = ring.get_shard("user:12345")  # → "shard-2"
+
+# Add a new shard — only ~25% of keys move!
+ring.add_shard("shard-4")
+shard = ring.get_shard("user:12345")  # might still be "shard-2"</code></pre>
+
+      <h3>Virtual Nodes</h3>
+      <p>Without virtual nodes, shards can end up with very uneven portions of the ring. Virtual nodes (vnodes) map each physical shard to many points on the ring:</p>
+      <ul>
+        <li><strong>4 shards × 150 vnodes = 600 points</strong> on the ring → much more even distribution.</li>
+        <li>If one shard is more powerful, give it more vnodes (weighted sharding).</li>
+        <li>Trade-off: more vnodes = more even distribution, but larger routing table.</li>
+      </ul>
+
+      <!-- ────────────────────── 8. REAL-WORLD EXAMPLES ──────────────────────── -->
+      <h2 id="real-world">Real-World Examples</h2>
+
+      <h3>Instagram — PostgreSQL Sharded by user_id</h3>
+      <p>Instagram's early architecture (pre-Facebook acquisition) used PostgreSQL with application-level sharding:</p>
+      <ul>
+        <li><strong>Shard key:</strong> <code>user_id</code> — all of a user's photos, likes, and comments co-located.</li>
+        <li><strong>ID generation:</strong> Each shard generates IDs using a PostgreSQL stored function that encodes the shard ID, timestamp, and sequence number into a 64-bit ID:</li>
+      </ul>
+      <pre><code>-- Instagram's ID generation (simplified, per-shard PL/pgSQL function)
+CREATE OR REPLACE FUNCTION next_id(OUT result BIGINT) AS $$
+DECLARE
+    our_epoch  BIGINT := 1314220021721;  -- custom epoch
+    seq_id     BIGINT;
+    now_millis BIGINT;
+    shard_id   INT := 5;  -- different per shard
+BEGIN
+    SELECT nextval('table_id_seq') % 1024 INTO seq_id;
+    SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) INTO now_millis;
+    result := (now_millis - our_epoch) << 23;   -- 41 bits: timestamp
+    result := result | (shard_id << 10);         -- 13 bits: shard ID
+    result := result | (seq_id);                 -- 10 bits: sequence
+END;
+$$ LANGUAGE plpgsql;</code></pre>
+      <ul>
+        <li><strong>Routing:</strong> Application extracts shard ID from any ID: <code>shard_id = (id >> 10) & 8191</code>.</li>
+        <li><strong>Result:</strong> Billions of photos served with no cross-shard joins for user-centric queries.</li>
+      </ul>
+
+      <h3>Discord — guild_id Sharding on Cassandra → ScyllaDB</h3>
+      <ul>
+        <li><strong>Shard key:</strong> <code>guild_id</code> (Discord server ID). All messages for a guild on one partition.</li>
+        <li><strong>Problem:</strong> Messages are time-ordered within a guild, so the partition key is <code>(guild_id, bucket)</code> where <code>bucket</code> is a time window (e.g., 10-day period). This prevents any single partition from growing unbounded.</li>
+        <li><strong>Migration:</strong> Moved from Cassandra to ScyllaDB for lower tail latency (p99 went from 40–200ms to 5–15ms).</li>
+      </ul>
+      <pre><code>-- Discord's message table (Cassandra CQL, simplified)
+CREATE TABLE messages (
+    guild_id    BIGINT,
+    bucket      INT,          -- time bucket to limit partition size
+    message_id  BIGINT,       -- Snowflake ID (contains timestamp)
+    author_id   BIGINT,
+    content     TEXT,
+    PRIMARY KEY ((guild_id, bucket), message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);</code></pre>
+
+      <h3>Slack — Vitess for MySQL</h3>
+      <ul>
+        <li><strong>Before:</strong> Single MySQL instance handling all workspace data.</li>
+        <li><strong>Migration:</strong> Adopted Vitess to shard by <code>workspace_id</code>.</li>
+        <li><strong>Benefits:</strong> Online resharding, transparent query routing, connection pooling (reduced MySQL connections by 90%).</li>
+        <li><strong>Scale:</strong> Hundreds of Vitess shards serving millions of workspaces.</li>
+      </ul>
+
+      <h3>Uber — Schemaless (Custom Sharded Storage)</h3>
+      <ul>
+        <li><strong>Built Schemaless:</strong> A sharded, append-only, immutable data store on top of MySQL.</li>
+        <li><strong>Design:</strong> Each cell (row) has a row key, column name, and ref key. Data is sharded by row key using consistent hashing.</li>
+        <li><strong>Write path:</strong> Write to one shard (master), asynchronously replicate to replicas in other datacenters.</li>
+        <li><strong>Motivation:</strong> Needed a system that could handle trip data, user data, and driver data at massive scale without schema migrations blocking writes.</li>
+      </ul>
+
+      <!-- ──────────────────────────── 9. INTERVIEW ──────────────────────────── -->
+      <h2 id="interview">Sharding in Interviews</h2>
+
+      <h3>When to Propose Sharding</h3>
+      <p>In a system design interview, don't jump to sharding. Mention it when:</p>
+      <ul>
+        <li>The problem involves <strong>billions of records</strong> or <strong>petabytes of data</strong>.</li>
+        <li>Write throughput exceeds what a single instance handles (~50K–100K writes/sec for relational DBs).</li>
+        <li>Read replicas alone can't solve the write bottleneck.</li>
+        <li>You need data locality (geo-sharding) for compliance.</li>
+      </ul>
+
+      <h3>How to Discuss Shard Key Selection</h3>
+      <ol>
+        <li><strong>Identify the primary access pattern.</strong> "Users will query their own orders, so <code>user_id</code> is the natural shard key."</li>
+        <li><strong>Evaluate cardinality and distribution.</strong> "We have 100M users, evenly distributed — good cardinality."</li>
+        <li><strong>Consider hotspots.</strong> "Power users generate 1000× more data. We can handle this with caching or dedicated shards."</li>
+        <li><strong>Address cross-shard queries.</strong> "Admin queries that span all users will use scatter-gather with pre-aggregated tables."</li>
+      </ol>
+
+      <h3>Common Follow-Up Questions</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Question</th><th style="text-align:left; padding:0.5em;">Strong Answer Pattern</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">"What if one shard gets hot?"</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Monitor per-shard metrics. Short term: cache hot keys. Long term: split the shard (range-based) or add vnodes (consistent hashing).</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">"How do you handle cross-shard joins?"</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Avoid them. Denormalize frequently joined data. For rare needs, use scatter-gather or a materialized view in an analytics DB.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">"How do you add a new shard?"</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Use consistent hashing (move ~1/N keys). Double-write to old + new shard during migration. Vitess-style online resharding for MySQL.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">"What about auto-increment IDs?"</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Can't use DB auto-increment across shards (collisions). Use Snowflake IDs (Twitter), UUIDs, or Instagram-style ID generation encoding shard ID.</td></tr>
+          <tr><td style="padding:0.5em;">"How do you maintain global uniqueness?"</td><td style="padding:0.5em;">Each shard generates IDs with embedded shard identifier, or use a central ID service (Twitter Snowflake, Leaf by Meituan).</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Quick Reference: Sharding Checklist</h3>
+      <ol>
+        <li>&#9744; Exhaust vertical scaling, caching, read replicas first</li>
+        <li>&#9744; Choose shard key (high cardinality, even distribution, query locality)</li>
+        <li>&#9744; Pick strategy (hash / range / directory / geographic)</li>
+        <li>&#9744; Plan for cross-shard queries (denormalize, scatter-gather)</li>
+        <li>&#9744; Design ID generation (Snowflake, embedded shard ID)</li>
+        <li>&#9744; Plan resharding strategy (consistent hashing, Vitess)</li>
+        <li>&#9744; Monitor per-shard metrics (size, latency, connections)</li>
+        <li>&#9744; Handle hot keys (caching, dedicated shards, key salting)</li>
+      </ol>
+
+      <!-- ───────────────────── Summary ───────────────────── -->
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><strong>Sharding splits rows</strong> across multiple database instances to scale beyond a single machine's limits.</li>
+        <li><strong>Hash-based sharding</strong> gives even distribution but terrible resharding. <strong>Range-based</strong> enables range queries but risks hotspots. <strong>Directory-based</strong> is most flexible but requires a metadata service.</li>
+        <li><strong>Shard key selection</strong> is the most critical decision — optimize for cardinality, distribution, and query locality.</li>
+        <li><strong>Cross-shard queries</strong> are expensive. Denormalize aggressively and use scatter-gather sparingly.</li>
+        <li><strong>Consistent hashing</strong> solves the resharding problem by moving only ~1/N keys when adding a shard.</li>
+        <li><strong>Tools like Vitess</strong> automate shard routing, online resharding, and schema migrations for MySQL.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="message-queues.html"><span>Previous</span><span>&#8592; Message Queues</span></a>
+        <a class="next" href="replication.html"><span>Next</span><span>Replication &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,fill,rx){return el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,fill:fill,rx:''+(rx||6)});}
+    function line(x1,y1,x2,y2,stroke,sw){return el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:stroke,'stroke-width':''+(sw||2)});}
+    function arrow(x1,y1,x2,y2,color){
+      var g=el('g',{});
+      g.appendChild(line(x1,y1,x2,y2,color,2));
+      var a=Math.atan2(y2-y1,x2-x1),s=8;
+      var p=el('polygon',{points:(x2-s*Math.cos(a-0.4))+','+(y2-s*Math.sin(a-0.4))+' '+x2+','+y2+' '+(x2-s*Math.cos(a+0.4))+','+(y2-s*Math.sin(a+0.4)),fill:color});
+      g.appendChild(p);return g;
+    }
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ════════════════════════════════════════════════════════════════════════
+       ANIMATION 1 — Hash-Based Sharding
+       ════════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('hash-svg'),info=document.getElementById('hash-info'),out=document.getElementById('hash-output');
+      var colors=['#2196f3','#0a8f6a','#f59e0b','#e74c3c','#9c27b0'];
+      var shardLabels=['Shard 0','Shard 1','Shard 2','Shard 3'];
+      var users=[
+        {id:101,name:'Alice'},  {id:205,name:'Bob'},    {id:307,name:'Carol'},
+        {id:412,name:'Dan'},    {id:518,name:'Eve'},     {id:623,name:'Frank'},
+        {id:731,name:'Grace'},  {id:849,name:'Hank'},    {id:956,name:'Ivy'},
+        {id:1042,name:'Jake'},  {id:1137,name:'Kim'},    {id:1250,name:'Leo'}
+      ];
+      function simpleHash(id){return ((id*2654435761)>>>0);}
+      function shardFor(id,n){return simpleHash(id)%n;}
+      var step=0,totalSteps=6;
+
+      function drawShards(n,shardCounts,highlight,sx){
+        var sw=100,sh=50,gap=10,startY=30;
+        sx=sx||530;
+        for(var i=0;i<n;i++){
+          var y=startY+i*(sh+gap);
+          var c=colors[i%colors.length];
+          var isHot=(highlight===i);
+          svg.appendChild(rect(sx,y,sw,sh,isHot?'#e74c3c':c,8));
+          svg.appendChild(txt(n<=4?shardLabels[i]:'Shard '+i,{x:''+(sx+sw/2),y:''+(y+22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#fff'}));
+          if(shardCounts){
+            svg.appendChild(txt(shardCounts[i]+' keys',{x:''+(sx+sw/2),y:''+(y+38),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'rgba(255,255,255,0.85)'}));
+          }
+        }
+      }
+      function drawUsers(subset,startY){
+        startY=startY||40;
+        for(var i=0;i<subset.length;i++){
+          var y=startY+i*22;
+          svg.appendChild(rect(10,y,130,19,'#f5f5f5',4));
+          svg.appendChild(txt('user_id='+subset[i].id+' ('+subset[i].name+')',{x:'15',y:''+(y+14),'font-family':'Consolas,monospace','font-size':'9.5',fill:'var(--ink)'}));
+        }
+      }
+
+      function draw(){
+        clearSvg(svg);
+        if(step===0){
+          svg.appendChild(txt('Hash-Based Sharding: hash(user_id) % 4',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+          drawUsers(users.slice(0,6));
+          drawShards(4,null,-1);
+          svg.appendChild(txt('Click Step to route users to shards',{x:'350',y:'300','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink-muted)'}));
+          info.textContent='12 users, 4 shards. Each user routed by hash(user_id) % 4.';
+        }
+        else if(step===1){
+          svg.appendChild(txt('Step 1: Route user_id=101',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+          var u=users[0],s=shardFor(u.id,4);
+          drawUsers([u],80);
+          drawShards(4,null,s);
+          svg.appendChild(txt('hash('+u.id+') % 4 = '+s,{x:'310',y:'100','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'13',fill:'var(--ink)'}));
+          svg.appendChild(arrow(140,90,525,50+s*60+25,'#0a8f6a'));
+          info.textContent='user_id=101 → hash(101)%4='+s+' → goes to Shard '+s;
+        }
+        else if(step===2){
+          svg.appendChild(txt('Step 2: Route user_id=205',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+          var u=users[1],s=shardFor(u.id,4);
+          drawUsers([u],80);
+          drawShards(4,null,s);
+          svg.appendChild(txt('hash('+u.id+') % 4 = '+s,{x:'310',y:'100','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'13',fill:'var(--ink)'}));
+          svg.appendChild(arrow(140,90,525,50+s*60+25,'#2196f3'));
+          info.textContent='user_id=205 → hash(205)%4='+s+' → goes to Shard '+s;
+        }
+        else if(step===3){
+          svg.appendChild(txt('Step 3: All 12 users distributed',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+          var counts=[0,0,0,0];
+          var assignments={};
+          users.forEach(function(u){var s=shardFor(u.id,4);counts[s]++;if(!assignments[s])assignments[s]=[];assignments[s].push(u.name);});
+          drawUsers(users);
+          drawShards(4,counts,-1);
+          for(var s=0;s<4;s++){
+            if(assignments[s]){
+              svg.appendChild(txt(assignments[s].join(', '),{x:'645',y:''+(50+s*60+25),'font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+            }
+          }
+          info.textContent='Even distribution! Each shard has ~3 users. Good hash function → balanced load.';
+        }
+        else if(step===4){
+          svg.appendChild(txt('Step 4: Add 5th shard → hash(id) % 5',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#e74c3c'}));
+          var old4=[0,0,0,0],new5=[0,0,0,0,0],moved=0;
+          users.forEach(function(u){
+            var o=shardFor(u.id,4),n=shardFor(u.id,5);
+            old4[o]++;new5[n]++;
+            if(o!==n)moved++;
+          });
+          svg.appendChild(txt('Before (4 shards)',{x:'170',y:'60','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'var(--ink)'}));
+          for(var i=0;i<4;i++){
+            var y=80+i*45;
+            svg.appendChild(rect(120,y,100,35,colors[i],6));
+            svg.appendChild(txt('Shard '+i+': '+old4[i]+' keys',{x:'170',y:''+(y+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#fff'}));
+          }
+          svg.appendChild(txt('After (5 shards)',{x:'500',y:'60','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'var(--ink)'}));
+          for(var i=0;i<5;i++){
+            var y=80+i*45;
+            svg.appendChild(rect(450,y,100,35,colors[i],6));
+            svg.appendChild(txt('Shard '+i+': '+new5[i]+' keys',{x:'500',y:''+(y+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#fff'}));
+          }
+          svg.appendChild(arrow(225,140,445,140,'#e74c3c'));
+          svg.appendChild(txt(moved+'/'+users.length+' keys moved!',{x:'340',y:'125','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#e74c3c'}));
+          info.textContent='Problem! Adding 1 shard with modulo hashing moved '+moved+' of '+users.length+' keys ('+Math.round(moved/users.length*100)+'%). This is very expensive.';
+        }
+        else if(step===5){
+          svg.appendChild(txt('Step 5: Consistent hashing → minimal movement',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#0a8f6a'}));
+          var cx=350,cy=175,r=110;
+          svg.appendChild(el('circle',{cx:''+cx,cy:''+cy,r:''+r,fill:'none',stroke:'var(--line)','stroke-width':'2'}));
+          var shardAngles=[0,72,144,216,288];
+          var shardNames=['S0','S1','S2','S3','S4'];
+          for(var i=0;i<5;i++){
+            var a=(shardAngles[i]-90)*Math.PI/180;
+            var sx=cx+r*Math.cos(a),sy=cy+r*Math.sin(a);
+            var c=i<4?colors[i]:colors[4];
+            svg.appendChild(el('circle',{cx:''+sx,cy:''+sy,r:'14',fill:c}));
+            svg.appendChild(txt(shardNames[i],{x:''+sx,y:''+(sy+4),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:'#fff'}));
+          }
+          svg.appendChild(txt('New shard (S4) only takes keys',{x:'350',y:'295','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+          svg.appendChild(txt('from its neighbor — ~20% move instead of ~80%',{x:'350',y:'310','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+          var keyAngles=[30,95,160,200,250,330];
+          var keyLabels=['k1','k2','k3','k4','k5','k6'];
+          var movedKey=4;
+          for(var i=0;i<keyAngles.length;i++){
+            var a=(keyAngles[i]-90)*Math.PI/180;
+            var kx=cx+(r-30)*Math.cos(a),ky=cy+(r-30)*Math.sin(a);
+            var isMoved=(i===movedKey);
+            svg.appendChild(el('circle',{cx:''+kx,cy:''+ky,r:'8',fill:isMoved?'#9c27b0':'#888'}));
+            svg.appendChild(txt(keyLabels[i],{x:''+kx,y:''+(ky+3),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'7',fill:'#fff'}));
+          }
+          info.textContent='Consistent hashing: adding S4 only moves ~1/N keys (~20%). Much better than modulo resharding!';
+        }
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('hash-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('hash-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+
+    /* ════════════════════════════════════════════════════════════════════════
+       ANIMATION 2 — Range-Based Sharding & Hotspot
+       ════════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('range-svg'),info=document.getElementById('range-info'),out=document.getElementById('range-output');
+      var step=0,totalSteps=5;
+      var shardColors=['#2196f3','#0a8f6a','#f59e0b','#e74c3c','#9c27b0'];
+
+      function drawBar(x,y,w,h,fill,label,count,maxH,hot){
+        var barH=Math.max(8,h);
+        svg.appendChild(el('rect',{x:''+x,y:''+(y+maxH-barH),width:''+w,height:''+barH,rx:'4',fill:fill,opacity:hot?'1':'0.85'}));
+        if(hot){
+          svg.appendChild(el('rect',{x:''+x,y:''+(y+maxH-barH),width:''+w,height:''+barH,rx:'4',fill:'none',stroke:'#e74c3c','stroke-width':'3','stroke-dasharray':'6,3'}));
+        }
+        svg.appendChild(txt(label,{x:''+(x+w/2),y:''+(y+maxH+15),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'11',fill:'var(--ink)'}));
+        svg.appendChild(txt(count+'%',{x:''+(x+w/2),y:''+(y+maxH-barH-6),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+      }
+
+      function draw(){
+        clearSvg(svg);
+        if(step===0){
+          svg.appendChild(txt('Range-Based Sharding by First Letter of Username',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+          var ranges=[{label:'Shard 0\nA–F',range:'A–F'},{label:'Shard 1\nG–L',range:'G–L'},{label:'Shard 2\nM–R',range:'M–R'},{label:'Shard 3\nS–Z',range:'S–Z'}];
+          var sw=130,gap=20,startX=60;
+          for(var i=0;i<4;i++){
+            var x=startX+i*(sw+gap);
+            svg.appendChild(el('rect',{x:''+x,y:'60',width:''+sw,height:'50',rx:'8',fill:shardColors[i],opacity:'0.85'}));
+            svg.appendChild(txt('Shard '+i,{x:''+(x+sw/2),y:'82','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'#fff'}));
+            svg.appendChild(txt(ranges[i].range,{x:''+(x+sw/2),y:'100','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'rgba(255,255,255,0.9)'}));
+          }
+          svg.appendChild(txt('Sorted data split into ranges per shard',{x:'350',y:'145','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink-muted)'}));
+          var letters='A B C D E F G H I J K L M N O P Q R S T U V W X Y Z'.split(' ');
+          for(var i=0;i<26;i++){
+            var x=45+i*24;
+            var si=i<6?0:i<12?1:i<18?2:3;
+            svg.appendChild(el('rect',{x:''+x,y:'170',width:'20',height:'20',rx:'3',fill:shardColors[si],opacity:'0.5'}));
+            svg.appendChild(txt(letters[i],{x:''+(x+10),y:'185','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#fff'}));
+          }
+          info.textContent='4 shards, each handling a range of the alphabet. Looks balanced at first...';
+        }
+        else if(step===1){
+          svg.appendChild(txt('Real Traffic Distribution — Hotspot Detected!',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#e74c3c'}));
+          var maxH=160,barW=100,gap=40,startX=90,baseY=50;
+          var percents=[15,42,28,15];
+          var labels=['Shard 0\nA–F','Shard 1\nG–L','Shard 2\nM–R','Shard 3\nS–Z'];
+          for(var i=0;i<4;i++){
+            var x=startX+i*(barW+gap);
+            var h=percents[i]/42*maxH;
+            drawBar(x,baseY,barW,h,shardColors[i],labels[i],percents[i],maxH,i===1);
+          }
+          svg.appendChild(txt('🔥 HOT',{x:''+(startX+barW/2+1*(barW+gap)),y:''+(baseY+maxH-percents[1]/42*maxH-22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'16',fill:'#e74c3c'}));
+          info.textContent='Shard 1 (G–L) gets 42% of traffic! Names starting with J, K, L are very common → hotspot.';
+        }
+        else if(step===2){
+          svg.appendChild(txt('Hotspot Details: Why G–L Is Overloaded',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#e74c3c'}));
+          var names=['Garcia','Gonzalez','Green','Hall','Harris','Hill','Howard','Jackson','James','Johnson','Jones','King','Kumar','Lee','Lewis','Lopez'];
+          var cols=4,rows=4;
+          for(var r=0;r<rows;r++){
+            for(var c=0;c<cols;c++){
+              var idx=r*cols+c;
+              if(idx>=names.length)break;
+              var x=80+c*155,y=50+r*28;
+              svg.appendChild(el('rect',{x:''+x,y:''+y,width:'145',height:'22',rx:'4',fill:idx>=8?'#e74c3c':'#0a8f6a',opacity:'0.15'}));
+              svg.appendChild(txt(names[idx],{x:''+(x+8),y:''+(y+16),'font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+            }
+          }
+          svg.appendChild(txt('Common surnames J–L cluster on one shard (Jackson, James, Johnson, Jones, King, Kumar, Lee, Lewis, Lopez)',{x:'350',y:'185','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+          svg.appendChild(txt('Shard 1 has 2.8× more data than Shard 0 or Shard 3',{x:'350',y:'210','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:'#e74c3c'}));
+          svg.appendChild(txt('Solution: Split the overloaded shard →',{x:'350',y:'250','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'#0a8f6a'}));
+          info.textContent='Common last names starting with J, K, L create a massive hotspot on Shard 1.';
+        }
+        else if(step===3){
+          svg.appendChild(txt('Rebalancing: Split Shard 1 Into Two',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#0a8f6a'}));
+          var maxH=140,barW=80,gap=25,startX=55,baseY=55;
+          var labels5=['Shard 0\nA–F','Shard 1a\nG–I','Shard 1b\nJ–L','Shard 2\nM–R','Shard 3\nS–Z'];
+          var percents5=[15,14,28,28,15];
+          var cols5=[shardColors[0],'#0a8f6a','#00bcd4',shardColors[2],shardColors[3]];
+          for(var i=0;i<5;i++){
+            var x=startX+i*(barW+gap);
+            var h=percents5[i]/28*maxH;
+            drawBar(x,baseY,barW,h,cols5[i],labels5[i],percents5[i],maxH,false);
+          }
+          svg.appendChild(txt('Split!',{x:''+(startX+1*(barW+gap)+barW+gap/2),y:''+(baseY+maxH+35),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#0a8f6a'}));
+          svg.appendChild(el('line',{x1:''+(startX+1*(barW+gap)+barW+gap/2),y1:''+(baseY+maxH+18),x2:''+(startX+1*(barW+gap)+barW+gap/2),y2:''+(baseY+maxH+25),stroke:'#0a8f6a','stroke-width':'2'}));
+          info.textContent='Shard 1 split into 1a (G–I, 14%) and 1b (J–L, 28%). Still not perfectly even, but much better!';
+        }
+        else if(step===4){
+          svg.appendChild(txt('Final: Balanced After Further Adjustment',{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#0a8f6a'}));
+          var maxH=140,barW=80,gap=25,startX=55,baseY=55;
+          var labels5=['Shard 0\nA–G','Shard 1\nH–K','Shard 2\nL–O','Shard 3\nP–T','Shard 4\nU–Z'];
+          var percents5=[19,22,23,21,15];
+          var cols5=[shardColors[0],shardColors[1],shardColors[2],shardColors[3],shardColors[4]];
+          for(var i=0;i<5;i++){
+            var x=startX+i*(barW+gap);
+            var h=percents5[i]/23*maxH;
+            drawBar(x,baseY,barW,h,cols5[i],labels5[i],percents5[i],maxH,false);
+          }
+          svg.appendChild(txt('✓ Ranges adjusted based on actual data distribution — balanced!',{x:'350',y:'270','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'12',fill:'#0a8f6a'}));
+          info.textContent='Ranges adjusted to match real data distribution. No shard has more than 23% of data. Balanced!';
+        }
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('range-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('range-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,922 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Distributed Locking: Redis SET NX, Redlock algorithm, ZooKeeper ephemeral znodes, etcd leases, fencing tokens, database locks, and lock-free alternatives for system design.">
+  <title>Distributed Locking | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Building Blocks</a><span>&middot; Part 8 of 70</span></div>
+
+      <h1>Distributed Locking</h1>
+      <p class="post-meta">April 2026 &middot; 18 min read</p>
+
+      <!-- ======================= Section 1 ======================= -->
+      <h2 id="why">Why Distributed Locks?</h2>
+      <p>In a single-process application, a mutex or semaphore is enough to coordinate access to shared memory. But the moment your system spans multiple servers, containers, or even data centers, local mutexes are useless&mdash;they cannot cross process boundaries. That is where <strong>distributed locks</strong> come in: a mechanism that allows multiple independent processes to agree that exactly <em>one</em> of them holds exclusive access to a shared resource at any given time.</p>
+
+      <h3>Real-World Scenarios</h3>
+      <ul>
+        <li><strong>Prevent double booking:</strong> Two users simultaneously try to reserve the last seat on a flight. Without a distributed lock on that seat inventory row, both could succeed, over-selling the flight.</li>
+        <li><strong>Single-writer guarantee:</strong> A distributed cache rebuilder should only be executed by one node at a time. If two nodes simultaneously rebuild, they might write partial or conflicting data.</li>
+        <li><strong>Cron job deduplication:</strong> In a Kubernetes deployment with N replicas, a scheduled task (send daily emails, archive old records) must run on <em>exactly one</em> pod. A distributed lock ensures only the winner executes.</li>
+        <li><strong>Leader election:</strong> In a replicated database or streaming system, nodes compete for leadership. The winner writes; followers replicate. A distributed lock (or lease) is the foundation of this pattern.</li>
+        <li><strong>Rate-limited API calls:</strong> A third-party API allows one request per second. Multiple workers must coordinate so only one sends a request in each time window.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Distributed locks are not about performance&mdash;they are about <em>correctness</em>. If two processes both believe they hold the lock, data corruption or business-logic violations can follow.
+      </div>
+
+      <!-- ======================= Section 2 ======================= -->
+      <h2 id="properties">Properties of a Good Distributed Lock</h2>
+      <p>Not all distributed locks are created equal. A robust implementation must satisfy several properties, formalized in the literature as <strong>safety</strong> and <strong>liveness</strong> guarantees:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Property</th><th style="text-align:left; padding:0.5em;">Type</th><th style="text-align:left; padding:0.5em;">Description</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Mutual Exclusion</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Safety</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">At most one client can hold the lock at any given time. This is the <em>fundamental</em> guarantee. If this breaks, the lock is useless.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Deadlock-Free</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Liveness</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Even if a client crashes while holding the lock, the lock must eventually be released. Typically enforced via TTL (time-to-live) or session expiration.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Fault Tolerance</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Availability</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">The lock service must remain operational even if some nodes fail. A single-node lock server is a single point of failure.</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Fencing Tokens</strong></td><td style="padding:0.5em;">Safety (extended)</td><td style="padding:0.5em;">Each lock acquisition produces a monotonically increasing token. Resource servers reject stale tokens to prevent delayed writes from a previous lock holder.</td></tr>
+        </tbody>
+      </table>
+
+      <p>The first three are widely agreed upon. The fourth&mdash;fencing tokens&mdash;was highlighted by Martin Kleppmann as <em>essential</em> for correctness in asynchronous systems. We will explore it in depth in a <a href="#fencing">dedicated section</a>.</p>
+
+      <!-- ======================= Section 3 ======================= -->
+      <h2 id="redis-lock">Redis-Based Locking</h2>
+      <p>Redis is the most popular choice for distributed locking because of its low latency and simplicity. The basic pattern uses a single Redis instance:</p>
+
+      <h3>Acquiring the Lock</h3>
+      <pre><code># SET key value NX EX ttl
+# NX  = only set if key does NOT exist (mutual exclusion)
+# EX  = set TTL in seconds (deadlock-freedom)
+# value = a unique random string identifying THIS client
+
+SET my_lock "client-a-uuid-123" NX EX 30
+
+# Returns OK if the lock was acquired
+# Returns (nil) if someone else already holds it</code></pre>
+
+      <p>The <code>NX</code> flag ensures atomicity&mdash;only one client wins the race. The <code>EX 30</code> sets a 30-second TTL so that if the client crashes, the lock auto-releases. The random value identifies the lock owner, preventing accidental release by another client.</p>
+
+      <h3>Releasing the Lock</h3>
+      <p>You <strong>must not</strong> simply <code>DEL my_lock</code>. If the TTL expired and another client acquired the lock, you would delete <em>their</em> lock. Instead, use a Lua script for atomic check-and-delete:</p>
+
+      <pre><code>-- Lua script: release only if the value matches our unique ID
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+
+-- Execute from client:
+EVAL "if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) else return 0 end" 1 my_lock "client-a-uuid-123"</code></pre>
+
+      <h3>Problems with Single-Instance Redis Locks</h3>
+      <ul>
+        <li><strong>Single point of failure (SPOF):</strong> If the Redis instance goes down, all locks are lost. If it comes back with a stale RDB snapshot, it might have "forgotten" about active locks, allowing two clients to believe they hold the same lock.</li>
+        <li><strong>Replication lag:</strong> If using Redis replication, the master might accept a <code>SET NX</code> and crash before replicating to the replica. The replica is promoted, and another client acquires the "same" lock. Now two clients hold the lock.</li>
+        <li><strong>Clock drift:</strong> TTL-based expiration depends on the server clock. Significant clock skew between Redis and clients can cause premature or delayed expiration.</li>
+        <li><strong>Long GC pauses:</strong> A client acquires the lock, then its JVM garbage collector pauses for 30 seconds. The TTL expires, another client acquires the lock, and when the original client resumes, it still thinks it holds the lock.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Bottom line:</strong> A single-Redis-instance lock is fine for <em>efficiency</em> purposes (avoiding duplicate work) but is NOT safe for <em>correctness</em> purposes (preventing data corruption). For correctness, you need either Redlock or a consensus-based system.
+      </div>
+
+      <!-- ======================= Section 4 ======================= -->
+      <h2 id="redlock">Redlock Algorithm</h2>
+      <p>Redlock, proposed by Salvatore Sanfilippo (Antirez), addresses the single-instance weakness by using <strong>N independent Redis instances</strong> (typically 5). The algorithm:</p>
+
+      <h3>Step-by-Step</h3>
+      <ol>
+        <li><strong>Record the start time</strong> (<code>T1</code>) in milliseconds.</li>
+        <li><strong>Sequentially try to acquire the lock</strong> on all N Redis instances using the same key, same random value, and the same TTL. Use a small per-instance timeout (e.g., 5&ndash;10ms) so that a down instance doesn't slow you down.</li>
+        <li><strong>Calculate elapsed time</strong>: <code>elapsed = now() - T1</code>.</li>
+        <li><strong>The lock is acquired if and only if:</strong>
+          <ul>
+            <li>The client acquired the lock on a <strong>majority</strong> of instances (at least <code>⌊N/2⌋ + 1</code>, so 3 out of 5).</li>
+            <li>The total elapsed time is <strong>less than the lock TTL</strong>. The effective lock validity is <code>TTL - elapsed</code>.</li>
+          </ul>
+        </li>
+        <li><strong>If the lock was NOT acquired</strong> (fewer than majority or timeout exceeded), <strong>release the lock on ALL instances</strong> (even the ones where it was acquired) to avoid deadlocks.</li>
+      </ol>
+
+      <pre><code># Pseudocode for Redlock acquisition
+import time, uuid, redis
+
+LOCK_KEY = "my_resource"
+LOCK_TTL = 30000  # 30 seconds in ms
+QUORUM = 3        # majority of 5
+RETRY_DELAY = 200 # ms between retries
+instances = [redis.Redis(host=h) for h in REDIS_HOSTS]  # 5 hosts
+
+def acquire_lock():
+    value = str(uuid.uuid4())
+    start = time.monotonic_ns() // 1_000_000  # ms
+
+    acquired = 0
+    for r in instances:
+        try:
+            if r.set(LOCK_KEY, value, nx=True, px=LOCK_TTL):
+                acquired += 1
+        except redis.ConnectionError:
+            pass  # instance down, skip
+
+    elapsed = (time.monotonic_ns() // 1_000_000) - start
+    validity = LOCK_TTL - elapsed
+
+    if acquired >= QUORUM and validity > 0:
+        return value, validity  # lock acquired!
+    else:
+        # Release on ALL instances
+        for r in instances:
+            try:
+                release_lock(r, value)
+            except:
+                pass
+        return None, 0
+
+def release_lock(r, value):
+    lua = """
+    if redis.call("GET",KEYS[1])==ARGV[1] then
+        return redis.call("DEL",KEYS[1])
+    else return 0 end
+    """
+    r.eval(lua, 1, LOCK_KEY, value)</code></pre>
+
+      <!-- Redlock Animation -->
+      <div class="anim-container" id="redlock-anim">
+        <h4>&#9654; Redlock Algorithm</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through lock acquisition across 5 independent Redis nodes. Majority (3/5) required.</p>
+        <svg id="redlock-svg" width="620" height="300" viewBox="0 0 620 300"></svg>
+        <div id="redlock-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="redlock-step">Step &rarr;</button>
+          <button class="anim-btn" id="redlock-reset">Reset</button>
+          <span class="anim-output" id="redlock-output"></span>
+        </div>
+      </div>
+
+      <h3>The Kleppmann vs Antirez Debate</h3>
+      <p>In 2016, Martin Kleppmann published a widely-read analysis titled <em>"How to do distributed locking"</em> that criticized Redlock. Salvatore Sanfilippo (creator of Redis) responded with a rebuttal. This debate remains one of the most important discussions in distributed systems:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Kleppmann&rsquo;s Criticisms</th><th style="text-align:left; padding:0.5em;">Antirez&rsquo;s Rebuttals</th></tr></thead>
+        <tbody>
+          <tr>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              <strong>GC pauses break safety.</strong> A client acquires the lock, then a GC pause of &gt;TTL causes the lock to expire. Another client acquires it. The first client resumes and operates on shared data, believing it still holds the lock. Two clients now have "the lock."
+            </td>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              The client checks the remaining lock validity <em>after</em> acquiring it. If the GC pause happened during acquisition, the validity check catches it. However, Kleppmann argues the pause can happen <em>after</em> the check.
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              <strong>Clock jumps break safety.</strong> Redlock relies on wall-clock time for TTL calculations. If an NTP correction jumps a Redis server&rsquo;s clock forward, the lock expires prematurely.
+            </td>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              Use monotonic clocks where possible. Redis uses <code>gettimeofday()</code> which can be affected by NTP, but in practice large jumps are rare with well-configured NTP (smearing, not stepping).
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              <strong>No fencing tokens.</strong> Redlock does not produce monotonically increasing tokens. Without fencing, even correctly implemented locks cannot prevent split-brain writes.
+            </td>
+            <td style="padding:0.5em; border-bottom:1px solid var(--line); vertical-align:top;">
+              If you need fencing tokens, you need a consensus system anyway. Redlock is designed for a different (valid) use case where strong fencing isn&rsquo;t required.
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0.5em; vertical-align:top;">
+              <strong>Use a proper consensus system.</strong> If you need a lock for correctness, use ZooKeeper, etcd, or Chubby&mdash;systems designed with formal correctness proofs and linearizable semantics.
+            </td>
+            <td style="padding:0.5em; vertical-align:top;">
+              Redlock provides a practical middle ground. Not everyone needs the operational complexity of ZooKeeper. For many use cases, Redlock&rsquo;s guarantees are sufficient.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Verdict:</strong> Kleppmann&rsquo;s argument is widely considered technically correct: for <em>correctness-critical</em> locks, Redlock is insufficient because it lacks fencing tokens and relies on timing assumptions. Use Redlock for <em>efficiency</em> (preventing duplicate work where occasional double-execution is tolerable). For <em>correctness</em>, use a consensus-based system with fencing.
+      </div>
+
+      <!-- ======================= Section 5 ======================= -->
+      <h2 id="zookeeper">ZooKeeper Locks</h2>
+      <p>Apache ZooKeeper provides a more reliable locking primitive built on top of its consensus protocol (ZAB &mdash; ZooKeeper Atomic Broadcast). Unlike Redis, ZooKeeper was <em>designed</em> for coordination tasks.</p>
+
+      <h3>How It Works: Ephemeral Sequential Znodes</h3>
+      <ol>
+        <li><strong>Create an ephemeral sequential znode</strong> under a lock path:
+          <pre><code># Client creates an ephemeral sequential node
+create -e -s /locks/my_resource/lock-
+# ZooKeeper returns: /locks/my_resource/lock-0000000001</code></pre>
+          <p><code>-e</code> = ephemeral (auto-deleted when session ends), <code>-s</code> = sequential (ZooKeeper appends a monotonically increasing counter).</p>
+        </li>
+        <li><strong>List all children</strong> of the lock path:
+          <pre><code>ls /locks/my_resource
+# Returns: [lock-0000000001, lock-0000000003, lock-0000000005]</code></pre>
+        </li>
+        <li><strong>Check if you have the lowest sequence number:</strong>
+          <ul>
+            <li><strong>Yes:</strong> You hold the lock. Proceed with your critical section.</li>
+            <li><strong>No:</strong> Set a <em>watch</em> on the znode with the <em>next-lower</em> sequence number (not the lowest &mdash; this avoids the "herd effect" where all waiters wake up simultaneously).</li>
+          </ul>
+        </li>
+        <li><strong>When the watched znode is deleted</strong> (previous holder releases or crashes), you are notified. Re-check if you now have the lowest number.</li>
+        <li><strong>Release:</strong> Simply delete your znode, or let your session expire (ZooKeeper automatically deletes ephemeral nodes).</li>
+      </ol>
+
+      <pre><code># Pseudocode: ZooKeeper distributed lock (using Kazoo Python client)
+from kazoo.client import KazooClient
+from kazoo.recipe.lock import Lock
+
+zk = KazooClient(hosts='zk1:2181,zk2:2181,zk3:2181')
+zk.start()
+
+lock = Lock(zk, "/locks/my_resource")
+
+# Blocking acquire
+lock.acquire(timeout=30)
+try:
+    # Critical section: only one client executes this at a time
+    process_shared_resource()
+finally:
+    lock.release()
+
+# Or use as context manager
+with Lock(zk, "/locks/my_resource"):
+    process_shared_resource()</code></pre>
+
+      <h3>Advantages Over Redis</h3>
+      <ul>
+        <li><strong>Consensus-backed:</strong> ZAB protocol ensures all nodes agree on the state of the lock. No split-brain from replication lag.</li>
+        <li><strong>Automatic cleanup:</strong> Ephemeral nodes are deleted when the client session dies. No TTL guessing game.</li>
+        <li><strong>Monotonic ordering:</strong> Sequential znodes provide a natural ordering that can be used as fencing tokens.</li>
+        <li><strong>No clock dependency:</strong> Lock correctness does not depend on synchronized clocks.</li>
+        <li><strong>Watch mechanism:</strong> Clients are <em>notified</em> when the lock becomes available, rather than polling.</li>
+      </ul>
+
+      <h3>Drawbacks</h3>
+      <ul>
+        <li><strong>Operational complexity:</strong> Running a ZooKeeper ensemble (3 or 5 nodes) requires significant operational expertise.</li>
+        <li><strong>Higher latency:</strong> Consensus requires quorum writes, which are slower than a single Redis <code>SET</code>.</li>
+        <li><strong>Session management:</strong> If a client&rsquo;s session expires due to a temporary network partition, the lock is released even though the client is still running (and might still be accessing the shared resource).</li>
+      </ul>
+
+      <!-- ======================= Section 6 ======================= -->
+      <h2 id="etcd">etcd Locks</h2>
+      <p>etcd uses the Raft consensus algorithm and provides distributed locking through <strong>leases</strong> and <strong>transactions</strong>. It is the coordination backbone of Kubernetes.</p>
+
+      <h3>Lease-Based Locks</h3>
+      <pre><code># Grant a lease (TTL = 30 seconds)
+etcdctl lease grant 30
+# Output: lease 694d81417acd0b17 granted with TTL(30s)
+
+# Put a key with the lease attached
+etcdctl put --lease=694d81417acd0b17 /locks/my_resource "client-a"
+
+# The key auto-deletes when the lease expires
+# Keep the lease alive with periodic keep-alives:
+etcdctl lease keep-alive 694d81417acd0b17</code></pre>
+
+      <h3>Transactions for Atomic Lock Acquisition</h3>
+      <pre><code># Atomic compare-and-set: only create the lock if it doesn't exist
+etcdctl txn --interactive
+# compares:
+create_revision("/locks/my_resource") = "0"
+# success requests:
+put /locks/my_resource "client-a" --lease=694d81417acd0b17
+# failure requests:
+get /locks/my_resource</code></pre>
+
+      <p>The transaction checks that the key&rsquo;s <code>create_revision</code> is 0 (key doesn&rsquo;t exist). If true, it creates the key with the lease. If false, it returns the current holder&rsquo;s value. This is atomic and linearizable.</p>
+
+      <h3>Using etcd&rsquo;s Built-in Lock Command</h3>
+      <pre><code># etcd provides a high-level lock command
+etcdctl lock /locks/my_resource
+# Blocks until the lock is acquired
+# Holds the lock until the process exits or is interrupted (Ctrl+C)
+
+# Execute a command while holding the lock
+etcdctl lock /locks/my_resource -- echo "I have the lock"</code></pre>
+
+      <h3>Programmatic Example (Go)</h3>
+      <pre><code>import (
+    "context"
+    "go.etcd.io/etcd/client/v3"
+    "go.etcd.io/etcd/client/v3/concurrency"
+)
+
+cli, _ := clientv3.New(clientv3.Config{
+    Endpoints: []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"},
+})
+defer cli.Close()
+
+// Create a session (lease-based)
+session, _ := concurrency.NewSession(cli, concurrency.WithTTL(30))
+defer session.Close()
+
+// Create a mutex
+mu := concurrency.NewMutex(session, "/locks/my_resource")
+
+// Acquire
+mu.Lock(context.TODO())
+defer mu.Unlock(context.TODO())
+
+// Critical section
+processSharedResource()
+
+// The lock's revision can serve as a fencing token:
+fmt.Println("Fencing token:", mu.Header().Revision)</code></pre>
+
+      <p>The <code>mu.Header().Revision</code> is a monotonically increasing number from etcd&rsquo;s Raft log. This makes etcd locks compatible with fencing token requirements out of the box.</p>
+
+      <!-- ======================= Section 7 ======================= -->
+      <h2 id="fencing">Fencing Tokens</h2>
+      <p>Fencing tokens are <strong>the</strong> critical concept that separates a distributed lock that is merely "good enough" from one that is provably correct. This idea, popularized by Martin Kleppmann, addresses a fundamental problem in asynchronous distributed systems.</p>
+
+      <h3>The Problem: Zombie Lock Holders</h3>
+      <p>Consider this scenario without fencing:</p>
+      <ol>
+        <li>Client A acquires the lock with TTL=30s.</li>
+        <li>Client A begins processing, but hits a long GC pause (or network delay).</li>
+        <li>The lock&rsquo;s TTL expires after 30s. Client A is still paused.</li>
+        <li>Client B acquires the lock (legitimately).</li>
+        <li>Client B writes to the shared resource.</li>
+        <li>Client A&rsquo;s GC pause ends. It still believes it holds the lock.</li>
+        <li>Client A writes to the shared resource, <strong>overwriting Client B&rsquo;s data</strong>.</li>
+      </ol>
+      <p>The lock&rsquo;s mutual exclusion guarantee was <em>violated</em>. Both clients wrote to the resource "at the same time" from the resource&rsquo;s perspective.</p>
+
+      <h3>The Solution: Monotonically Increasing Tokens</h3>
+      <p>Each time a lock is acquired, the lock service issues a <strong>fencing token</strong>&mdash;a monotonically increasing number (e.g., ZooKeeper&rsquo;s zxid, etcd&rsquo;s revision). The resource server (database, storage, API) validates this token:</p>
+
+      <pre><code># Lock service issues tokens:
+# Client A acquires lock → token = 33
+# Client B acquires lock → token = 34
+
+# Resource server tracks the highest token it has seen:
+highest_token_seen = 0
+
+def write(data, token):
+    if token <= highest_token_seen:
+        raise RejectedError(f"Stale token {token} < {highest_token_seen}")
+    highest_token_seen = token
+    actually_write(data)
+
+# Client A (token=33) writes first  → accepted, highest=33
+# Client B (token=34) writes        → accepted, highest=34
+# Client A (delayed, token=33) tries → REJECTED (33 < 34)</code></pre>
+
+      <!-- Lock with Fencing Animation -->
+      <div class="anim-container" id="lock-anim">
+        <h4>&#9654; Distributed Lock with Fencing</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how fencing tokens prevent a zombie lock holder from corrupting data after a GC pause.</p>
+        <svg id="lock-svg" width="620" height="320" viewBox="0 0 620 320"></svg>
+        <div id="lock-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="lock-step">Step &rarr;</button>
+          <button class="anim-btn" id="lock-reset">Reset</button>
+          <span class="anim-output" id="lock-output"></span>
+        </div>
+      </div>
+
+      <h3>Where Fencing Tokens Come From</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Lock Service</th><th style="text-align:left; padding:0.5em;">Fencing Token Source</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">ZooKeeper</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Sequential znode number or <code>zxid</code> (transaction ID)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">etcd</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>revision</code> from the Raft log (returned by <code>mu.Header().Revision</code>)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Chubby (Google)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Lock sequencer (built-in)</td></tr>
+          <tr><td style="padding:0.5em;">Redis / Redlock</td><td style="padding:0.5em;">&#x26A0; <strong>Not natively supported.</strong> Requires external sequencing.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Fencing requires cooperation from the resource server.</strong> It must understand and enforce token ordering. This is straightforward for databases (<code>WHERE token > last_seen_token</code>) but harder for arbitrary APIs or third-party services.
+      </div>
+
+      <!-- ======================= Section 8 ======================= -->
+      <h2 id="database-lock">Database-Based Locks</h2>
+      <p>If your application already uses a relational database, you can leverage it as a lock service. This avoids adding a new infrastructure dependency, though it comes with trade-offs.</p>
+
+      <h3>SELECT FOR UPDATE (Row-Level Locking)</h3>
+      <pre><code>-- Create a locks table
+CREATE TABLE distributed_locks (
+    lock_name   VARCHAR(255) PRIMARY KEY,
+    locked_by   VARCHAR(255),
+    locked_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at  TIMESTAMP
+);
+
+-- Attempt to acquire (within a transaction)
+BEGIN;
+SELECT * FROM distributed_locks
+    WHERE lock_name = 'my_resource'
+    FOR UPDATE SKIP LOCKED;
+
+-- If the row is returned, check expiration and update
+UPDATE distributed_locks
+    SET locked_by = 'client-a',
+        locked_at = NOW(),
+        expires_at = NOW() + INTERVAL '30 seconds'
+    WHERE lock_name = 'my_resource'
+      AND (expires_at IS NULL OR expires_at < NOW());
+COMMIT;
+
+-- Release
+UPDATE distributed_locks
+    SET locked_by = NULL, expires_at = NULL
+    WHERE lock_name = 'my_resource'
+      AND locked_by = 'client-a';</code></pre>
+
+      <h3>PostgreSQL Advisory Locks</h3>
+      <p>PostgreSQL provides dedicated advisory lock functions that don&rsquo;t require a table:</p>
+
+      <pre><code>-- Session-level advisory lock (released when session ends)
+SELECT pg_advisory_lock(12345);
+-- ... critical section ...
+SELECT pg_advisory_unlock(12345);
+
+-- Try without blocking (returns true/false)
+SELECT pg_try_advisory_lock(12345);
+
+-- Transaction-level advisory lock (released at COMMIT/ROLLBACK)
+SELECT pg_advisory_xact_lock(12345);
+
+-- Using two integers for namespacing
+SELECT pg_advisory_lock(1, 42);  -- namespace=1, resource=42</code></pre>
+
+      <h3>MySQL GET_LOCK</h3>
+      <pre><code>-- Acquire (timeout 30 seconds)
+SELECT GET_LOCK('my_resource', 30);
+-- Returns 1 if acquired, 0 if timed out, NULL on error
+
+-- Release
+SELECT RELEASE_LOCK('my_resource');
+
+-- Check without acquiring
+SELECT IS_FREE_LOCK('my_resource');</code></pre>
+
+      <h3>Pros and Cons</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Pros</th><th style="text-align:left; padding:0.5em;">Cons</th></tr></thead>
+        <tbody>
+          <tr>
+            <td style="padding:0.5em; vertical-align:top;">
+              <ul style="margin:0;padding-left:1em;">
+                <li>No additional infrastructure</li>
+                <li>Transactional semantics (ACID)</li>
+                <li>Works with your existing HA setup</li>
+              </ul>
+            </td>
+            <td style="padding:0.5em; vertical-align:top;">
+              <ul style="margin:0;padding-left:1em;">
+                <li>Database becomes a bottleneck at scale</li>
+                <li>Lock contention increases query latency</li>
+                <li>Not designed for high-throughput locking</li>
+                <li>Connection pool exhaustion under heavy locking</li>
+              </ul>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ======================= Section 9 ======================= -->
+      <h2 id="lock-free">Lock-Free Alternatives</h2>
+      <p>Sometimes the best distributed lock is <strong>no lock at all</strong>. Several patterns avoid the need for explicit locking:</p>
+
+      <h3>Optimistic Locking (Version Numbers)</h3>
+      <p>Instead of preventing concurrent access, allow it but detect conflicts at write time:</p>
+      <pre><code>-- Read the current version
+SELECT data, version FROM resources WHERE id = 42;
+-- Returns: data='old_value', version=7
+
+-- Update only if the version hasn't changed
+UPDATE resources
+    SET data = 'new_value', version = version + 1
+    WHERE id = 42 AND version = 7;
+
+-- Check affected rows:
+-- 1 row  → success, your write went through
+-- 0 rows → conflict! Someone else updated first. Retry.</code></pre>
+
+      <p>This is the most widely used concurrency control mechanism in web applications. It avoids the overhead and complexity of distributed locks entirely for most use cases.</p>
+
+      <h3>Compare-and-Swap (CAS)</h3>
+      <p>CAS is the atomic primitive underlying optimistic locking. Many distributed stores support it natively:</p>
+      <pre><code># etcd: atomic CAS using transactions
+etcdctl txn --interactive
+# compares:
+value("/config/setting") = "old_value"
+# success:
+put /config/setting "new_value"
+# failure:
+get /config/setting
+
+# DynamoDB: conditional write
+table.put_item(
+    Item={'id': '42', 'data': 'new_value', 'version': 8},
+    ConditionExpression='version = :v',
+    ExpressionAttributeValues={':v': 7}
+)
+# Raises ConditionalCheckFailedException if version != 7</code></pre>
+
+      <h3>CRDTs (Conflict-Free Replicated Data Types)</h3>
+      <p>CRDTs are data structures that can be independently updated on different nodes and merged without conflicts. They eliminate the need for locking by making all operations commutative:</p>
+      <ul>
+        <li><strong>G-Counter:</strong> Each node maintains its own counter. The global count is the sum. Increments on any node are always safe.</li>
+        <li><strong>OR-Set (Observed-Remove Set):</strong> Elements can be added/removed concurrently. Conflicts resolve deterministically.</li>
+        <li><strong>LWW-Register (Last-Writer-Wins):</strong> Each write is timestamped. The latest timestamp wins on merge.</li>
+      </ul>
+
+      <h3>When to Avoid Locks</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Use Locks When</th><th style="text-align:left; padding:0.5em;">Avoid Locks When</th></tr></thead>
+        <tbody>
+          <tr>
+            <td style="padding:0.5em; vertical-align:top;">
+              <ul style="margin:0;padding-left:1em;">
+                <li>Strict mutual exclusion is required</li>
+                <li>Operations are not idempotent</li>
+                <li>External side effects (sending email, charging a card)</li>
+                <li>Leader election</li>
+              </ul>
+            </td>
+            <td style="padding:0.5em; vertical-align:top;">
+              <ul style="margin:0;padding-left:1em;">
+                <li>Operations are idempotent (safe to retry)</li>
+                <li>Optimistic concurrency works (low contention)</li>
+                <li>CRDTs can model your data</li>
+                <li>Eventual consistency is acceptable</li>
+              </ul>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ======================= Section 10 ======================= -->
+      <h2 id="pitfalls">Common Pitfalls</h2>
+
+      <h3>1. Lock Holder Dies Without Releasing</h3>
+      <p>This is the most common pitfall. A client acquires the lock, crashes (segfault, OOM, power failure), and never releases it.</p>
+      <ul>
+        <li><strong>Mitigation:</strong> Always use TTLs (Redis), leases (etcd), or ephemeral nodes (ZooKeeper). Never use a lock without an automatic expiration mechanism.</li>
+        <li><strong>Anti-pattern:</strong> Using a database row as a lock without an <code>expires_at</code> column. If the process dies, the lock is held forever until manual intervention.</li>
+      </ul>
+
+      <h3>2. Clock Skew Between Nodes</h3>
+      <p>If your lock&rsquo;s correctness depends on time (TTL, lease duration), clock differences between machines can cause problems:</p>
+      <ul>
+        <li>A Redis server&rsquo;s clock jumps forward by 10s → lock expires 10s early.</li>
+        <li>A client&rsquo;s clock is 5s behind → it calculates lock validity incorrectly.</li>
+      </ul>
+      <p><strong>Mitigation:</strong> Use monotonic clocks for duration calculations (<code>clock_gettime(CLOCK_MONOTONIC)</code> or <code>time.monotonic()</code>). Keep NTP well-configured with slew mode (gradual adjustment) rather than step mode (sudden jumps).</p>
+
+      <h3>3. Network Partitions During Lock Hold</h3>
+      <p>A client acquires the lock, then a network partition isolates it from the lock server:</p>
+      <ul>
+        <li>The lock server considers the client dead and releases the lock.</li>
+        <li>Another client on the other side of the partition acquires the lock.</li>
+        <li>The original client is still running and still thinks it holds the lock.</li>
+      </ul>
+      <p><strong>Mitigation:</strong> Fencing tokens. The resource server will reject the original client&rsquo;s stale token.</p>
+
+      <h3>4. GC Pauses Extending Lock Hold Time</h3>
+      <p>This is particularly insidious in JVM-based systems. A stop-the-world GC pause can last seconds or even minutes in pathological cases:</p>
+      <pre><code>// Timeline:
+t=0s    Client A acquires lock (TTL=30s, token=33)
+t=1s    Client A starts processing
+t=2s    Client A hits a full GC pause ← FROZEN
+t=32s   Lock expires (30s TTL)
+t=33s   Client B acquires lock (token=34)
+t=34s   Client B writes to resource
+t=45s   Client A's GC ends ← RESUMES, thinks it has the lock!
+t=46s   Client A writes to resource with token=33
+        → MUST BE REJECTED by resource server</code></pre>
+
+      <p><strong>Mitigation:</strong> Fencing tokens (again). Also: tune GC to minimize pause times (G1GC, ZGC, Shenandoah), use shorter TTLs with frequent renewals, and always check lock validity before performing the critical operation.</p>
+
+      <h3>5. Forgetting to Release the Lock</h3>
+      <pre><code># BAD: Exception between acquire and release = lock held until TTL
+lock.acquire()
+process()        # ← if this throws, release() is never called
+lock.release()
+
+# GOOD: Use try/finally or context managers
+lock.acquire()
+try:
+    process()
+finally:
+    lock.release()
+
+# BEST: Context manager (Python) or defer (Go)
+with lock:
+    process()</code></pre>
+
+      <h3>6. Retry Storms</h3>
+      <p>If all clients retry immediately after failing to acquire the lock, they create a thundering herd effect that overwhelms the lock server.</p>
+      <p><strong>Mitigation:</strong> Use exponential backoff with jitter:</p>
+      <pre><code>import random, time
+
+def acquire_with_backoff(lock, max_retries=10):
+    for attempt in range(max_retries):
+        if lock.acquire(blocking=False):
+            return True
+        # Exponential backoff with jitter
+        wait = min(2 ** attempt * 0.1, 5.0)  # cap at 5s
+        wait *= (0.5 + random.random())       # add jitter
+        time.sleep(wait)
+    return False</code></pre>
+
+      <h3>Summary: Choosing a Distributed Lock</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Technology</th><th style="text-align:left; padding:0.5em;">Best For</th><th style="text-align:left; padding:0.5em;">Fencing?</th><th style="text-align:left; padding:0.5em;">Complexity</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redis (single)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Efficiency, deduplication</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#x2718;</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Low</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redlock</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Better efficiency, no SPOF</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#x2718;</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Medium</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">ZooKeeper</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Correctness-critical locks</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#x2714;</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">High</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">etcd</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Kubernetes-native, correctness</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#x2714;</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Medium&ndash;High</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Database</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Simple apps, existing DB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">&#x2714; (via version)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Low</td></tr>
+          <tr><td style="padding:0.5em;">No lock (CAS/CRDT)</td><td style="padding:0.5em;">High throughput, idempotent ops</td><td style="padding:0.5em;">N/A</td><td style="padding:0.5em;">Varies</td></tr>
+        </tbody>
+      </table>
+
+      <nav class="post-nav">
+        <a class="prev" href="bloom-filters.html"><span>Previous</span><span>&#8592; Bloom Filters</span></a>
+        <a class="next" href="heartbeat-health.html"><span>Next</span><span>Heartbeat &amp; Health &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ========================================================
+       Animation 1: Distributed Lock with Fencing Tokens
+       ======================================================== */
+    (function(){
+      var svg=document.getElementById('lock-svg'),
+          info=document.getElementById('lock-info'),
+          out=document.getElementById('lock-output');
+      var W=620,H=320;
+      var clientAx=60,clientBx=60,lockSvcX=280,resX=500;
+      var clientAy=70,clientBy=200,lockSvcY=135,resY=135;
+      var cA='#2196f3',cB='#f59e0b',cLock='#7c3aed',cRes='#0a8f6a',cRej='#e74c3c',cOk='#16a34a';
+
+      function drawBase(){
+        clearSvg(svg);
+        // Client A box
+        svg.appendChild(el('rect',{x:''+(clientAx-40),y:''+(clientAy-20),width:'80',height:'40',rx:'8',fill:cA,opacity:'0.15',stroke:cA,'stroke-width':'2'}));
+        svg.appendChild(txt('Client A',{x:''+clientAx,y:''+(clientAy+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:cA}));
+        // Client B box
+        svg.appendChild(el('rect',{x:''+(clientBx-40),y:''+(clientBy-20),width:'80',height:'40',rx:'8',fill:cB,opacity:'0.15',stroke:cB,'stroke-width':'2'}));
+        svg.appendChild(txt('Client B',{x:''+clientBx,y:''+(clientBy+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:cB}));
+        // Lock service
+        svg.appendChild(el('rect',{x:''+(lockSvcX-50),y:''+(lockSvcY-25),width:'100',height:'50',rx:'8',fill:cLock,opacity:'0.15',stroke:cLock,'stroke-width':'2'}));
+        svg.appendChild(txt('Lock',{x:''+lockSvcX,y:''+(lockSvcY-2),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:cLock}));
+        svg.appendChild(txt('Service',{x:''+lockSvcX,y:''+(lockSvcY+12),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:cLock}));
+        // Resource server
+        svg.appendChild(el('rect',{x:''+(resX-50),y:''+(resY-25),width:'100',height:'50',rx:'8',fill:cRes,opacity:'0.15',stroke:cRes,'stroke-width':'2'}));
+        svg.appendChild(txt('Resource',{x:''+resX,y:''+(resY-2),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:cRes}));
+        svg.appendChild(txt('Server',{x:''+resX,y:''+(resY+12),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:cRes}));
+        // Token tracker
+        svg.appendChild(txt('highest_token: 0',{x:''+resX,y:''+(resY+45),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)',id:'lock-highest'}));
+      }
+
+      function arrow(x1,y1,x2,y2,color,dashed){
+        var g=el('g',{});
+        var line=el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'2'});
+        if(dashed)line.setAttribute('stroke-dasharray','6,4');
+        g.appendChild(line);
+        // arrowhead
+        var angle=Math.atan2(y2-y1,x2-x1);
+        var hl=8;
+        var p1x=x2-hl*Math.cos(angle-0.4),p1y=y2-hl*Math.sin(angle-0.4);
+        var p2x=x2-hl*Math.cos(angle+0.4),p2y=y2-hl*Math.sin(angle+0.4);
+        g.appendChild(el('polygon',{points:x2+','+y2+' '+p1x+','+p1y+' '+p2x+','+p2y,fill:color}));
+        svg.appendChild(g);
+      }
+
+      function label(x,y,text,color,size){
+        svg.appendChild(txt(text,{x:''+x,y:''+y,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':''+(size||10),fill:color||'var(--ink)'}));
+      }
+
+      function badge(x,y,text,bg,fg){
+        var r=el('rect',{x:''+(x-22),y:''+(y-10),width:'44',height:'20',rx:'10',fill:bg});
+        svg.appendChild(r);
+        svg.appendChild(txt(text,{x:''+x,y:''+(y+4),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:fg||'#fff'}));
+      }
+
+      var steps=[
+        {desc:'Step 1: Client A acquires lock → token = 33',fn:function(){
+          arrow(100,clientAy,lockSvcX-50,lockSvcY-5,cA);
+          label(185,clientAy-12,'LOCK req',cA);
+          arrow(lockSvcX-50,lockSvcY+5,100,clientAy+15,cLock,true);
+          label(185,clientAy+28,'token=33',cLock);
+          badge(clientAx,clientAy+42,'T=33',cA,'#fff');
+        }},
+        {desc:'Step 2: Client A processes request (working...)',fn:function(){
+          badge(clientAx,clientAy+42,'T=33',cA,'#fff');
+          label(clientAx,clientAy+66,'processing...',cA,9);
+        }},
+        {desc:'Step 3: Client A hits a GC pause! Lock TTL expires.',fn:function(){
+          badge(clientAx,clientAy+42,'T=33',cA,'#fff');
+          var r=el('rect',{x:''+(clientAx-45),y:''+(clientAy-28),width:'90',height:'48',rx:'8',fill:cRej,opacity:'0.15',stroke:cRej,'stroke-width':'2','stroke-dasharray':'4,3'});
+          svg.appendChild(r);
+          label(clientAx,clientAy+66,'GC PAUSE!',cRej,11);
+          label(lockSvcX,lockSvcY+42,'TTL expired',cRej,10);
+          label(lockSvcX,lockSvcY+54,'lock released',cRej,10);
+        }},
+        {desc:'Step 4: Client B acquires lock → token = 34',fn:function(){
+          label(clientAx,clientAy+66,'still paused',cRej,9);
+          arrow(100,clientBy,lockSvcX-50,lockSvcY+5,cB);
+          label(185,clientBy-12,'LOCK req',cB);
+          arrow(lockSvcX-50,lockSvcY-5,100,clientBy-15,cLock,true);
+          label(185,clientBy-28,'token=34',cLock);
+          badge(clientBx,clientBy+42,'T=34',cB,'#fff');
+        }},
+        {desc:'Step 5: Client A wakes up, sends delayed write with token=33',fn:function(){
+          badge(clientAx,clientAy+42,'T=33',cA,'#fff');
+          label(clientAx,clientAy+66,'GC ends!',cRej,9);
+          arrow(100,clientAy+10,resX-50,resY-15,cA,true);
+          label(310,clientAy+16,'write(data, token=33)',cA,10);
+        }},
+        {desc:'Step 6: Resource server REJECTS token 33 < 34  ✗',fn:function(){
+          badge(clientAx,clientAy+42,'T=33',cA,'#fff');
+          arrow(100,clientAy+10,resX-50,resY-15,cA,true);
+          label(310,clientAy+16,'write(data, token=33)',cA,10);
+          // rejection
+          arrow(resX-50,resY-5,100,clientAy+20,cRej,true);
+          badge(310,resY+4,'REJECT',cRej,'#fff');
+          label(resX,resY+45,'33 < 34 → stale!',cRej,10);
+          // X mark
+          svg.appendChild(txt('✗',{x:''+310,y:''+(resY+22),'text-anchor':'middle','font-family':'sans-serif','font-size':'22',fill:cRej}));
+        }},
+        {desc:'Step 7: Client B writes with token=34 → ACCEPTED  ✓',fn:function(){
+          badge(clientBx,clientBy+42,'T=34',cB,'#fff');
+          arrow(100,clientBy+10,resX-50,resY+15,cB);
+          label(310,clientBy+18,'write(data, token=34)',cB,10);
+          arrow(resX-50,resY+15,100,clientBy+20,cOk,true);
+          badge(310,resY-8,'ACCEPT',cOk,'#fff');
+          label(resX,resY+45,'highest_token: 34',cOk,10);
+          svg.appendChild(txt('✓',{x:''+310,y:''+(resY+32),'text-anchor':'middle','font-family':'sans-serif','font-size':'22',fill:cOk}));
+        }}
+      ];
+      drawBase();var step=0;
+      document.getElementById('lock-step').addEventListener('click',function(){
+        if(step>=steps.length)return;
+        drawBase();
+        // Show cumulative state up to current step
+        for(var i=0;i<=step;i++) steps[i].fn();
+        info.textContent=steps[step].desc;
+        out.textContent=(step+1)+' / '+steps.length;
+        step++;
+      });
+      document.getElementById('lock-reset').addEventListener('click',function(){step=0;drawBase();info.textContent='Click "Step" to begin the fencing token demo.';out.textContent='';});
+      info.textContent='Click "Step" to begin the fencing token demo.';
+    })();
+
+    /* ========================================================
+       Animation 2: Redlock Algorithm (5 Redis Nodes)
+       ======================================================== */
+    (function(){
+      var svg=document.getElementById('redlock-svg'),
+          info=document.getElementById('redlock-info'),
+          out=document.getElementById('redlock-output');
+      var W=620,H=300;
+      var nodeY=60,nodeSpacing=110,nodeStartX=70;
+      var clientX=310,clientY=220;
+      var cNode='#e74c3c',cClient='#2196f3',cOk='#16a34a',cFail='#9ca3af',cLock='#7c3aed';
+
+      function nodeX(i){return nodeStartX+i*nodeSpacing;}
+
+      function drawBase(){
+        clearSvg(svg);
+        // Title
+        svg.appendChild(txt('5 Independent Redis Instances',{x:'310',y:'20','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+        // Nodes
+        for(var i=0;i<5;i++){
+          var nx=nodeX(i);
+          svg.appendChild(el('rect',{x:''+(nx-30),y:''+(nodeY-18),width:'60',height:'36',rx:'8',fill:cNode,opacity:'0.15',stroke:cNode,'stroke-width':'2',id:'rn-'+i}));
+          svg.appendChild(txt('Redis '+(i+1),{x:''+nx,y:''+(nodeY+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:cNode}));
+        }
+        // Client
+        svg.appendChild(el('rect',{x:''+(clientX-40),y:''+(clientY-18),width:'80',height:'36',rx:'8',fill:cClient,opacity:'0.15',stroke:cClient,'stroke-width':'2'}));
+        svg.appendChild(txt('Client',{x:''+clientX,y:''+(clientY+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:cClient}));
+      }
+
+      function arrowTo(x1,y1,x2,y2,color){
+        var g=el('g',{});
+        g.appendChild(el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'2'}));
+        var angle=Math.atan2(y2-y1,x2-x1);var hl=7;
+        var p1x=x2-hl*Math.cos(angle-0.4),p1y=y2-hl*Math.sin(angle-0.4);
+        var p2x=x2-hl*Math.cos(angle+0.4),p2y=y2-hl*Math.sin(angle+0.4);
+        g.appendChild(el('polygon',{points:x2+','+y2+' '+p1x+','+p1y+' '+p2x+','+p2y,fill:color}));
+        svg.appendChild(g);
+      }
+
+      function statusBadge(nx,ny,text,bg){
+        svg.appendChild(el('rect',{x:''+(nx-16),y:''+(ny+22),width:'32',height:'18',rx:'9',fill:bg}));
+        svg.appendChild(txt(text,{x:''+nx,y:''+(ny+35),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:'#fff'}));
+      }
+
+      // Success scenario: nodes 0,1,2 acquired; 3,4 fail
+      var scenarioSuccess=[
+        {acquired:[],desc:'Client begins Redlock: will try all 5 nodes.'},
+        {acquired:[0],pending:[1,2,3,4],desc:'SET NX on Redis 1 → OK (1/5)'},
+        {acquired:[0,1],pending:[2,3,4],desc:'SET NX on Redis 2 → OK (2/5)'},
+        {acquired:[0,1,2],failed:[],pending:[3,4],desc:'SET NX on Redis 3 → OK (3/5) — MAJORITY REACHED!'},
+        {acquired:[0,1,2],failed:[3],pending:[4],desc:'SET NX on Redis 4 → FAIL (node down)'},
+        {acquired:[0,1,2],failed:[3,4],pending:[],desc:'SET NX on Redis 5 → FAIL (timeout). Final: 3/5 ≥ 3 → LOCK ACQUIRED ✓'}
+      ];
+      // Failure scenario: only 2 acquired
+      var scenarioFail=[
+        {acquired:[],desc:'[Failure case] Client begins Redlock.'},
+        {acquired:[0],pending:[1,2,3,4],desc:'SET NX on Redis 1 → OK (1/5)'},
+        {acquired:[0],failed:[1],pending:[2,3,4],desc:'SET NX on Redis 2 → FAIL (already locked)'},
+        {acquired:[0],failed:[1,2],pending:[3,4],desc:'SET NX on Redis 3 → FAIL (node down)'},
+        {acquired:[0,3],failed:[1,2],pending:[4],desc:'SET NX on Redis 4 → OK (2/5)'},
+        {acquired:[0,3],failed:[1,2,4],pending:[],desc:'SET NX on Redis 5 → FAIL. Final: 2/5 < 3 → LOCK NOT ACQUIRED ✗. Release all.'}
+      ];
+
+      var allSteps=scenarioSuccess.concat(scenarioFail);
+      var step=0;
+
+      function drawStep(idx){
+        drawBase();
+        var s=allSteps[idx];
+        var isFailScenario=idx>=scenarioSuccess.length;
+        var scenarioLabel=isFailScenario?'Scenario: Failure (2/5)':'Scenario: Success (3/5)';
+        svg.appendChild(txt(scenarioLabel,{x:'310',y:'290','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+
+        // Draw arrows and badges for acquired/failed nodes
+        if(s.acquired)s.acquired.forEach(function(i){
+          arrowTo(clientX,clientY-18,nodeX(i),nodeY+18,cOk);
+          statusBadge(nodeX(i),nodeY,'OK',cOk);
+        });
+        if(s.failed)s.failed.forEach(function(i){
+          arrowTo(clientX,clientY-18,nodeX(i),nodeY+18,cFail);
+          statusBadge(nodeX(i),nodeY,'FAIL',cFail);
+        });
+        if(s.pending)s.pending.forEach(function(i){
+          var dline=el('line',{x1:''+clientX,y1:''+(clientY-18),x2:''+nodeX(i),y2:''+(nodeY+18),stroke:'#d1d5db','stroke-width':'1','stroke-dasharray':'4,4'});
+          svg.appendChild(dline);
+        });
+
+        // Final result badge
+        if(idx===scenarioSuccess.length-1 || idx===allSteps.length-1){
+          var isSuccess=idx===scenarioSuccess.length-1;
+          var bx=clientX,by=clientY+28;
+          svg.appendChild(el('rect',{x:''+(bx-60),y:''+(by-10),width:'120',height:'24',rx:'12',fill:isSuccess?cOk:'#e74c3c'}));
+          svg.appendChild(txt(isSuccess?'LOCK ACQUIRED ✓':'LOCK FAILED ✗',{x:''+bx,y:''+(by+5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'#fff'}));
+        }
+
+        // Tally
+        var acq=s.acquired?s.acquired.length:0;
+        var fail=s.failed?s.failed.length:0;
+        svg.appendChild(txt('Acquired: '+acq+'/5   Failed: '+fail+'/5',{x:'310',y:'155','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+
+        info.textContent=s.desc;
+        out.textContent=(idx+1)+' / '+allSteps.length;
+      }
+
+      drawBase();
+      info.textContent='Click "Step" to walk through Redlock (success then failure scenario).';
+
+      document.getElementById('redlock-step').addEventListener('click',function(){
+        if(step>=allSteps.length)return;
+        drawStep(step);step++;
+      });
+      document.getElementById('redlock-reset').addEventListener('click',function(){step=0;drawBase();info.textContent='Click "Step" to walk through Redlock (success then failure scenario).';out.textContent='';});
+    })();
+  })();
+  </script>
+</body>
+</html>

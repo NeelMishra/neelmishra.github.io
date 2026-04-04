@@ -1,0 +1,1594 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Case Study: Discord at Scale — real-time messaging with Elixir/BEAM, guild sharding, message storage evolution from MongoDB to Cassandra to ScyllaDB, WebRTC voice/video with SFUs, Rust for performance-critical services, lazy guilds, Kafka data pipelines, Elasticsearch, and distributed rate limiting serving 200M+ monthly active users.">
+  <title>Case Study: Discord at Scale | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Case Studies</a><span>&middot; Post 68 of 70</span></div>
+
+      <h1>Case Study: Discord at Scale</h1>
+      <p class="post-meta">April 2026 &middot; 22 min read</p>
+
+      <p>Discord has grown from a niche gaming voice-chat app to a <strong>universal communication platform</strong> serving <strong>200 million+ monthly active users</strong> who spend over <strong>4 billion minutes in conversation every day</strong>. At peak, Discord handles tens of millions of concurrent users across millions of active guilds (servers), delivering messages with sub-100ms latency.</p>
+
+      <p>What makes Discord's infrastructure fascinating isn't just the scale — it's the technology choices. Elixir on the BEAM VM for real-time messaging. A database migration from MongoDB to Cassandra to ScyllaDB. Rust for performance-critical hot paths. WebRTC with custom SFU infrastructure for voice and video. Every decision was driven by specific engineering constraints that we'll examine in detail.</p>
+
+      <div class="callout">
+        <strong>Discord by the Numbers (2024–2025):</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>200M+ MAU</strong> — monthly active users across desktop, mobile, web</li>
+          <li><strong>4B+ minutes/day</strong> — of voice, video, and text conversation</li>
+          <li><strong>19M+ active servers</strong> — guilds ranging from 2 members to 1M+</li>
+          <li><strong>~150M+ messages/day</strong> at peak — all persisted and searchable</li>
+          <li><strong>Millions of concurrent voice connections</strong> — real-time audio/video</li>
+          <li><strong>Trillions of stored messages</strong> — petabytes of data in the message store</li>
+        </ul>
+      </div>
+
+      <!-- ───────────────── 1. ELIXIR & THE BEAM VM ───────────────── -->
+      <h2 id="elixir-beam">Elixir &amp; the BEAM VM: Built for Real-Time</h2>
+
+      <p>Discord's real-time messaging layer is built on <strong>Elixir</strong>, a functional language that runs on the <strong>BEAM virtual machine</strong> — the same VM that powers Erlang and has been battle-tested in telecom systems (Ericsson's phone switches) for 30+ years. This wasn't a trendy choice; it was an engineering one driven by very specific properties of the BEAM.</p>
+
+      <h3 id="beam-properties">Why the BEAM VM?</h3>
+
+      <p>The BEAM provides four critical properties that map perfectly to Discord's requirements:</p>
+
+      <p><strong>1. Lightweight Processes:</strong> BEAM processes are not OS threads. They're incredibly lightweight — each process uses only ~2KB of memory and is scheduled by the BEAM's own preemptive scheduler. Discord spawns <strong>millions of processes per node</strong> — one per connected WebSocket session, one per guild, one per voice connection.</p>
+
+      <pre><code># Each connected user gets their own process
+# A single Elixir node can handle 1M+ concurrent connections
+
+defmodule Discord.Gateway.Session do
+  use GenServer
+
+  # ~2KB per process — 1 million sessions = ~2GB RAM
+  def start_link(user_id, socket) do
+    GenServer.start_link(__MODULE__, %{
+      user_id: user_id,
+      socket: socket,
+      guilds: [],          # guilds this user is in
+      presence: :online,
+      sequence: 0,         # event sequence number for resuming
+      heartbeat_ref: nil
+    })
+  end
+
+  def init(state) do
+    # Schedule heartbeat check every 41.25 seconds
+    ref = Process.send_after(self(), :check_heartbeat, 41_250)
+    {:ok, %{state | heartbeat_ref: ref}}
+  end
+
+  # Handle incoming heartbeat from client
+  def handle_info(:heartbeat, state) do
+    send_to_socket(state.socket, %{op: 11})  # HEARTBEAT_ACK
+    {:noreply, %{state | last_heartbeat: System.monotonic_time()}}
+  end
+
+  # If no heartbeat received, close the zombie connection
+  def handle_info(:check_heartbeat, state) do
+    if System.monotonic_time() - state.last_heartbeat > 45_000 do
+      Logger.warn("Zombie session for user #{state.user_id}")
+      {:stop, :heartbeat_timeout, state}
+    else
+      ref = Process.send_after(self(), :check_heartbeat, 41_250)
+      {:noreply, %{state | heartbeat_ref: ref}}
+    end
+  end
+end</code></pre>
+
+      <p><strong>2. Preemptive Scheduling &amp; Reduction Counting:</strong> The BEAM scheduler doesn't use cooperative multitasking. It tracks <em>reductions</em> (roughly, function calls) and preempts any process that exceeds its reduction budget (~4000 reductions). This means a single expensive operation <strong>cannot starve other processes</strong>. For Discord, this guarantees that one user sending a massive message doesn't block delivery to other users on the same node.</p>
+
+      <pre><code># BEAM preemptive scheduling ensures fairness
+#
+# Traditional event-loop (Node.js-like):
+#   User A sends 10MB message → parser blocks the loop
+#   → All other users on this thread are blocked
+#
+# BEAM:
+#   User A sends 10MB message → parser gets 4000 reductions
+#   → Preempted → Scheduler runs User B, C, D processes
+#   → Comes back to User A → Another 4000 reductions
+#   → No one is starved
+
+# The scheduler runs on each CPU core:
+# 4-core machine = 4 schedulers, each with its own run queue
+# Processes are load-balanced across schedulers
+# Work-stealing: idle scheduler steals from busy scheduler's queue</code></pre>
+
+      <p><strong>3. Fault Isolation via Process Isolation:</strong> Each BEAM process has its own heap and garbage collector. If one process crashes, it <strong>does not affect any other process</strong>. Discord uses <strong>supervision trees</strong> to automatically restart crashed processes. If a user's session crashes, only that user is affected — and they're immediately reconnected.</p>
+
+      <pre><code># Supervision tree: automatic crash recovery
+defmodule Discord.Gateway.Supervisor do
+  use Supervisor
+
+  def start_link(opts) do
+    Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def init(_opts) do
+    children = [
+      # If the SessionRegistry crashes, restart it
+      {Discord.Gateway.SessionRegistry, []},
+
+      # DynamicSupervisor: one child per connected session
+      # :one_for_one = if one session crashes, only that session restarts
+      {DynamicSupervisor,
+        name: Discord.Gateway.SessionSupervisor,
+        strategy: :one_for_one,
+        max_restarts: 10_000,    # allow up to 10K restarts
+        max_seconds: 1           # per second before supervisor itself restarts
+      },
+
+      # Guild process supervisor
+      {DynamicSupervisor,
+        name: Discord.Guild.Supervisor,
+        strategy: :one_for_one
+      }
+    ]
+
+    # :rest_for_one = if SessionRegistry crashes,
+    # restart it AND everything started after it
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+end
+
+# Impact of a crash:
+# Session process crashes → Supervisor restarts it → ~50ms
+# User sees a brief disconnect, auto-reconnects via RESUME
+# No other users affected
+# Guild process crashes → All members get re-subscribed → ~200ms
+# No messages lost (messages are persisted separately)</code></pre>
+
+      <p><strong>4. Hot Code Upgrades:</strong> The BEAM supports loading new code while the system is running, without dropping connections. Discord can deploy new gateway code to a node while millions of users are connected — their WebSocket connections remain intact throughout the upgrade.</p>
+
+      <pre><code># Hot code upgrade: deploy without dropping connections
+#
+# Traditional deployment:
+#   1. Drain connections from node (users disconnect)
+#   2. Deploy new code
+#   3. Restart node
+#   4. Users reconnect (thundering herd!)
+#
+# BEAM hot code upgrade:
+#   1. Compile new .beam files
+#   2. Load new module versions into VM
+#   3. Old processes continue on old code
+#   4. Next message dispatch uses new code
+#   5. Old code is garbage collected when no process references it
+#
+# Two versions of every module can coexist in the VM simultaneously
+# Zero downtime, zero dropped connections</code></pre>
+
+      <h3 id="erlang-distribution">Erlang Distribution Protocol</h3>
+
+      <p>BEAM nodes communicate via the <strong>Erlang Distribution Protocol</strong> — a built-in mechanism for sending messages between processes on different physical machines. Discord uses this for cross-node guild communication:</p>
+
+      <pre><code># Cross-node communication is transparent
+# Sending a message to a process on another machine looks identical
+# to sending to a local process
+
+# On Node A:
+guild_pid = :global.whereis_name({:guild, guild_id})
+GenServer.cast(guild_pid, {:new_message, message})
+
+# guild_pid might be on Node A, Node B, or Node C
+# The syntax is IDENTICAL — BEAM handles serialization,
+# network transport, and delivery transparently
+
+# This is why Elixir/BEAM is perfect for distributed systems:
+# Location transparency is built into the VM</code></pre>
+
+      <div class="callout">
+        <strong>BEAM vs. Alternatives for Real-Time Messaging:</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>Node.js</strong> — single-threaded event loop. One slow handler blocks everything. No process isolation. Requires clustering libraries for multi-core.</li>
+          <li><strong>Go</strong> — goroutines are lightweight but share memory. One goroutine panicking can crash the process. No hot code upgrades. No built-in distribution.</li>
+          <li><strong>Java</strong> — threads are expensive (~1MB stack each). GC pauses affect all threads. Virtual threads (Loom) improve this but lack BEAM's isolation.</li>
+          <li><strong>Elixir/BEAM</strong> — lightweight isolated processes, preemptive scheduling, per-process GC, built-in distribution, hot code upgrades. Purpose-built for exactly this workload.</li>
+        </ul>
+      </div>
+
+      <!-- ───────────────── 2. GUILD SHARDING ───────────────── -->
+      <h2 id="guild-sharding">Guild Sharding Architecture</h2>
+
+      <p>A <strong>guild</strong> (what users call a "server") is the fundamental unit of state in Discord. Each guild contains channels, members, roles, permissions, and active voice states. Discord's sharding strategy is built around guilds as the atomic unit.</p>
+
+      <h3 id="guild-process">The Guild Process</h3>
+
+      <p>Every guild is a single Elixir <strong>GenServer process</strong> — a long-lived, stateful process that holds the guild's state in memory and processes all events sequentially. This eliminates the need for distributed locks or database-backed coordination for guild operations.</p>
+
+      <pre><code>defmodule Discord.Guild.Server do
+  use GenServer
+
+  defstruct [
+    :id,
+    :name,
+    :owner_id,
+    channels: %{},        # channel_id => %Channel{}
+    members: %{},         # user_id => %Member{roles, nickname, ...}
+    roles: %{},           # role_id => %Role{permissions, position, ...}
+    voice_states: %{},    # user_id => %VoiceState{channel_id, muted, ...}
+    presences: %{},       # user_id => :online | :idle | :dnd | :offline
+    member_count: 0,
+    large?: false         # true if member_count > 250
+  ]
+
+  # All operations on a guild are serialized through this process
+  # No locks needed! GenServer mailbox = built-in message queue
+
+  def handle_cast({:send_message, channel_id, author_id, content}, state) do
+    # 1. Permission check (in-memory, no DB call)
+    with :ok <- check_permissions(state, author_id, channel_id, :send_messages),
+         :ok <- check_rate_limit(author_id) do
+
+      message = %Message{
+        id: Snowflake.generate(),
+        channel_id: channel_id,
+        author_id: author_id,
+        content: content,
+        timestamp: DateTime.utc_now()
+      }
+
+      # 2. Persist to message store (async, don't block the guild process)
+      Task.start(fn -> MessageStore.persist(message) end)
+
+      # 3. Fan out to all connected sessions in this channel
+      fan_out_message(state, channel_id, message)
+
+      {:noreply, state}
+    else
+      {:error, :missing_permissions} ->
+        {:noreply, state}
+      {:error, :rate_limited} ->
+        {:noreply, state}
+    end
+  end
+
+  defp fan_out_message(state, channel_id, message) do
+    # Get all members who have access to this channel
+    channel = state.channels[channel_id]
+
+    state.members
+    |> Enum.filter(fn {user_id, member} ->
+      has_channel_access?(state, member, channel)
+    end)
+    |> Enum.each(fn {user_id, _member} ->
+      # Send to user's gateway session (might be on another node)
+      case SessionRegistry.lookup(user_id) do
+        {:ok, session_pids} ->
+          # User might have multiple sessions (desktop + mobile)
+          Enum.each(session_pids, fn pid ->
+            send(pid, {:dispatch, :MESSAGE_CREATE, message})
+          end)
+        :not_found ->
+          :ok  # User is offline, no session to send to
+      end
+    end)
+  end
+end</code></pre>
+
+      <h3 id="shard-mapping">Shard-to-Node Mapping</h3>
+
+      <p>Discord assigns guilds to Elixir nodes using a <strong>consistent hash ring</strong>. The guild ID determines which node "owns" that guild. When a node goes down, its guilds are redistributed to remaining nodes.</p>
+
+      <pre><code># Guild-to-node assignment via consistent hashing
+#
+# ┌──────────────────────────────────────────────┐
+# │              Hash Ring (0 to 2^32)           │
+# │                                              │
+# │    Node-A          Node-B         Node-C     │
+# │      │               │              │        │
+# │  ────●───────────────●──────────────●────    │
+# │      ↑               ↑              ↑        │
+# │  Guilds with      Guilds with    Guilds with │
+# │  hash 0..X        hash X..Y     hash Y..2^32│
+# └──────────────────────────────────────────────┘
+#
+# Each node has multiple virtual nodes (vnodes) for even distribution
+# Adding a node: only ~1/N guilds need to migrate
+# Removing a node: its guilds distribute evenly to remaining nodes
+
+defmodule Discord.Guild.Router do
+  @ring_size 2048  # number of virtual nodes
+
+  def get_node(guild_id) do
+    hash = :erlang.phash2(guild_id, @ring_size)
+    # Look up which physical node owns this vnode
+    :ets.lookup(:guild_ring, hash)
+    |> case do
+      [{^hash, node}] -> node
+      [] -> fallback_node()
+    end
+  end
+
+  # When a user connects, they subscribe to all their guilds
+  def subscribe_to_guilds(session_pid, guild_ids) do
+    Enum.each(guild_ids, fn guild_id ->
+      node = get_node(guild_id)
+      # Tell the guild process on that node about this session
+      :rpc.cast(node, Discord.Guild.Server, :add_session,
+                [guild_id, session_pid])
+    end)
+  end
+end</code></pre>
+
+      <h3 id="gateway-sharding">Client-Side Gateway Sharding</h3>
+
+      <p>For bots or large applications, Discord also supports <strong>client-side gateway sharding</strong>. A bot in 100,000 guilds doesn't connect once — it connects with multiple shards, each receiving events for a subset of guilds:</p>
+
+      <pre><code># Client-side shard assignment
+# shard_id = (guild_id >> 22) % num_shards
+#
+# Bot with 100K guilds, 16 shards:
+# Shard 0: receives events for guilds where (id >> 22) % 16 == 0
+# Shard 1: receives events for guilds where (id >> 22) % 16 == 1
+# ...
+# Shard 15: receives events for guilds where (id >> 22) % 16 == 15
+#
+# Each shard is a separate WebSocket connection
+# Max guilds per shard: 2,500 (Discord enforced limit)
+# Required shards = ceil(guild_count / 2500)
+
+# IDENTIFY payload specifies the shard:
+{
+  "op": 2,                    // IDENTIFY opcode
+  "d": {
+    "token": "Bot MTk...",
+    "intents": 33281,         // bitfield of subscribed events
+    "shard": [0, 16],         // [shard_id, total_shards]
+    "properties": {
+      "os": "linux",
+      "browser": "discord.py",
+      "device": "discord.py"
+    }
+  }
+}</code></pre>
+
+      <!-- ───────────────── ANIMATION 1: Message Delivery Path ───────────────── -->
+      <h2 id="msg-delivery-path">Message Delivery Path</h2>
+      <p>The following animation traces a message from the moment a user presses Enter to its delivery across all connected clients in the channel — illustrating guild-level process sharding, fanout, and WebSocket delivery.</p>
+
+      <div class="anim-container" id="discord-msg-anim">
+        <h4>&#9654; Message Delivery Path</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how a message flows through Discord's guild-sharded Elixir infrastructure to reach every connected client.</p>
+        <svg id="msg-svg" width="700" height="400" viewBox="0 0 700 400"></svg>
+        <div id="msg-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="msg-step">Step &rarr;</button>
+          <button class="anim-btn" id="msg-reset">Reset</button>
+          <span class="anim-output" id="msg-output"></span>
+        </div>
+      </div>
+
+      <!-- ───────────────── 3. MESSAGE STORAGE EVOLUTION ───────────────── -->
+      <h2 id="message-storage">Message Storage Evolution</h2>
+
+      <p>Discord's message storage is one of the most instructive case studies in database evolution at scale. The system went through three major phases, each driven by hitting concrete scaling walls.</p>
+
+      <h3 id="mongodb-era">Phase 1: MongoDB (2015–2016)</h3>
+
+      <p>Discord launched with <strong>MongoDB</strong> — a practical choice for a startup that needed to iterate quickly. Messages were stored as documents with flexible schemas. At low scale, this worked fine.</p>
+
+      <pre><code>// MongoDB message document (early Discord)
+{
+  "_id": ObjectId("..."),
+  "channel_id": "123456789",
+  "author_id": "987654321",
+  "content": "Hello world!",
+  "timestamp": ISODate("2016-01-15T10:30:00Z"),
+  "attachments": [],
+  "embeds": [],
+  "mentions": ["111222333"],
+  "reactions": {
+    "👍": ["user1", "user2"],
+    "❤️": ["user3"]
+  }
+}
+
+// Problem: as messages grew to hundreds of millions, MongoDB struggled.
+// - Single-document write locks in WiredTiger
+// - Memory-mapped storage engine couldn't handle the working set
+// - Sharding added operational complexity without solving read latency
+// - No built-in time-series optimization for append-heavy workload</code></pre>
+
+      <h3 id="cassandra-era">Phase 2: Cassandra (2016–2022)</h3>
+
+      <p>Discord migrated to <strong>Apache Cassandra</strong> — a wide-column, masterless NoSQL database designed for high write throughput and linear horizontal scaling. Messages were modeled as time-series data with the channel as the partition key.</p>
+
+      <pre><code>-- Cassandra message table schema
+CREATE TABLE messages (
+    channel_id  bigint,
+    message_id  bigint,       -- Snowflake ID (encodes timestamp)
+    author_id   bigint,
+    content     text,
+    attachments frozen&lt;list&lt;frozen&lt;attachment&gt;&gt;&gt;,
+    embeds      frozen&lt;list&lt;frozen&lt;embed&gt;&gt;&gt;,
+    mentions    frozen&lt;set&lt;bigint&gt;&gt;,
+    reactions   frozen&lt;map&lt;text, frozen&lt;set&lt;bigint&gt;&gt;&gt;&gt;,
+    edited_at   timestamp,
+    PRIMARY KEY ((channel_id), message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_size': 1,
+                    'compaction_window_unit': 'DAYS'}
+  AND gc_grace_seconds = 864000;
+
+-- Query: Get latest 50 messages in a channel (extremely fast)
+SELECT * FROM messages
+WHERE channel_id = 123456789
+ORDER BY message_id DESC
+LIMIT 50;
+
+-- This query hits a SINGLE partition — no scatter-gather
+-- Cassandra returns results in ~1-5ms for small partitions</code></pre>
+
+      <p>Cassandra worked well for years but eventually hit critical issues at Discord's scale:</p>
+
+      <div class="callout">
+        <strong>Why Cassandra Failed at Discord's Scale:</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>GC Pauses:</strong> Cassandra runs on the JVM. As heap pressure increased, GC pauses (particularly G1GC mixed collections) would spike to 500ms–2s, causing <strong>p99 tail latency spikes</strong> that were visible to users as "stuck" messages.</li>
+          <li><strong>Hot Partitions:</strong> Popular channels (announcements in million-member guilds) created massive partitions. Cassandra has no per-partition load balancing — all reads/writes for a partition go to the same replicas.</li>
+          <li><strong>Compaction Storms:</strong> Large SSTables triggered compaction that temporarily doubled disk I/O and caused read latency spikes. Leveled compaction helped but increased write amplification 10x.</li>
+          <li><strong>Read Amplification:</strong> Reading from multiple SSTables per query. Bloom filters helped but weren't sufficient for Discord's read patterns (random access to old messages via search/jump).</li>
+          <li><strong>Operational Burden:</strong> JVM tuning, heap sizing, GC algorithm selection, compaction strategy tuning — the operational surface area was enormous. A team of engineers spent significant time just keeping Cassandra healthy.</li>
+        </ul>
+      </div>
+
+      <pre><code># Cassandra GC pause impact on Discord
+#
+# Normal operation:
+# p50 read latency: 2ms
+# p99 read latency: 15ms
+#
+# During GC pause:
+# p50 read latency: 2ms (unaffected nodes)
+# p99 read latency: 800ms+ ← visible to users!
+# p999 read latency: 2000ms+ ← messages appear "stuck"
+#
+# The problem: speculative retries (read from replica if primary is slow)
+# helped p99 but increased cluster load, making GC pauses more frequent.
+# A vicious cycle.
+#
+# Timeline of a GC-induced incident:
+# T+0s:    Node 7 enters G1 mixed GC collection
+# T+0.2s:  All reads to partitions on Node 7 stall
+# T+0.3s:  Speculative retries hit replica nodes (Node 3, Node 11)
+# T+0.5s:  Node 3 now under increased load, its GC pressure rises
+# T+0.8s:  Node 7 exits GC, but Node 3 enters GC
+# T+1.2s:  Cascade continues across the cluster
+# T+5s:    Cluster stabilizes, but users experienced 5s of degradation</code></pre>
+
+      <h3 id="scylladb-era">Phase 3: ScyllaDB (2022–Present)</h3>
+
+      <p>Discord migrated from Cassandra to <strong>ScyllaDB</strong> — a Cassandra-compatible database rewritten from scratch in C++ with a fundamentally different architecture. The migration was transparent to application code because ScyllaDB speaks the CQL (Cassandra Query Language) protocol.</p>
+
+      <p><strong>ScyllaDB's Shard-Per-Core Architecture:</strong></p>
+
+      <pre><code># ScyllaDB vs Cassandra: Architectural Differences
+#
+# ┌─────────────────────────────────────────────────┐
+# │              CASSANDRA (JVM-based)               │
+# │                                                  │
+# │  ┌──────────────────────────────────────────┐   │
+# │  │         Shared JVM Heap (32GB)           │   │
+# │  │                                          │   │
+# │  │  Thread 1  Thread 2  Thread 3  Thread 4  │   │
+# │  │     ↕         ↕         ↕         ↕      │   │
+# │  │  ┌─────────────────────────────────────┐ │   │
+# │  │  │   Shared Memory / Shared SSTables   │ │   │
+# │  │  └─────────────────────────────────────┘ │   │
+# │  │                                          │   │
+# │  │  ⚠ GC pauses freeze ALL threads          │   │
+# │  │  ⚠ Lock contention between threads       │   │
+# │  │  ⚠ NUMA-unaware memory allocation        │   │
+# │  └──────────────────────────────────────────┘   │
+# └─────────────────────────────────────────────────┘
+#
+# ┌─────────────────────────────────────────────────┐
+# │          SCYLLADB (C++ / Seastar framework)      │
+# │                                                  │
+# │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐        │
+# │  │Core 0│  │Core 1│  │Core 2│  │Core 3│        │
+# │  │      │  │      │  │      │  │      │        │
+# │  │Own   │  │Own   │  │Own   │  │Own   │        │
+# │  │memory│  │memory│  │memory│  │memory│        │
+# │  │      │  │      │  │      │  │      │        │
+# │  │Own   │  │Own   │  │Own   │  │Own   │        │
+# │  │SSTs  │  │SSTs  │  │SSTs  │  │SSTs  │        │
+# │  │      │  │      │  │      │  │      │        │
+# │  │Own   │  │Own   │  │Own   │  │Own   │        │
+# │  │network│ │network│ │network│ │network│       │
+# │  │queue │  │queue │  │queue │  │queue │        │
+# │  └──────┘  └──────┘  └──────┘  └──────┘        │
+# │                                                  │
+# │  ✓ No GC — deterministic memory management       │
+# │  ✓ No locks — each core is independent           │
+# │  ✓ NUMA-aware — memory pinned to local NUMA node │
+# │  ✓ Each core = independent shard of data          │
+# └─────────────────────────────────────────────────┘</code></pre>
+
+      <p><strong>Key advantages that solved Discord's problems:</strong></p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Problem (Cassandra)</th><th style="text-align:left; padding:0.5em;">Solution (ScyllaDB)</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">JVM GC pauses (500ms–2s)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">No GC — C++ with manual memory management via Seastar allocator. Zero pause time.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Thread contention &amp; locks</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Shard-per-core: each CPU core owns its data slice. No shared mutable state, no locks.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">NUMA-unaware allocation</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Memory is pinned to the local NUMA node of each core. No cross-NUMA traffic.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Compaction storms</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Per-core compaction runs independently and is I/O-scheduled to not impact reads.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Operational tuning burden</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Self-tuning: ScyllaDB auto-configures based on hardware. No JVM heap/GC tuning.</td></tr>
+          <tr><td style="padding:0.5em;">177 Cassandra nodes</td><td style="padding:0.5em;">72 ScyllaDB nodes — same throughput, better latency, less than half the hardware.</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code># Discord's migration results (publicly shared):
+#
+# BEFORE (Cassandra):
+# - 177 nodes
+# - p99 read latency: 40-125ms (with GC spikes to 1s+)
+# - p99 write latency: 5-70ms
+# - Frequent GC-related incidents
+# - Dedicated team for Cassandra operations
+#
+# AFTER (ScyllaDB):
+# - 72 nodes (59% fewer machines)
+# - p99 read latency: 15ms (CONSISTENT — no spikes)
+# - p99 write latency: 5ms (CONSISTENT)
+# - Zero GC-related incidents (no GC exists)
+# - Reduced operational burden significantly
+#
+# The migration was transparent to application code:
+# ScyllaDB speaks CQL — same queries, same drivers, same schema
+# Discord ran both clusters in parallel during migration,
+# dual-writing and comparing results for months before cutover</code></pre>
+
+      <h3 id="data-model-details">Message Data Model Details</h3>
+
+      <p>Discord uses <strong>Snowflake IDs</strong> — 64-bit IDs that encode the timestamp of creation. This means message IDs are naturally ordered by time, and you can extract the creation time from any message ID without a database lookup:</p>
+
+      <pre><code># Discord Snowflake ID structure (64 bits):
+#
+# ┌──────────────────────────────────────────────────────┐
+# │  Timestamp (ms since Discord Epoch)  │ Worker │ Seq  │
+# │           42 bits                    │ 10 bits│12bits│
+# └──────────────────────────────────────────────────────┘
+#
+# Discord Epoch: 2015-01-01T00:00:00.000Z (1420070400000)
+#
+# Example: message_id = 1234567890123456789
+# timestamp_ms = (1234567890123456789 >> 22) + 1420070400000
+# = Unix timestamp of when the message was created
+#
+# Why this matters for storage:
+# - Messages are ALREADY sorted by time (no secondary index needed)
+# - Partition key = channel_id, clustering key = message_id (DESC)
+# - "Get latest 50 messages" = single partition scan, pre-sorted
+# - "Jump to message" = single partition seek by message_id
+# - "Messages before timestamp" = convert timestamp to Snowflake,
+#   then seek to that position in the partition
+
+def snowflake_to_timestamp(snowflake_id):
+    discord_epoch = 1420070400000
+    timestamp_ms = (snowflake_id >> 22) + discord_epoch
+    return datetime.fromtimestamp(timestamp_ms / 1000)
+
+def timestamp_to_snowflake(dt):
+    discord_epoch = 1420070400000
+    timestamp_ms = int(dt.timestamp() * 1000) - discord_epoch
+    return timestamp_ms &lt;&lt; 22  # minimum possible ID at this timestamp</code></pre>
+
+      <!-- ───────────────── ANIMATION 2: Migration ───────────────── -->
+      <h2 id="db-migration">Cassandra → ScyllaDB Migration</h2>
+      <p>This animation visualizes the latency improvements Discord observed when migrating from Cassandra to ScyllaDB, showing how JVM GC pauses caused periodic latency spikes that completely disappeared with ScyllaDB's shard-per-core C++ architecture.</p>
+
+      <div class="anim-container" id="migration-anim">
+        <h4>&#9654; Cassandra to ScyllaDB Migration</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Compare Cassandra's GC-induced latency spikes versus ScyllaDB's smooth, consistent latency profile.</p>
+        <svg id="mig-svg" width="700" height="370" viewBox="0 0 700 370"></svg>
+        <div id="mig-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="mig-step">Step &rarr;</button>
+          <button class="anim-btn" id="mig-reset">Reset</button>
+          <span class="anim-output" id="mig-output"></span>
+        </div>
+      </div>
+
+      <!-- ───────────────── 4. VOICE & VIDEO ───────────────── -->
+      <h2 id="voice-video">Voice &amp; Video: WebRTC with SFUs</h2>
+
+      <p>Discord's voice and video infrastructure uses <strong>WebRTC</strong> with <strong>Selective Forwarding Units (SFUs)</strong> rather than peer-to-peer mesh or MCU (Multipoint Control Unit) architectures.</p>
+
+      <h3 id="sfu-architecture">Why SFU?</h3>
+
+      <pre><code># Voice/Video Architecture Options:
+#
+# 1. PEER-TO-PEER MESH (e.g., small WebRTC calls)
+#    Each participant sends their stream to every other participant
+#    Connections = N × (N-1) / 2
+#    5 users = 10 connections, 10 users = 45 connections
+#    ⚠ Doesn't scale beyond ~5 users (bandwidth explosion)
+#
+#    User A ←──→ User B
+#      ↕  ╲      ╱  ↕
+#    User C ←──→ User D
+#
+# 2. MCU (Multipoint Control Unit)
+#    Server receives all streams, mixes them into one, sends back
+#    ✓ Low client bandwidth (receives 1 stream)
+#    ⚠ Enormous server CPU (decode + mix + encode per participant)
+#    ⚠ Fixed layout, no client-side flexibility
+#
+# 3. SFU (Selective Forwarding Unit) — Discord's choice
+#    Server receives each participant's stream
+#    FORWARDS (not mixes) selected streams to each participant
+#    ✓ Low client upload (send 1 stream to server)
+#    ✓ Server just forwards packets (no decode/encode)
+#    ✓ Client chooses which streams to display
+#    ✓ Scales to hundreds of participants
+#
+#    User A ──→ ┌─────┐ ──→ User B (receives A, C, D)
+#    User B ──→ │ SFU │ ──→ User A (receives B, C, D)
+#    User C ──→ │     │ ──→ User C (receives A, B, D)
+#    User D ──→ └─────┘ ──→ User D (receives A, B, C)
+#
+#    Server CPU: O(N) forwarding vs O(N²) mixing</code></pre>
+
+      <h3 id="voice-regions">Voice Server Regions</h3>
+
+      <p>Discord operates voice servers in <strong>multiple geographic regions</strong>. When a user joins a voice channel, they're connected to the voice server closest to the guild's configured region (or automatic region selection based on participant locations):</p>
+
+      <pre><code># Voice connection flow:
+#
+# 1. User clicks "Join Voice Channel"
+# 2. Client sends VOICE_STATE_UPDATE via gateway WebSocket
+# 3. Guild process selects optimal voice server region
+# 4. Gateway sends VOICE_SERVER_UPDATE to client:
+#    {
+#      "token": "voice_session_token",
+#      "guild_id": "123",
+#      "endpoint": "us-east-1.voice.discord.gg:443"
+#    }
+# 5. Client establishes WebSocket to voice server
+# 6. UDP hole-punching for media transport
+# 7. Client sends/receives Opus-encoded audio via RTP over UDP
+#
+# Audio codec: Opus (optimized for voice, 6-510 kbps)
+# Video codec: H.264 / VP8 / VP9 / AV1
+# Transport: SRTP (Secure RTP) over UDP
+# Signaling: WebSocket to voice server
+#
+# Simulcast: client sends multiple quality levels
+# (e.g., 720p, 360p, 180p) — SFU selects which to forward
+# based on each receiver's available bandwidth and UI layout</code></pre>
+
+      <div class="callout">
+        <strong>Voice Optimization Details:</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>Opus codec:</strong> Discord uses Opus at 64kbps for voice channels. Opus handles packet loss gracefully through Forward Error Correction (FEC) and Packet Loss Concealment (PLC).</li>
+          <li><strong>Jitter buffer:</strong> Adaptive jitter buffer absorbs network timing variations. Target buffer: 40–120ms depending on connection quality.</li>
+          <li><strong>Voice Activity Detection (VAD):</strong> Client-side VAD suppresses packets when the user isn't speaking. Reduces server bandwidth by ~60% in typical conversations.</li>
+          <li><strong>Priority Speaker:</strong> Stage Channels use priority tagging in RTP headers. SFU prioritizes forwarding these streams and drops non-priority streams under congestion.</li>
+        </ul>
+      </div>
+
+      <!-- ───────────────── 5. RUST FOR PERFORMANCE ───────────────── -->
+      <h2 id="rust-services">Rust for Performance-Critical Services</h2>
+
+      <p>While Elixir handles the real-time messaging layer, Discord uses <strong>Rust</strong> for services where raw throughput and predictable latency are critical. The two most prominent examples are the <strong>Read States</strong> service and <strong>Member List</strong> indexing.</p>
+
+      <h3 id="read-states">Read States Service</h3>
+
+      <p>Every user has "read states" — tracking which messages they've read in every channel they have access to. This is one of the highest-traffic services at Discord because it's updated on <em>every message view</em>:</p>
+
+      <pre><code>// Read States: Rust service tracking per-user-per-channel read position
+//
+// Data model:
+// Key: (user_id, channel_id)
+// Value: {
+//   last_read_message_id: Snowflake,
+//   mention_count: u32,
+//   last_pin_timestamp: Option<DateTime>,
+// }
+//
+// Scale: 200M users × average ~100 channels each = ~20 BILLION read states
+// Update frequency: every time a user opens a channel or scrolls
+//
+// Why Rust?
+// - The Go version had GC pauses causing latency spikes (sound familiar?)
+// - Millions of updates/second with p99 < 1ms requirement
+// - Memory efficiency: compact representation, no GC overhead
+
+use dashmap::DashMap;
+use std::sync::Arc;
+
+pub struct ReadStateService {
+    // Sharded concurrent hashmap — no global locks
+    states: Arc<DashMap<(UserId, ChannelId), ReadState>>,
+    // Background persistence to database
+    persist_queue: crossbeam::channel::Sender<ReadStateUpdate>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ReadState {
+    pub last_read_id: u64,      // Snowflake ID
+    pub mention_count: u32,
+    pub last_pin_ts: Option<u64>,
+}
+
+impl ReadStateService {
+    pub fn ack_message(&self, user_id: UserId, channel_id: ChannelId,
+                       message_id: u64) {
+        // Lock-free update via DashMap shard
+        self.states
+            .entry((user_id, channel_id))
+            .and_modify(|state| {
+                if message_id > state.last_read_id {
+                    state.last_read_id = message_id;
+                    state.mention_count = 0; // reading clears mentions
+                }
+            })
+            .or_insert(ReadState {
+                last_read_id: message_id,
+                mention_count: 0,
+                last_pin_ts: None,
+            });
+
+        // Async persist (batched, coalesced)
+        let _ = self.persist_queue.try_send(ReadStateUpdate {
+            user_id, channel_id, message_id,
+        });
+    }
+
+    pub fn get_unread_count(&self, user_id: UserId,
+                             channel_id: ChannelId,
+                             latest_message_id: u64) -> u32 {
+        match self.states.get(&(user_id, channel_id)) {
+            Some(state) => {
+                if latest_message_id > state.last_read_id {
+                    // Channel has unread messages
+                    // Exact count requires DB query; return mention count
+                    state.mention_count
+                } else {
+                    0
+                }
+            }
+            None => 0, // Never visited this channel
+        }
+    }
+}</code></pre>
+
+      <h3 id="member-list">Member List Indexing</h3>
+
+      <p>The member list sidebar in Discord shows users grouped by role and sorted by status. For large guilds, this is a complex data structure that must be updated in real-time as members come online/offline or change roles:</p>
+
+      <pre><code>// Member list: sorted, grouped, real-time updated
+//
+// Display order:
+// ┌────────────────────┐
+// │ ★ ADMIN — 3        │  ← role group header
+// │   Alice (online)   │
+// │   Bob (idle)       │
+// │   Charlie (dnd)    │
+// │ ⚔ MODERATOR — 5   │
+// │   Dave (online)    │
+// │   Eve (online)     │
+// │   ...              │
+// │ 👤 ONLINE — 1,247  │  ← @everyone who are online
+// │   ...              │
+// │ 💤 OFFLINE — 8,432 │  ← offline members
+// │   ...              │
+// └────────────────────┘
+//
+// Requirements:
+// - Sorted by role hierarchy, then by status, then alphabetically
+// - Updated in real-time (presence changes, role changes)
+// - For a 100K member guild, we can't send the full list
+// - Solution: send only the visible "window" + updates
+
+// Rust B-tree index for efficient range queries and updates
+use std::collections::BTreeMap;
+
+pub struct MemberListIndex {
+    // Composite key for natural sort order:
+    // (role_position, online_status, username_lowercase)
+    tree: BTreeMap<MemberListKey, MemberId>,
+
+    // Reverse index for O(1) lookups by member
+    member_to_key: HashMap<MemberId, MemberListKey>,
+
+    // Subscribers: which clients are viewing which range
+    subscribers: HashMap<SessionId, ViewRange>,
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
+pub struct MemberListKey {
+    role_position: u16,      // lower = higher priority
+    status_order: u8,        // 0=online, 1=idle, 2=dnd, 3=offline
+    username_lower: String,
+}
+
+impl MemberListIndex {
+    // When a member's presence changes:
+    pub fn update_presence(&mut self, member_id: MemberId,
+                           new_status: Status) {
+        if let Some(old_key) = self.member_to_key.remove(&member_id) {
+            self.tree.remove(&old_key);
+
+            let new_key = MemberListKey {
+                status_order: status_to_order(new_status),
+                ..old_key
+            };
+            self.tree.insert(new_key.clone(), member_id);
+            self.member_to_key.insert(member_id, new_key);
+
+            // Notify subscribers whose view range is affected
+            self.notify_affected_subscribers(&old_key, &new_key);
+        }
+    }
+}</code></pre>
+
+      <!-- ───────────────── 6. LAZY GUILDS ───────────────── -->
+      <h2 id="lazy-guilds">Lazy Guilds: Scaling to Million-Member Servers</h2>
+
+      <p>When Discord guilds grew beyond 250,000 members, sending the full member list and presence data on connection became untenable. A guild with 1 million members would require sending ~100MB+ of member/presence data to every user who connected — causing multi-second load times and massive bandwidth costs.</p>
+
+      <p>Discord solved this with <strong>Lazy Guilds</strong> (also called "lazy-load member lists"):</p>
+
+      <pre><code># Lazy Guild protocol:
+#
+# BEFORE lazy guilds (small guild, < 250 members):
+# 1. User connects to gateway
+# 2. READY event contains FULL member list + presences for all guilds
+# 3. Client has complete data — can render member list immediately
+#
+# AFTER lazy guilds (large guild, > 250 members):
+# 1. User connects to gateway
+# 2. READY event contains guild metadata BUT:
+#    - member_count: 500000 (just the count)
+#    - members: [] (empty!)
+#    - presences: [] (empty!)
+# 3. Client opens the guild → sends LAZY_REQUEST:
+#    {
+#      "op": 14,  // LAZY_REQUEST
+#      "d": {
+#        "guild_id": "123456",
+#        "channels": {
+#          "789012": [[0, 99]]  // Request member list rows 0-99
+#        }
+#      }
+#    }
+# 4. Server responds with GUILD_MEMBER_LIST_UPDATE:
+#    - Sends only the requested range of the sorted member list
+#    - Includes group headers (role names + counts)
+#    - Includes member objects for visible rows only
+# 5. As user scrolls, client requests more ranges
+# 6. As presences change, server sends incremental SYNC updates
+#    only for members in the client's subscribed ranges
+#
+# Result:
+# - Initial load: ~5KB instead of ~100MB
+# - Only transfers data for ~100 visible members at a time
+# - Incremental updates only for subscribed ranges
+# - Million-member guilds load as fast as 50-member guilds
+
+# The threshold:
+# guild.member_count <= 250 → "small" guild → full member list
+# guild.member_count > 250  → "large" guild → lazy loading
+# This is why Discord calls them "large" guilds in the API</code></pre>
+
+      <div class="callout">
+        <strong>Lazy Guild Optimization Chain:</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>Subscription model:</strong> Client explicitly subscribes to channel member list ranges. Server only sends updates for subscribed ranges — dramatically reduces per-user event traffic.</li>
+          <li><strong>Incremental syncs:</strong> Member list updates are sent as diffs (INSERT at index 5, UPDATE at index 12, DELETE at index 30) rather than full list re-sends.</li>
+          <li><strong>Group headers:</strong> Role groups include counts but not all members. "Online — 12,345" is a single group header object, not 12,345 member objects.</li>
+          <li><strong>Offline pruning:</strong> For guilds with >1000 members, offline members are completely excluded from the member list index. They're only loaded if the user explicitly scrolls to the offline section.</li>
+        </ul>
+      </div>
+
+      <!-- ───────────────── 7. DATA PIPELINE ───────────────── -->
+      <h2 id="data-pipeline">Data Pipeline: Kafka &amp; Spark</h2>
+
+      <p>Discord's analytics and data pipeline processes billions of events daily using <strong>Apache Kafka</strong> as the central event bus and <strong>Apache Spark</strong> for batch and stream processing:</p>
+
+      <pre><code># Discord Data Pipeline Architecture:
+#
+# ┌──────────┐   ┌──────────┐   ┌──────────┐
+# │ Gateway  │   │ API      │   │ Voice    │
+# │ Events   │   │ Requests │   │ Events   │
+# └────┬─────┘   └────┬─────┘   └────┬─────┘
+#      │              │              │
+#      └──────────────┼──────────────┘
+#                     ▼
+#            ┌────────────────┐
+#            │  Apache Kafka  │
+#            │                │
+#            │  Topics:       │
+#            │  - messages    │
+#            │  - presences   │
+#            │  - voice       │
+#            │  - guild_events│
+#            │  - api_requests│
+#            └───────┬────────┘
+#                    │
+#          ┌─────────┼──────────┐
+#          ▼         ▼          ▼
+#    ┌──────────┐ ┌────────┐ ┌──────────┐
+#    │ Spark    │ │ Real-  │ │ Data     │
+#    │ Batch    │ │ time   │ │ Warehouse│
+#    │ Jobs     │ │ Stream │ │ (BigQuery│
+#    │          │ │ (Flink)│ │  / S3)   │
+#    └──────────┘ └────────┘ └──────────┘
+#         │           │           │
+#         ▼           ▼           ▼
+#    ┌──────────┐ ┌────────┐ ┌──────────┐
+#    │ ML Model │ │ Alerts │ │ Dashboards│
+#    │ Training │ │ & Fraud│ │ & Reports │
+#    └──────────┘ └────────┘ └──────────┘
+
+# Key Kafka topics and their throughput:
+# - discord.messages: ~150M+ messages/day, partitioned by channel_id
+# - discord.presence: ~billions of updates/day (online/offline/idle)
+# - discord.voice: voice session start/stop/quality metrics
+# - discord.guild_events: member join/leave, role changes
+# - discord.api: all API request logs for abuse detection</code></pre>
+
+      <!-- ───────────────── 8. SEARCH ───────────────── -->
+      <h2 id="search">Search: Elasticsearch</h2>
+
+      <p>Discord uses <strong>Elasticsearch</strong> for full-text message search across opted-in servers. This is a massive indexing challenge given trillions of historical messages:</p>
+
+      <pre><code># Elasticsearch Message Index
+#
+# Index: discord-messages-YYYY-MM
+# (monthly indices for lifecycle management)
+#
+# Mapping:
+{
+  "mappings": {
+    "properties": {
+      "id":          { "type": "long" },
+      "channel_id":  { "type": "long" },
+      "guild_id":    { "type": "long" },
+      "author_id":   { "type": "long" },
+      "content":     {
+        "type": "text",
+        "analyzer": "discord_analyzer",
+        "fields": {
+          "exact": { "type": "keyword" }  // for exact-match filters
+        }
+      },
+      "timestamp":   { "type": "date" },
+      "has_embed":   { "type": "boolean" },
+      "has_file":    { "type": "boolean" },
+      "mention_ids": { "type": "long" },
+      "pinned":      { "type": "boolean" }
+    }
+  }
+}
+
+# Search query: "from:Alice has:image python tutorial"
+# Translates to:
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "content": "python tutorial" } }
+      ],
+      "filter": [
+        { "term": { "guild_id": 123456789 } },
+        { "term": { "author_id": 111222333 } },
+        { "term": { "has_file": true } }
+      ]
+    }
+  },
+  "sort": [{ "timestamp": "desc" }],
+  "size": 25
+}
+
+# Performance considerations:
+# - Indices are sharded by guild_id for query locality
+# - Time-based indices allow efficient deletion of old data
+# - Opt-in only: not all guilds have search enabled
+# - Index lag: ~30 seconds from message send to searchable</code></pre>
+
+      <!-- ───────────────── 9. RATE LIMITING ───────────────── -->
+      <h2 id="rate-limiting">Distributed Rate Limiting</h2>
+
+      <p>Discord's API handles millions of requests per second from users, bots, and third-party applications. Rate limiting is critical for preventing abuse and ensuring fair resource allocation:</p>
+
+      <pre><code># Discord Rate Limiting Strategy
+#
+# Multiple layers of rate limiting:
+#
+# 1. PER-ROUTE rate limits:
+#    POST /channels/{id}/messages → 5 requests per 5 seconds per channel
+#    PATCH /guilds/{id}           → 2 requests per 10 seconds
+#    GET /users/@me               → 5 requests per 5 seconds
+#
+# 2. GLOBAL rate limit:
+#    50 requests per second across ALL routes (per bot/user)
+#
+# 3. Resource-specific limits:
+#    Reactions: 1 per 250ms per channel
+#    DMs: 5 per second (anti-spam)
+#    Guild creation: 10 per day
+#
+# Rate limit headers in every response:
+# X-RateLimit-Limit: 5         (max requests in window)
+# X-RateLimit-Remaining: 3     (requests left)
+# X-RateLimit-Reset: 1640000.5 (Unix timestamp of reset)
+# X-RateLimit-Bucket: abc123   (shared bucket identifier)
+#
+# When exceeded:
+# HTTP 429 Too Many Requests
+# {
+#   "message": "You are being rate limited.",
+#   "retry_after": 3.57,        (seconds to wait)
+#   "global": false              (false = per-route, true = global)
+# }
+
+# Implementation: distributed token bucket using Redis
+#
+# EVALSHA <rate_limit_script> 1 rate:user:123:POST:/channels/456/messages
+#   5       -- max tokens
+#   5000    -- refill interval (ms)
+#   1       -- tokens to consume
+#
+# Redis Lua script (atomic):
+local key = KEYS[1]
+local max_tokens = tonumber(ARGV[1])
+local interval_ms = tonumber(ARGV[2])
+local consume = tonumber(ARGV[3])
+local now = redis.call('TIME')
+local now_ms = now[1] * 1000 + now[2] / 1000
+
+local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(bucket[1]) or max_tokens
+local last_refill = tonumber(bucket[2]) or now_ms
+
+-- Refill tokens based on elapsed time
+local elapsed = now_ms - last_refill
+local refill = math.floor(elapsed / interval_ms) * max_tokens
+tokens = math.min(max_tokens, tokens + refill)
+
+if tokens >= consume then
+  tokens = tokens - consume
+  redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now_ms)
+  redis.call('PEXPIRE', key, interval_ms * 2)
+  return {1, tokens, 0}  -- allowed, remaining, retry_after
+else
+  local retry_after = interval_ms - elapsed
+  return {0, 0, retry_after}  -- denied, 0 remaining, retry ms
+end</code></pre>
+
+      <!-- ───────────────── 10. PUTTING IT ALL TOGETHER ───────────────── -->
+      <h2 id="full-architecture">Full Architecture Overview</h2>
+
+      <p>Let's trace a complete message through Discord's entire infrastructure stack:</p>
+
+      <pre><code># Complete message lifecycle: User sends "Hello!" in #general
+#
+# 1. CLIENT → API GATEWAY
+#    WebSocket frame: {"op":0, "d":{"content":"Hello!",
+#                      "channel_id":"789", "nonce":"abc"}}
+#    Transport: WSS (WebSocket Secure over TLS 1.3)
+#    Terminates at: Cloudflare → Discord API Gateway (Nginx)
+#
+# 2. API GATEWAY → RATE LIMITER
+#    Check: POST /channels/789/messages rate limit
+#    Redis EVALSHA → token bucket check → PASS
+#    ~0.5ms
+#
+# 3. RATE LIMITER → API SERVICE
+#    Validate authentication (JWT token verification)
+#    Validate permissions (user can send in this channel?)
+#    Validate content (message length, attachment limits)
+#    ~2ms
+#
+# 4. API SERVICE → GUILD PROCESS (Elixir)
+#    Route to the Elixir node that owns guild 456
+#    guild_pid = Router.get_node(guild_id)
+#    GenServer.cast(guild_pid, {:new_message, ...})
+#    ~1ms (Erlang distribution protocol)
+#
+# 5. GUILD PROCESS → MESSAGE STORE (ScyllaDB)
+#    INSERT INTO messages (channel_id, message_id, ...)
+#    Async write, don't block the guild process
+#    ~2-5ms write latency
+#
+# 6. GUILD PROCESS → FANOUT
+#    For each member with access to #general:
+#      For each of that member's connected sessions:
+#        Send MESSAGE_CREATE event via WebSocket
+#    Connected members in channel: ~500 (of 10K guild members)
+#    Active sessions: ~800 (some have desktop + mobile)
+#    Fanout time: ~5ms for 800 WebSocket sends
+#
+# 7. GUILD PROCESS → KAFKA (async)
+#    Publish message event to discord.messages topic
+#    For analytics, search indexing, abuse detection
+#    ~1ms (fire and forget with acks=1)
+#
+# 8. KAFKA → ELASTICSEARCH (async, ~30s lag)
+#    Consumer reads from discord.messages
+#    Index into discord-messages-2026-04 index
+#    Message becomes searchable
+#
+# 9. READ STATES UPDATE (Rust service)
+#    For the author: update read state for this channel
+#    For other members: increment unread/mention counts
+#    ~0.5ms per update
+#
+# Total time from Send to Delivery: ~15-40ms
+# (User perceives it as "instant")</code></pre>
+
+      <!-- ───────────────── KEY TAKEAWAYS ───────────────── -->
+      <h2 id="key-takeaways">Key Takeaways</h2>
+
+      <ul>
+        <li><strong>Choose the right runtime for the job:</strong> Elixir/BEAM's lightweight processes, fault isolation, and built-in distribution make it ideal for real-time messaging. No other runtime provides all four properties simultaneously.</li>
+        <li><strong>Guild-level sharding</strong> makes the system tractable — each guild is a single process with serialized state. No distributed locks, no race conditions, no coordination overhead for guild-local operations.</li>
+        <li><strong>Database evolution is normal:</strong> MongoDB → Cassandra → ScyllaDB wasn't failure — it was engineering. Each migration was driven by hitting real scaling limits. Design for migration from day one (abstraction layers, CQL compatibility).</li>
+        <li><strong>GC is a real production concern</strong> at scale. Both the Cassandra→ScyllaDB and Go→Rust migrations were driven by GC-induced tail latency. When p99 matters, GC-free runtimes win.</li>
+        <li><strong>Lazy loading is essential</strong> for systems with massive cardinality differences (guilds ranging from 2 to 1M+ members). One-size-fits-all data transfer strategies break at the extremes.</li>
+        <li><strong>SFUs over MCUs:</strong> For voice/video at scale, SFU architecture provides the best balance of server cost (forward, don't mix) and client flexibility (choose layout client-side).</li>
+        <li><strong>Use the right language per service:</strong> Elixir for real-time messaging (concurrency), Rust for hot-path services (latency), Python for ML pipelines (ecosystem). Polyglot architectures let you optimize per-constraint.</li>
+        <li><strong>Distributed rate limiting</strong> is table stakes for any API at scale. Redis-backed token buckets with Lua scripts provide atomic, low-latency rate limiting across a distributed fleet.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="uber-engineering.html"><span>Previous</span><span>&#8592; Uber Engineering</span></a>
+        <a class="next" href="slack-architecture.html"><span>Next</span><span>Slack Architecture &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* ── Shared SVG helpers ── */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function roundRect(x,y,w,h,fill,rx,strokeColor){
+      var a={x:''+x,y:''+y,width:''+w,height:''+h,fill:fill,rx:''+(rx||8)};
+      if(strokeColor){a.stroke=strokeColor;a['stroke-width']='2';}
+      return el('rect',a);
+    }
+    function arrow(x1,y1,x2,y2,color,sw){
+      var g=el('g',{});
+      g.appendChild(el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':''+(sw||2)}));
+      var a=Math.atan2(y2-y1,x2-x1),s=8;
+      g.appendChild(el('polygon',{points:(x2-s*Math.cos(a-0.4))+','+(y2-s*Math.sin(a-0.4))+' '+x2+','+y2+' '+(x2-s*Math.cos(a+0.4))+','+(y2-s*Math.sin(a+0.4)),fill:color}));
+      return g;
+    }
+    function dashedLine(x1,y1,x2,y2,color){return el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'2','stroke-dasharray':'6,4'});}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    var COL={
+      brand:'#5865F2',   /* Discord blurple */
+      elixir:'#6e4a7e',
+      guild:'#5865F2',
+      ws:'#57F287',
+      user:'#EB459E',
+      store:'#FEE75C',
+      cass:'#e7522d',
+      scylla:'#2196F3',
+      ok:'#16a36a',
+      warn:'#f59e0b',
+      err:'#e74c3c',
+      muted:'#888'
+    };
+
+    /* ════════════════════════════════════════════════════════════════
+       ANIMATION 1 — Message Delivery Path
+       ════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('msg-svg');
+      var info=document.getElementById('msg-info');
+      var out=document.getElementById('msg-output');
+      var step=0,totalSteps=7;
+
+      function svcBox(s,x,y,w,h,fill,label,sub){
+        s.appendChild(roundRect(x,y,w,h,fill,8));
+        s.appendChild(txt(label,{x:''+(x+w/2),y:''+(y+h/2-(sub?4:0)),'text-anchor':'middle','dominant-baseline':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'#fff'}));
+        if(sub)s.appendChild(txt(sub,{x:''+(x+w/2),y:''+(y+h/2+12),'text-anchor':'middle','dominant-baseline':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'rgba(255,255,255,0.8)'}));
+      }
+
+      function draw(){
+        clearSvg(svg);
+
+        /* Background: Node boundary boxes */
+        svg.appendChild(roundRect(225,10,250,380,'rgba(88,101,242,0.06)',12,COL.brand));
+        svg.appendChild(txt('Elixir Node (BEAM VM)',{x:'350',y:'30','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:COL.brand}));
+
+        /* User (sender) on left */
+        var ux=30,uy=100,uw=100,uh=40;
+        svcBox(svg,ux,uy,uw,uh,COL.user,'👤 Alice','sends message');
+
+        /* Gateway / WebSocket */
+        var gx=180,gy=100,gw=100,gh=40;
+        svcBox(svg,gx,gy,gw,gh,step>=1?COL.ws:'#ccc','Gateway','WebSocket');
+
+        /* Arrow: User → Gateway */
+        if(step>=1){
+          svg.appendChild(arrow(ux+uw,uy+uh/2,gx,gy+gh/2,COL.ws));
+          svg.appendChild(txt('WSS',{x:''+(ux+uw+15),y:''+(uy+uh/2-8),'font-family':'Consolas,monospace','font-size':'9',fill:COL.ws}));
+        }
+
+        /* Guild Process */
+        var gpx=310,gpy=80,gpw=130,gph=55;
+        svcBox(svg,gpx,gpy,gpw,gph,step>=2?COL.elixir:'#ccc','Guild Process','GenServer #456');
+
+        /* Arrow: Gateway → Guild */
+        if(step>=2){
+          svg.appendChild(arrow(gx+gw,gy+gh/2,gpx,gpy+gph/2,COL.elixir));
+          svg.appendChild(txt('cast',{x:''+(gx+gw+8),y:''+(gy+gh/2-8),'font-family':'Consolas,monospace','font-size':'9',fill:COL.elixir}));
+        }
+
+        /* Message Store (ScyllaDB) */
+        var sx=310,sy=175,sw=130,sh=40;
+        svcBox(svg,sx,sy,sw,sh,step>=3?COL.scylla:'#ccc','ScyllaDB','message store');
+
+        /* Arrow: Guild → ScyllaDB */
+        if(step>=3){
+          svg.appendChild(arrow(gpx+gpw/2,gpy+gph,sx+sw/2,sy,COL.scylla));
+          svg.appendChild(txt('persist',{x:''+(gpx+gpw/2+10),y:''+(gpy+gph+16),'font-family':'Consolas,monospace','font-size':'9',fill:COL.scylla}));
+        }
+
+        /* Fanout: connected sessions (3 users on same node) */
+        var clients=[
+          {name:'Bob',emoji:'👤',cx:520,cy:60},
+          {name:'Carol',emoji:'👤',cx:520,cy:130},
+          {name:'Dave',emoji:'👤',cx:520,cy:200}
+        ];
+        for(var i=0;i<clients.length;i++){
+          var c=clients[i];
+          var active=step>=4;
+          svcBox(svg,c.cx,c.cy,110,35,active?COL.brand:'#ccc',c.emoji+' '+c.name,'session');
+          if(step>=4){
+            svg.appendChild(arrow(gpx+gpw,gpy+gph/2,c.cx,c.cy+17,COL.brand));
+          }
+        }
+
+        /* Remote node with remote client */
+        svg.appendChild(roundRect(490,260,190,110,'rgba(110,74,126,0.06)',12,COL.elixir));
+        svg.appendChild(txt('Elixir Node B',{x:'585',y:'278','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.elixir}));
+
+        var rx=510,ry=295,rw=110,rh=35;
+        svcBox(svg,rx,ry,rw,rh,step>=5?'#9b59b6':'#ccc','👤 Eve','remote session');
+
+        /* WS delivery arrows to each client */
+        if(step>=5){
+          svg.appendChild(dashedLine(gpx+gpw,gpy+gph/2+20,rx,ry+rh/2,COL.elixir));
+          svg.appendChild(txt('Erlang dist.',{x:''+(gpx+gpw+5),y:''+(gpy+gph/2+35),'font-family':'Consolas,monospace','font-size':'8',fill:COL.elixir}));
+        }
+
+        /* WebSocket delivery to clients */
+        if(step>=6){
+          for(var i=0;i<clients.length;i++){
+            var c=clients[i];
+            svg.appendChild(arrow(c.cx+110,c.cy+17,670,c.cy+17,COL.ws));
+          }
+          svg.appendChild(arrow(rx+rw,ry+rh/2,670,ry+rh/2,COL.ws));
+          svg.appendChild(txt('📱 WebSocket push',{x:'672',y:'50','font-family':'Consolas,monospace','font-size':'9',fill:COL.ws,'text-anchor':'start'}));
+        }
+
+        /* Kafka async at bottom */
+        var kx=130,ky=275,kw=120,kh=35;
+        svcBox(svg,kx,ky,kw,kh,step>=3?COL.warn:'#ccc','Kafka','analytics topic');
+        if(step>=3){
+          svg.appendChild(arrow(gpx,gpy+gph,kx+kw,ky,COL.warn));
+          svg.appendChild(txt('async',{x:''+(gpx-25),y:''+(gpy+gph+20),'font-family':'Consolas,monospace','font-size':'9',fill:COL.warn}));
+        }
+
+        /* Read States */
+        var rsx=100,rsy=340,rsw=120,rsh=35;
+        svcBox(svg,rsx,rsy,rsw,rsh,step>=3?COL.err:'#ccc','Read States','Rust service');
+        if(step>=3){
+          svg.appendChild(arrow(kx+kw/2,ky+kh,rsx+rsw/2,rsy,COL.err));
+        }
+
+        var infos=[
+          'Alice types "Hello!" and presses Enter. The client sends a WebSocket frame with the message payload.',
+          'The message arrives at the Gateway via a secure WebSocket (WSS) connection. Gateway validates the auth token.',
+          'Gateway routes the message to the Guild Process — the Elixir GenServer that owns Guild #456. The guild process checks permissions.',
+          'Guild process persists the message to ScyllaDB (async) and publishes to Kafka for analytics. The message gets a Snowflake ID.',
+          'Guild process fans out: for each member with access to #general, find their session process and send the MESSAGE_CREATE event.',
+          'For members connected to other Elixir nodes (Eve on Node B), the message is forwarded via Erlang distribution protocol transparently.',
+          'All recipient sessions push the MESSAGE_CREATE event to their clients via WebSocket. Total delivery: ~15-40ms from Send to all clients.'
+        ];
+        info.textContent=infos[step];
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('msg-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('msg-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+
+    /* ════════════════════════════════════════════════════════════════
+       ANIMATION 2 — Cassandra to ScyllaDB Migration
+       ════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('mig-svg');
+      var info=document.getElementById('mig-info');
+      var out=document.getElementById('mig-output');
+      var step=0,totalSteps=6;
+
+      /* Seeded pseudo-random for consistent "random" spikes */
+      function seededRand(seed){return((Math.sin(seed*9301+49297)%233280)/233280+1)%1;}
+
+      function drawGraph(s,gx,gy,gw,gh,title,color,data,maxY,unit,highlight){
+        /* Background */
+        s.appendChild(roundRect(gx,gy,gw,gh,'rgba(0,0,0,0.03)',8));
+        s.appendChild(txt(title,{x:''+(gx+gw/2),y:''+(gy+16),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:color}));
+
+        /* Y axis labels */
+        for(var i=0;i<=4;i++){
+          var yy=gy+gh-10-(i*(gh-30)/4);
+          var val=Math.round(maxY*i/4);
+          s.appendChild(txt(val+unit,{x:''+(gx+8),y:''+yy,'font-family':'Consolas,monospace','font-size':'8',fill:COL.muted}));
+          s.appendChild(el('line',{x1:''+(gx+35),y1:''+yy,x2:''+(gx+gw-10),y2:''+yy,stroke:'rgba(0,0,0,0.06)','stroke-width':'1'}));
+        }
+
+        /* Data line */
+        if(data.length<2)return;
+        var pts=[];
+        var barW=(gw-50)/data.length;
+        for(var i=0;i<data.length;i++){
+          var px=gx+45+i*barW;
+          var py=gy+gh-10-(data[i]/maxY)*(gh-30);
+          py=Math.max(gy+25,Math.min(gy+gh-10,py));
+          pts.push(px+','+py);
+        }
+        s.appendChild(el('polyline',{points:pts.join(' '),fill:'none',stroke:color,'stroke-width':'2.5','stroke-linejoin':'round'}));
+
+        /* Fill area */
+        var areapts=pts.slice();
+        areapts.push((gx+45+(data.length-1)*barW)+','+(gy+gh-10));
+        areapts.push((gx+45)+','+(gy+gh-10));
+        s.appendChild(el('polygon',{points:areapts.join(' '),fill:color,opacity:'0.12'}));
+
+        /* Highlight spikes */
+        if(highlight){
+          for(var i=0;i<data.length;i++){
+            if(data[i]>maxY*0.6){
+              var px=gx+45+i*barW;
+              var py=gy+gh-10-(data[i]/maxY)*(gh-30);
+              py=Math.max(gy+25,py);
+              s.appendChild(el('circle',{cx:''+px,cy:''+py,r:'4',fill:COL.err,opacity:'0.8'}));
+              s.appendChild(txt('GC!',{x:''+px,y:''+(py-8),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'8',fill:COL.err}));
+            }
+          }
+        }
+      }
+
+      function draw(){
+        clearSvg(svg);
+
+        if(step<=2){
+          /* Phase: Cassandra */
+          svg.appendChild(roundRect(10,5,680,360,'rgba(231,82,45,0.04)',12,COL.cass));
+          svg.appendChild(txt('Apache Cassandra (JVM)',{x:'350',y:'24','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.cass}));
+
+          if(step===0){
+            /* Architecture diagram */
+            svg.appendChild(txt('JVM Shared Heap',{x:'350',y:'58','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:COL.cass}));
+            svg.appendChild(roundRect(80,68,540,50,'rgba(231,82,45,0.1)',8,COL.cass));
+            var labels=['Thread 1','Thread 2','Thread 3','Thread 4'];
+            for(var i=0;i<4;i++){
+              var bx=110+i*130;
+              svg.appendChild(roundRect(bx,76,100,34,COL.cass,6));
+              svg.appendChild(txt(labels[i],{x:''+(bx+50),y:'97','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#fff'}));
+            }
+
+            /* GC warning */
+            svg.appendChild(roundRect(80,135,540,60,'rgba(231,82,45,0.08)',8));
+            svg.appendChild(txt('⚠ Garbage Collection pauses ALL threads simultaneously',{x:'350',y:'160','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.cass}));
+            svg.appendChild(txt('G1GC mixed collections: 200ms–2000ms stop-the-world',{x:'350',y:'180','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.err}));
+
+            /* Node count */
+            svg.appendChild(txt('177 Cassandra Nodes',{x:'350',y:'220','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'14',fill:COL.cass}));
+            for(var r=0;r<3;r++){
+              for(var c=0;c<10;c++){
+                svg.appendChild(roundRect(120+c*46,235+r*32,40,26,COL.cass,4));
+                svg.appendChild(txt('N'+(r*10+c+1),{x:''+(140+c*46),y:''+(252+r*32),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'#fff'}));
+              }
+            }
+          }
+
+          if(step===1){
+            /* Cassandra latency graph with GC spikes */
+            var cassP99=[];
+            for(var i=0;i<50;i++){
+              var base=15+seededRand(i*3)*25;
+              /* Inject GC spikes every ~8 data points */
+              if(i%8===3||i%8===4) base=200+seededRand(i*7)*800;
+              if(i%12===7) base=500+seededRand(i*11)*500;
+              cassP99.push(base);
+            }
+            drawGraph(svg,20,40,320,150,'p99 Read Latency (Cassandra)',COL.cass,cassP99,1000,'ms',true);
+
+            /* p50 graph — stable but GC affects it too */
+            var cassP50=[];
+            for(var i=0;i<50;i++){
+              var base=2+seededRand(i*5)*5;
+              if(i%8===3||i%8===4) base=50+seededRand(i*13)*100;
+              cassP50.push(base);
+            }
+            drawGraph(svg,360,40,320,150,'p50 Read Latency (Cassandra)',COL.cass,cassP50,200,'ms',true);
+
+            /* Summary text */
+            svg.appendChild(roundRect(20,210,660,130,'rgba(231,82,45,0.06)',8));
+            svg.appendChild(txt('⚠ Cassandra Pain Points at Discord Scale',{x:'350',y:'236','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.cass}));
+            svg.appendChild(txt('• GC pauses cause p99 spikes to 800ms+ every few minutes',{x:'40',y:'262','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink)'}));
+            svg.appendChild(txt('• Speculative retries increase cluster load → more GC pressure',{x:'40',y:'282','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink)'}));
+            svg.appendChild(txt('• Compaction storms double disk I/O periodically',{x:'40',y:'302','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink)'}));
+            svg.appendChild(txt('• 177 nodes required → high operational cost',{x:'40',y:'322','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink)'}));
+          }
+
+          if(step===2){
+            /* Migration decision */
+            svg.appendChild(roundRect(50,45,600,90,'rgba(231,82,45,0.08)',10,COL.cass));
+            svg.appendChild(txt('Decision: Migrate to ScyllaDB',{x:'350',y:'72','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'16',fill:COL.cass}));
+            svg.appendChild(txt('CQL-compatible → same queries, same schema, same drivers',{x:'350',y:'100','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink)'}));
+            svg.appendChild(txt('C++ shard-per-core → no GC, no locks, no NUMA issues',{x:'350',y:'120','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink)'}));
+
+            /* Migration strategy */
+            svg.appendChild(txt('Migration Strategy: Dark Launch',{x:'350',y:'165','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:COL.brand}));
+
+            var phases=['1. Dual-write to both','2. Shadow-read ScyllaDB','3. Compare results','4. Cutover reads','5. Decommission Cass.'];
+            var phaseColors=[COL.cass,COL.scylla,COL.warn,COL.scylla,COL.ok];
+            for(var i=0;i<5;i++){
+              var bx=50+i*125;
+              svg.appendChild(roundRect(bx,185,118,40,phaseColors[i],8));
+              svg.appendChild(txt(phases[i],{x:''+(bx+59),y:'209','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'10',fill:'#fff'}));
+              if(i<4) svg.appendChild(arrow(bx+118,205,bx+125,205,'#aaa'));
+            }
+
+            /* Months */
+            svg.appendChild(txt('Months of parallel operation, comparing every read result',{x:'350',y:'250','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:COL.muted}));
+
+            svg.appendChild(roundRect(50,270,600,80,'rgba(33,150,243,0.08)',10));
+            svg.appendChild(txt('Key insight: CQL compatibility made the migration transparent to application code.',{x:'350',y:'295','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'11',fill:COL.scylla}));
+            svg.appendChild(txt('Same queries, same schema, same Cassandra drivers → just point to new cluster.',{x:'350',y:'318','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink)'}));
+            svg.appendChild(txt('Zero application code changes required.',{x:'350',y:'338','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:COL.ok}));
+          }
+        }
+
+        if(step>=3){
+          /* Phase: ScyllaDB */
+          svg.appendChild(roundRect(10,5,680,360,'rgba(33,150,243,0.04)',12,COL.scylla));
+          svg.appendChild(txt('ScyllaDB (C++ / Seastar)',{x:'350',y:'24','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.scylla}));
+
+          if(step===3){
+            /* Shard-per-core architecture */
+            svg.appendChild(txt('Shard-Per-Core Architecture',{x:'350',y:'55','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:COL.scylla}));
+
+            var coreLabels=['Core 0','Core 1','Core 2','Core 3','Core 4','Core 5'];
+            for(var i=0;i<6;i++){
+              var bx=55+i*105;
+              svg.appendChild(roundRect(bx,68,95,100,COL.scylla,8));
+              svg.appendChild(txt(coreLabels[i],{x:''+(bx+47),y:'86','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:'#fff'}));
+              svg.appendChild(txt('Own memory',{x:''+(bx+47),y:'104','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'rgba(255,255,255,0.85)'}));
+              svg.appendChild(txt('Own SSTables',{x:''+(bx+47),y:'118','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'rgba(255,255,255,0.85)'}));
+              svg.appendChild(txt('Own network Q',{x:''+(bx+47),y:'132','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'rgba(255,255,255,0.85)'}));
+              svg.appendChild(txt('Own compaction',{x:''+(bx+47),y:'146','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'rgba(255,255,255,0.85)'}));
+            }
+
+            /* Benefits */
+            svg.appendChild(roundRect(30,185,640,160,'rgba(33,150,243,0.06)',8));
+            svg.appendChild(txt('✓ No GC — C++ with Seastar allocator',{x:'50',y:'210','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+            svg.appendChild(txt('✓ No locks — each core is an independent shard, no shared mutable state',{x:'50',y:'232','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+            svg.appendChild(txt('✓ NUMA-aware — memory pinned to local NUMA node of each core',{x:'50',y:'254','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+            svg.appendChild(txt('✓ Predictable latency — no stop-the-world pauses of any kind',{x:'50',y:'276','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+            svg.appendChild(txt('✓ Self-tuning — auto-configures based on hardware detection',{x:'50',y:'298','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+            svg.appendChild(txt('✓ I/O scheduling — compaction cannot starve read operations',{x:'50',y:'320','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'12',fill:COL.ok}));
+          }
+
+          if(step===4){
+            /* ScyllaDB latency graph — smooth */
+            var scylP99=[];
+            for(var i=0;i<50;i++){
+              scylP99.push(10+seededRand(i*17)*8);
+            }
+            drawGraph(svg,20,40,320,150,'p99 Read Latency (ScyllaDB)',COL.scylla,scylP99,100,'ms',false);
+
+            var scylP50=[];
+            for(var i=0;i<50;i++){
+              scylP50.push(1+seededRand(i*19)*3);
+            }
+            drawGraph(svg,360,40,320,150,'p50 Read Latency (ScyllaDB)',COL.scylla,scylP50,20,'ms',false);
+
+            /* Comparison callout */
+            svg.appendChild(roundRect(20,210,660,140,'rgba(22,163,106,0.06)',10,COL.ok));
+            svg.appendChild(txt('Migration Results',{x:'350',y:'236','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'14',fill:COL.ok}));
+
+            var metrics=[
+              ['Nodes:','177','72','59% fewer'],
+              ['p99 Read:','40–125ms (spikes to 1s+)','15ms (consistent)','88% better'],
+              ['p99 Write:','5–70ms','5ms (consistent)','stable'],
+              ['GC Incidents:','Frequent','Zero','eliminated']
+            ];
+            for(var i=0;i<metrics.length;i++){
+              var yy=258+i*20;
+              svg.appendChild(txt(metrics[i][0],{x:'40',y:''+yy,'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'var(--ink)'}));
+              svg.appendChild(txt(metrics[i][1],{x:'150',y:''+yy,'font-family':'Consolas,monospace','font-size':'10',fill:COL.cass}));
+              svg.appendChild(txt('→',{x:'370',y:''+yy,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:COL.muted}));
+              svg.appendChild(txt(metrics[i][2],{x:'395',y:''+yy,'font-family':'Consolas,monospace','font-size':'10',fill:COL.scylla}));
+              svg.appendChild(txt(metrics[i][3],{x:'600',y:''+yy,'font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.ok}));
+            }
+          }
+
+          if(step===5){
+            /* Side-by-side latency comparison */
+            /* Cassandra graph (small, left) */
+            var cassData=[];
+            for(var i=0;i<40;i++){
+              var b=15+seededRand(i*3)*25;
+              if(i%8===3||i%8===4) b=200+seededRand(i*7)*800;
+              if(i%12===7) b=500+seededRand(i*11)*500;
+              cassData.push(b);
+            }
+            drawGraph(svg,15,40,325,140,'BEFORE: Cassandra p99',COL.cass,cassData,1000,'ms',true);
+
+            /* ScyllaDB graph (small, right) */
+            var scylData=[];
+            for(var i=0;i<40;i++){
+              scylData.push(10+seededRand(i*17)*8);
+            }
+            drawGraph(svg,360,40,325,140,'AFTER: ScyllaDB p99',COL.scylla,scylData,1000,'ms',false);
+
+            /* Big takeaway */
+            svg.appendChild(roundRect(30,200,640,150,'rgba(22,163,106,0.08)',12,COL.ok));
+            svg.appendChild(txt('🎯 Key Lesson',{x:'350',y:'228','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'16',fill:COL.ok}));
+            svg.appendChild(txt('At scale, GC-induced tail latency is a fundamental architectural problem,',{x:'350',y:'256','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink)'}));
+            svg.appendChild(txt('not a tuning problem. Discord tried every JVM GC tuning trick:',{x:'350',y:'276','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink)'}));
+            svg.appendChild(txt('G1GC, ZGC, Shenandoah, heap sizing, young gen ratios...',{x:'350',y:'296','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:COL.muted}));
+            svg.appendChild(txt('The only real fix was eliminating the GC entirely.',{x:'350',y:'324','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'13',fill:COL.ok}));
+          }
+        }
+
+        var infos=[
+          'Cassandra runs on the JVM with shared heap memory. All threads share one garbage collector — when GC runs, ALL threads pause.',
+          'Cassandra p99 latency at Discord scale: baseline ~15ms but with regular GC-induced spikes to 200ms–1000ms+. These spikes are visible to users.',
+          'Discord decided to migrate to ScyllaDB — a CQL-compatible, C++ rewrite of Cassandra. Migration strategy: dual-write, shadow-read, compare, cutover.',
+          'ScyllaDB uses shard-per-core architecture (Seastar framework). Each CPU core owns its memory, SSTables, and network queue independently. Zero sharing.',
+          'After migration: p99 dropped from 40–125ms (with spikes) to a consistent 15ms. Nodes reduced from 177 to 72. Zero GC incidents.',
+          'Side-by-side comparison tells the whole story. Cassandra: chaotic spikes from GC pauses. ScyllaDB: smooth, predictable, consistent. Same data, same queries, fundamentally better architecture.'
+        ];
+        info.textContent=infos[step];
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('mig-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('mig-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+  })();
+  </script>
+</body>
+</html>

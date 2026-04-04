@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="SQL Database Internals: B+ tree indexes, buffer pool, WAL, MVCC, query optimizer, connection pooling, and storage engines explained for system design interviews.">
+  <title>SQL Database Internals | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <style>
+    .sql-table { width:100%; border-collapse:collapse; margin:1.5em 0; font-size:0.92rem; }
+    .sql-table th { text-align:left; padding:0.6em 0.7em; border-bottom:2px solid var(--line); font-weight:700; background:rgba(10,143,106,0.04); }
+    .sql-table td { padding:0.55em 0.7em; border-bottom:1px solid var(--line); vertical-align:top; }
+    .sql-table tr:last-child td { border-bottom:none; }
+    .sql-table code { font-size:0.85em; }
+    .metric-row { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+    .metric-box { flex:1; min-width:140px; border:1px solid var(--line); border-radius:10px; padding:0.7rem 0.9rem; background:var(--card); text-align:center; }
+    .metric-box .num { font-family:"Syne",sans-serif; font-size:1.5rem; font-weight:800; color:var(--brand); }
+    .metric-box .lbl { font-size:0.78rem; color:var(--ink-muted); margin-top:0.15rem; }
+    .explain-output { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:1em; margin:1em 0; overflow-x:auto; font-size:0.82rem; font-family:Consolas,'Courier New',monospace; line-height:1.5; }
+    .explain-output .good { color:#22c55e; font-weight:700; }
+    .explain-output .bad { color:#ef4444; font-weight:700; }
+    .explain-output .warn { color:#f59e0b; font-weight:700; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series</a><span>&middot; Data Storage &middot; Part 1 of 70</span></div>
+
+      <h1>SQL Database Internals</h1>
+      <p class="post-meta">April 2026 &middot; 24 min read</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 1: OVERVIEW -->
+      <!-- ============================================================ -->
+      <h2 id="overview">How SQL Databases Work Under the Hood</h2>
+
+      <p>Every time you execute a <code>SELECT * FROM orders WHERE user_id = 42</code>, an extraordinary chain of events unfolds inside the database engine. Understanding this pipeline&mdash;parser, optimizer, executor, storage engine&mdash;is the difference between a system that handles 50 queries/second and one that handles 50,000. For system design, database internals are not academic trivia; they are the foundation of every scaling decision you will make.</p>
+
+      <h3>The Query Processing Pipeline</h3>
+
+      <p>Every SQL statement passes through four distinct phases before a single byte of data is returned:</p>
+
+      <ol>
+        <li><strong>Parser &amp; Lexer</strong> &mdash; The raw SQL string is tokenized and parsed into an Abstract Syntax Tree (AST). Syntax errors are caught here. PostgreSQL uses a Bison-generated parser (<code>gram.y</code>, over 20,000 lines). MySQL uses a similar yacc-based parser.</li>
+        <li><strong>Analyzer / Rewriter</strong> &mdash; The AST is validated against the catalog (do these tables exist? do column types match?). Views are expanded, CTEs are inlined or materialized, and rule-based rewrites are applied. PostgreSQL's rewriter handles things like <code>CREATE RULE</code> and updatable views.</li>
+        <li><strong>Query Optimizer</strong> &mdash; The most complex phase. The optimizer generates multiple candidate execution plans, estimates cost for each using statistics, and picks the cheapest. PostgreSQL's optimizer is cost-based and considers factors like sequential I/O cost (<code>seq_page_cost = 1.0</code>), random I/O cost (<code>random_page_cost = 4.0</code>), CPU tuple processing cost, and join ordering. For a query joining <em>N</em> tables, there are <em>N!</em> possible join orderings&mdash;the optimizer uses dynamic programming (for &le; 12 tables) or genetic algorithms (<code>geqo</code>, for &gt; 12 tables) to find the best plan.</li>
+        <li><strong>Executor &amp; Storage Engine</strong> &mdash; The chosen plan is executed node-by-node in a pull-based (Volcano) iterator model. Each node (SeqScan, IndexScan, HashJoin, Sort, etc.) implements <code>Open()</code>, <code>Next()</code>, and <code>Close()</code>. The executor calls <code>Next()</code> on the root node, which recursively calls its children, propagating down to the storage engine that actually reads pages from disk (or the buffer pool).</li>
+      </ol>
+
+      <pre><code># PostgreSQL: Trace the full lifecycle of a query
+SET log_statement = 'all';
+SET log_parser_stats = on;
+SET log_planner_stats = on;
+SET log_executor_stats = on;
+
+-- Now run your query and check pg_log for timing at each phase
+SELECT * FROM orders WHERE user_id = 42 AND status = 'shipped';</code></pre>
+
+      <div class="callout">
+        <strong>Why this matters for system design:</strong> When you choose between SQL and NoSQL, or decide whether to add an index, or pick between a read replica and a cache&mdash;you're making decisions that interact directly with this pipeline. A missing index doesn't just "make a query slow"; it forces the executor to do a sequential scan, reading every 8KB page of a potentially 100GB table from disk.
+      </div>
+
+      <div class="metric-row">
+        <div class="metric-box"><div class="num">~0.1 ms</div><div class="lbl">Parse + Analyze time</div></div>
+        <div class="metric-box"><div class="num">~1-50 ms</div><div class="lbl">Optimizer planning</div></div>
+        <div class="metric-box"><div class="num">Variable</div><div class="lbl">Execution time</div></div>
+        <div class="metric-box"><div class="num">8 KB</div><div class="lbl">Default page size (PG)</div></div>
+      </div>
+
+      <h3>PostgreSQL vs MySQL Architecture</h3>
+
+      <p>Though both are relational, their architectures differ significantly:</p>
+
+      <table class="sql-table">
+        <thead><tr><th>Component</th><th>PostgreSQL</th><th>MySQL (InnoDB)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Process Model</strong></td><td>Multi-process: one OS process per connection (forked from <code>postmaster</code>)</td><td>Multi-threaded: one thread per connection within a single process</td></tr>
+          <tr><td><strong>Storage Engine</strong></td><td>Single integrated engine (heap storage)</td><td>Pluggable: InnoDB (default), MyISAM, Memory, etc.</td></tr>
+          <tr><td><strong>MVCC Strategy</strong></td><td>Tuple versioning in heap (xmin/xmax)</td><td>Undo log for old row versions</td></tr>
+          <tr><td><strong>Default Page Size</strong></td><td>8 KB</td><td>16 KB</td></tr>
+          <tr><td><strong>WAL Name</strong></td><td>WAL (Write-Ahead Log)</td><td>Redo Log + Binary Log</td></tr>
+          <tr><td><strong>Optimizer</strong></td><td>Cost-based, supports hash joins, merge joins, parallel query</td><td>Cost-based, historically weaker (no hash joins until 8.0.18)</td></tr>
+          <tr><td><strong>Replication</strong></td><td>Streaming replication (WAL shipping)</td><td>Binary log replication (row-based, statement-based, or mixed)</td></tr>
+        </tbody>
+      </table>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 2: B+ TREE INDEXES -->
+      <!-- ============================================================ -->
+      <h2 id="b-plus-tree">B+ Tree Indexes</h2>
+
+      <p>The B+ tree is the single most important data structure in relational databases. Every primary key, every unique constraint, every index you create&mdash;it's almost certainly a B+ tree. Understanding this structure is understanding why some queries are instant and others bring your database to its knees.</p>
+
+      <h3>Anatomy of a B+ Tree</h3>
+
+      <p>A B+ tree is a self-balancing, sorted tree structure optimized for systems that read and write large blocks of data (like disk pages):</p>
+
+      <ul>
+        <li><strong>Internal nodes</strong> contain only <em>keys</em> and <em>pointers to child nodes</em>. They act as a routing directory. A typical internal node in PostgreSQL (8KB page, 8-byte integer keys) can hold ~500 keys, meaning a single node can route to 500+ children.</li>
+        <li><strong>Leaf nodes</strong> contain <em>keys</em> and either the <em>actual row data</em> (clustered index) or <em>pointers to the heap</em> (non-clustered index). All leaf nodes are at the same depth, guaranteeing O(log<sub>B</sub> N) lookup where B is the branching factor.</li>
+        <li><strong>Leaf-to-leaf pointers</strong> &mdash; All leaf nodes are linked in a doubly-linked list. This makes range scans (<code>WHERE price BETWEEN 10 AND 50</code>) extremely efficient: find the start leaf, then follow the chain.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>The math behind B+ tree efficiency:</strong> With a branching factor of 500 and 8KB pages:<br>
+        &bull; Level 0 (root): 1 page = 500 keys<br>
+        &bull; Level 1: 500 pages = 250,000 keys<br>
+        &bull; Level 2: 250,000 pages = 125,000,000 keys<br>
+        &bull; Level 3: 62,500,000,000 keys<br><br>
+        A table with <strong>125 million rows</strong> requires only <strong>3 disk I/Os</strong> to find any row by index. The root and level-1 nodes typically stay in the buffer pool (RAM), so in practice it's <strong>1&ndash;2 disk reads</strong>. This is why B+ trees dominate: they minimize the one thing that's slow&mdash;disk I/O.
+      </div>
+
+      <!-- Animation 1: B+ Tree Lookup -->
+      <div class="anim-container" id="btree-anim">
+        <h4>&#9654; B+ Tree Lookup</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through a B+ tree search for key <strong>42</strong>. Watch how the search navigates from root to leaf, counting disk I/Os at each level.</p>
+        <svg id="btree-svg" width="700" height="320" viewBox="0 0 700 320"></svg>
+        <div id="btree-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="btree-step">Step &rarr;</button>
+          <button class="anim-btn" id="btree-reset">Reset</button>
+          <span class="anim-output" id="btree-output"></span>
+        </div>
+      </div>
+
+      <h3>Clustered vs Non-Clustered Indexes</h3>
+
+      <table class="sql-table">
+        <thead><tr><th>Property</th><th>Clustered Index</th><th>Non-Clustered (Secondary) Index</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Leaf contains</strong></td><td>The actual row data</td><td>A pointer back to the clustered index key (InnoDB) or heap tuple ID (PostgreSQL)</td></tr>
+          <tr><td><strong>Physical order</strong></td><td>Table rows are physically stored in index order</td><td>Separate structure; table rows remain in insertion order</td></tr>
+          <tr><td><strong>Count per table</strong></td><td>Exactly one (MySQL InnoDB always has one; PostgreSQL can use <code>CLUSTER</code> but doesn't maintain it)</td><td>Unlimited</td></tr>
+          <tr><td><strong>Range scan cost</strong></td><td>Sequential I/O (fast)&mdash;pages are physically adjacent</td><td>Random I/O (slow)&mdash;each row pointer may reference a different heap page</td></tr>
+          <tr><td><strong>Lookup cost</strong></td><td>Single B+ tree traversal</td><td>B+ tree traversal + "bookmark lookup" to fetch the full row</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>-- MySQL InnoDB: The PRIMARY KEY IS the clustered index
+CREATE TABLE orders (
+    id         BIGINT PRIMARY KEY,   -- Clustered index (rows stored in id order)
+    user_id    BIGINT NOT NULL,
+    status     VARCHAR(20),
+    total      DECIMAL(10,2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_id (user_id),            -- Secondary (non-clustered)
+    INDEX idx_status_created (status, created_at)  -- Composite secondary
+);
+
+-- PostgreSQL: Heap storage by default, no persistent clustering
+CREATE TABLE orders (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    status     VARCHAR(20),
+    total      NUMERIC(10,2),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX idx_user_id ON orders (user_id);
+CREATE INDEX idx_status_created ON orders (status, created_at);
+
+-- One-time physical reorder (not maintained on inserts!)
+CLUSTER orders USING idx_user_id;</code></pre>
+
+      <h3>Composite Indexes &amp; The Leftmost Prefix Rule</h3>
+
+      <p>A composite index on <code>(a, b, c)</code> is sorted first by <code>a</code>, then by <code>b</code> within each <code>a</code> group, then by <code>c</code>. This means the index can efficiently serve queries that filter on:</p>
+
+      <ul>
+        <li><code>WHERE a = ?</code> &mdash; &#10003; Uses the index</li>
+        <li><code>WHERE a = ? AND b = ?</code> &mdash; &#10003; Uses the index</li>
+        <li><code>WHERE a = ? AND b = ? AND c = ?</code> &mdash; &#10003; Full index usage</li>
+        <li><code>WHERE a = ? AND c = ?</code> &mdash; &#9888; Only the <code>a</code> part is used; <code>c</code> requires a filter after</li>
+        <li><code>WHERE b = ?</code> &mdash; &#10007; Cannot use the index at all (skips the leftmost prefix)</li>
+        <li><code>WHERE b = ? AND c = ?</code> &mdash; &#10007; Same&mdash;no leftmost prefix</li>
+      </ul>
+
+      <pre><code>-- This composite index:
+CREATE INDEX idx_composite ON orders (status, created_at, total);
+
+-- ✓ Can serve:
+EXPLAIN SELECT * FROM orders WHERE status = 'shipped' AND created_at > '2025-01-01';
+-- → Index Range Scan on idx_composite
+
+-- ✗ Cannot efficiently serve:
+EXPLAIN SELECT * FROM orders WHERE created_at > '2025-01-01';
+-- → Sequential Scan (status is the leftmost prefix, and it's missing)</code></pre>
+
+      <h3>Index-Only Scans (Covering Indexes)</h3>
+
+      <p>If all columns referenced in a query (SELECT list, WHERE, ORDER BY) are contained in the index, the database can answer the query <em>entirely from the index</em> without ever touching the table heap. This eliminates the "bookmark lookup" and can be 10&ndash;100x faster for certain queries.</p>
+
+      <pre><code>-- PostgreSQL: INCLUDE clause for covering indexes (v11+)
+CREATE INDEX idx_covering ON orders (user_id) INCLUDE (status, total);
+
+-- This query is now index-only:
+EXPLAIN ANALYZE SELECT status, total FROM orders WHERE user_id = 42;
+-- → Index Only Scan using idx_covering on orders
+--   Heap Fetches: 0  ← No heap access needed!
+
+-- MySQL: Covering index via composite
+CREATE INDEX idx_covering ON orders (user_id, status, total);
+-- Same query can use "Using index" optimization (visible in EXPLAIN Extra column)</code></pre>
+
+      <div class="callout">
+        <strong>Performance tip:</strong> In PostgreSQL, index-only scans depend on the <strong>visibility map</strong>. If many rows on a page have been recently updated but not vacuumed, the database must still check the heap to verify visibility. Run <code>VACUUM</code> regularly (or rely on autovacuum) to keep index-only scans fast. Check <code>Heap Fetches</code> in <code>EXPLAIN ANALYZE</code>&mdash;if it's high, your visibility map is stale.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 3: BUFFER POOL -->
+      <!-- ============================================================ -->
+      <h2 id="buffer-pool">Buffer Pool / Page Cache</h2>
+
+      <p>The buffer pool is the single most important performance component of any SQL database. It is a region of shared memory that caches data pages read from disk, sitting between the executor and the disk. Almost every query optimization ultimately comes down to one thing: keeping the data you need <em>in the buffer pool</em>.</p>
+
+      <h3>Pages: The Unit of I/O</h3>
+
+      <p>Databases do not read individual rows from disk. They read <strong>pages</strong> (also called blocks)&mdash;fixed-size chunks that are the smallest unit of I/O:</p>
+
+      <div class="metric-row">
+        <div class="metric-box"><div class="num">8 KB</div><div class="lbl">PostgreSQL page size</div></div>
+        <div class="metric-box"><div class="num">16 KB</div><div class="lbl">InnoDB page size</div></div>
+        <div class="metric-box"><div class="num">~0.1 ms</div><div class="lbl">SSD random read (1 page)</div></div>
+        <div class="metric-box"><div class="num">~5-10 ms</div><div class="lbl">HDD random read (1 page)</div></div>
+      </div>
+
+      <p>A single 8KB PostgreSQL page holding <code>orders</code> rows (each ~200 bytes) contains approximately 40 rows. Reading one row means reading 40 rows&mdash;this is why sequential access patterns (reading adjacent rows) are so much faster than random access. The buffer pool exploits this: once a page is read for one row, the other 39 rows are "free."</p>
+
+      <h3>How the Buffer Pool Works</h3>
+
+      <ol>
+        <li><strong>Page request</strong> &mdash; The executor needs page #1234 of the <code>orders</code> table.</li>
+        <li><strong>Buffer pool lookup</strong> &mdash; A hash table maps (table OID, page number) → buffer pool slot. If found → <strong>buffer hit</strong> (instant, ~100ns). If not → <strong>buffer miss</strong>.</li>
+        <li><strong>Eviction</strong> &mdash; If the pool is full, an eviction algorithm selects a victim page. PostgreSQL uses a <strong>clock-sweep</strong> algorithm (a variant of LRU with usage counters). MySQL InnoDB uses a <strong>modified LRU</strong> with a "young" and "old" sublist (the midpoint insertion strategy) to prevent full-table scans from flushing the entire cache.</li>
+        <li><strong>Disk read</strong> &mdash; The page is read from the OS file into the freed buffer slot.</li>
+        <li><strong>Pin &amp; return</strong> &mdash; The page is "pinned" (can't be evicted) while the executor uses it, then "unpinned" when done.</li>
+      </ol>
+
+      <pre><code>-- PostgreSQL: Check buffer pool (shared_buffers) hit rate
+SELECT
+    datname,
+    blks_hit,
+    blks_read,
+    ROUND(blks_hit::numeric / NULLIF(blks_hit + blks_read, 0) * 100, 2) AS hit_ratio_pct
+FROM pg_stat_database
+WHERE datname = current_database();
+
+-- Target: > 99% hit ratio. Below 95% = serious problem.
+-- Example output:
+--  datname  | blks_hit  | blks_read | hit_ratio_pct
+-- ----------+-----------+-----------+---------------
+--  mydb     | 987654321 |   1234567 |         99.87
+
+-- PostgreSQL: Configure buffer pool size
+-- postgresql.conf
+-- shared_buffers = 8GB   # 25% of total RAM as starting point
+-- effective_cache_size = 24GB  # 75% of RAM (tells optimizer about OS cache too)
+
+-- MySQL InnoDB: Check buffer pool stats
+SHOW ENGINE INNODB STATUS\G
+-- Or query the metrics:
+SELECT
+    pool_id,
+    pool_size * 16 / 1024 AS pool_size_mb,
+    free_buffers,
+    database_pages,
+    old_database_pages,
+    modified_db_pages AS dirty_pages,
+    ROUND(1 - (innodb_buffer_pool_reads / innodb_buffer_pool_read_requests) * 100, 2) AS hit_ratio
+FROM information_schema.innodb_buffer_pool_stats,
+     (SELECT variable_value AS innodb_buffer_pool_reads FROM performance_schema.global_status WHERE variable_name = 'Innodb_buffer_pool_reads') r,
+     (SELECT variable_value AS innodb_buffer_pool_read_requests FROM performance_schema.global_status WHERE variable_name = 'Innodb_buffer_pool_read_requests') rr;</code></pre>
+
+      <h3>Dirty Pages and Flushing</h3>
+
+      <p>When a write operation modifies a page in the buffer pool, that page becomes <strong>dirty</strong>&mdash;the in-memory version differs from the on-disk version. Dirty pages must eventually be flushed (written) to disk. The critical question is <em>when</em>:</p>
+
+      <ul>
+        <li><strong>Background flushing</strong> &mdash; PostgreSQL's <code>bgwriter</code> process continuously writes dirty pages to disk in the background, smoothing out I/O spikes. MySQL's <code>page_cleaner</code> threads do the same.</li>
+        <li><strong>Checkpoint flushing</strong> &mdash; Periodically (or when the WAL reaches a size threshold), a checkpoint writes <em>all</em> dirty pages to disk. This is the most I/O-intensive operation and can cause latency spikes if misconfigured.</li>
+        <li><strong>Eviction flushing</strong> &mdash; If the only available victim page is dirty, it must be flushed before the slot can be reused. This is the "worst case" and causes synchronous I/O stalls.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Buffer pool sizing rule of thumb:</strong><br>
+        &bull; <strong>PostgreSQL:</strong> Set <code>shared_buffers</code> to <strong>25%</strong> of total RAM (the OS filesystem cache handles the rest). Set <code>effective_cache_size</code> to <strong>75%</strong> of RAM.<br>
+        &bull; <strong>MySQL InnoDB:</strong> Set <code>innodb_buffer_pool_size</code> to <strong>70&ndash;80%</strong> of total RAM (InnoDB manages its own I/O, bypassing the OS cache with O_DIRECT).<br>
+        &bull; On a 64GB server: PG → <code>shared_buffers = 16GB</code>, MySQL → <code>innodb_buffer_pool_size = 48GB</code>.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 4: WAL -->
+      <!-- ============================================================ -->
+      <h2 id="wal">Write-Ahead Log (WAL)</h2>
+
+      <p>The Write-Ahead Log is the mechanism that makes databases <strong>durable</strong>&mdash;the D in ACID. The rule is brutally simple: <em>before any change is applied to data pages, the description of that change must first be written to the WAL and flushed to stable storage</em>. This single rule is why your data survives power outages, kernel panics, and disk failures.</p>
+
+      <h3>Why WAL Exists: The Problem It Solves</h3>
+
+      <p>Without WAL, a crash during a write could leave the database in a half-modified, inconsistent state. Consider updating an account balance from $100 to $50 and transferring $50 to another account. If the system crashes after the first write but before the second, $50 has vanished. WAL prevents this by recording the <em>entire transaction</em> atomically in a sequential log before touching any data pages.</p>
+
+      <h3>How WAL Works: Step by Step</h3>
+
+      <ol>
+        <li><strong>Transaction begins</strong> &mdash; <code>BEGIN; UPDATE accounts SET balance = balance - 50 WHERE id = 1;</code></li>
+        <li><strong>Generate WAL record</strong> &mdash; The database creates a log record describing the change: "Page 42, offset 128, old value = 100, new value = 50."</li>
+        <li><strong>Write WAL to disk</strong> &mdash; The record is appended to the WAL file (<code>pg_wal/</code> in PostgreSQL, redo log in MySQL). This is a <strong>sequential write</strong>&mdash;appending to the end of a file&mdash;which is extremely fast even on HDDs (~100MB/s).</li>
+        <li><strong>Modify buffer pool page</strong> &mdash; The data page in memory is updated. It becomes a dirty page.</li>
+        <li><strong>COMMIT → fsync WAL</strong> &mdash; On <code>COMMIT</code>, the WAL buffer is flushed to disk with <code>fsync()</code>. Once this returns, the transaction is durable. The data pages may still only exist in memory.</li>
+        <li><strong>Acknowledge client</strong> &mdash; "COMMIT OK" is sent back. The client can be confident the data is safe.</li>
+        <li><strong>Later: Checkpoint</strong> &mdash; Eventually, the dirty data pages are flushed to their actual locations on disk (random writes). Once a checkpoint completes, the WAL records before that point can be recycled.</li>
+      </ol>
+
+      <!-- Animation 2: WAL Write Flow -->
+      <div class="anim-container" id="wal-anim">
+        <h4>&#9654; WAL Write Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the write path: client write → WAL → buffer pool → ack → checkpoint → crash recovery.</p>
+        <svg id="wal-svg" width="700" height="300" viewBox="0 0 700 300"></svg>
+        <div id="wal-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="wal-step">Step &rarr;</button>
+          <button class="anim-btn" id="wal-reset">Reset</button>
+          <span class="anim-output" id="wal-output"></span>
+        </div>
+      </div>
+
+      <h3>Sequential vs Random I/O: Why WAL Is Fast</h3>
+
+      <table class="sql-table">
+        <thead><tr><th>I/O Pattern</th><th>HDD</th><th>SSD</th><th>NVMe</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Sequential write</strong> (WAL)</td><td>100&ndash;200 MB/s</td><td>400&ndash;600 MB/s</td><td>2&ndash;5 GB/s</td></tr>
+          <tr><td><strong>Random write</strong> (data pages)</td><td>1&ndash;2 MB/s</td><td>200&ndash;400 MB/s</td><td>1&ndash;3 GB/s</td></tr>
+          <tr><td><strong>Speed ratio</strong></td><td>~100x faster</td><td>~2x faster</td><td>~2x faster</td></tr>
+        </tbody>
+      </table>
+
+      <p>On HDDs, WAL provides a <strong>100x performance improvement</strong> because sequential writes avoid seek time. On modern NVMe SSDs, the gap is smaller, but WAL still provides the crucial durability guarantee&mdash;you can't safely skip it.</p>
+
+      <h3>Checkpointing</h3>
+
+      <p>Checkpointing writes all dirty pages to disk and records "everything up to WAL position X is safely on disk." This serves two purposes:</p>
+      <ul>
+        <li><strong>Limits recovery time</strong> &mdash; After a crash, the database only needs to replay WAL records <em>after</em> the last checkpoint. Without checkpoints, recovery could mean replaying days of WAL.</li>
+        <li><strong>Reclaims WAL space</strong> &mdash; WAL segments before the checkpoint are no longer needed for recovery and can be recycled.</li>
+      </ul>
+
+      <pre><code>-- PostgreSQL: Checkpoint tuning
+checkpoint_timeout = 15min        -- Time between checkpoints (default 5min, increase for write-heavy)
+max_wal_size = 4GB                -- WAL size that triggers a checkpoint
+checkpoint_completion_target = 0.9 -- Spread I/O over 90% of checkpoint interval
+
+-- MySQL InnoDB: Redo log tuning
+innodb_log_file_size = 2G         -- Size of each redo log file
+innodb_log_files_in_group = 2     -- Number of redo log files (total = 4GB)
+innodb_flush_log_at_trx_commit = 1 -- 1 = flush on every commit (durable)
+                                    -- 2 = flush every second (faster, risk of 1s data loss)
+                                    -- 0 = write to log buffer only (fastest, risky)</code></pre>
+
+      <h3>WAL Archiving &amp; Replication</h3>
+
+      <p>WAL is not just for crash recovery. It is the foundation of database replication:</p>
+      <ul>
+        <li><strong>PostgreSQL streaming replication</strong> &mdash; The primary streams WAL records to standby servers in near-real-time. The standby replays the WAL to maintain an identical copy. Synchronous replication waits for the standby to confirm before committing.</li>
+        <li><strong>Point-in-time recovery (PITR)</strong> &mdash; By archiving WAL segments, you can restore a database to any point in time. Take a base backup, then replay WAL up to the desired timestamp.</li>
+        <li><strong>MySQL binary log</strong> &mdash; MySQL uses a separate binary log (binlog) for replication, distinct from the InnoDB redo log. The binlog records logical changes (row images or SQL statements) and is shipped to replicas.</li>
+      </ul>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 5: MVCC -->
+      <!-- ============================================================ -->
+      <h2 id="mvcc">MVCC (Multi-Version Concurrency Control)</h2>
+
+      <p>MVCC is the mechanism that allows multiple transactions to read and write data concurrently without blocking each other. Instead of locking rows during reads, MVCC gives each transaction a <strong>consistent snapshot</strong> of the database at the moment it started. Readers never block writers. Writers never block readers. This is the secret to high concurrency in modern SQL databases.</p>
+
+      <h3>The Core Idea</h3>
+
+      <p>Without MVCC, a <code>SELECT</code> query on a row being updated by another transaction would have to either (a) block and wait for the write to complete, or (b) read uncommitted ("dirty") data. MVCC provides a third option: <strong>read the old version of the row</strong> that was valid at the start of your transaction. Each row can have multiple versions simultaneously, each visible to different transactions based on their start time.</p>
+
+      <h3>PostgreSQL: Tuple Versioning (xmin / xmax)</h3>
+
+      <p>PostgreSQL stores all row versions directly in the main table heap. Every tuple has two hidden system columns:</p>
+
+      <ul>
+        <li><code>xmin</code> &mdash; The transaction ID (XID) that <em>created</em> this row version.</li>
+        <li><code>xmax</code> &mdash; The transaction ID that <em>deleted or updated</em> this row version (0 if the row is still "live").</li>
+      </ul>
+
+      <pre><code>-- See the hidden system columns
+SELECT xmin, xmax, ctid, * FROM orders WHERE id = 42;
+--  xmin  | xmax | ctid  | id | user_id | status  | total
+-- -------+------+-------+----+---------+---------+-------
+--  12345 |    0 | (0,1) | 42 |     100 | pending | 99.99
+
+-- Now another transaction updates this row:
+-- Transaction B: UPDATE orders SET status = 'shipped' WHERE id = 42;
+-- This creates a NEW tuple with xmin = B's XID,
+-- and sets xmax = B's XID on the OLD tuple:
+--  xmin  |  xmax | ctid  | id | user_id | status  | total    ← OLD (invisible to new txns)
+-- -------+-------+-------+----+---------+---------+-------
+--  12345 | 12350 | (0,1) | 42 |     100 | pending | 99.99
+--
+--  xmin  |  xmax | ctid  | id | user_id | status  | total    ← NEW (visible after B commits)
+-- -------+-------+-------+----+---------+---------+-------
+--  12350 |     0 | (0,5) | 42 |     100 | shipped | 99.99</code></pre>
+
+      <p>A transaction sees a row version if: <code>xmin</code> is a committed transaction that started before the reader, AND (<code>xmax</code> is 0 or <code>xmax</code> is an uncommitted transaction or a transaction that started after the reader).</p>
+
+      <h3>MySQL InnoDB: Undo Log Approach</h3>
+
+      <p>InnoDB takes a different approach. The table always contains the <strong>latest version</strong> of each row. When a row is updated, the <em>old version</em> is written to the <strong>undo log</strong> (also called the rollback segment). A chain of undo records lets the database reconstruct any previous version of a row:</p>
+
+      <pre><code>-- InnoDB row structure (conceptual):
+-- [Row Data (current)] → [Undo Record 1 (previous)] → [Undo Record 2 (older)] → ...
+--
+-- Each undo record contains:
+-- - The old column values
+-- - A pointer to the next older undo record
+-- - The transaction ID that created it
+--
+-- To read a snapshot from 5 minutes ago, InnoDB follows the undo chain
+-- backwards until it finds a version created before the snapshot timestamp.
+
+-- Check undo log size (indicates long-running transactions):
+SELECT count AS undo_log_entries
+FROM information_schema.innodb_metrics
+WHERE name = 'trx_rseg_history_len';
+-- If this grows large (>1M), you have long-running transactions preventing purge.</code></pre>
+
+      <h3>VACUUM: The PostgreSQL Cleanup Problem</h3>
+
+      <p>Because PostgreSQL stores old row versions in the main heap, dead tuples accumulate and cause <strong>table bloat</strong>. The <code>VACUUM</code> process reclaims this space:</p>
+
+      <ul>
+        <li><strong>Regular VACUUM</strong> &mdash; Marks dead tuples as reusable space but doesn't shrink the file. Non-blocking (mostly).</li>
+        <li><strong>VACUUM FULL</strong> &mdash; Rewrites the entire table, reclaiming all space. Requires an <code>ACCESS EXCLUSIVE</code> lock&mdash;the table is completely unavailable. Avoid in production.</li>
+        <li><strong>Autovacuum</strong> &mdash; A background daemon that automatically vacuums tables when dead tuple count exceeds a threshold (<code>autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor * reltuples</code>).</li>
+      </ul>
+
+      <pre><code>-- Monitor table bloat
+SELECT
+    schemaname, relname,
+    n_live_tup,
+    n_dead_tup,
+    ROUND(n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup, 0) * 100, 2) AS dead_pct,
+    last_autovacuum,
+    last_autoanalyze
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 10000
+ORDER BY n_dead_tup DESC;
+
+-- Tune autovacuum for high-write tables
+ALTER TABLE orders SET (
+    autovacuum_vacuum_scale_factor = 0.01,   -- Vacuum when 1% rows are dead (default 20%)
+    autovacuum_analyze_scale_factor = 0.005,  -- Re-analyze stats more often
+    autovacuum_vacuum_cost_delay = 2          -- Be more aggressive (default 20ms delay)
+);</code></pre>
+
+      <p>MySQL InnoDB has an analogous problem: the <strong>purge</strong> thread removes old undo log entries once no active transaction needs them. If a long-running transaction holds a read view open, the undo log grows unboundedly, causing performance degradation.</p>
+
+      <div class="callout">
+        <strong>MVCC concurrency comparison:</strong><br>
+        &bull; <strong>PostgreSQL:</strong> Dead tuples in heap → table bloat → needs VACUUM. Old versions are fast to read (same table). Visibility check per-tuple is cheap (compare XIDs).<br>
+        &bull; <strong>MySQL InnoDB:</strong> Clean heap (latest only) → no bloat. Old versions in undo log → can be slow to reconstruct if the undo chain is long. Purge is cheaper than VACUUM.<br>
+        &bull; Both achieve the same goal: <strong>readers never block writers, writers never block readers</strong>.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 6: QUERY OPTIMIZER -->
+      <!-- ============================================================ -->
+      <h2 id="optimizer">Query Optimizer</h2>
+
+      <p>The query optimizer is the "brain" of the database. It takes a declarative SQL statement ("give me all shipped orders for user 42") and figures out the <em>fastest way</em> to retrieve that data. A good optimizer can make the difference between a query that takes 2 milliseconds and one that takes 20 minutes.</p>
+
+      <h3>Cost-Based Optimization</h3>
+
+      <p>Modern optimizers are <strong>cost-based</strong>: they estimate the "cost" of each possible execution plan and pick the cheapest. Cost is typically measured in abstract units representing disk I/O and CPU work:</p>
+
+      <pre><code>-- PostgreSQL cost model parameters
+SET seq_page_cost = 1.0;       -- Cost to read a page sequentially (baseline)
+SET random_page_cost = 4.0;    -- Cost to read a random page (4x sequential on HDD, set to 1.1 for SSD)
+SET cpu_tuple_cost = 0.01;     -- Cost to process a tuple in the executor
+SET cpu_index_tuple_cost = 0.005;  -- Cost to process an index entry
+SET cpu_operator_cost = 0.0025;    -- Cost to apply an operator/function
+
+-- CRITICAL: On SSD storage, reduce random_page_cost!
+-- Default 4.0 is tuned for HDD. On SSD, set to 1.1-1.5
+SET random_page_cost = 1.1;  -- SSD: random reads are almost as fast as sequential</code></pre>
+
+      <h3>Statistics: The Optimizer's Knowledge Base</h3>
+
+      <p>The optimizer can only make good decisions if it has accurate statistics about the data. PostgreSQL's <code>ANALYZE</code> (and autovacuum's auto-analyze) collects:</p>
+
+      <ul>
+        <li><strong>Table size</strong> &mdash; Number of rows (<code>reltuples</code>) and number of pages (<code>relpages</code>)</li>
+        <li><strong>Column statistics</strong> &mdash; Most common values (MCV), histogram of value distribution, null fraction, distinct value count</li>
+        <li><strong>Correlation</strong> &mdash; How closely the physical row order matches the index order (affects index scan cost estimates)</li>
+      </ul>
+
+      <pre><code>-- View optimizer statistics for a column
+SELECT
+    attname,
+    null_frac,
+    n_distinct,
+    most_common_vals,
+    most_common_freqs,
+    correlation
+FROM pg_stats
+WHERE tablename = 'orders' AND attname = 'status';
+-- Example:
+--  attname | null_frac | n_distinct | most_common_vals          | most_common_freqs        | correlation
+-- ---------+-----------+------------+---------------------------+--------------------------+-------------
+--  status  |         0 |          4 | {shipped,pending,cancelled,returned} | {0.45,0.30,0.15,0.10} |    0.12
+
+-- Force statistics refresh
+ANALYZE orders;
+
+-- Increase statistics granularity for important columns
+ALTER TABLE orders ALTER COLUMN status SET STATISTICS 1000;  -- Default is 100
+ANALYZE orders;</code></pre>
+
+      <h3>Join Algorithms</h3>
+
+      <table class="sql-table">
+        <thead><tr><th>Algorithm</th><th>How It Works</th><th>Best When</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Nested Loop</strong></td>
+            <td>For each row in the outer table, scan the inner table for matching rows. With an index on the inner table, each lookup is O(log N).</td>
+            <td>Small outer table + indexed inner table. Excellent for <code>LIMIT</code> queries.</td>
+            <td>O(N &times; M) without index<br>O(N &times; log M) with index</td>
+          </tr>
+          <tr>
+            <td><strong>Hash Join</strong></td>
+            <td>Build a hash table from the smaller table (build phase), then probe it for each row of the larger table (probe phase).</td>
+            <td>Equi-joins on large tables with no useful index. Medium-to-large result sets.</td>
+            <td>O(N + M) but needs memory for the hash table</td>
+          </tr>
+          <tr>
+            <td><strong>Merge Join</strong></td>
+            <td>Sort both tables on the join key, then merge them in a single pass (like merge sort's merge step).</td>
+            <td>Both inputs are already sorted (e.g., from index scans) or when the result is needed in sorted order.</td>
+            <td>O(N log N + M log M) for sorting + O(N + M) for merge</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>EXPLAIN: Reading Query Plans</h3>
+
+      <p>The <code>EXPLAIN</code> command is your window into the optimizer's decision. <code>EXPLAIN ANALYZE</code> actually executes the query and shows real timing:</p>
+
+      <div class="explain-output">
+<pre>EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT o.id, o.total, u.name
+FROM orders o
+JOIN users u ON o.user_id = u.id
+WHERE o.status = 'shipped' AND o.created_at > '2025-01-01';
+
+                                          QUERY PLAN
+--------------------------------------------------------------------------------------------
+ <span class="good">Hash Join</span>  (cost=45.20..1234.56 rows=4500 width=48)
+            (actual time=0.8..12.3 rows=4523 loops=1)
+   Hash Cond: (o.user_id = u.id)
+   Buffers: shared hit=342 read=12
+   →  <span class="good">Index Scan</span> using idx_status_created on orders o
+         (cost=0.42..1120.00 rows=4500 width=28)
+         (actual time=0.05..8.1 rows=4523 loops=1)
+         Index Cond: ((status = 'shipped') AND (created_at > '2025-01-01'))
+         Buffers: shared hit=310 read=12
+   →  Hash  (cost=35.00..35.00 rows=1000 width=24)
+            (actual time=0.6..0.6 rows=1000 loops=1)
+         Buffers: shared hit=32
+         →  <span class="good">Seq Scan</span> on users u
+               (cost=0.00..35.00 rows=1000 width=24)
+               (actual time=0.01..0.3 rows=1000 loops=1)
+               Buffers: shared hit=32
+ Planning Time: 0.15 ms
+ <span class="good">Execution Time: 12.8 ms</span></pre>
+      </div>
+
+      <p><strong>How to read this:</strong></p>
+      <ul>
+        <li><strong>cost=start..total</strong> &mdash; Estimated cost in abstract units. <code>start</code> is cost before the first row is returned; <code>total</code> is cost for all rows.</li>
+        <li><strong>rows</strong> &mdash; Estimated (in <code>EXPLAIN</code>) or actual (in <code>EXPLAIN ANALYZE</code>) row count. Large discrepancies indicate stale statistics.</li>
+        <li><strong>Buffers: shared hit/read</strong> &mdash; Buffer pool hits (free) vs disk reads (expensive). <code>read=12</code> means 12 pages fetched from disk.</li>
+        <li><strong>actual time</strong> &mdash; Real wall-clock time per loop iteration, in milliseconds.</li>
+      </ul>
+
+      <h3>Common Optimization Pitfalls</h3>
+
+      <pre><code>-- ✗ BAD: Function on indexed column prevents index usage
+SELECT * FROM orders WHERE YEAR(created_at) = 2025;
+-- → Full table scan! The index is on created_at, not YEAR(created_at).
+
+-- ✓ GOOD: Rewrite as a range condition
+SELECT * FROM orders WHERE created_at >= '2025-01-01' AND created_at < '2026-01-01';
+-- → Index range scan on idx_created_at
+
+-- ✗ BAD: Implicit type cast
+SELECT * FROM orders WHERE id = '42';  -- id is BIGINT, '42' is text
+-- Some databases can't use the index due to the type mismatch.
+
+-- ✓ GOOD: Match the type
+SELECT * FROM orders WHERE id = 42;
+
+-- ✗ BAD: SELECT * fetches all columns, preventing index-only scan
+SELECT * FROM orders WHERE user_id = 42;
+
+-- ✓ GOOD: Select only needed columns
+SELECT id, status, total FROM orders WHERE user_id = 42;
+
+-- ✗ BAD: OR conditions can prevent index usage
+SELECT * FROM orders WHERE user_id = 42 OR status = 'shipped';
+-- May result in a full table scan if optimizer can't split into two index scans
+
+-- ✓ GOOD: Use UNION ALL for separate index scans
+SELECT * FROM orders WHERE user_id = 42
+UNION ALL
+SELECT * FROM orders WHERE status = 'shipped' AND user_id != 42;</code></pre>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 7: CONNECTION POOLING -->
+      <!-- ============================================================ -->
+      <h2 id="connection-pooling">Connection Pooling</h2>
+
+      <p>Database connections are shockingly expensive. Each connection consumes significant server resources, and the overhead scales poorly. In PostgreSQL, each connection spawns a <strong>separate OS process</strong> (via <code>fork()</code>), consuming 5&ndash;10 MB of RAM. In MySQL, each connection is a thread consuming 1&ndash;5 MB. Beyond memory, each connection requires authentication, TLS negotiation, catalog caching, and session state.</p>
+
+      <div class="metric-row">
+        <div class="metric-box"><div class="num">5-10 MB</div><div class="lbl">RAM per PostgreSQL connection</div></div>
+        <div class="metric-box"><div class="num">1-5 MB</div><div class="lbl">RAM per MySQL connection</div></div>
+        <div class="metric-box"><div class="num">~50 ms</div><div class="lbl">Connection setup time (TLS)</div></div>
+        <div class="metric-box"><div class="num">200-500</div><div class="lbl">Practical max connections</div></div>
+      </div>
+
+      <h3>Why Too Many Connections Kill Performance</h3>
+
+      <p>Counterintuitively, increasing <code>max_connections</code> from 200 to 2000 will make your database <em>slower</em>, not faster. Here's why:</p>
+
+      <ul>
+        <li><strong>Context switching</strong> &mdash; With 2000 processes/threads, the CPU spends more time switching between them than doing actual work. On a 16-core server, you might have 125 processes per core, each getting a tiny time slice.</li>
+        <li><strong>Lock contention</strong> &mdash; More concurrent transactions means more lock conflicts, more deadlocks, and more time waiting. PostgreSQL's shared buffer pool has internal lock partitions that become bottlenecks beyond ~300 connections.</li>
+        <li><strong>Memory pressure</strong> &mdash; 2000 connections × 10 MB = 20 GB just for connection overhead, leaving less memory for the buffer pool. This leads to more disk I/O, which is slower for everyone.</li>
+        <li><strong>Work_mem multiplication</strong> &mdash; PostgreSQL's <code>work_mem</code> (used for sorts, hash joins) is per-operation per-connection. With <code>work_mem = 64MB</code> and 2000 connections each running a complex query, you could need 128 GB just for work_mem.</li>
+      </ul>
+
+      <h3>The Solution: Connection Poolers</h3>
+
+      <table class="sql-table">
+        <thead><tr><th>Pooler</th><th>Database</th><th>Mode</th><th>Key Features</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>PgBouncer</strong></td>
+            <td>PostgreSQL</td>
+            <td>External proxy</td>
+            <td>Ultra-lightweight (2KB per connection). Three pooling modes: session, transaction, statement. Handles 10,000+ client connections with ~50 server connections.</td>
+          </tr>
+          <tr>
+            <td><strong>Pgpool-II</strong></td>
+            <td>PostgreSQL</td>
+            <td>External proxy</td>
+            <td>Connection pooling + load balancing + read/write splitting. More features but heavier than PgBouncer.</td>
+          </tr>
+          <tr>
+            <td><strong>ProxySQL</strong></td>
+            <td>MySQL</td>
+            <td>External proxy</td>
+            <td>Connection pooling + query routing + read/write splitting + query caching. Production-grade for MySQL deployments.</td>
+          </tr>
+          <tr>
+            <td><strong>MySQL Thread Pool</strong></td>
+            <td>MySQL</td>
+            <td>Built-in (Enterprise)</td>
+            <td>Groups connections into thread groups, limits concurrent execution. Available in MySQL Enterprise and MariaDB.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre><code># PgBouncer configuration (pgbouncer.ini)
+[databases]
+mydb = host=localhost port=5432 dbname=mydb
+
+[pgbouncer]
+listen_port = 6432
+listen_addr = 0.0.0.0
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+
+pool_mode = transaction     # Return connection to pool after each transaction
+                            # (not session — session mode defeats the purpose)
+max_client_conn = 10000     # Accept up to 10K client connections
+default_pool_size = 25      # Only 25 actual PostgreSQL connections per database
+reserve_pool_size = 5       # 5 extra connections for burst traffic
+reserve_pool_timeout = 3    # Wait 3s before using reserve connections
+
+# ProxySQL configuration
+# mysql -u admin -padmin -h 127.0.0.1 -P6032
+INSERT INTO mysql_servers (hostgroup_id, hostname, port, weight) VALUES
+    (0, '10.0.1.10', 3306, 1000),  -- Primary (writes)
+    (1, '10.0.1.11', 3306, 500),   -- Replica 1 (reads)
+    (1, '10.0.1.12', 3306, 500);   -- Replica 2 (reads)
+
+-- Route reads to replicas, writes to primary
+INSERT INTO mysql_query_rules (rule_id, match_pattern, destination_hostgroup) VALUES
+    (1, '^SELECT.*FOR UPDATE', 0),   -- SELECT FOR UPDATE → primary
+    (2, '^SELECT', 1),               -- All other SELECTs → replicas
+    (3, '.*', 0);                    -- Everything else → primary</code></pre>
+
+      <h3>Pool Sizing Formula</h3>
+
+      <div class="callout">
+        <strong>The PostgreSQL wiki's formula:</strong><br>
+        <code>connections = (CPU cores × 2) + effective_spindle_count</code><br><br>
+        On a 16-core server with 1 SSD: <code>(16 × 2) + 1 = 33 connections</code>.<br>
+        On a 32-core server with 4 SSDs: <code>(32 × 2) + 4 = 68 connections</code>.<br><br>
+        This seems shockingly low, but benchmarks consistently show that a pool of <strong>25&ndash;50 connections</strong> outperforms 200+ connections on typical hardware. The reason: fewer connections = less contention = each query finishes faster = higher overall throughput. This is <a href="https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing" style="color:var(--brand)">well-documented by HikariCP</a>.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 8: STORAGE ENGINES -->
+      <!-- ============================================================ -->
+      <h2 id="storage-engines">Storage Engines</h2>
+
+      <p>The storage engine is the lowest layer of the database: it determines how data is physically organized on disk, how reads and writes are performed, and what durability and concurrency guarantees are provided. Different engines make fundamentally different trade-offs.</p>
+
+      <h3>PostgreSQL: Heap Storage</h3>
+
+      <p>PostgreSQL uses a straightforward <strong>heap storage</strong> model:</p>
+
+      <ul>
+        <li>The table is stored as a sequence of 8KB pages in a file (one file per 1GB segment).</li>
+        <li>Rows are inserted wherever there's free space (tracked by the <strong>Free Space Map</strong>, or FSM).</li>
+        <li>Rows are <em>not</em> stored in any particular order (unless you explicitly run <code>CLUSTER</code>, which is a one-time operation).</li>
+        <li>Each row version includes a header (23 bytes for system columns: xmin, xmax, ctid, etc.) plus the actual data.</li>
+        <li>Deleted/updated rows leave dead tuples that must be reclaimed by VACUUM.</li>
+      </ul>
+
+      <p><strong>TOAST (The Oversized-Attribute Storage Technique):</strong> When a row exceeds ~2KB, PostgreSQL automatically compresses and/or moves large column values to a separate TOAST table. This keeps the main table pages efficient for scanning.</p>
+
+      <pre><code>-- Check if a table has a TOAST table
+SELECT relname, reltoastrelid::regclass AS toast_table
+FROM pg_class WHERE relname = 'documents';
+--  relname   | toast_table
+-- -----------+---------------------------
+--  documents | pg_toast.pg_toast_16384
+
+-- Check TOAST table size
+SELECT pg_size_pretty(pg_total_relation_size('pg_toast.pg_toast_16384'));
+
+-- Monitor table size and bloat
+SELECT
+    relname,
+    pg_size_pretty(pg_relation_size(relid)) AS table_size,
+    pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+    pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) AS index_and_toast_size
+FROM pg_stat_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 10;</code></pre>
+
+      <h3>MySQL: InnoDB vs MyISAM</h3>
+
+      <table class="sql-table">
+        <thead><tr><th>Feature</th><th>InnoDB</th><th>MyISAM</th></tr></thead>
+        <tbody>
+          <tr><td><strong>ACID compliance</strong></td><td>Full (transactions, crash recovery)</td><td>No transactions, no crash recovery</td></tr>
+          <tr><td><strong>Locking</strong></td><td>Row-level locking via MVCC</td><td>Table-level locking</td></tr>
+          <tr><td><strong>Index structure</strong></td><td>Clustered B+ tree (PK = data). Secondary indexes store PK values.</td><td>B+ tree with pointers to physical row offsets</td></tr>
+          <tr><td><strong>Foreign keys</strong></td><td>Supported</td><td>Not supported</td></tr>
+          <tr><td><strong>Crash recovery</strong></td><td>Redo log + doublewrite buffer → automatic recovery</td><td>No recovery. <code>REPAIR TABLE</code> may lose data.</td></tr>
+          <tr><td><strong>Full-text search</strong></td><td>Supported (since 5.6)</td><td>Supported (historically the main reason to use MyISAM)</td></tr>
+          <tr><td><strong>Compression</strong></td><td>Page-level compression, transparent</td><td><code>myisampack</code> for read-only compressed tables</td></tr>
+          <tr><td><strong>Use case (2025)</strong></td><td><strong>Everything. Default since MySQL 5.5.</strong></td><td>Legacy only. No reason to use in new projects.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>InnoDB secondary index "double lookup":</strong> In InnoDB, a secondary index leaf contains the primary key value, not a row pointer. So a secondary index lookup requires <em>two</em> B+ tree traversals: (1) traverse the secondary index to find the PK, then (2) traverse the clustered (primary key) index to find the actual row. This is why InnoDB queries are faster when you can use the primary key directly, and why covering indexes (which avoid the second lookup) are especially valuable.
+      </div>
+
+      <h3>B-Tree vs LSM-Tree Engines</h3>
+
+      <p>Beyond the traditional B+ tree engines (PostgreSQL, InnoDB), a fundamentally different approach exists: the <strong>Log-Structured Merge (LSM) tree</strong>, used by RocksDB, LevelDB, Cassandra, and HBase.</p>
+
+      <table class="sql-table">
+        <thead><tr><th>Property</th><th>B+ Tree (InnoDB, PostgreSQL)</th><th>LSM Tree (RocksDB, Cassandra)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Write pattern</strong></td><td>In-place updates: find the page, modify it</td><td>Append-only: writes go to a memtable, then flushed as immutable sorted runs (SSTables)</td></tr>
+          <tr><td><strong>Write amplification</strong></td><td>Lower for small updates (modify one page)</td><td>Higher due to compaction (data rewritten during merge)</td></tr>
+          <tr><td><strong>Read amplification</strong></td><td>Lower: single B+ tree traversal</td><td>Higher: may check memtable + multiple SSTable levels. Bloom filters mitigate.</td></tr>
+          <tr><td><strong>Space amplification</strong></td><td>Higher (in-place updates, page fragmentation, MVCC bloat)</td><td>Can be lower after compaction (but temp space during compaction)</td></tr>
+          <tr><td><strong>Write throughput</strong></td><td>Good (limited by random I/O for page writes)</td><td>Excellent (all writes are sequential)</td></tr>
+          <tr><td><strong>Read latency</strong></td><td>Predictable (O(log N) always)</td><td>Variable (depends on compaction state, may need to check multiple levels)</td></tr>
+          <tr><td><strong>Best for</strong></td><td>Read-heavy OLTP, complex queries, transactions</td><td>Write-heavy workloads, time-series, logging, ingestion pipelines</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>-- MySQL with RocksDB engine (MyRocks - used by Facebook for MySQL):
+CREATE TABLE events (
+    id BIGINT PRIMARY KEY,
+    event_type VARCHAR(50),
+    payload JSON,
+    created_at TIMESTAMP
+) ENGINE=ROCKSDB;
+
+-- Advantages over InnoDB for Facebook's use case:
+-- - 50% less storage (better compression on sorted data)
+-- - Higher write throughput for their workload
+-- - Lower write amplification
+
+-- PostgreSQL doesn't support pluggable engines natively,
+-- but extensions like pg_tde and columnar engines (citus_columnar) exist.</code></pre>
+
+      <h3>Choosing the Right Storage Approach</h3>
+
+      <ul>
+        <li><strong>OLTP (orders, users, payments)</strong> → B+ tree engine (InnoDB, PostgreSQL). Predictable reads, ACID transactions, row-level locking.</li>
+        <li><strong>Write-heavy ingestion (logs, events, metrics)</strong> → LSM engine (RocksDB, Cassandra). Sequential writes, better compression, higher write throughput.</li>
+        <li><strong>Analytics (reporting, BI)</strong> → Columnar storage (ClickHouse, Redshift, BigQuery). Scans only needed columns, extreme compression ratios.</li>
+        <li><strong>Mixed workloads</strong> → Consider HTAP databases (TiDB, CockroachDB) that combine row and columnar storage.</li>
+      </ul>
+
+
+      <!-- ============================================================ -->
+      <!-- NAV -->
+      <!-- ============================================================ -->
+      <nav class="post-nav">
+        <a class="prev" href="../building-blocks/logging-monitoring.html"><span>Previous</span><span>&#8592; Logging &amp; Monitoring</span></a>
+        <a class="next" href="nosql-document.html"><span>Next</span><span>NoSQL Document Stores &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,r,fill,stroke){return el('rect',{x:x,y:y,width:w,height:h,rx:r||0,fill:fill||'none',stroke:stroke||'none','stroke-width':'1.5'});}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function line(x1,y1,x2,y2,color,width){return el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:color||'var(--ink-muted)','stroke-width':width||'1.5'});}
+    function arrow(x1,y1,x2,y2,color){
+      var g=document.createElementNS(NS,'g');
+      g.appendChild(el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:color||'var(--ink-muted)','stroke-width':'2','marker-end':'url(#arrowhead)'}));
+      return g;
+    }
+
+    /* ===== ANIMATION 1: B+ Tree Lookup ===== */
+    (function(){
+      var svg=document.getElementById('btree-svg');
+      var info=document.getElementById('btree-info');
+      var out=document.getElementById('btree-output');
+      var W=700,H=320;
+
+      // B+ tree structure: searching for key 42
+      // Root: [20, 40, 60]
+      // Level 1: [5,10,15] [25,30,35] [41,42,48] [55,58,62]
+      // Leaves:  ... various leaf nodes with data pointers
+
+      var nodeW=130,nodeH=36,gapX=15,gapY=70;
+      // Root node
+      var root={keys:[20,40,60],x:285,y:20};
+      // Level 1 nodes
+      var L1=[
+        {keys:['5','10','15'],x:30,y:110},
+        {keys:['25','30','35'],x:195,y:110},
+        {keys:['41','42','48'],x:370,y:110},
+        {keys:['55','58','62'],x:540,y:110}
+      ];
+      // Leaf nodes (level 2)
+      var leaves=[
+        {keys:['1→d','5→d','8→d'],x:0,y:210},
+        {keys:['10→d','12→d','15→d'],x:125,y:210},
+        {keys:['20→d','22→d','25→d'],x:250,y:210},
+        {keys:['30→d','35→d','38→d'],x:375,y:210},
+        {keys:['40→d','41→d','42→✓'],x:500,y:210}
+      ];
+
+      var visited=[];
+      var diskIO=0;
+      var step=0;
+
+      function drawNode(n,highlight,label){
+        var bColor=highlight?'#22c55e':'var(--line)';
+        var bgColor=highlight?'rgba(34,197,94,0.12)':'var(--card)';
+        svg.appendChild(rect(n.x,n.y,nodeW,nodeH,8,bgColor,bColor));
+        var keyStr=n.keys.join(' | ');
+        svg.appendChild(txt(keyStr,{x:''+(n.x+nodeW/2),y:''+(n.y+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'600',fill:highlight?'#16a34a':'var(--ink)'}));
+        if(label){
+          svg.appendChild(txt(label,{x:''+(n.x+nodeW/2),y:''+(n.y-6),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'700',fill:highlight?'#16a34a':'var(--ink-muted)'}));
+        }
+      }
+
+      function drawEdge(x1,y1,x2,y2,highlight){
+        var c=highlight?'#22c55e':'var(--line)';
+        var w=highlight?'2.5':'1.5';
+        svg.appendChild(el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:c,'stroke-width':w}));
+      }
+
+      function drawLeafChain(){
+        for(var i=0;i<leaves.length-1;i++){
+          var x1=leaves[i].x+nodeW+2;
+          var y1=leaves[i].y+nodeH/2;
+          var x2=leaves[i+1].x-2;
+          var y2=leaves[i+1].y+nodeH/2;
+          svg.appendChild(el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'4,3'}));
+          // small arrow
+          svg.appendChild(txt('→',{x:''+(x2-8),y:''+(y2+4),'font-size':'10',fill:'var(--ink-muted)'}));
+        }
+      }
+
+      function drawIO(){
+        svg.appendChild(rect(550,270,140,36,8,'rgba(10,143,106,0.08)','var(--brand)'));
+        svg.appendChild(txt('Disk I/O: '+diskIO,{x:'620',y:'293','text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'14','font-weight':'800',fill:'var(--brand)'}));
+      }
+
+      function drawAll(){
+        clearSvg(svg);
+        // Draw edges first (root to L1)
+        var rootCX=root.x+nodeW/2;
+        var rootBot=root.y+nodeH;
+        for(var i=0;i<L1.length;i++){
+          var childCX=L1[i].x+nodeW/2;
+          var isHL=visited.indexOf('root-'+i)>=0;
+          drawEdge(rootCX,rootBot,childCX,L1[i].y,isHL);
+        }
+        // L1 to leaves (simplified: show only relevant edges)
+        // L1[0]→leaves[0,1], L1[1]→leaves[2,3], L1[2]→leaves[3,4], L1[3]→...
+        var l1Leaf=[[0,1],[2,3],[3,4],[]];
+        for(var j=0;j<L1.length;j++){
+          for(var k=0;k<l1Leaf[j].length;k++){
+            var li=l1Leaf[j][k];
+            if(li<leaves.length){
+              var isHL2=visited.indexOf('L1-'+j+'-'+li)>=0;
+              drawEdge(L1[j].x+nodeW/2,L1[j].y+nodeH,leaves[li].x+nodeW/2,leaves[li].y,isHL2);
+            }
+          }
+        }
+        drawLeafChain();
+        // Draw nodes
+        drawNode(root,visited.indexOf('root')>=0,'ROOT');
+        for(var m=0;m<L1.length;m++){
+          drawNode(L1[m],visited.indexOf('L1-'+m)>=0,'INTERNAL');
+        }
+        for(var n2=0;n2<leaves.length;n2++){
+          drawNode(leaves[n2],visited.indexOf('leaf-'+n2)>=0,'LEAF');
+        }
+        drawIO();
+      }
+
+      var steps=[
+        {desc:'Start: Searching for key 42. Load root node from disk.',action:function(){visited.push('root');diskIO=1;}},
+        {desc:'Root [20,40,60]: 42 > 40 and 42 < 60 → follow 3rd pointer (between 40 and 60).',action:function(){visited.push('root-2');visited.push('L1-2');diskIO=2;}},
+        {desc:'Internal [41,42,48]: Key 42 found in internal node → follow pointer to leaf. Load leaf from disk.',action:function(){visited.push('L1-2-4');visited.push('leaf-4');diskIO=3;}},
+        {desc:'Leaf [40→d, 41→d, 42→✓]: Key 42 FOUND! Return data pointer. Total: 3 disk I/Os.',action:function(){}}
+      ];
+
+      function reset(){
+        step=0;visited=[];diskIO=0;
+        drawAll();
+        info.textContent='Click "Step" to search for key 42 in the B+ tree.';
+        out.textContent='';
+      }
+
+      function doStep(){
+        if(step>=steps.length){info.textContent='Search complete! Key 42 found in 3 disk I/Os. Click Reset to replay.';return;}
+        var s=steps[step];
+        s.action();
+        drawAll();
+        info.textContent='Step '+(step+1)+': '+s.desc;
+        out.textContent=(step+1)+' / '+steps.length;
+        step++;
+      }
+
+      reset();
+      document.getElementById('btree-step').addEventListener('click',doStep);
+      document.getElementById('btree-reset').addEventListener('click',reset);
+    })();
+
+    /* ===== ANIMATION 2: WAL Write Flow ===== */
+    (function(){
+      var svg=document.getElementById('wal-svg');
+      var info=document.getElementById('wal-info');
+      var out=document.getElementById('wal-output');
+      var W=700,H=300;
+
+      // Components
+      var client={x:20,y:120,w:80,h:50,label:'Client'};
+      var walDisk={x:230,y:20,w:120,h:50,label:'WAL (Disk)'};
+      var bufPool={x:230,y:120,w:120,h:50,label:'Buffer Pool'};
+      var dataDisk={x:230,y:220,w:120,h:50,label:'Data Disk'};
+      var ack={x:520,y:120,w:80,h:50,label:'ACK ✓'};
+      var crash={x:520,y:30,w:100,h:40,label:'💥 CRASH'};
+      var recover={x:520,y:220,w:100,h:50,label:'Recovery'};
+
+      var step=0;
+      var highlights=[];
+      var arrows2=[];
+
+      function drawBox(b,hl){
+        var bg=hl?'rgba(34,197,94,0.12)':'var(--card)';
+        var bdr=hl?'#22c55e':'var(--line)';
+        svg.appendChild(rect(b.x,b.y,b.w,b.h,10,bg,bdr));
+        var lines=b.label.split('\n');
+        for(var i=0;i<lines.length;i++){
+          svg.appendChild(txt(lines[i],{x:''+(b.x+b.w/2),y:''+(b.y+b.h/2+4+i*14),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'11','font-weight':'700',fill:hl?'#16a34a':'var(--ink)'}));
+        }
+      }
+
+      function drawArrow2(x1,y1,x2,y2,color,label,dashed){
+        var c=color||'var(--ink-muted)';
+        var attrs={x1:x1,y1:y1,x2:x2,y2:y2,stroke:c,'stroke-width':'2'};
+        if(dashed)attrs['stroke-dasharray']='6,4';
+        svg.appendChild(el('line',attrs));
+        // arrowhead
+        var dx=x2-x1,dy=y2-y1;
+        var len=Math.sqrt(dx*dx+dy*dy);
+        var ux=dx/len,uy=dy/len;
+        var ax=x2-ux*10,ay=y2-uy*10;
+        var px=-uy*5,py=ux*5;
+        svg.appendChild(el('polygon',{points:(x2)+','+(y2)+' '+(ax+px)+','+(ay+py)+' '+(ax-px)+','+(ay-py),fill:c}));
+        if(label){
+          var mx=(x1+x2)/2,my=(y1+y2)/2;
+          svg.appendChild(rect(mx-35,my-10,70,16,4,'var(--bg)','none'));
+          svg.appendChild(txt(label,{x:''+mx,y:''+(my+2),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:c}));
+        }
+      }
+
+      function drawStep(n){
+        // Step labels
+        var stepData=[
+          {desc:'Write arrives from client.',hl:['client'],arr:[]},
+          {desc:'Step 1: Write change to WAL (sequential, fast ~0.1ms).',hl:['client','wal'],arr:[{from:'client',to:'wal',c:'#0a8f6a',l:'1. WAL write'}]},
+          {desc:'Step 2: Modify page in buffer pool (in memory, instant).',hl:['client','wal','buf'],arr:[{from:'client',to:'wal',c:'#0a8f6a',l:'1. WAL write'},{from:'wal',to:'buf',c:'#3b82f6',l:'2. Modify page'}]},
+          {desc:'Step 3: ACK sent to client. Transaction is DURABLE.',hl:['client','wal','buf','ack'],arr:[{from:'client',to:'wal',c:'#0a8f6a',l:'1. WAL write'},{from:'wal',to:'buf',c:'#3b82f6',l:'2. Modify page'},{from:'buf',to:'ack',c:'#22c55e',l:'3. ACK'}]},
+          {desc:'Step 4: Later — Checkpoint flushes dirty pages to data disk.',hl:['buf','data'],arr:[{from:'buf',to:'data',c:'#f59e0b',l:'4. Checkpoint',d:true}]},
+          {desc:'Step 5: CRASH! Power failure before checkpoint completes.',hl:['crash'],arr:[]},
+          {desc:'Step 6: Recovery — Replay WAL to reconstruct lost changes. Data is safe!',hl:['wal','data','recover'],arr:[{from:'wal',to:'recover',c:'#22c55e',l:'6. Replay WAL'},{from:'recover',to:'data',c:'#22c55e',l:'Reconstruct'}]}
+        ];
+        if(n>=stepData.length)return null;
+        return stepData[n];
+      }
+
+      function drawAll(){
+        clearSvg(svg);
+        var sd=drawStep(step-1);
+        var hlSet=sd?sd.hl:[];
+
+        drawBox(client,hlSet.indexOf('client')>=0);
+        drawBox(walDisk,hlSet.indexOf('wal')>=0);
+        drawBox(bufPool,hlSet.indexOf('buf')>=0);
+        drawBox(dataDisk,hlSet.indexOf('data')>=0);
+
+        if(step>=4){
+          drawBox(ack,hlSet.indexOf('ack')>=0);
+        }
+        if(step>=6){
+          var crashBg=hlSet.indexOf('crash')>=0?'rgba(239,68,68,0.15)':'var(--card)';
+          var crashBdr=hlSet.indexOf('crash')>=0?'#ef4444':'var(--line)';
+          svg.appendChild(rect(crash.x,crash.y,crash.w,crash.h,10,crashBg,crashBdr));
+          svg.appendChild(txt('💥 CRASH',{x:''+(crash.x+crash.w/2),y:''+(crash.y+crash.h/2+5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'800',fill:hlSet.indexOf('crash')>=0?'#ef4444':'var(--ink)'}));
+        }
+        if(step>=7){
+          drawBox(recover,hlSet.indexOf('recover')>=0);
+        }
+
+        // Draw arrows
+        if(sd&&sd.arr){
+          for(var i=0;i<sd.arr.length;i++){
+            var a=sd.arr[i];
+            var fromB=a.from==='client'?client:a.from==='wal'?walDisk:a.from==='buf'?bufPool:a.from==='recover'?recover:client;
+            var toB=a.to==='wal'?walDisk:a.to==='buf'?bufPool:a.to==='data'?dataDisk:a.to==='ack'?ack:a.to==='recover'?recover:dataDisk;
+            var fx=fromB.x+fromB.w,fy=fromB.y+fromB.h/2;
+            var tx=toB.x,ty=toB.y+toB.h/2;
+            // Adjust for vertical arrows
+            if(a.from==='wal'&&a.to==='buf'){fx=fromB.x+fromB.w/2;fy=fromB.y+fromB.h;tx=toB.x+toB.w/2;ty=toB.y;}
+            if(a.from==='buf'&&a.to==='data'){fx=fromB.x+fromB.w/2;fy=fromB.y+fromB.h;tx=toB.x+toB.w/2;ty=toB.y;}
+            if(a.from==='buf'&&a.to==='ack'){fx=fromB.x+fromB.w;fy=fromB.y+fromB.h/2;tx=toB.x;ty=toB.y+toB.h/2;}
+            if(a.from==='wal'&&a.to==='recover'){fx=fromB.x+fromB.w;fy=fromB.y+fromB.h/2;tx=toB.x;ty=toB.y+toB.h/2-20;}
+            if(a.from==='recover'&&a.to==='data'){fx=fromB.x;fy=fromB.y+fromB.h/2;tx=toB.x+toB.w;ty=toB.y+toB.h/2;}
+            drawArrow2(fx,fy,tx,ty,a.c,a.l,a.d||false);
+          }
+        }
+
+        // Labels
+        svg.appendChild(txt('FAST (sequential)',{x:'175',y:'15','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('SLOW (random)',{x:'175',y:'260','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+      }
+
+      function reset(){
+        step=0;
+        drawAll();
+        info.textContent='Click "Step" to trace a write through the WAL pipeline.';
+        out.textContent='';
+      }
+
+      function doStep(){
+        var sd=drawStep(step);
+        if(!sd){info.textContent='Complete! WAL ensures data survives crashes. Click Reset to replay.';return;}
+        step++;
+        drawAll();
+        info.textContent=sd.desc;
+        out.textContent=step+' / 7';
+      }
+
+      reset();
+      document.getElementById('wal-step').addEventListener('click',doStep);
+      document.getElementById('wal-reset').addEventListener('click',reset);
+    })();
+  })();
+  </script>
+</body>
+</html>

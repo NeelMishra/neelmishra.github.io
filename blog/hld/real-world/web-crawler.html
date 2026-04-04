@@ -1,0 +1,1396 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design a Web Crawler: URL frontier with priority and politeness queues, BFS traversal, bloom filter dedup, SimHash near-duplicate detection, robots.txt parsing, distributed crawling, and spider trap handling.">
+  <title>Design: Web Crawler | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+  <style>
+    .crawl-svg-box{fill:var(--card,#fffdf9);stroke:var(--line,#d9cfba);stroke-width:1.5;rx:8;}
+    .crawl-svg-box.active{fill:rgba(10,143,106,.12);stroke:var(--brand,#0a8f6a);stroke-width:2.5;}
+    .crawl-svg-label{font-family:"Manrope",sans-serif;font-size:11px;fill:var(--ink-muted,#4a5a53);pointer-events:none;}
+    .crawl-svg-title{font-family:"Syne",sans-serif;font-size:12px;font-weight:700;fill:var(--ink,#13201a);pointer-events:none;}
+    .crawl-svg-arrow{stroke:var(--line,#d9cfba);stroke-width:1.5;fill:none;marker-end:url(#crawl-arrow);}
+    .crawl-svg-arrow.active{stroke:var(--brand,#0a8f6a);stroke-width:2.5;}
+    .crawl-svg-packet{fill:var(--brand,#0a8f6a);r:5;opacity:0;transition:opacity .3s;}
+    .crawl-svg-packet.visible{opacity:1;}
+
+    .pol-domain-lane{fill:rgba(10,143,106,.03);stroke:var(--line,#d9cfba);stroke-width:1;rx:6;}
+    .pol-domain-lane.active{fill:rgba(10,143,106,.10);stroke:var(--brand,#0a8f6a);stroke-width:2;}
+    .pol-queue-item{rx:4;ry:4;height:20;fill:var(--card,#fffdf9);stroke:var(--line,#d9cfba);stroke-width:1;}
+    .pol-queue-item.fetching{fill:var(--brand,#0a8f6a);stroke:var(--brand,#0a8f6a);}
+    .pol-queue-item.waiting{fill:#f59e0b;stroke:#f59e0b;}
+    .pol-timer{font-family:"Consolas",monospace;font-size:10px;fill:var(--ink-muted,#4a5a53);}
+
+    .step-indicator{display:inline-block;padding:.2rem .6rem;border-radius:4px;background:rgba(10,143,106,.08);color:var(--brand,#0a8f6a);font-size:.78rem;font-weight:700;margin-left:.5rem;}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../index.html">Home</a>
+      <a href="../../experience.html">Experience</a>
+      <a href="../../projects.html">Projects</a>
+      <a href="../../blog.html" class="active">Blog</a>
+      <a href="../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../blog.html">High Level Design Series &middot; Real-World Designs</a>
+        <span>&middot; Post 61 of 70</span>
+      </div>
+
+      <h1>Design: Web Crawler</h1>
+      <p class="post-meta">April 2026 &middot; 26 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           1. THE PROBLEM
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="problem">The Problem</h2>
+      <p>A <strong>web crawler</strong> (or spider) is a system that systematically browses the World Wide Web, downloading pages for indexing, archiving, or analysis. Search engines like Google, Bing, and DuckDuckGo depend on crawlers to discover and update billions of pages. The engineering challenge is immense: the web has <strong>over 4.5 billion indexed pages</strong>, each page can link to hundreds of others, and the whole corpus is in constant flux &mdash; pages are created, updated, and deleted every second.</p>
+
+      <p>Building a crawler that handles this at scale requires careful design of its URL scheduling (the <em>frontier</em>), politeness mechanisms, deduplication layers, and distributed architecture.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           2. REQUIREMENTS
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <ul>
+        <li>Crawl <strong>1 billion pages per month</strong> (~386 pages/second sustained).</li>
+        <li>Discover new pages by following hyperlinks from seed URLs.</li>
+        <li>Respect <code>robots.txt</code> directives and <code>Crawl-delay</code> headers.</li>
+        <li>Detect and avoid <strong>duplicate URLs</strong> and <strong>duplicate content</strong>.</li>
+        <li>Store downloaded content for downstream indexing/processing.</li>
+        <li>Re-crawl pages based on change frequency and importance.</li>
+      </ul>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Politeness:</strong> Never overwhelm a host &mdash; max 1 request/second per domain.</li>
+        <li><strong>Scalability:</strong> Horizontally scalable to handle 10&times; traffic surges.</li>
+        <li><strong>Robustness:</strong> Handle malformed HTML, infinite URL spaces, spider traps, and network failures gracefully.</li>
+        <li><strong>Extensibility:</strong> Pluggable modules for content extraction, link filtering, and priority scoring.</li>
+        <li><strong>Efficiency:</strong> Minimize DNS lookups, re-downloads, and wasted bandwidth.</li>
+      </ul>
+
+      <h3 id="back-of-envelope">Back-of-the-Envelope Estimation</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Metric</th><th style="text-align:left;padding:.5em;">Value</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Pages / month</td><td style="padding:.5em;border-bottom:1px solid var(--line);">1,000,000,000</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Pages / second</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~386 (1B / 30 days / 86400s)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Avg page size</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~100 KB (HTML only)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Monthly bandwidth</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~100 TB (1B &times; 100 KB)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Peak pages / second (5&times;)</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~1,930</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Unique URLs stored</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~10 billion (seen URLs)</td></tr>
+          <tr><td style="padding:.5em;">URL storage (avg 100 bytes &times; 10B)</td><td style="padding:.5em;">~1 TB</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           3. HIGH-LEVEL ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The crawler follows a loop:</p>
+
+      <pre><code>Seed URLs
+   │
+   ▼
+┌─────────────────┐     ┌──────────────┐     ┌──────────────┐
+│   URL Frontier   │────▶│ DNS Resolver  │────▶│   Fetcher    │
+│ (Priority Queue  │     │   (Cached)    │     │ (HTTP Client)│
+│ + Politeness Q)  │     └──────────────┘     └──────┬───────┘
+└────────▲─────────┘                                  │
+         │                                            ▼
+         │                                  ┌──────────────────┐
+         │                                  │  Content Parser   │
+         │                                  │ (HTML → DOM tree) │
+         │                                  └──────┬───────────┘
+         │                                         │
+         │                                         ▼
+         │                                  ┌──────────────────┐
+         │                                  │  URL Extractor    │
+         │                                  │ (href, canonical) │
+         │                                  └──────┬───────────┘
+         │                                         │
+         │         ┌────────────────┐              │
+         │         │  Content Store  │◀─────┐      ▼
+         │         │  (S3 / HDFS)   │      │  ┌───────────────┐
+         │         └────────────────┘      │  │  Dedup Layer   │
+         │                                 │  │ (Bloom Filter  │
+         └─────────────────────────────────┤  │ + SimHash)     │
+                                           │  └───────┬───────┘
+                                           │          │
+                                           └──────────┘
+                                        new URLs → frontier
+                                        content  → store</code></pre>
+
+      <p>Each component is designed to be <strong>independently scalable</strong>. The URL Frontier is the heart of the system &mdash; it decides <em>what</em> to crawl and <em>when</em>. The Dedup Layer prevents wasted work. The Fetcher is the I/O-heavy component that benefits most from horizontal scaling.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           ANIMATION 1: CRAWL FLOW
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="crawl-flow-visual">Crawl Flow &mdash; Interactive Visualization</h2>
+      <p>Click <strong>Step</strong> to trace a URL through the entire crawl pipeline. Watch how a seed URL enters the frontier, gets resolved, fetched, parsed, and its links are deduplicated before re-entering the frontier.</p>
+
+      <div class="anim-container" style="margin:2em 0;">
+        <svg id="crawl-anim" viewBox="0 0 780 380" style="width:100%;max-width:780px;background:var(--card,#fffdf9);border:1.5px solid var(--line,#d9cfba);border-radius:12px;">
+          <defs>
+            <marker id="crawl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--brand,#0a8f6a)"/></marker>
+            <marker id="crawl-arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--line,#d9cfba)"/></marker>
+          </defs>
+        </svg>
+        <div style="display:flex;align-items:center;gap:.75rem;margin-top:.75rem;flex-wrap:wrap;">
+          <button id="crawl-step" class="anim-btn">Step ▶</button>
+          <button id="crawl-reset" class="anim-btn">Reset ↺</button>
+          <span id="crawl-output" class="step-indicator">0 / 7</span>
+        </div>
+        <p id="crawl-info" style="margin-top:.5rem;font-size:.92rem;color:var(--ink-muted,#4a5a53);min-height:2.5em;">Click <strong>Step</strong> to begin the crawl cycle.</p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           4. URL FRONTIER DESIGN
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="url-frontier">URL Frontier Design</h2>
+      <p>The URL Frontier is the most critical component. It must answer two questions simultaneously: <strong>"What is the most important URL to crawl next?"</strong> (priority) and <strong>"Can we crawl this host right now without being rude?"</strong> (politeness). These are in tension &mdash; the highest-priority URL might belong to a host we just hit 200ms ago.</p>
+
+      <h3 id="frontier-priority">Priority Queue</h3>
+      <p>URLs are scored and inserted into one of <em>N</em> priority buckets (e.g., <em>N</em> = 256). Each bucket is a FIFO queue. Higher-priority buckets are drained first.</p>
+
+      <p><strong>Priority scoring factors:</strong></p>
+      <ul>
+        <li><strong>PageRank / link authority:</strong> Pages linked by many high-quality pages get higher priority.</li>
+        <li><strong>Freshness:</strong> Pages that change frequently (news homepages, stock tickers) are re-crawled sooner.</li>
+        <li><strong>Depth:</strong> URLs discovered at shallower BFS depth are prioritized (they tend to be more important).</li>
+        <li><strong>Domain importance:</strong> <code>wikipedia.org</code> ranks higher than a random personal blog.</li>
+        <li><strong>Content type hint:</strong> <code>.html</code> pages are prioritized over <code>.pdf</code> or <code>.zip</code> files.</li>
+      </ul>
+
+      <pre><code>// Simplified priority assignment
+function prioritize(url, metadata) {
+  let score = 0;
+  score += metadata.pageRank * 40;        // 0–40 points
+  score += metadata.domainAuthority * 20;  // 0–20 points
+  score += (10 - metadata.depth) * 3;     // 0–30: shallower = higher
+  score += metadata.changeFrequency * 10; // 0–10: more changes = higher
+  return Math.min(255, Math.max(0, Math.floor(score)));
+}
+
+// Insert into bucket
+frontier.buckets[prioritize(url, meta)].enqueue(url);</code></pre>
+
+      <h3 id="frontier-politeness">Politeness Queue</h3>
+      <p>Once a URL is selected from a priority bucket, it enters the <strong>politeness layer</strong>. This layer maintains <strong>one queue per domain</strong>. A fetcher thread can only pull from a domain queue if sufficient time has elapsed since the last request to that domain.</p>
+
+      <pre><code>// Per-domain queue structure
+domainQueues = {
+  "example.com":     Queue([url1, url4, url9]),
+  "wikipedia.org":   Queue([url2, url7]),
+  "news.ycombinator.com": Queue([url3]),
+  ...
+}
+
+// Rate limit: respect robots.txt Crawl-delay or default 1 req/sec
+domainTimers = {
+  "example.com":     { lastFetch: 1714000000, delay: 1000ms },
+  "wikipedia.org":   { lastFetch: 1714000001, delay: 5000ms },
+  ...
+}
+
+// Fetcher picks next available domain
+function pickNext() {
+  for (domain in domainQueues) {
+    if (now() - domainTimers[domain].lastFetch >= domainTimers[domain].delay) {
+      url = domainQueues[domain].dequeue();
+      domainTimers[domain].lastFetch = now();
+      return url;
+    }
+  }
+  return null; // all domains on cooldown
+}</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The two-tier design (priority &rarr; politeness) ensures that we always crawl <em>important</em> pages first while <em>never</em> overwhelming any single host. This is the architecture used by Mercator (the original crawler behind AltaVista) and its descendants.
+      </div>
+
+      <h3 id="frontier-data-structures">Data Structures</h3>
+      <p>At 10 billion URLs, the frontier can't fit entirely in RAM. A practical approach:</p>
+      <ul>
+        <li><strong>Front queues (priority):</strong> In-memory priority buckets holding the next ~1M URLs. Refilled from disk when drained.</li>
+        <li><strong>Back queues (politeness):</strong> In-memory per-domain queues, lazily loaded. Only active domains are in memory.</li>
+        <li><strong>Disk backing:</strong> A RocksDB or LevelDB instance stores the full frontier. URLs are batch-loaded into memory queues.</li>
+        <li><strong>Heap-based domain selector:</strong> A min-heap keyed by <code>lastFetch + delay</code> tells the fetcher which domain is next eligible.</li>
+      </ul>
+
+      <pre><code>┌────────────────────────────────────────────────────┐
+│                   URL FRONTIER                      │
+│                                                     │
+│  ┌─── Front Queues (Priority) ───┐                  │
+│  │ Bucket 255 ▓▓▓▓▓ (highest)    │                  │
+│  │ Bucket 254 ▓▓▓                 │                  │
+│  │ Bucket 253 ▓▓▓▓               │                  │
+│  │   ...                          │                  │
+│  │ Bucket   0 ▓ (lowest)         │                  │
+│  └────────────┬──────────────────┘                  │
+│               │ drain by priority                    │
+│               ▼                                      │
+│  ┌─── Back Queues (Politeness) ──┐                  │
+│  │ example.com    [url1, url4]   │                  │
+│  │ wikipedia.org  [url2]         │                  │
+│  │ github.com     [url5, url8]   │                  │
+│  └────────────┬──────────────────┘                  │
+│               │ pick domain with                     │
+│               │ earliest eligibility                 │
+│               ▼                                      │
+│         ┌──────────┐                                 │
+│         │ Fetcher  │                                 │
+│         └──────────┘                                 │
+└────────────────────────────────────────────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           5. BFS VS DFS
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="bfs-vs-dfs">BFS vs DFS Traversal</h2>
+      <p>The web is a directed graph. How we traverse it matters enormously:</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Aspect</th><th style="text-align:left;padding:.5em;">BFS (Breadth-First)</th><th style="text-align:left;padding:.5em;">DFS (Depth-First)</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Discovery pattern</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Explores all links at depth <em>d</em> before <em>d+1</em></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Dives deep into one path before backtracking</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Page importance</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Finds high-authority pages first (homepages, nav pages)</td><td style="padding:.5em;border-bottom:1px solid var(--line);">May get stuck on deep, low-value paths</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Politeness</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Naturally spreads requests across many domains</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Hammers one domain before moving on</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Spider trap risk</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Low &mdash; breadth limits depth exposure</td><td style="padding:.5em;border-bottom:1px solid var(--line);">High &mdash; can get trapped in infinite URL spaces</td></tr>
+          <tr><td style="padding:.5em;"><strong>Memory</strong></td><td style="padding:.5em;">Higher (stores entire frontier at current depth)</td><td style="padding:.5em;">Lower (only current path in stack)</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>BFS is strongly preferred</strong> for web crawling because it discovers important pages early, distributes load across domains naturally, and is resistant to spider traps. In practice, crawlers use a <em>priority-weighted BFS</em> where the frontier is a priority queue rather than a strict FIFO.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           6. ROBOTS.TXT PARSING
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="robots-txt">Robots.txt Parsing</h2>
+      <p>The <a href="https://www.rfc-editor.org/rfc/rfc9309" target="_blank" rel="noopener">Robots Exclusion Protocol</a> (RFC 9309) is the web's social contract between crawlers and site owners. A <code>robots.txt</code> file at the domain root tells crawlers what they may and may not access.</p>
+
+      <h3 id="robots-format">File Format</h3>
+      <pre><code># Example: https://example.com/robots.txt
+
+User-agent: *
+Disallow: /admin/
+Disallow: /private/
+Disallow: /search?q=
+Allow: /admin/public/
+Crawl-delay: 2
+
+User-agent: Googlebot
+Disallow: /no-google/
+Allow: /
+
+User-agent: BadBot
+Disallow: /
+
+Sitemap: https://example.com/sitemap.xml</code></pre>
+
+      <h3 id="robots-parsing-rules">Parsing Rules</h3>
+      <ol>
+        <li><strong>User-agent matching:</strong> Find the most specific <code>User-agent</code> group that matches your crawler's name. If none matches, fall back to <code>User-agent: *</code>.</li>
+        <li><strong>Allow vs Disallow:</strong> For a given path, the <em>longest matching rule</em> wins. <code>Allow: /admin/public/</code> overrides <code>Disallow: /admin/</code> for paths under <code>/admin/public/</code>.</li>
+        <li><strong>Crawl-delay:</strong> The number of seconds to wait between successive requests to this domain. Not all crawlers respect this (Google ignores it), but a polite crawler should honor it.</li>
+        <li><strong>Sitemap:</strong> Points to an XML sitemap for URL discovery. Crawlers should fetch and parse sitemaps to find pages that aren't linked from anywhere.</li>
+        <li><strong>Wildcards:</strong> <code>*</code> matches any sequence of characters. <code>$</code> matches the end of URL. E.g., <code>Disallow: /*.pdf$</code> blocks all PDF files.</li>
+      </ol>
+
+      <pre><code>// Robots.txt parser (simplified)
+class RobotsParser {
+  constructor(robotsTxt, userAgent) {
+    this.rules = [];
+    this.crawlDelay = 1; // default 1 second
+    this.sitemaps = [];
+    this.parse(robotsTxt, userAgent);
+  }
+
+  parse(text, ua) {
+    let lines = text.split('\n');
+    let activeGroup = false;
+    let wildcard = false;
+
+    for (let line of lines) {
+      line = line.split('#')[0].trim(); // strip comments
+      if (!line) continue;
+
+      let [directive, value] = line.split(':').map(s =&gt; s.trim());
+      directive = directive.toLowerCase();
+
+      if (directive === 'user-agent') {
+        if (value === ua)       activeGroup = true;
+        else if (value === '*') wildcard = true;
+        else                    activeGroup = false;
+      }
+      else if (activeGroup || (!activeGroup &amp;&amp; wildcard)) {
+        if (directive === 'disallow' &amp;&amp; value) {
+          this.rules.push({ path: value, allowed: false });
+        }
+        else if (directive === 'allow' &amp;&amp; value) {
+          this.rules.push({ path: value, allowed: true });
+        }
+        else if (directive === 'crawl-delay') {
+          this.crawlDelay = parseFloat(value) || 1;
+        }
+        else if (directive === 'sitemap') {
+          this.sitemaps.push(value);
+        }
+      }
+    }
+    // Sort by path length descending (longest match first)
+    this.rules.sort((a, b) =&gt; b.path.length - a.path.length);
+  }
+
+  isAllowed(urlPath) {
+    for (let rule of this.rules) {
+      if (this.matchPath(urlPath, rule.path)) {
+        return rule.allowed;
+      }
+    }
+    return true; // no matching rule = allowed
+  }
+
+  matchPath(urlPath, pattern) {
+    // Convert robots.txt pattern to regex
+    let regex = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&amp;') // escape special chars
+      .replace(/\*/g, '.*')                      // * → .*
+      .replace(/\\\$$/g, '$');                    // trailing \$ → $
+    return new RegExp('^' + regex).test(urlPath);
+  }
+}</code></pre>
+
+      <h3 id="robots-caching">Caching robots.txt</h3>
+      <p>Fetching <code>robots.txt</code> before every page is wasteful. The crawler caches it per domain with a TTL (typically <strong>24 hours</strong> or per the HTTP <code>Cache-Control</code> header). A background thread refreshes expiring entries. If <code>robots.txt</code> returns a <strong>4xx</strong>, the entire domain is assumed <em>allowed</em>. If it returns a <strong>5xx</strong>, the crawler should <em>back off</em> and retry later.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           7. DUPLICATE DETECTION
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="dedup">Duplicate Detection</h2>
+      <p>Duplicates waste bandwidth, storage, and processing time. There are two kinds:</p>
+
+      <h3 id="url-dedup">URL Deduplication</h3>
+      <p>The same page can be reached through many different URLs:</p>
+      <ul>
+        <li><code>http://example.com/page</code> vs <code>https://example.com/page</code></li>
+        <li><code>example.com/page/</code> vs <code>example.com/page</code> (trailing slash)</li>
+        <li><code>example.com/page?utm_source=twitter</code> vs <code>example.com/page</code> (tracking params)</li>
+        <li><code>example.com/Page</code> vs <code>example.com/page</code> (case sensitivity)</li>
+      </ul>
+
+      <p><strong>URL canonicalization</strong> normalizes URLs before dedup:</p>
+      <pre><code>function canonicalize(url) {
+  let u = new URL(url);
+  // 1. Lowercase scheme and host
+  u.protocol = u.protocol.toLowerCase();
+  u.hostname = u.hostname.toLowerCase();
+  // 2. Remove default port
+  if ((u.protocol === 'http:' &amp;&amp; u.port === '80') ||
+      (u.protocol === 'https:' &amp;&amp; u.port === '443')) {
+    u.port = '';
+  }
+  // 3. Remove fragment
+  u.hash = '';
+  // 4. Remove tracking parameters
+  let strip = ['utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid'];
+  strip.forEach(p =&gt; u.searchParams.delete(p));
+  // 5. Sort remaining params
+  u.searchParams.sort();
+  // 6. Remove trailing slash (except root)
+  if (u.pathname !== '/' &amp;&amp; u.pathname.endsWith('/')) {
+    u.pathname = u.pathname.slice(0, -1);
+  }
+  // 7. Decode unnecessary percent-encoding
+  u.pathname = decodeURIComponent(u.pathname);
+  return u.toString();
+}</code></pre>
+
+      <p>After canonicalization, we check membership using a <strong>Bloom filter</strong>:</p>
+
+      <pre><code>// Bloom filter for URL dedup
+// 10 billion URLs, 1% false positive rate → ~11.5 GB memory
+// k = 7 hash functions, m = 96 billion bits
+
+class URLBloomFilter {
+  constructor(expectedItems = 10_000_000_000, fpRate = 0.01) {
+    this.m = Math.ceil(-expectedItems * Math.log(fpRate) / (Math.log(2) ** 2));
+    this.k = Math.round((this.m / expectedItems) * Math.log(2));
+    this.bits = new BitArray(this.m);  // ~11.5 GB
+  }
+
+  add(url) {
+    for (let i = 0; i &lt; this.k; i++) {
+      this.bits.set(this.hash(url, i) % this.m);
+    }
+  }
+
+  mightContain(url) {
+    for (let i = 0; i &lt; this.k; i++) {
+      if (!this.bits.get(this.hash(url, i) % this.m)) return false;
+    }
+    return true; // possibly seen (small false positive rate)
+  }
+
+  hash(url, seed) {
+    return murmurHash3(url, seed); // fast, well-distributed hash
+  }
+}</code></pre>
+
+      <div class="callout">
+        <strong>Bloom filter trade-off:</strong> False positives mean we <em>skip</em> a URL we haven't actually crawled (acceptable &mdash; we'll discover it through other paths). False negatives would mean crawling a page twice (Bloom filters guarantee zero false negatives). At 1% FP rate, we miss ~1% of unique URLs &mdash; a good trade-off for 11.5 GB vs. 1 TB of full hash storage.
+      </div>
+
+      <h3 id="content-dedup">Content Deduplication (SimHash)</h3>
+      <p>Different URLs can serve <em>identical or near-identical content</em> (mirrors, syndicated articles, paginated duplicates). Byte-level hashing (MD5/SHA) catches exact duplicates but misses near-duplicates that differ by ads, timestamps, or minor layout changes.</p>
+
+      <p><strong>SimHash</strong> (invented by Moses Charikar, used by Google) produces a fingerprint where <em>similar documents produce similar hashes</em>. Two documents are near-duplicates if their SimHash values differ by only a few bits (Hamming distance &le; 3).</p>
+
+      <h4 id="simhash-algorithm">SimHash Algorithm</h4>
+      <pre><code>function simHash(document, hashBits = 64) {
+  // Step 1: Extract features (weighted shingles)
+  let tokens = tokenize(document);
+  let shingles = [];
+  for (let i = 0; i &lt;= tokens.length - 3; i++) {
+    shingles.push(tokens.slice(i, i + 3).join(' ')); // 3-word shingles
+  }
+
+  // Step 2: Initialize a V vector of size hashBits, all zeros
+  let V = new Array(hashBits).fill(0);
+
+  // Step 3: For each shingle, compute its hash and update V
+  for (let shingle of shingles) {
+    let weight = getWeight(shingle); // TF-IDF or frequency
+    let h = hash64(shingle);         // 64-bit hash
+
+    for (let i = 0; i &lt; hashBits; i++) {
+      if ((h &gt;&gt; BigInt(i)) &amp; 1n) {
+        V[i] += weight;   // bit is 1 → add weight
+      } else {
+        V[i] -= weight;   // bit is 0 → subtract weight
+      }
+    }
+  }
+
+  // Step 4: Convert V to fingerprint
+  let fingerprint = 0n;
+  for (let i = 0; i &lt; hashBits; i++) {
+    if (V[i] &gt; 0) {
+      fingerprint |= (1n &lt;&lt; BigInt(i));
+    }
+  }
+
+  return fingerprint;
+}
+
+// Hamming distance between two SimHash fingerprints
+function hammingDistance(a, b) {
+  let xor = a ^ b;
+  let count = 0;
+  while (xor) {
+    count += Number(xor &amp; 1n);
+    xor &gt;&gt;= 1n;
+  }
+  return count;
+}
+
+// Near-duplicate if Hamming distance ≤ 3
+function isNearDuplicate(fp1, fp2) {
+  return hammingDistance(fp1, fp2) &lt;= 3;
+}</code></pre>
+
+      <h4 id="simhash-lookup">Efficient SimHash Lookup</h4>
+      <p>Checking a new fingerprint against billions of stored fingerprints for Hamming distance &le; 3 is expensive. The <strong>table-based approach</strong> partitions the 64-bit hash into blocks and uses multiple lookup tables:</p>
+
+      <pre><code>// Partition 64-bit SimHash into 4 blocks of 16 bits each
+// Store in 4 tables, keyed by each block
+// If two hashes differ by ≤3 bits total, at least ONE of the
+// 4 blocks must be identical (pigeonhole principle)
+
+tables = [HashMap(), HashMap(), HashMap(), HashMap()];
+
+function store(fingerprint) {
+  for (let i = 0; i &lt; 4; i++) {
+    let block = (fingerprint &gt;&gt; BigInt(i * 16)) &amp; 0xFFFFn;
+    tables[i].getOrCreate(block).add(fingerprint);
+  }
+}
+
+function findNearDuplicates(fingerprint) {
+  let candidates = new Set();
+  for (let i = 0; i &lt; 4; i++) {
+    let block = (fingerprint &gt;&gt; BigInt(i * 16)) &amp; 0xFFFFn;
+    for (let stored of tables[i].get(block, [])) {
+      if (hammingDistance(fingerprint, stored) &lt;= 3) {
+        candidates.add(stored);
+      }
+    }
+  }
+  return candidates;
+}</code></pre>
+
+      <h4 id="minhash">MinHash for Jaccard Similarity</h4>
+      <p><strong>MinHash</strong> is an alternative for set-similarity detection. It estimates Jaccard similarity between two documents' shingle sets without comparing them directly.</p>
+
+      <pre><code>function minHash(shingleSet, numHashes = 200) {
+  let signature = new Array(numHashes).fill(Infinity);
+  for (let shingle of shingleSet) {
+    for (let i = 0; i &lt; numHashes; i++) {
+      let h = hashWithSeed(shingle, i);
+      signature[i] = Math.min(signature[i], h);
+    }
+  }
+  return signature;
+}
+
+// Estimated Jaccard similarity
+function jaccardEstimate(sig1, sig2) {
+  let matches = 0;
+  for (let i = 0; i &lt; sig1.length; i++) {
+    if (sig1[i] === sig2[i]) matches++;
+  }
+  return matches / sig1.length;
+}
+
+// Near-duplicate if Jaccard ≥ 0.8
+function isNearDup(sig1, sig2) {
+  return jaccardEstimate(sig1, sig2) &gt;= 0.8;
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           ANIMATION 2: POLITENESS QUEUE
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="politeness-visual">Politeness Queue &mdash; Interactive Visualization</h2>
+      <p>Click <strong>Step</strong> to watch the fetcher pick from different domain queues. Notice how each domain has its own rate limit &mdash; the fetcher never sends two concurrent requests to the same domain.</p>
+
+      <div class="anim-container" style="margin:2em 0;">
+        <svg id="politeness-anim" viewBox="0 0 780 340" style="width:100%;max-width:780px;background:var(--card,#fffdf9);border:1.5px solid var(--line,#d9cfba);border-radius:12px;">
+        </svg>
+        <div style="display:flex;align-items:center;gap:.75rem;margin-top:.75rem;flex-wrap:wrap;">
+          <button id="pol-step" class="anim-btn">Step ▶</button>
+          <button id="pol-reset" class="anim-btn">Reset ↺</button>
+          <span id="pol-output" class="step-indicator">0 / 8</span>
+        </div>
+        <p id="pol-info" style="margin-top:.5rem;font-size:.92rem;color:var(--ink-muted,#4a5a53);min-height:2.5em;">Click <strong>Step</strong> to see politeness-based domain scheduling.</p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           8. DNS RESOLUTION CACHING
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="dns-caching">DNS Resolution Caching</h2>
+      <p>DNS resolution is a hidden bottleneck. Each fetch requires resolving the hostname to an IP address. Standard OS DNS caches are too small for a crawler hitting millions of unique domains.</p>
+
+      <h3 id="dns-strategy">Crawler DNS Strategy</h3>
+      <ul>
+        <li><strong>Local DNS cache:</strong> An in-process LRU cache holding ~1M domain → IP mappings. TTL respects the DNS record's TTL (usually 5 minutes to 24 hours).</li>
+        <li><strong>Dedicated DNS resolver:</strong> Run a local <code>unbound</code> or <code>dnsmasq</code> instance with a large cache (1–2 GB RAM). This avoids saturating upstream DNS servers.</li>
+        <li><strong>Batch prefetching:</strong> When loading URLs from the frontier into the politeness queue, resolve DNS for all of them in parallel using async I/O.</li>
+        <li><strong>Fallback:</strong> If resolution fails, retry with a different DNS provider (Google DNS 8.8.8.8, Cloudflare 1.1.1.1). After 3 failures, mark the domain as unreachable and skip its URLs for 24 hours.</li>
+      </ul>
+
+      <pre><code>class DNSCache {
+  constructor(maxEntries = 1_000_000) {
+    this.cache = new LRUCache(maxEntries);
+    this.negativeCache = new LRUCache(100_000); // failed lookups
+  }
+
+  async resolve(hostname) {
+    // Check positive cache
+    let cached = this.cache.get(hostname);
+    if (cached &amp;&amp; cached.expiry &gt; Date.now()) return cached.ip;
+
+    // Check negative cache (don't retry too soon)
+    let neg = this.negativeCache.get(hostname);
+    if (neg &amp;&amp; neg.retryAfter &gt; Date.now()) return null;
+
+    try {
+      let result = await dns.resolve4(hostname);
+      this.cache.set(hostname, {
+        ip: result[0],
+        expiry: Date.now() + result.ttl * 1000
+      });
+      return result[0];
+    } catch (err) {
+      this.negativeCache.set(hostname, {
+        retryAfter: Date.now() + 24 * 3600 * 1000 // 24h backoff
+      });
+      return null;
+    }
+  }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           9. CONTENT PARSING & LINK EXTRACTION
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="content-parsing">Content Parsing &amp; Link Extraction</h2>
+      <p>After fetching a page, the crawler must extract useful information and discover new URLs.</p>
+
+      <h3 id="parsing-pipeline">Parsing Pipeline</h3>
+      <pre><code>function processPage(url, html, headers) {
+  // 1. Charset detection & decoding
+  let charset = detectCharset(headers['content-type'], html);
+  let text = decode(html, charset);
+
+  // 2. Parse HTML into DOM
+  let dom = parseHTML(text); // using a lenient parser (like htmlparser2)
+
+  // 3. Check for meta robots directives
+  let metaRobots = dom.querySelector('meta[name="robots"]');
+  if (metaRobots) {
+    let content = metaRobots.getAttribute('content').toLowerCase();
+    if (content.includes('noindex')) skipIndexing(url);
+    if (content.includes('nofollow')) return []; // don't extract links
+  }
+
+  // 4. Extract canonical URL
+  let canonical = dom.querySelector('link[rel="canonical"]');
+  if (canonical &amp;&amp; canonical.href !== url) {
+    // This page says it's a duplicate of canonical.href
+    markAsDuplicate(url, canonical.href);
+  }
+
+  // 5. Extract links
+  let links = [];
+  for (let anchor of dom.querySelectorAll('a[href]')) {
+    let href = anchor.getAttribute('href');
+    let rel = anchor.getAttribute('rel') || '';
+
+    // Skip nofollow links
+    if (rel.includes('nofollow')) continue;
+
+    // Resolve relative URLs
+    let absoluteUrl = resolveUrl(url, href);
+
+    // Filter: only http/https, skip mailto:, javascript:, etc.
+    if (absoluteUrl.startsWith('http://') || absoluteUrl.startsWith('https://')) {
+      links.push(canonicalize(absoluteUrl));
+    }
+  }
+
+  // 6. Extract metadata
+  let metadata = {
+    title: dom.querySelector('title')?.textContent,
+    description: dom.querySelector('meta[name="description"]')?.content,
+    language: dom.documentElement.getAttribute('lang'),
+    lastModified: headers['last-modified'],
+  };
+
+  return { links, metadata, text: extractText(dom) };
+}</code></pre>
+
+      <h3 id="content-types">Handling Different Content Types</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Content-Type</th><th style="text-align:left;padding:.5em;">Action</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><code>text/html</code></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Full parsing, link extraction, indexing</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><code>application/pdf</code></td><td style="padding:.5em;border-bottom:1px solid var(--line);">PDF text extraction (Apache Tika), index but no link extraction</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><code>application/xml</code></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Check if sitemap — parse for URLs if so</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><code>image/*</code>, <code>video/*</code></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Skip or store metadata only (alt text from referring page)</td></tr>
+          <tr><td style="padding:.5em;"><code>application/javascript</code></td><td style="padding:.5em;">Skip — no crawlable content</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           10. STORAGE
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="storage">Storage Architecture</h2>
+
+      <h3 id="url-database">URL Database</h3>
+      <p>Tracks every URL the crawler has seen, with metadata:</p>
+      <pre><code>CREATE TABLE urls (
+  url_hash     BIGINT PRIMARY KEY,  -- 64-bit hash of canonical URL
+  canonical_url TEXT NOT NULL,
+  domain       TEXT NOT NULL,
+  last_crawled TIMESTAMP,
+  next_crawl   TIMESTAMP,           -- scheduled recrawl time
+  http_status  SMALLINT,
+  content_hash BIGINT,              -- SimHash fingerprint
+  priority     SMALLINT DEFAULT 0,
+  crawl_count  INT DEFAULT 0,
+  change_freq  INTERVAL,            -- estimated change frequency
+  INDEX idx_next_crawl (next_crawl),
+  INDEX idx_domain (domain)
+);</code></pre>
+
+      <p>With 10 billion rows, this table is <strong>sharded by <code>url_hash</code></strong> across multiple database nodes. Each shard holds ~500M–1B rows.</p>
+
+      <h3 id="content-store">Content Store</h3>
+      <p>Raw HTML and extracted text are stored in an object store (S3, HDFS, or Google Cloud Storage):</p>
+
+      <pre><code>// Content storage layout
+s3://crawler-content/
+  ├── raw/          # Raw HTML responses
+  │   ├── 2026/04/15/
+  │   │   ├── {url_hash_1}.html.gz    # gzipped HTML
+  │   │   ├── {url_hash_2}.html.gz
+  │   │   └── ...
+  ├── parsed/       # Extracted text + metadata (JSON)
+  │   ├── 2026/04/15/
+  │   │   ├── {url_hash_1}.json.gz
+  │   │   └── ...
+  └── index/        # Manifest files for batch processing
+      ├── 2026-04-15-manifest.jsonl
+      └── ...</code></pre>
+
+      <p>At 100 KB average page size &times; 1B pages/month = <strong>~100 TB/month</strong>. With gzip compression (~5:1 ratio), actual storage is ~20 TB/month. Lifecycle policies automatically tier older data to cheaper storage (S3 Glacier) after 90 days.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           11. DISTRIBUTED CRAWLING
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="distributed">Distributed Crawling</h2>
+      <p>A single machine can fetch perhaps 50–100 pages/second. At 386 pages/second sustained, we need at least <strong>4–8 crawler nodes</strong>. At peak (1,930 pages/sec), we need <strong>20–40 nodes</strong>.</p>
+
+      <h3 id="partitioning">Partitioning Strategy</h3>
+      <p>Two main approaches:</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Strategy</th><th style="text-align:left;padding:.5em;">How It Works</th><th style="text-align:left;padding:.5em;">Pros</th><th style="text-align:left;padding:.5em;">Cons</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>URL hash partition</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);"><code>node = hash(url) % N</code></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Even distribution, simple</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Same domain spread across nodes — harder to enforce per-domain politeness</td></tr>
+          <tr><td style="padding:.5em;"><strong>Domain-based partition</strong></td><td style="padding:.5em;"><code>node = hash(domain) % N</code></td><td style="padding:.5em;">All URLs for a domain on one node — easy politeness enforcement</td><td style="padding:.5em;">Skewed load (wikipedia.org has vastly more URLs than a personal blog)</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Domain-based partitioning is preferred</strong> because it localizes politeness state (robots.txt cache, crawl-delay timers, per-domain queues) to a single node, eliminating distributed coordination.</p>
+
+      <h3 id="coordination">Coordination Architecture</h3>
+      <pre><code>┌───────────────────────────────────────────────┐
+│              Coordinator Service               │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
+│  │ Assigner  │  │ Monitor   │  │ Rebalancer│  │
+│  └───────────┘  └───────────┘  └───────────┘  │
+└───────────────────────┬───────────────────────┘
+                        │ domain assignments
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────┐
+   │  Crawler   │ │  Crawler   │ │  Crawler   │
+   │  Node 1    │ │  Node 2    │ │  Node 3    │
+   │            │ │            │ │            │
+   │ domains:   │ │ domains:   │ │ domains:   │
+   │ A-F hash   │ │ G-M hash   │ │ N-Z hash   │
+   │ range      │ │ range      │ │ range      │
+   └────────────┘ └────────────┘ └────────────┘
+         │              │              │
+         ▼              ▼              ▼
+   ┌────────────────────────────────────────┐
+   │       Shared URL Database (sharded)    │
+   └────────────────────────────────────────┘
+   ┌────────────────────────────────────────┐
+   │       Content Store (S3 / HDFS)        │
+   └────────────────────────────────────────┘</code></pre>
+
+      <ul>
+        <li><strong>Assigner:</strong> Maps domain hash ranges to crawler nodes using consistent hashing.</li>
+        <li><strong>Monitor:</strong> Tracks node health via heartbeats. Detects failed nodes within 30 seconds.</li>
+        <li><strong>Rebalancer:</strong> When a node fails or is added, reassigns domain ranges with minimal disruption.</li>
+      </ul>
+
+      <h3 id="cross-node-urls">Cross-Node URL Exchange</h3>
+      <p>When Crawler Node 1 finds a link to <code>github.com</code> (owned by Node 3), it must route the URL to the correct node:</p>
+      <pre><code>// After extracting links from a page
+for (let link of extractedLinks) {
+  let targetNode = consistentHash(getDomain(link)) % numNodes;
+  if (targetNode === myNodeId) {
+    localFrontier.add(link);          // local — add directly
+  } else {
+    outboundBuffers[targetNode].add(link); // remote — buffer
+  }
+}
+
+// Flush buffers periodically (every 1 second or 1000 URLs)
+for (let node in outboundBuffers) {
+  if (outboundBuffers[node].size &gt; 1000 || timeSinceFlush &gt; 1000) {
+    sendBatch(node, outboundBuffers[node].drain());
+  }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           12. RECRAWL STRATEGY
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="recrawl">Recrawl Strategy</h2>
+      <p>Not all pages change at the same rate. An effective recrawl policy prioritizes pages that are likely to have changed since the last visit.</p>
+
+      <h3 id="recrawl-signals">Change Frequency Estimation</h3>
+      <ul>
+        <li><strong>Historical change rate:</strong> If a page changed in 3 of the last 5 crawls, it changes ~60% of the time. Recrawl more often.</li>
+        <li><strong>HTTP headers:</strong> <code>Last-Modified</code> and <code>ETag</code> allow conditional GETs (<code>If-Modified-Since</code>), saving bandwidth when the page hasn't changed.</li>
+        <li><strong>Page type heuristic:</strong> News homepages change every few minutes. Product pages change weekly. Archive pages change yearly.</li>
+        <li><strong>Sitemap <code>&lt;changefreq&gt;</code>:</strong> Site owners declare expected change frequency (hourly, daily, weekly, etc.).</li>
+      </ul>
+
+      <pre><code>// Adaptive recrawl scheduling
+function scheduleRecrawl(url, crawlHistory) {
+  let changes = crawlHistory.filter(c =&gt; c.changed).length;
+  let total = crawlHistory.length;
+  let changeRate = total &gt; 0 ? changes / total : 0.5; // default 50%
+
+  // Exponential backoff: pages that rarely change get crawled less often
+  let baseInterval;
+  if (changeRate &gt; 0.8) baseInterval = 1 * HOUR;   // very dynamic
+  else if (changeRate &gt; 0.5) baseInterval = 6 * HOUR;
+  else if (changeRate &gt; 0.2) baseInterval = 1 * DAY;
+  else if (changeRate &gt; 0.05) baseInterval = 7 * DAY;
+  else baseInterval = 30 * DAY;                       // nearly static
+
+  // Adjust by page importance (PageRank)
+  let importance = getPageRank(url);
+  let interval = baseInterval / (1 + importance); // important pages crawled sooner
+
+  return Date.now() + interval;
+}</code></pre>
+
+      <div class="callout">
+        <strong>Conditional GET optimization:</strong> For recrawls, always send <code>If-Modified-Since</code> and <code>If-None-Match</code> headers. If the server returns <strong>304 Not Modified</strong>, you save bandwidth and know the content hasn't changed &mdash; without downloading the full page.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           13. SPIDER TRAPS & INFINITE URL SPACES
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="spider-traps">Handling Spider Traps</h2>
+      <p>Spider traps are pages (intentional or accidental) that generate an infinite number of unique URLs, causing the crawler to waste resources endlessly.</p>
+
+      <h3 id="trap-types">Common Trap Types</h3>
+      <ul>
+        <li><strong>Infinite calendar:</strong> <code>/calendar?date=2026-04-15</code> → links to <code>?date=2026-04-16</code> → <code>?date=2026-04-17</code> → forever.</li>
+        <li><strong>Session IDs in URLs:</strong> <code>/page?sid=abc123</code> — each visit generates a new session ID, creating a new "unique" URL.</li>
+        <li><strong>Soft 404s:</strong> Server returns 200 OK for any URL path (<code>/anything/you/type</code>), making the URL space infinite.</li>
+        <li><strong>Deliberately hostile:</strong> <code>&lt;a href="/trap/&lt;random_string&gt;"&gt;</code> — a page that generates links to random sub-paths.</li>
+        <li><strong>Parameterized pagination:</strong> <code>/search?page=1</code>, <code>?page=2</code>, ... <code>?page=999999999</code>.</li>
+      </ul>
+
+      <h3 id="trap-defenses">Defense Mechanisms</h3>
+      <ol>
+        <li><strong>Max depth limit:</strong> Don't follow links beyond depth 15–20 from seed URLs. Deep pages are rarely valuable.</li>
+        <li><strong>Per-domain URL budget:</strong> Cap the number of URLs crawled per domain per cycle (e.g., 100,000). Prevents any single domain from consuming the entire crawl budget.</li>
+        <li><strong>URL pattern detection:</strong> If we see many URLs matching the same pattern with only a changing parameter (e.g., <code>/calendar?date=*</code>), sample a few and stop.</li>
+        <li><strong>Content fingerprinting:</strong> If the last 10 pages from a domain all have the same SimHash, the domain is likely a trap. Deprioritize it.</li>
+        <li><strong>URL length limit:</strong> URLs longer than 2,048 characters are suspicious. Skip them.</li>
+        <li><strong>Blacklisting:</strong> Maintain a manual blacklist of known trap domains, updated by operators.</li>
+      </ol>
+
+      <pre><code>// Spider trap detection
+class TrapDetector {
+  constructor() {
+    this.domainStats = new Map(); // domain → { count, patterns, hashes }
+  }
+
+  check(url, domain, contentHash) {
+    let stats = this.domainStats.get(domain) || { count: 0, patterns: {}, recentHashes: [] };
+    stats.count++;
+
+    // Check 1: Per-domain URL budget
+    if (stats.count &gt; 100_000) {
+      return { isTrap: true, reason: 'URL budget exceeded' };
+    }
+
+    // Check 2: URL pattern clustering
+    let pattern = url.replace(/[0-9]+/g, '{N}')
+                     .replace(/[a-f0-9]{8,}/gi, '{HASH}');
+    stats.patterns[pattern] = (stats.patterns[pattern] || 0) + 1;
+    if (stats.patterns[pattern] &gt; 1000) {
+      return { isTrap: true, reason: `Pattern "${pattern}" seen 1000+ times` };
+    }
+
+    // Check 3: Content similarity
+    stats.recentHashes.push(contentHash);
+    if (stats.recentHashes.length &gt; 10) {
+      stats.recentHashes.shift();
+      let allSame = stats.recentHashes.every(h =&gt;
+        hammingDistance(h, stats.recentHashes[0]) &lt;= 3
+      );
+      if (allSame) {
+        return { isTrap: true, reason: 'Last 10 pages are near-identical' };
+      }
+    }
+
+    this.domainStats.set(domain, stats);
+    return { isTrap: false };
+  }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           14. JAVASCRIPT RENDERING
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="js-rendering">JavaScript Rendering</h2>
+      <p>Modern single-page applications (React, Angular, Vue) render content client-side. A traditional crawler that only reads raw HTML will see an empty <code>&lt;div id="root"&gt;&lt;/div&gt;</code> with no links or content.</p>
+
+      <h3 id="rendering-approaches">Rendering Approaches</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Approach</th><th style="text-align:left;padding:.5em;">Description</th><th style="text-align:left;padding:.5em;">Latency</th><th style="text-align:left;padding:.5em;">Cost</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Static HTML only</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Parse raw HTML as-is</td><td style="padding:.5em;border-bottom:1px solid var(--line);">~10ms</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Very low</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Headless browser</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">Chromium (Puppeteer) executes JS, waits for DOM</td><td style="padding:.5em;border-bottom:1px solid var(--line);">2–10s</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Very high (CPU + RAM)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);"><strong>Lightweight JS engine</strong></td><td style="padding:.5em;border-bottom:1px solid var(--line);">V8 isolate without full browser (no layout/paint)</td><td style="padding:.5em;border-bottom:1px solid var(--line);">500ms–2s</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Medium</td></tr>
+          <tr><td style="padding:.5em;"><strong>Hybrid</strong></td><td style="padding:.5em;">Try static first; if minimal content detected, re-queue for JS rendering</td><td style="padding:.5em;">Varies</td><td style="padding:.5em;">Optimal</td></tr>
+        </tbody>
+      </table>
+
+      <p>The <strong>hybrid approach</strong> is used by Google's crawler (Googlebot). It first processes the raw HTML (fast, cheap). If the page contains framework markers (<code>&lt;div id="root"&gt;</code>, <code>&lt;app-root&gt;</code>, <code>noscript</code> tags with content hints), it's re-queued for a separate <strong>rendering service</strong> that runs headless Chrome at scale.</p>
+
+      <pre><code>// Hybrid rendering decision
+function needsJSRendering(html) {
+  // Check for SPA framework signatures
+  let spaMarkers = [
+    '&lt;div id="root"&gt;&lt;/div&gt;',
+    '&lt;div id="app"&gt;&lt;/div&gt;',
+    '&lt;app-root&gt;',
+    'window.__NEXT_DATA__',
+    'window.__NUXT__',
+  ];
+
+  let hasMarker = spaMarkers.some(m =&gt; html.includes(m));
+
+  // Check if meaningful content exists
+  let textContent = stripTags(html).trim();
+  let hasContent = textContent.length &gt; 500; // at least 500 chars of text
+
+  // Needs JS rendering if SPA markers present AND no meaningful static content
+  return hasMarker &amp;&amp; !hasContent;
+}
+
+// Rendering service (Puppeteer pool)
+async function renderWithJS(url) {
+  let browser = await browserPool.acquire();
+  try {
+    let page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', req =&gt; {
+      // Block images, fonts, stylesheets — only need HTML + JS
+      if (['image','stylesheet','font','media'].includes(req.resourceType())) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+    let html = await page.content();
+    await page.close();
+    return html;
+  } finally {
+    browserPool.release(browser);
+  }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           15. PUTTING IT ALL TOGETHER
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="full-pipeline">Complete Pipeline Summary</h2>
+      <pre><code>┌──────────────────────────────────────────────────────────────────────┐
+│                     WEB CRAWLER PIPELINE                             │
+│                                                                      │
+│  ┌──────┐   ┌───────────┐   ┌────────────┐   ┌──────────────┐       │
+│  │ Seed │──▶│   URL     │──▶│ robots.txt │──▶│    DNS       │       │
+│  │ URLs │   │ Frontier  │   │  Checker   │   │   Resolver   │       │
+│  └──────┘   │           │   └────────────┘   │   (cached)   │       │
+│             │ Priority  │                     └──────┬───────┘       │
+│             │ + Polite  │                            │               │
+│             └─────▲─────┘                            ▼               │
+│                   │                          ┌──────────────┐        │
+│                   │                          │   Fetcher    │        │
+│                   │                          │  (HTTP/1.1   │        │
+│                   │                          │   HTTP/2)    │        │
+│                   │                          └──────┬───────┘        │
+│                   │                                 │                │
+│                   │                                 ▼                │
+│                   │                          ┌──────────────┐        │
+│                   │                          │  JS Render?  │        │
+│                   │                          │  (if needed) │        │
+│                   │                          └──────┬───────┘        │
+│                   │                                 │                │
+│                   │                                 ▼                │
+│                   │         ┌─────────┐     ┌──────────────┐        │
+│                   │         │ Content │◀────│   Content    │        │
+│                   │         │  Store  │     │   Parser     │        │
+│                   │         │ (S3)    │     └──────┬───────┘        │
+│                   │         └─────────┘            │                │
+│                   │                                ▼                │
+│                   │                         ┌──────────────┐        │
+│                   │                         │     URL      │        │
+│                   │                         │  Extractor   │        │
+│                   │                         └──────┬───────┘        │
+│                   │                                │                │
+│                   │                                ▼                │
+│                   │                         ┌──────────────┐        │
+│                   │                         │   Dedup      │        │
+│                   │                         │ (Bloom +     │        │
+│                   │         new URLs        │  SimHash)    │        │
+│                   └─────────────────────────┤              │        │
+│                                             └──────────────┘        │
+└──────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <h3 id="operational-metrics">Key Operational Metrics</h3>
+      <ul>
+        <li><strong>Pages crawled / second</strong> — primary throughput metric.</li>
+        <li><strong>URL frontier size</strong> — if growing unboundedly, something is wrong (possibly a spider trap).</li>
+        <li><strong>Duplicate rate</strong> — percentage of URLs/content filtered by dedup. Should be 30–60%.</li>
+        <li><strong>Error rate</strong> — 4xx/5xx responses, DNS failures, timeouts. Alert if &gt; 5%.</li>
+        <li><strong>Politeness compliance</strong> — verify no domain receives &gt; 1 req/sec (or its crawl-delay).</li>
+        <li><strong>Freshness</strong> — average age of content in the index. Lower is better for news; acceptable for archives.</li>
+        <li><strong>Rendering queue depth</strong> — how many pages are waiting for JS rendering. Monitor for backlog.</li>
+      </ul>
+
+      <h3 id="tech-stack">Suggested Technology Stack</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:.5em;">Component</th><th style="text-align:left;padding:.5em;">Technology</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">URL Frontier</td><td style="padding:.5em;border-bottom:1px solid var(--line);">RocksDB (disk) + in-memory priority heaps</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">URL Dedup</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Bloom filter (in-memory, 12 GB)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Content Dedup</td><td style="padding:.5em;border-bottom:1px solid var(--line);">SimHash stored in Redis / Cassandra</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">DNS Cache</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Local unbound + in-process LRU</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Fetcher</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Async HTTP client (Netty / aiohttp / Go net/http)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">HTML Parser</td><td style="padding:.5em;border-bottom:1px solid var(--line);">htmlparser2 (JS) / jsoup (Java) / lxml (Python)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">JS Rendering</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Puppeteer / Playwright pool (headless Chromium)</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Content Store</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Amazon S3 / HDFS</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">URL Database</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Sharded PostgreSQL or Cassandra</td></tr>
+          <tr><td style="padding:.5em;border-bottom:1px solid var(--line);">Cross-Node Messaging</td><td style="padding:.5em;border-bottom:1px solid var(--line);">Kafka / gRPC streams</td></tr>
+          <tr><td style="padding:.5em;">Coordination</td><td style="padding:.5em;">ZooKeeper / etcd for leader election + config</td></tr>
+        </tbody>
+      </table>
+
+      <p>In the next post, we'll design a <strong>Payment System</strong> — handling money with correctness guarantees, idempotency, and distributed transaction management.</p>
+
+      <nav class="post-nav">
+        <a href="stock-exchange.html">
+          <span>Previous</span>
+          <span>&larr; Stock Exchange</span>
+        </a>
+        <a class="next" href="payment-system.html">
+          <span>Next</span>
+          <span>Payment System &rarr;</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  /* ═══════════════════════════════════════════════════════════════════
+     ANIMATION 1 — Crawl Flow Pipeline
+     ═══════════════════════════════════════════════════════════════════ */
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('crawl-anim');
+    var info=document.getElementById('crawl-info');
+    var out=document.getElementById('crawl-output');
+    var step=0,totalSteps=8;
+    var B='#0a8f6a',DIM='#d9cfba',CARD='#fffdf9',INK='#13201a',MUTED='#4a5a53',WARN='#f59e0b',RED='#e74c3c',BLOOM='#6366f1';
+
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+
+    function roundRect(parent,x,y,w,h,fill,stroke,label,textFill,fs){
+      fs=fs||11;
+      parent.appendChild(el('rect',{x:x,y:y,width:w,height:h,rx:8,fill:fill,stroke:stroke,'stroke-width':2}));
+      var lines=label.split('\n');
+      for(var i=0;i<lines.length;i++){
+        parent.appendChild(txt(lines[i],{x:''+(x+w/2),y:''+(y+h/2+(i-(lines.length-1)/2)*14),'text-anchor':'middle','dominant-baseline':'middle','font-family':'Syne,sans-serif','font-size':''+fs,'font-weight':'700',fill:textFill}));
+      }
+    }
+
+    function arrow(x1,y1,x2,y2,color,dashed){
+      var attrs={x1:x1,y1:y1,x2:x2,y2:y2,stroke:color,'stroke-width':2,'marker-end':color===DIM?'url(#crawl-arrow-dim)':'url(#crawl-arrow)'};
+      if(dashed)attrs['stroke-dasharray']='6,4';
+      return el('line',attrs);
+    }
+
+    function packet(cx,cy,color){
+      var c=el('circle',{cx:cx,cy:cy,r:6,fill:color||B,opacity:1});
+      return c;
+    }
+
+    function draw(){
+      while(svg.childNodes.length>1)svg.removeChild(svg.lastChild);
+      // Keep defs
+      var defs=svg.querySelector('defs');
+
+      // Layout
+      var fX=20,fY=155,fW=110,fH=55;
+      var dX=175,dY=155,dW=100,dH=55;
+      var feX=320,feY=155,feW=100,feH=55;
+      var pX=465,pY=155,pW=100,pH=55;
+      var uX=610,uY=155,uW=120,uH=55;
+      var bX=610,bY=280,bW=120,bH=55;
+      var sX=320,sY=280,sW=100,sH=55;
+
+      var dimFill='#f5f3ee',dimStroke=DIM,dimText=MUTED;
+
+      // Title
+      svg.appendChild(txt('Crawl Pipeline Flow',{x:'390',y:'28','text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'15','font-weight':'800',fill:INK}));
+
+      // Draw boxes
+      var boxes=[
+        {x:fX,y:fY,w:fW,h:fH,label:'URL\nFrontier',minStep:0,color:B},
+        {x:dX,y:dY,w:dW,h:dH,label:'DNS\nResolver',minStep:2,color:'#0ea5e9'},
+        {x:feX,y:feY,w:feW,h:feH,label:'HTTP\nFetcher',minStep:3,color:'#8b5cf6'},
+        {x:pX,y:pY,w:pW,h:pH,label:'Content\nParser',minStep:4,color:'#ec4899'},
+        {x:uX,y:uY,w:uW,h:uH,label:'URL\nExtractor',minStep:5,color:'#f59e0b'},
+        {x:bX,y:bY,w:bW,h:bH,label:'Bloom\nFilter',minStep:6,color:BLOOM},
+        {x:sX,y:sY,w:sW,h:sH,label:'Content\nStore',minStep:4,color:'#14b8a6'}
+      ];
+
+      for(var i=0;i<boxes.length;i++){
+        var b=boxes[i];
+        var act=step>=b.minStep;
+        roundRect(svg,b.x,b.y,b.w,b.h,act?b.color:dimFill,act?b.color:dimStroke,b.label,act?'#fff':dimText);
+      }
+
+      // Arrows
+      // Frontier → DNS
+      svg.appendChild(arrow(fX+fW,fY+fH/2,dX,dY+dH/2,step>=1?B:DIM));
+      // DNS → Fetcher
+      svg.appendChild(arrow(dX+dW,dY+dH/2,feX,feY+feH/2,step>=2?'#0ea5e9':DIM));
+      // Fetcher → Parser
+      svg.appendChild(arrow(feX+feW,feY+feH/2,pX,pY+pH/2,step>=3?'#8b5cf6':DIM));
+      // Parser → URL Extractor
+      svg.appendChild(arrow(pX+pW,pY+pH/2,uX,uY+uH/2,step>=4?'#ec4899':DIM));
+      // URL Extractor → Bloom Filter
+      svg.appendChild(arrow(uX+uW/2,uY+uH,bX+bW/2,bY,step>=5?'#f59e0b':DIM));
+      // Bloom Filter → Frontier (loop back)
+      if(step>=7){
+        // Draw curved arrow back
+        var pathD='M '+(bX)+' '+(bY+bH/2)+' C '+(bX-80)+' '+(bY+bH/2+60)+' '+(fX-40)+' '+(fY+fH+40)+' '+(fX+fW/2)+' '+(fY+fH);
+        svg.appendChild(el('path',{d:pathD,stroke:B,'stroke-width':2.5,fill:'none','marker-end':'url(#crawl-arrow)'}));
+        svg.appendChild(txt('new URLs',{x:''+(fX+fW/2-60),y:''+(fY+fH+55),'font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:B}));
+      } else {
+        var pathD='M '+(bX)+' '+(bY+bH/2)+' C '+(bX-80)+' '+(bY+bH/2+60)+' '+(fX-40)+' '+(fY+fH+40)+' '+(fX+fW/2)+' '+(fY+fH);
+        svg.appendChild(el('path',{d:pathD,stroke:DIM,'stroke-width':1.5,fill:'none','marker-end':'url(#crawl-arrow-dim)','stroke-dasharray':'6,4'}));
+      }
+      // Parser → Content Store
+      svg.appendChild(arrow(pX+pW/2,pY+pH,sX+sW/2,sY,step>=4?'#14b8a6':DIM));
+
+      // Step-specific packets (animated dots)
+      if(step===1){
+        svg.appendChild(packet(fX+fW+25,fY+fH/2,B));
+        svg.appendChild(txt('/news/article-42',{x:''+(fX+fW+5),y:''+(fY-5),'font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:B}));
+      }
+      if(step===2){
+        svg.appendChild(packet(dX+dW+15,dY+dH/2,'#0ea5e9'));
+        svg.appendChild(txt('93.184.216.34',{x:''+(dX+dW/2),y:''+(dY-8),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#0ea5e9'}));
+      }
+      if(step===3){
+        svg.appendChild(packet(feX+feW+15,feY+feH/2,'#8b5cf6'));
+        svg.appendChild(txt('HTTP 200 · 45KB',{x:''+(feX+feW/2),y:''+(feY-8),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#8b5cf6'}));
+      }
+      if(step===4){
+        svg.appendChild(packet(pX+pW+15,pY+pH/2,'#ec4899'));
+        svg.appendChild(txt('HTML → DOM tree',{x:''+(pX+pW/2),y:''+(pY-8),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#ec4899'}));
+        svg.appendChild(packet(sX+sW/2,sY-10,'#14b8a6'));
+      }
+      if(step===5){
+        svg.appendChild(packet(uX+uW/2,uY+uH+10,'#f59e0b'));
+        svg.appendChild(txt('12 links found',{x:''+(uX+uW/2),y:''+(uY-8),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#f59e0b'}));
+      }
+      if(step===6){
+        svg.appendChild(txt('Seen before?',{x:''+(bX+bW/2),y:''+(bY-10),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:BLOOM}));
+        // Show check marks and X marks
+        svg.appendChild(txt('✓ 8 new',{x:''+(bX-10),y:''+(bY+bH+20),'font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:B}));
+        svg.appendChild(txt('✗ 4 seen',{x:''+(bX+70),y:''+(bY+bH+20),'font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:RED}));
+      }
+      if(step===7){
+        svg.appendChild(txt('8 new URLs',{x:''+(bX+bW/2),y:''+(bY-10),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:B}));
+        svg.appendChild(txt('→ back to frontier',{x:''+(bX+bW/2),y:''+(bY-22),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:B}));
+        // Pulse on frontier
+        svg.appendChild(el('rect',{x:fX-3,y:fY-3,width:fW+6,height:fH+6,rx:10,fill:'none',stroke:B,'stroke-width':3,'stroke-dasharray':'8,4'}));
+      }
+
+      // Info
+      var msgs=[
+        'Click Step to trace a URL through the crawl pipeline.',
+        'Step 1: URL "/news/article-42" is dequeued from the frontier\'s priority queue.',
+        'Step 2: DNS resolves example.com → 93.184.216.34 (cached lookup, ~1ms).',
+        'Step 3: Fetcher sends HTTP GET, receives 200 OK with 45 KB HTML body.',
+        'Step 4: Content Parser builds DOM tree. Raw HTML is stored in Content Store (S3).',
+        'Step 5: URL Extractor finds 12 outgoing links (<a href="...">).',
+        'Step 6: Bloom filter checks each link — 8 are new, 4 were already seen (filtered out).',
+        'Step 7: 8 new URLs are added back to the URL Frontier. The cycle continues!'
+      ];
+      info.innerHTML=msgs[step];
+      out.textContent=step+' / '+(totalSteps-1);
+    }
+
+    draw();
+    document.getElementById('crawl-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+    document.getElementById('crawl-reset').addEventListener('click',function(){step=0;draw();});
+  })();
+
+  /* ═══════════════════════════════════════════════════════════════════
+     ANIMATION 2 — Politeness Queue
+     ═══════════════════════════════════════════════════════════════════ */
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    var svg=document.getElementById('politeness-anim');
+    var info=document.getElementById('pol-info');
+    var out=document.getElementById('pol-output');
+    var step=0,totalSteps=9;
+    var B='#0a8f6a',DIM='#d9cfba',CARD='#fffdf9',INK='#13201a',MUTED='#4a5a53';
+    var COLORS=['#0ea5e9','#8b5cf6','#f59e0b'];
+    var DOMAINS=['news.com','blog.io','shop.dev'];
+
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+
+    // Domain state: each domain has queue of URLs, cooldown timer, and fetch status
+    var domainState=[
+      {name:'news.com',color:COLORS[0],delay:1000,urls:['page-1','page-2','page-3','page-4'],fetched:[],cooldown:0,lastFetch:0},
+      {name:'blog.io',color:COLORS[1],delay:2000,urls:['post-A','post-B','post-C'],fetched:[],cooldown:0,lastFetch:0},
+      {name:'shop.dev',color:COLORS[2],delay:1500,urls:['item-X','item-Y','item-Z','item-W'],fetched:[],cooldown:0,lastFetch:0}
+    ];
+
+    // Timeline of fetcher actions at each step
+    var timeline=[
+      {action:null,desc:'Click Step to see how the fetcher picks from domain queues respecting rate limits.'},
+      {action:{domain:0},desc:'Step 1: Fetcher picks news.com/page-1. news.com cooldown starts (1s delay).'},
+      {action:{domain:1},desc:'Step 2: blog.io is available → fetch blog.io/post-A. blog.io cooldown starts (2s delay).'},
+      {action:{domain:2},desc:'Step 3: shop.dev is available → fetch shop.dev/item-X. shop.dev cooldown starts (1.5s delay).'},
+      {action:{domain:0},desc:'Step 4: news.com cooldown expired → fetch news.com/page-2. blog.io and shop.dev still cooling down.'},
+      {action:{domain:2},desc:'Step 5: shop.dev cooldown expired → fetch shop.dev/item-Y. blog.io still cooling down (2s is longer).'},
+      {action:{domain:0},desc:'Step 6: news.com ready again → fetch news.com/page-3.'},
+      {action:{domain:1},desc:'Step 7: blog.io finally ready (2s delay is long!) → fetch blog.io/post-B.'},
+      {action:{domain:2},desc:'Step 8: shop.dev ready → fetch shop.dev/item-Z. All domains served fairly, none overwhelmed!'}
+    ];
+
+    function resetState(){
+      domainState=[
+        {name:'news.com',color:COLORS[0],delay:1000,urls:['page-1','page-2','page-3','page-4'],fetched:[],cooldown:0,lastFetch:0},
+        {name:'blog.io',color:COLORS[1],delay:2000,urls:['post-A','post-B','post-C'],fetched:[],cooldown:0,lastFetch:0},
+        {name:'shop.dev',color:COLORS[2],delay:1500,urls:['item-X','item-Y','item-Z','item-W'],fetched:[],cooldown:0,lastFetch:0}
+      ];
+    }
+
+    function applyStep(s){
+      if(s<=0)return;
+      resetState();
+      for(var i=1;i<=s;i++){
+        var t=timeline[i];
+        if(t&&t.action!==null){
+          var d=domainState[t.action.domain];
+          if(d.urls.length>0){
+            d.fetched.push(d.urls.shift());
+            d.lastFetch=i;
+            d.cooldown=d.delay;
+          }
+        }
+        // Decrease cooldowns for domains NOT fetched this step
+        for(var j=0;j<domainState.length;j++){
+          if(!(t&&t.action&&t.action.domain===j)){
+            domainState[j].cooldown=Math.max(0,domainState[j].cooldown-1000);
+          }
+        }
+      }
+    }
+
+    function draw(){
+      while(svg.firstChild)svg.removeChild(svg.firstChild);
+      applyStep(step);
+
+      // Title
+      svg.appendChild(txt('Politeness Queue — Per-Domain Rate Limiting',{x:'390',y:'28','text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'14','font-weight':'800',fill:INK}));
+
+      // Draw fetcher box
+      var fetchX=600,fetchY=120,fetchW=140,fetchH=100;
+      svg.appendChild(el('rect',{x:fetchX,y:fetchY,width:fetchW,height:fetchH,rx:10,fill:step>0?B:'#f5f3ee',stroke:step>0?B:DIM,'stroke-width':2}));
+      svg.appendChild(txt('Fetcher',{x:''+(fetchX+fetchW/2),y:''+(fetchY+30),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'14','font-weight':'700',fill:step>0?'#fff':MUTED}));
+
+      // Currently fetching
+      if(step>0&&timeline[step]&&timeline[step].action!==null){
+        var dIdx=timeline[step].action.domain;
+        var ds=domainState[dIdx];
+        var fetching=ds.fetched.length>0?ds.fetched[ds.fetched.length-1]:'';
+        svg.appendChild(txt(ds.name+'/'+fetching,{x:''+(fetchX+fetchW/2),y:''+(fetchY+55),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:'#fff'}));
+        svg.appendChild(txt('⬇ fetching',{x:''+(fetchX+fetchW/2),y:''+(fetchY+72),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'rgba(255,255,255,0.7)'}));
+      }
+
+      // Draw domain lanes
+      var laneX=30,laneW=520,laneH=75;
+      for(var i=0;i<3;i++){
+        var d=domainState[i];
+        var ly=52+i*(laneH+12);
+        var isActive=step>0&&timeline[step]&&timeline[step].action&&timeline[step].action.domain===i;
+
+        // Lane background
+        svg.appendChild(el('rect',{x:laneX,y:ly,width:laneW,height:laneH,rx:8,fill:isActive?'rgba(10,143,106,.08)':'#fafaf7',stroke:isActive?d.color:DIM,'stroke-width':isActive?2:1}));
+
+        // Domain label
+        svg.appendChild(txt(d.name,{x:''+(laneX+8),y:''+(ly+18),'font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:d.color}));
+
+        // Delay info
+        svg.appendChild(txt('delay: '+d.delay+'ms',{x:''+(laneX+8),y:''+(ly+32),'font-family':'Consolas,monospace','font-size':'9',fill:MUTED}));
+
+        // Cooldown bar
+        var barX=laneX+110,barY=ly+10,barW=150,barH=14;
+        svg.appendChild(el('rect',{x:barX,y:barY,width:barW,height:barH,rx:4,fill:'#f0ede6',stroke:DIM,'stroke-width':1}));
+        var coolPct=Math.min(1,d.cooldown/d.delay);
+        if(coolPct>0){
+          svg.appendChild(el('rect',{x:barX,y:barY,width:barW*coolPct,height:barH,rx:4,fill:d.color,opacity:0.4}));
+        }
+        svg.appendChild(txt(coolPct>0?'⏳ cooling':'✓ ready',{x:''+(barX+barW+8),y:''+(barY+11),'font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:coolPct>0?d.color:B}));
+
+        // Queue items
+        var qX=laneX+110,qY=ly+34;
+        // Show fetched items (grayed out)
+        var offset=0;
+        for(var f=0;f<d.fetched.length;f++){
+          svg.appendChild(el('rect',{x:qX+offset,y:qY,width:60,height:22,rx:4,fill:'#e8e5dd',stroke:'#ccc','stroke-width':1}));
+          svg.appendChild(txt(d.fetched[f],{x:''+(qX+offset+30),y:''+(qY+14),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#999'}));
+          svg.appendChild(txt('✓',{x:''+(qX+offset+52),y:''+(qY+13),'font-family':'sans-serif','font-size':'9',fill:B}));
+          offset+=66;
+        }
+        // Show remaining queue items
+        for(var q=0;q<d.urls.length;q++){
+          var isFirst=q===0;
+          svg.appendChild(el('rect',{x:qX+offset,y:qY,width:60,height:22,rx:4,fill:isFirst&&isActive?d.color:CARD,stroke:isFirst?d.color:DIM,'stroke-width':isFirst?2:1}));
+          svg.appendChild(txt(d.urls[q],{x:''+(qX+offset+30),y:''+(qY+14),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:isFirst&&isActive?'#fff':INK}));
+          offset+=66;
+        }
+
+        // Arrow from active lane to fetcher
+        if(isActive){
+          svg.appendChild(el('line',{x1:laneX+laneW,y1:ly+laneH/2,x2:fetchX,y2:fetchY+fetchH/2,stroke:d.color,'stroke-width':2.5,'marker-end':'url(#crawl-arrow)'}));
+        }
+      }
+
+      // Legend
+      svg.appendChild(txt('Each domain has its own queue & rate limit. Fetcher never hits the same domain twice in a row.',{x:'390',y:'325','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:MUTED}));
+
+      info.innerHTML=timeline[step].desc;
+      out.textContent=step+' / '+(totalSteps-1);
+    }
+
+    draw();
+    document.getElementById('pol-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+    document.getElementById('pol-reset').addEventListener('click',function(){step=0;draw();});
+  })();
+  </script>
+</body>
+</html>

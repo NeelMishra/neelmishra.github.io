@@ -1,0 +1,1401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Key-Value Stores deep dive: Redis data structures, persistence, clustering, and DynamoDB partition keys, GSI/LSI, single-table design, capacity planning, and DAX caching for system design interviews.">
+  <title>Key-Value Stores (Redis, DynamoDB) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+  <link rel="stylesheet" href="../../tree-diagrams.css">
+  <style>
+    .kv-badge{display:inline-block;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;padding:0.15rem 0.55rem;border-radius:4px;margin-right:0.3rem}
+    .kv-badge.redis{background:#fef3c7;color:#92400e}
+    .kv-badge.dynamo{background:#dbeafe;color:#1e40af}
+    .kv-badge.memcached{background:#d1fae5;color:#065f46}
+    .cmd-box{border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;background:var(--card)}
+    .cmd-box h4{margin:0 0 0.5rem;font-size:0.95rem;color:var(--brand)}
+    .ds-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1.2rem 0}
+    .ds-grid>div{border:1px solid var(--line);border-radius:10px;padding:1rem;background:var(--card)}
+    .ds-grid>div h4{margin:0 0 0.5rem;font-size:0.95rem}
+    @media(max-width:700px){.ds-grid{grid-template-columns:1fr}}
+    .cap-bar{display:flex;align-items:center;gap:0.5rem;margin:0.3rem 0;font-size:0.85rem}
+    .cap-bar .bar{height:10px;border-radius:5px;transition:width 0.4s ease}
+    .slot-row{display:flex;flex-wrap:wrap;gap:2px;margin:0.3rem 0}
+    .slot-block{width:8px;height:8px;border-radius:2px;display:inline-block}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#kv-model">The Key-Value Model</a></li>
+          <li><a href="#hash-internals">Hash Table Internals</a></li>
+          <li><a href="#redis">Redis Deep Dive</a></li>
+          <li class="depth-3"><a href="#redis-ds">Data Structures</a></li>
+          <li class="depth-3"><a href="#redis-persistence">Persistence (RDB &amp; AOF)</a></li>
+          <li class="depth-3"><a href="#redis-cluster">Redis Cluster</a></li>
+          <li class="depth-3"><a href="#redis-sentinel">Redis Sentinel</a></li>
+          <li class="depth-3"><a href="#redis-pubsub">Pub/Sub &amp; Streams</a></li>
+          <li class="depth-3"><a href="#redis-lua">Lua Scripting</a></li>
+          <li><a href="#dynamodb">DynamoDB Deep Dive</a></li>
+          <li class="depth-3"><a href="#dynamo-keys">Partition &amp; Sort Keys</a></li>
+          <li class="depth-3"><a href="#dynamo-indexes">GSI &amp; LSI</a></li>
+          <li class="depth-3"><a href="#dynamo-single-table">Single-Table Design</a></li>
+          <li class="depth-3"><a href="#dynamo-capacity">Capacity Planning</a></li>
+          <li class="depth-3"><a href="#dynamo-streams">Streams &amp; DAX</a></li>
+          <li><a href="#comparison">Redis vs DynamoDB vs Memcached</a></li>
+          <li><a href="#when-to-use">When to Use Each</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../blog.html">High Level Design Series</a>
+        <span>&middot; Data Storage &middot; Part 3</span>
+      </div>
+
+      <h1>Key-Value Stores (Redis, DynamoDB)</h1>
+      <p class="post-meta">April 2026 &middot; 20 min read</p>
+
+      <!-- ==================== SECTION 1: THE KEY-VALUE MODEL ==================== -->
+      <h2 id="kv-model">The Key-Value Model</h2>
+      <p>A key-value store is the simplest form of a database: it maps <strong>unique keys</strong> to <strong>opaque values</strong>. Think of it as a giant distributed hash map. The store doesn't inspect or index the values — all it guarantees is that given a key, it can return the associated value in <strong>O(1) amortized time</strong>.</p>
+
+      <p>The API surface is deliberately tiny:</p>
+<pre><code>GET(key)           → value | null
+PUT(key, value)    → OK
+DELETE(key)        → OK</code></pre>
+
+      <p>This simplicity is the source of both its <strong>power</strong> and its <strong>limitations</strong>:</p>
+      <ul>
+        <li><strong>Power:</strong> Because the store doesn't need to maintain indexes, enforce schemas, or support joins, it can be optimized purely for <em>speed</em> and <em>horizontal scalability</em>. Lookups are O(1). Sharding is trivial — hash the key, pick a node.</li>
+        <li><strong>Limitations:</strong> No secondary indexes (in pure KV stores), no range queries on values, no ad-hoc queries. If you need to find "all users in New York," you need a separate index or a different database.</li>
+      </ul>
+
+      <p>Common use cases for key-value stores:</p>
+      <table style="width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.88rem;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Use Case</th><th style="text-align:left;padding:0.5em;">Key Pattern</th><th style="text-align:left;padding:0.5em;">Value</th><th style="text-align:left;padding:0.5em;">Store</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Session cache</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>sess:{session_id}</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">JSON blob</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Shopping cart</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>cart:{user_id}</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Hash of items</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Rate limiting</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>rl:{ip}:{window}</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Counter</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">User profile</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>USER#123</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">JSON document</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">DynamoDB</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Feature flags</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>flag:{feature_name}</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Boolean/JSON</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis / etcd</td></tr>
+          <tr><td style="padding:0.5em;">Distributed lock</td><td style="padding:0.5em;"><code>lock:{resource}</code></td><td style="padding:0.5em;">Owner token + TTL</td><td style="padding:0.5em;">Redis</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ==================== SECTION 2: HASH TABLE INTERNALS ==================== -->
+      <h2 id="hash-internals">Hash Table Internals</h2>
+      <p>Every key-value store is ultimately built on top of a <strong>hash table</strong>. Understanding how hash tables work internally is critical for understanding why KV stores have O(1) lookups, how they handle collisions, and why resizing is expensive.</p>
+
+      <h3>How a Hash Table Works</h3>
+      <ol>
+        <li><strong>Hash Function:</strong> Take the key (e.g., <code>"user:42"</code>) and pass it through a hash function (e.g., MurmurHash3, SipHash, CRC16) to produce a fixed-size integer.</li>
+        <li><strong>Bucket Index:</strong> Compute <code>hash(key) % num_buckets</code> to get the index into an array of "buckets."</li>
+        <li><strong>Collision Resolution:</strong> Multiple keys can hash to the same bucket. Two strategies:
+          <ul>
+            <li><strong>Chaining:</strong> Each bucket points to a linked list of (key, value) pairs. On collision, append to the list. Lookup scans the list (O(n) worst case, O(1) amortized with good hash functions).</li>
+            <li><strong>Open Addressing:</strong> On collision, probe the next slot (linear probing, quadratic probing, or double hashing). Redis uses chaining; DynamoDB's internal storage uses a variant of consistent hashing.</li>
+          </ul>
+        </li>
+        <li><strong>Load Factor:</strong> <code>α = n / m</code> where <code>n</code> = number of entries, <code>m</code> = number of buckets. When α exceeds a threshold (typically 0.75), the table <strong>resizes</strong> — usually doubling the number of buckets and rehashing all entries.</li>
+      </ol>
+
+      <p>Redis specifically uses a technique called <strong>incremental rehashing</strong>: instead of rehashing all keys at once (which would block the single-threaded event loop), Redis maintains two hash tables simultaneously and gradually migrates keys from the old table to the new one, one bucket at a time, on each operation.</p>
+
+      <!-- ANIMATION 1: Hash Table Lookup -->
+      <div class="anim-container" id="hash-anim">
+        <h4>&#9654; Hash Table Lookup</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through a key lookup with collision resolution via chaining.</p>
+        <svg id="hash-svg" width="700" height="360" viewBox="0 0 700 360" style="max-width:100%;height:auto"></svg>
+        <div id="hash-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="hash-step">Step &rarr;</button>
+          <button class="anim-btn" id="hash-reset">Reset</button>
+          <span class="anim-output" id="hash-output"></span>
+        </div>
+      </div>
+
+      <h3>Redis Hash Table Implementation</h3>
+      <p>Redis's dictionary (<code>dict.h</code>) uses two hash tables (<code>ht[0]</code> and <code>ht[1]</code>) for incremental rehashing:</p>
+<pre><code>typedef struct dict {
+    dictType *type;      // function pointers: hash, keyCompare, etc.
+    dictht ht[2];        // ht[0] = current, ht[1] = resize target
+    long rehashidx;      // -1 when not rehashing, else current bucket index
+    int16_t pauserehash; // >0 means rehashing is paused
+} dict;
+
+typedef struct dictht {
+    dictEntry **table;   // array of pointers to linked list heads
+    unsigned long size;  // always a power of 2
+    unsigned long sizemask; // size - 1 (for fast modulo via bitwise AND)
+    unsigned long used;  // number of entries
+} dictht;</code></pre>
+
+      <p>Key implementation details:</p>
+      <ul>
+        <li><strong>Hash function:</strong> Redis uses <strong>SipHash</strong> (keyed hash, resistant to hash-flooding DoS attacks) for string keys.</li>
+        <li><strong>Bucket index:</strong> <code>idx = hash &amp; ht-&gt;sizemask</code> (bitwise AND is faster than modulo when size is a power of 2).</li>
+        <li><strong>Rehash trigger:</strong> When <code>used / size &gt; 1</code> (load factor &gt; 1, if no background save) or <code>used / size &gt; 5</code> (during BGSAVE/BGREWRITEAOF, more lenient to avoid copy-on-write overhead).</li>
+        <li><strong>Incremental rehash:</strong> On each <code>dictAdd</code>, <code>dictFind</code>, or <code>dictDelete</code>, Redis migrates entries from <strong>one bucket</strong> of <code>ht[0]</code> to <code>ht[1]</code>. After all buckets are migrated, <code>ht[1]</code> becomes <code>ht[0]</code> and <code>ht[1]</code> is reset.</li>
+      </ul>
+
+      <!-- ==================== SECTION 3: REDIS DEEP DIVE ==================== -->
+      <h2 id="redis">Redis Deep Dive</h2>
+      <p>Redis (Remote Dictionary Server) is an <strong>in-memory data structure store</strong> that can serve as a database, cache, message broker, and streaming engine. It's single-threaded for command processing (using an event loop), which eliminates lock contention and gives it <strong>predictable sub-millisecond latency</strong> for most operations.</p>
+
+      <p>Key characteristics:</p>
+      <ul>
+        <li><strong>In-memory:</strong> All data lives in RAM. This is what gives Redis its speed — no disk I/O on reads.</li>
+        <li><strong>Single-threaded command processing:</strong> One command at a time, no locks needed. I/O threads handle network reads/writes (since Redis 6.0).</li>
+        <li><strong>Rich data structures:</strong> Not just strings — lists, sets, sorted sets, hashes, streams, bitmaps, HyperLogLog, and more.</li>
+        <li><strong>Optional persistence:</strong> RDB snapshots and/or AOF (Append-Only File) for durability.</li>
+        <li><strong>Throughput:</strong> ~100K-500K ops/sec on a single node (depending on command complexity and hardware).</li>
+      </ul>
+
+      <h3 id="redis-ds">Redis Data Structures</h3>
+      <p>Redis is <em>not</em> a simple key-value store — it's a <strong>data structure server</strong>. Each value type has its own set of atomic operations. This is what makes Redis dramatically more useful than Memcached.</p>
+
+      <div class="ds-grid">
+        <div>
+          <h4>String</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Binary-safe, up to 512 MB. The most basic type.</p>
+<pre><code># Basic get/set
+SET user:42:name "Alice"
+GET user:42:name          → "Alice"
+
+# Atomic counter
+INCR page:views:home      → 1
+INCRBY page:views:home 10 → 11
+
+# Set with expiry (session token)
+SET sess:abc123 "{user_id:42}" EX 3600
+
+# Set only if not exists (distributed lock)
+SET lock:order:99 "worker-1" NX PX 30000
+
+# Bit operations
+SETBIT user:42:features 3 1
+BITCOUNT user:42:features → 1</code></pre>
+        </div>
+        <div>
+          <h4>List</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Doubly linked list. O(1) push/pop at both ends.</p>
+<pre><code># Task queue (producer)
+LPUSH queue:emails "{to:'a@b.com'}"
+LPUSH queue:emails "{to:'c@d.com'}"
+
+# Task queue (consumer - blocking)
+BRPOP queue:emails 30  → pops oldest
+
+# Recent activity feed (capped list)
+LPUSH feed:user:42 "liked post #123"
+LTRIM feed:user:42 0 99  # keep last 100
+
+# Range query
+LRANGE feed:user:42 0 9  → last 10 items
+LLEN queue:emails         → 2</code></pre>
+        </div>
+        <div>
+          <h4>Set</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Unordered unique elements. O(1) add/remove/check.</p>
+<pre><code># Track unique visitors
+SADD visitors:2026-04-15 "user:42"
+SADD visitors:2026-04-15 "user:43"
+SCARD visitors:2026-04-15  → 2
+
+# Tag system
+SADD post:99:tags "redis" "nosql" "cache"
+SMEMBERS post:99:tags
+SISMEMBER post:99:tags "redis" → 1
+
+# Set operations
+SADD friends:alice "bob" "carol" "dave"
+SADD friends:bob "alice" "carol" "eve"
+SINTER friends:alice friends:bob  → "carol"
+SUNION friends:alice friends:bob
+SDIFF friends:alice friends:bob   → "dave"</code></pre>
+        </div>
+        <div>
+          <h4>Sorted Set (ZSet)</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Set with scores. Skip list + hash table. O(log N) add.</p>
+<pre><code># Leaderboard
+ZADD leaderboard 2500 "alice"
+ZADD leaderboard 1800 "bob"
+ZADD leaderboard 3100 "carol"
+
+# Top 10 players (descending)
+ZREVRANGE leaderboard 0 9 WITHSCORES
+# → "carol" 3100, "alice" 2500, "bob" 1800
+
+# Rank lookup
+ZREVRANK leaderboard "alice"  → 1 (0-indexed)
+ZSCORE leaderboard "alice"    → "2500"
+
+# Range by score (time-series window)
+ZRANGEBYSCORE events 1714000000 1714100000
+
+# Remove old entries
+ZREMRANGEBYSCORE events -inf 1713900000</code></pre>
+        </div>
+        <div>
+          <h4>Hash</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Field-value pairs inside a key. Like a mini document.</p>
+<pre><code># User profile as hash
+HSET user:42 name "Alice" email "a@b.com"
+HSET user:42 login_count 0
+
+HGET user:42 name           → "Alice"
+HGETALL user:42
+# → "name" "Alice" "email" "a@b.com"
+#   "login_count" "0"
+
+# Atomic field increment
+HINCRBY user:42 login_count 1  → 1
+
+# Partial update (only change email)
+HSET user:42 email "alice@new.com"
+
+# Memory efficient: hashes with <128 fields
+# use ziplist encoding (contiguous memory)</code></pre>
+        </div>
+        <div>
+          <h4>Stream</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Append-only log with consumer groups. Like Kafka-lite.</p>
+<pre><code># Produce events
+XADD orders * user_id 42 total 15990
+# → "1714000000000-0" (auto-generated ID)
+
+XADD orders * user_id 43 total 8500
+# → "1714000000001-0"
+
+# Read all events from beginning
+XRANGE orders - +
+
+# Consumer group (multiple workers)
+XGROUP CREATE orders grp1 0
+XREADGROUP GROUP grp1 worker-1 COUNT 10
+  BLOCK 5000 STREAMS orders >
+
+# Acknowledge processed messages
+XACK orders grp1 "1714000000000-0"
+
+# Pending entries (unacknowledged)
+XPENDING orders grp1</code></pre>
+        </div>
+      </div>
+
+      <div class="ds-grid">
+        <div>
+          <h4>HyperLogLog</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Probabilistic cardinality estimation. ~12 KB per key. 0.81% std error.</p>
+<pre><code># Count unique visitors (billions of elements,
+# only 12 KB of memory!)
+PFADD visitors:today "user:42" "user:43"
+PFADD visitors:today "user:42"  # duplicate
+PFCOUNT visitors:today  → 2
+
+# Merge multiple periods
+PFMERGE visitors:week
+  visitors:mon visitors:tue visitors:wed
+
+PFCOUNT visitors:week  → approximate unique count</code></pre>
+        </div>
+        <div>
+          <h4>Bitmap &amp; Bitfield</h4>
+          <p style="font-size:0.85rem;color:var(--ink-muted);margin:0 0 0.5rem">Bit-level operations on strings. Ultra-compact for flags.</p>
+<pre><code># Daily active users (1 bit per user ID)
+SETBIT dau:2026-04-15 42 1
+SETBIT dau:2026-04-15 43 1
+BITCOUNT dau:2026-04-15  → 2
+
+# Users active on BOTH days
+BITOP AND active_both dau:2026-04-15
+  dau:2026-04-16
+BITCOUNT active_both  → count
+
+# Bitfield: packed integer arrays
+BITFIELD player:42 SET u8 #0 100  # HP = 100
+BITFIELD player:42 SET u8 #1 50   # MP = 50
+BITFIELD player:42 INCRBY u8 #0 -25 # damage</code></pre>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Memory optimization:</strong> Redis uses special compact encodings for small data structures. Hashes with fewer than <code>hash-max-ziplist-entries</code> (default 128) entries and values shorter than <code>hash-max-ziplist-value</code> (default 64 bytes) are stored as <strong>ziplists</strong> (contiguous memory, no pointers) — using ~10x less memory than the full hash table encoding. Similar optimizations exist for lists (quicklist = linked list of ziplists), sets (intset for small integer sets), and sorted sets (ziplist for small sets).
+      </div>
+
+      <!-- Redis Persistence -->
+      <h3 id="redis-persistence">Persistence: RDB vs AOF</h3>
+      <p>Redis is in-memory, but that doesn't mean your data vanishes on restart. Redis offers two persistence mechanisms, and you can use both simultaneously:</p>
+
+      <div class="ds-grid">
+        <div>
+          <h4>RDB (Redis Database Snapshots)</h4>
+          <p style="font-size:0.85rem;">Point-in-time snapshots of the entire dataset, saved as a compact binary file.</p>
+<pre><code># redis.conf
+save 900 1      # snapshot if ≥1 key changed in 900s
+save 300 10     # snapshot if ≥10 keys changed in 300s
+save 60 10000   # snapshot if ≥10K keys changed in 60s
+
+# Manual trigger
+BGSAVE          # fork() → child writes dump.rdb
+SAVE            # blocks main thread (never in prod!)
+
+# How it works:
+# 1. Redis calls fork() to create child process
+# 2. Child writes entire dataset to temp file
+# 3. Child atomically renames temp → dump.rdb
+# 4. Parent continues serving requests
+# 5. Copy-on-write: only modified pages duplicated</code></pre>
+          <ul style="font-size:0.85rem;margin-top:0.5rem">
+            <li><strong>Pro:</strong> Compact file, fast restarts, good for backups</li>
+            <li><strong>Pro:</strong> Child process does the I/O — zero impact on latency</li>
+            <li><strong>Con:</strong> Data loss between snapshots (up to minutes)</li>
+            <li><strong>Con:</strong> <code>fork()</code> can be slow with large datasets (copies page tables)</li>
+          </ul>
+        </div>
+        <div>
+          <h4>AOF (Append-Only File)</h4>
+          <p style="font-size:0.85rem;">Logs every write command. Replay the log to reconstruct state.</p>
+<pre><code># redis.conf
+appendonly yes
+appendfsync everysec   # fsync once per second (default)
+# appendfsync always   # fsync on every write (safest)
+# appendfsync no       # let OS decide (fastest)
+
+# AOF file looks like:
+*3\r\n$3\r\nSET\r\n$7\r\nuser:42\r\n$5\r\nAlice\r\n
+
+# AOF rewrite (compaction):
+BGREWRITEAOF
+# Rewrites AOF with minimum commands to
+# reconstruct current state. E.g., 1000 INCRs
+# become a single SET with final value.
+
+# Redis 7.0+: Multi-part AOF
+# base.aof (RDB-format snapshot) +
+# incr.aof (incremental commands since snapshot)</code></pre>
+          <ul style="font-size:0.85rem;margin-top:0.5rem">
+            <li><strong>Pro:</strong> Minimal data loss (at most 1 second with <code>everysec</code>)</li>
+            <li><strong>Pro:</strong> Append-only = no corruption risk from partial writes</li>
+            <li><strong>Con:</strong> Larger file size than RDB</li>
+            <li><strong>Con:</strong> Slower restarts (must replay all commands)</li>
+          </ul>
+        </div>
+      </div>
+
+      <p><strong>Recommended production config:</strong> Enable <strong>both</strong> RDB and AOF. Redis will use AOF for recovery (more complete data) and RDB for backups and faster cold starts. The Redis 7.0 multi-part AOF essentially combines the best of both — an RDB base with incremental AOF on top.</p>
+
+      <div class="cmd-box">
+        <h4>Persistence Decision Matrix</h4>
+        <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+          <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Requirement</th><th style="text-align:left;padding:0.5em;">Use</th><th style="text-align:left;padding:0.5em;">Config</th></tr></thead>
+          <tbody>
+            <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Pure cache, no durability needed</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">None</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>save ""</code>, <code>appendonly no</code></td></tr>
+            <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Accept a few minutes of data loss</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">RDB only</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>save 300 10</code></td></tr>
+            <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Accept at most ~1 second of loss</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">AOF everysec</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>appendfsync everysec</code></td></tr>
+            <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Zero data loss (rare for Redis)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">AOF always</td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>appendfsync always</code> (~10x slower)</td></tr>
+            <tr><td style="padding:0.5em;">Best of both worlds (recommended)</td><td style="padding:0.5em;">RDB + AOF</td><td style="padding:0.5em;">Both enabled, AOF used for recovery</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Redis Cluster -->
+      <h3 id="redis-cluster">Redis Cluster</h3>
+      <p>A single Redis node can hold ~25 GB of data comfortably (limited by RAM). For larger datasets or higher throughput, you need <strong>Redis Cluster</strong> — Redis's built-in sharding solution that distributes data across multiple nodes.</p>
+
+      <h4>How Hash Slots Work</h4>
+      <p>Redis Cluster divides the entire keyspace into <strong>16,384 hash slots</strong> (numbered 0–16,383). Each key is assigned to a slot using:</p>
+<pre><code>slot = CRC16(key) mod 16384</code></pre>
+
+      <p>Each master node in the cluster owns a subset of these slots. With 3 masters:</p>
+      <ul>
+        <li><strong>Node A:</strong> slots 0–5460</li>
+        <li><strong>Node B:</strong> slots 5461–10922</li>
+        <li><strong>Node C:</strong> slots 10923–16383</li>
+      </ul>
+
+      <p>Each master has one or more <strong>replicas</strong> for failover. A typical production cluster runs <strong>6 nodes</strong>: 3 masters + 3 replicas.</p>
+
+      <h4>Hash Tags for Multi-Key Operations</h4>
+      <p>Since multi-key commands (MGET, pipeline transactions) only work when all keys hash to the <strong>same slot</strong>, Redis supports <strong>hash tags</strong>: only the substring inside <code>{...}</code> is hashed.</p>
+<pre><code># These all hash to the same slot (hash of "user:42")
+SET {user:42}:profile "..."
+SET {user:42}:settings "..."
+SET {user:42}:cart "..."
+
+# Now MGET works across all three
+MGET {user:42}:profile {user:42}:settings {user:42}:cart
+
+# Without hash tags, these could land on different nodes
+# → CROSSSLOT error on multi-key commands</code></pre>
+
+      <h4>MOVED Redirects</h4>
+      <p>When a client sends a command to the wrong node, the node responds with a <code>MOVED</code> redirect:</p>
+<pre><code># Client sends to Node A:
+GET user:500
+# Node A calculates: CRC16("user:500") % 16384 = 7365
+# 7365 is owned by Node B, not Node A
+
+# Node A responds:
+-MOVED 7365 192.168.1.2:6379
+
+# Smart clients (like redis-py-cluster, Lettuce, Jedis)
+# cache the slot→node mapping and send future requests
+# for slot 7365 directly to Node B.</code></pre>
+
+      <h4>Resharding &amp; Rebalancing</h4>
+      <p>Adding a new node to the cluster:</p>
+<pre><code># 1. Add Node D to the cluster
+redis-cli --cluster add-node 192.168.1.4:6379 192.168.1.1:6379
+
+# 2. Reshard: move slots from existing nodes to Node D
+redis-cli --cluster reshard 192.168.1.1:6379
+# → Interactively choose how many slots (e.g., 4096)
+# → Choose source nodes (A, B, C) and target (D)
+
+# During resharding:
+# - Keys in migrating slots trigger ASK redirect
+# - Client follows ASK to new node for that key
+# - Once migration is complete, MOVED is returned instead
+# - Entire process is online — no downtime</code></pre>
+
+      <!-- ANIMATION 2: Redis Cluster -->
+      <div class="anim-container" id="redis-cluster-anim">
+        <h4>&#9654; Redis Cluster Hash Slot Routing</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how a key is routed to the correct node via CRC16 hashing, including a MOVED redirect.</p>
+        <svg id="cluster-svg" width="700" height="420" viewBox="0 0 700 420" style="max-width:100%;height:auto"></svg>
+        <div id="cluster-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="cluster-step">Step &rarr;</button>
+          <button class="anim-btn" id="cluster-reset">Reset</button>
+          <span class="anim-output" id="cluster-output"></span>
+        </div>
+      </div>
+
+      <!-- Redis Sentinel -->
+      <h3 id="redis-sentinel">Redis Sentinel</h3>
+      <p>Redis Sentinel provides <strong>high availability</strong> for standalone Redis deployments (non-cluster mode). It handles automatic failover, monitoring, and service discovery.</p>
+
+      <p>How Sentinel works:</p>
+      <ol>
+        <li><strong>Monitoring:</strong> Sentinel continuously pings the master and replicas. If a master doesn't respond within <code>down-after-milliseconds</code>, the sentinel marks it as <strong>subjectively down (SDOWN)</strong>.</li>
+        <li><strong>Quorum:</strong> When enough sentinels (a configurable <code>quorum</code>, typically 2 out of 3) agree the master is down, it's marked <strong>objectively down (ODOWN)</strong>.</li>
+        <li><strong>Failover:</strong> Sentinels elect a leader who promotes the best replica to master. "Best" = most up-to-date replication offset.</li>
+        <li><strong>Notification:</strong> Clients subscribed to Sentinel are notified of the new master's address. Smart clients (Lettuce, redis-py with Sentinel support) reconnect automatically.</li>
+      </ol>
+
+<pre><code># sentinel.conf
+sentinel monitor mymaster 192.168.1.1 6379 2  # quorum=2
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+sentinel parallel-syncs mymaster 1
+
+# Query Sentinel for current master
+redis-cli -p 26379 SENTINEL get-master-addr-by-name mymaster
+# → "192.168.1.2" "6379" (after failover)</code></pre>
+
+      <div class="callout">
+        <strong>Sentinel vs Cluster:</strong> Sentinel provides HA for a <em>single-shard</em> deployment (one dataset, replicated). Redis Cluster provides HA <em>and</em> sharding (multiple shards, each with replicas). For datasets that fit on one node, Sentinel is simpler. For larger data or higher throughput, use Cluster.
+      </div>
+
+      <!-- Redis Pub/Sub & Streams -->
+      <h3 id="redis-pubsub">Pub/Sub &amp; Streams</h3>
+
+      <h4>Pub/Sub (Fire-and-Forget)</h4>
+      <p>Redis Pub/Sub is a simple messaging system where publishers send messages to <strong>channels</strong> and all subscribed clients receive them in real-time. Messages are <strong>not persisted</strong> — if no subscriber is listening, the message is lost.</p>
+<pre><code># Publisher
+PUBLISH chat:room:42 "Hello from Alice!"
+# → (integer) 2  (2 subscribers received it)
+
+# Subscriber (blocking)
+SUBSCRIBE chat:room:42
+# Blocks and receives messages as they arrive:
+# 1) "message"
+# 2) "chat:room:42"
+# 3) "Hello from Alice!"
+
+# Pattern subscribe (wildcard)
+PSUBSCRIBE chat:room:*
+# Receives messages from ALL chat rooms</code></pre>
+
+      <h4>Streams (Persistent, Consumer Groups)</h4>
+      <p>For durable messaging with consumer groups, acknowledgment, and replay — use <strong>Redis Streams</strong> (added in Redis 5.0). Streams solve every limitation of Pub/Sub:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.85rem;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Feature</th><th style="text-align:left;padding:0.5em;">Pub/Sub</th><th style="text-align:left;padding:0.5em;">Streams</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Persistence</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">❌ Fire and forget</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">✅ Stored on disk</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Consumer groups</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">❌ All get every msg</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">✅ Load-balanced across group</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Acknowledgment</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">❌ No ack</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">✅ XACK per message</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Replay</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">❌ Missed = lost</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">✅ Read from any ID</td></tr>
+          <tr><td style="padding:0.5em;">Backpressure</td><td style="padding:0.5em;">❌ Slow client drops</td><td style="padding:0.5em;">✅ Pending list tracks unprocessed</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Redis Lua Scripting -->
+      <h3 id="redis-lua">Lua Scripting</h3>
+      <p>Redis executes Lua scripts <strong>atomically</strong> — the entire script runs without any other command interleaving. This is the key to implementing complex atomic operations that can't be done with a single Redis command.</p>
+
+<pre><code># Rate limiter using sliding window (Lua script)
+# KEYS[1] = rate limit key, ARGV[1] = window (sec),
+# ARGV[2] = max requests, ARGV[3] = current timestamp
+
+local key = KEYS[1]
+local window = tonumber(ARGV[1])
+local max_req = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+
+-- Remove entries outside the window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+
+-- Count requests in current window
+local count = redis.call('ZCARD', key)
+
+if count < max_req then
+    -- Under limit: add this request
+    redis.call('ZADD', key, now, now .. '-' .. math.random(1000000))
+    redis.call('EXPIRE', key, window)
+    return 1  -- allowed
+else
+    return 0  -- rate limited
+end</code></pre>
+
+<pre><code># Execute the script from a client
+redis-cli EVAL "$(cat rate_limit.lua)" 1 \
+  "rl:api:192.168.1.1" 60 100 1714000000
+# → (integer) 1  (allowed)
+
+# Or use EVALSHA with cached script hash
+redis-cli SCRIPT LOAD "$(cat rate_limit.lua)"
+# → "a1b2c3d4e5f6..."
+
+redis-cli EVALSHA "a1b2c3d4e5f6..." 1 \
+  "rl:api:192.168.1.1" 60 100 1714000000</code></pre>
+
+      <p>Other common Lua script use cases:</p>
+      <ul>
+        <li><strong>Compare-and-swap:</strong> Read a value, check a condition, write atomically.</li>
+        <li><strong>Distributed lock release:</strong> Only delete the lock if you own it (check token, then delete).</li>
+        <li><strong>Inventory reservation:</strong> Decrement stock only if sufficient quantity exists.</li>
+        <li><strong>Leaderboard update:</strong> Update score and trim to top-N atomically.</li>
+      </ul>
+
+<pre><code># Safe distributed lock release (Redlock pattern)
+# Only release if we still own the lock
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0  -- someone else holds it now
+end</code></pre>
+
+      <!-- ==================== SECTION 4: DYNAMODB DEEP DIVE ==================== -->
+      <h2 id="dynamodb">DynamoDB Deep Dive</h2>
+      <p>Amazon DynamoDB is a fully managed, serverless key-value and document database that delivers <strong>single-digit millisecond performance at any scale</strong>. Unlike Redis (which you operate yourself), DynamoDB is a <em>service</em> — AWS handles replication, sharding, patching, and scaling.</p>
+
+      <p>Key characteristics:</p>
+      <ul>
+        <li><strong>Serverless:</strong> No servers to provision, patch, or manage. Auto-scales up and down.</li>
+        <li><strong>Consistent performance:</strong> Single-digit ms latency whether your table has 1 KB or 1 PB of data.</li>
+        <li><strong>Multi-region:</strong> Global Tables replicate across AWS regions with sub-second replication lag.</li>
+        <li><strong>Flexible consistency:</strong> Choose per-query: strongly consistent reads or eventually consistent reads (2x cheaper).</li>
+        <li><strong>SLA:</strong> 99.999% availability for Global Tables, 99.99% for standard tables.</li>
+      </ul>
+
+      <h3 id="dynamo-keys">Partition Key &amp; Sort Key</h3>
+      <p>Every DynamoDB table has a <strong>primary key</strong> that uniquely identifies each item. There are two types:</p>
+
+      <div class="ds-grid">
+        <div>
+          <h4>Simple Primary Key (Partition Key Only)</h4>
+          <p style="font-size:0.85rem;">The partition key alone must be unique. DynamoDB hashes it to determine which physical partition stores the item.</p>
+<pre><code># Table: Users
+# PK: user_id (String)
+
+{
+  "user_id": "u-42",       ← partition key
+  "name": "Alice",
+  "email": "alice@ex.com",
+  "plan": "premium"
+}
+
+# Access patterns:
+# ✅ GetItem(user_id = "u-42")    → O(1)
+# ❌ Query(email = "alice@...")   → full scan!</code></pre>
+        </div>
+        <div>
+          <h4>Composite Primary Key (PK + Sort Key)</h4>
+          <p style="font-size:0.85rem;">Partition key + sort key together are unique. Enables range queries within a partition.</p>
+<pre><code># Table: Orders
+# PK: user_id (String), SK: order_id (String)
+
+{
+  "user_id": "u-42",       ← partition key
+  "order_id": "ord-001",   ← sort key
+  "total": 15990,
+  "status": "shipped"
+}
+
+# Access patterns:
+# ✅ GetItem(PK="u-42", SK="ord-001")
+# ✅ Query(PK="u-42", SK begins_with "ord-")
+# ✅ Query(PK="u-42", SK between "A" and "Z")
+# ✅ Query(PK="u-42") → all orders for user</code></pre>
+        </div>
+      </div>
+
+      <p><strong>Partition key design is everything.</strong> A bad partition key causes <strong>hot partitions</strong> — all traffic concentrated on one physical partition while others sit idle. Good partition keys have <strong>high cardinality</strong> and <strong>uniform access distribution</strong>.</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.85rem;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Good PK</th><th style="text-align:left;padding:0.5em;">Bad PK</th><th style="text-align:left;padding:0.5em;">Why</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>user_id</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>country</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Millions of users vs. ~200 countries → hot partition on "US"</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>device_id</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);"><code>date</code></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">All IoT writes go to today's partition</td></tr>
+          <tr><td style="padding:0.5em;"><code>order_id</code> (UUID)</td><td style="padding:0.5em;"><code>status</code></td><td style="padding:0.5em;">Only 5 statuses → extreme imbalance</td></tr>
+        </tbody>
+      </table>
+
+      <!-- GSI & LSI -->
+      <h3 id="dynamo-indexes">Global &amp; Local Secondary Indexes</h3>
+      <p>DynamoDB's primary key determines the <em>only</em> efficient access pattern on the base table. For additional access patterns, you need <strong>secondary indexes</strong>.</p>
+
+      <div class="ds-grid">
+        <div>
+          <h4>Local Secondary Index (LSI)</h4>
+          <p style="font-size:0.85rem;">Same partition key as the base table, different sort key. Must be created at table creation time. Limit: 5 per table.</p>
+<pre><code># Base table: Orders
+# PK: user_id, SK: order_id
+
+# LSI: OrdersByDate
+# PK: user_id (same), SK: created_at
+
+# Now you can query:
+# "All orders for user u-42, sorted by date"
+response = table.query(
+    IndexName='OrdersByDate',
+    KeyConditionExpression=
+        Key('user_id').eq('u-42') &
+        Key('created_at').between(
+            '2026-01-01', '2026-04-30'
+        )
+)</code></pre>
+          <ul style="font-size:0.82rem;margin-top:0.3rem">
+            <li>Strongly consistent reads ✅</li>
+            <li>Shares throughput with base table</li>
+            <li>10 GB limit per partition key value</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Global Secondary Index (GSI)</h4>
+          <p style="font-size:0.85rem;">Completely different partition key and/or sort key. Can be created anytime. Limit: 20 per table.</p>
+<pre><code># Base table: Orders
+# PK: user_id, SK: order_id
+
+# GSI: OrdersByStatus
+# PK: status, SK: created_at
+
+# Now you can query:
+# "All pending orders, newest first"
+response = table.query(
+    IndexName='OrdersByStatus',
+    KeyConditionExpression=
+        Key('status').eq('pending'),
+    ScanIndexForward=False  # descending
+)
+
+# GSI: OrdersByEmail
+# PK: email, SK: user_id
+# "Find user by email" → efficient lookup</code></pre>
+          <ul style="font-size:0.82rem;margin-top:0.3rem">
+            <li>Eventually consistent reads only ❌</li>
+            <li>Has its own provisioned throughput</li>
+            <li>Asynchronously replicated from base</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Single-Table Design -->
+      <h3 id="dynamo-single-table">Single-Table Design Patterns</h3>
+      <p>Single-table design is a DynamoDB modeling technique where <strong>all entity types live in one table</strong>, using generic key names (<code>PK</code>, <code>SK</code>) with prefixed values to differentiate entities. This is the recommended approach from AWS for most applications.</p>
+
+      <p>Why? DynamoDB charges per table (provisioned capacity) and per-request (on-demand). Fewer tables = fewer things to manage, and you can fetch related entities in a <strong>single Query</strong> operation.</p>
+
+<pre><code># Single-table design for an e-commerce app
+# Table: ECommerce
+# PK (String) | SK (String) | Attributes...
+
+# User entity
+PK=USER#u-42         SK=PROFILE           name=Alice email=alice@ex.com plan=premium
+
+# User's orders (all in one partition → one Query)
+PK=USER#u-42         SK=ORDER#2026-04-15#ord-001  total=15990 status=shipped
+PK=USER#u-42         SK=ORDER#2026-04-10#ord-002  total=8500  status=delivered
+
+# Order items (nested under order)
+PK=ORDER#ord-001     SK=ITEM#sku-101              qty=1 price=9999
+PK=ORDER#ord-001     SK=ITEM#sku-205              qty=2 price=2995
+
+# Product entity
+PK=PRODUCT#sku-101   SK=METADATA                  name="Widget" category="electronics"
+PK=PRODUCT#sku-101   SK=REVIEW#u-43               rating=5 text="Great product!"
+
+# GSI1: Inverted index (SK → PK)
+# GSI1PK=ORDER#2026-04-15#ord-001  GSI1SK=USER#u-42
+# → "Which user placed order ord-001?"
+
+# GSI2: By status
+# GSI2PK=shipped  GSI2SK=2026-04-15#ord-001
+# → "All shipped orders, sorted by date"</code></pre>
+
+      <h4>Query Examples (Python / boto3)</h4>
+<pre><code>import boto3
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ECommerce')
+
+# 1. Get user profile
+profile = table.get_item(
+    Key={'PK': 'USER#u-42', 'SK': 'PROFILE'}
+)['Item']
+
+# 2. Get all orders for a user (sorted by date)
+orders = table.query(
+    KeyConditionExpression=
+        Key('PK').eq('USER#u-42') &
+        Key('SK').begins_with('ORDER#')
+)['Items']
+
+# 3. Get orders from last 30 days
+recent = table.query(
+    KeyConditionExpression=
+        Key('PK').eq('USER#u-42') &
+        Key('SK').between('ORDER#2026-03-16', 'ORDER#2026-04-16')
+)['Items']
+
+# 4. Get all items in an order
+items = table.query(
+    KeyConditionExpression=
+        Key('PK').eq('ORDER#ord-001') &
+        Key('SK').begins_with('ITEM#')
+)['Items']
+
+# 5. Batch get multiple entities (up to 100 items)
+result = dynamodb.batch_get_item(
+    RequestItems={
+        'ECommerce': {
+            'Keys': [
+                {'PK': 'USER#u-42', 'SK': 'PROFILE'},
+                {'PK': 'USER#u-43', 'SK': 'PROFILE'},
+                {'PK': 'PRODUCT#sku-101', 'SK': 'METADATA'}
+            ]
+        }
+    }
+)
+
+# 6. Transactional write (atomic across items)
+dynamodb.meta.client.transact_write_items(
+    TransactItems=[
+        {'Put': {'TableName': 'ECommerce', 'Item': {
+            'PK': 'USER#u-42',
+            'SK': 'ORDER#2026-04-16#ord-003',
+            'total': 5000, 'status': 'created'
+        }}},
+        {'Update': {'TableName': 'ECommerce',
+            'Key': {'PK': 'PRODUCT#sku-101', 'SK': 'METADATA'},
+            'UpdateExpression': 'SET stock = stock - :qty',
+            'ConditionExpression': 'stock >= :qty',
+            'ExpressionAttributeValues': {':qty': 1}
+        }}
+    ]
+)</code></pre>
+
+      <!-- Capacity Planning -->
+      <h3 id="dynamo-capacity">Capacity Planning</h3>
+      <p>DynamoDB has two capacity modes. Understanding the math is critical for cost estimation in system design interviews.</p>
+
+      <h4>Read Capacity Units (RCU)</h4>
+      <ul>
+        <li><strong>1 RCU</strong> = one <strong>strongly consistent</strong> read of up to <strong>4 KB</strong></li>
+        <li><strong>1 RCU</strong> = two <strong>eventually consistent</strong> reads of up to <strong>4 KB</strong></li>
+        <li><strong>Transactional reads</strong> cost <strong>2 RCUs</strong> per 4 KB read</li>
+      </ul>
+
+      <h4>Write Capacity Units (WCU)</h4>
+      <ul>
+        <li><strong>1 WCU</strong> = one write of up to <strong>1 KB</strong></li>
+        <li><strong>Transactional writes</strong> cost <strong>2 WCUs</strong> per 1 KB write</li>
+      </ul>
+
+      <div class="cmd-box">
+        <h4>Capacity Planning Example</h4>
+        <p style="font-size:0.88rem;margin-bottom:0.5rem;">Scenario: E-commerce platform with 10,000 DAU, peak 500 requests/sec.</p>
+<pre><code># Read calculations:
+# - Average item size: 2 KB
+# - 80% reads are eventually consistent
+# - 20% reads are strongly consistent
+# - Peak: 400 reads/sec
+
+Eventually consistent: 400 × 0.8 = 320 reads/sec
+  Each 2 KB item = ceil(2/4) = 1 RCU per strongly consistent read
+  Eventually consistent = 0.5 RCU per read
+  → 320 × 0.5 = 160 RCUs
+
+Strongly consistent: 400 × 0.2 = 80 reads/sec
+  → 80 × 1 = 80 RCUs
+
+Total read capacity: 160 + 80 = 240 RCUs
+
+# Write calculations:
+# - Average item size: 1.5 KB → ceil(1.5/1) = 2 WCUs per write
+# - Peak: 100 writes/sec
+
+Total write capacity: 100 × 2 = 200 WCUs
+
+# Cost estimate (us-east-1, provisioned):
+# RCU: $0.00013 per RCU per hour
+# WCU: $0.00065 per WCU per hour
+#
+# Monthly (730 hours):
+# Reads:  240 × $0.00013 × 730 = $22.78/month
+# Writes: 200 × $0.00065 × 730 = $94.90/month
+# Total: ~$118/month (provisioned)
+#
+# On-demand pricing:
+# $1.25 per million write request units
+# $0.25 per million read request units
+# At 400 reads/sec × 86400 sec = 34.56M reads/day
+# At 100 writes/sec × 86400 sec = 8.64M writes/day
+# → ~$8.64 + ~$10.80 = ~$19.44/day = ~$583/month
+# → Provisioned is cheaper at sustained load!</code></pre>
+      </div>
+
+      <h4>Adaptive Capacity</h4>
+      <p>DynamoDB automatically handles <strong>uneven workloads</strong> with adaptive capacity. Even if one partition is receiving disproportionate traffic (hot partition), DynamoDB will:</p>
+      <ol>
+        <li><strong>Burst capacity:</strong> Each partition can burst up to 300 seconds of unused throughput.</li>
+        <li><strong>Adaptive capacity:</strong> Automatically increases throughput for hot partitions by "borrowing" unused capacity from other partitions, as long as total table throughput isn't exceeded.</li>
+        <li><strong>Partition splitting:</strong> If a partition is consistently hot, DynamoDB will automatically split it into two partitions. This is transparent and requires no action.</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Interview tip:</strong> When asked about DynamoDB capacity, mention three things: (1) the RCU/WCU math, (2) provisioned vs on-demand trade-offs (sustained load → provisioned; spiky → on-demand), and (3) adaptive capacity + auto-scaling as mitigations for hot partitions.
+      </div>
+
+      <!-- DynamoDB Streams & DAX -->
+      <h3 id="dynamo-streams">DynamoDB Streams &amp; DAX</h3>
+
+      <h4>DynamoDB Streams</h4>
+      <p>DynamoDB Streams captures a <strong>time-ordered sequence of item-level modifications</strong> (inserts, updates, deletes) in a DynamoDB table. Each stream record contains the primary key, the old/new image (or both), and a timestamp.</p>
+
+<pre><code># Enable streams on a table
+aws dynamodb update-table \
+    --table-name ECommerce \
+    --stream-specification \
+        StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES
+
+# Stream view types:
+# KEYS_ONLY        → only the key attributes
+# NEW_IMAGE        → the entire item after modification
+# OLD_IMAGE        → the entire item before modification
+# NEW_AND_OLD_IMAGES → both (most useful)
+
+# Common use cases:
+# 1. Trigger Lambda on item change (event-driven)
+# 2. Cross-region replication (Global Tables use this)
+# 3. Materialized views / denormalization
+# 4. Analytics pipeline: Stream → Kinesis → S3 → Athena
+# 5. Audit log / change data capture (CDC)</code></pre>
+
+      <p>Example: Auto-update a search index when a product changes:</p>
+<pre><code># Lambda function triggered by DynamoDB Stream
+def handler(event, context):
+    for record in event['Records']:
+        if record['eventName'] in ('INSERT', 'MODIFY'):
+            new_image = record['dynamodb']['NewImage']
+            pk = new_image['PK']['S']
+            
+            if pk.startswith('PRODUCT#'):
+                # Index in Elasticsearch
+                es_client.index(
+                    index='products',
+                    id=pk,
+                    body={
+                        'name': new_image['name']['S'],
+                        'category': new_image['category']['S'],
+                        'price': int(new_image['price']['N'])
+                    }
+                )
+        
+        elif record['eventName'] == 'REMOVE':
+            old_image = record['dynamodb']['OldImage']
+            pk = old_image['PK']['S']
+            if pk.startswith('PRODUCT#'):
+                es_client.delete(index='products', id=pk)</code></pre>
+
+      <h4>DAX (DynamoDB Accelerator)</h4>
+      <p>DAX is a fully managed, in-memory caching layer for DynamoDB that delivers <strong>microsecond response times</strong> (vs. single-digit millisecond for vanilla DynamoDB). It's API-compatible — just change the endpoint.</p>
+
+<pre><code># Without DAX (standard DynamoDB)
+import boto3
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('ECommerce')
+result = table.get_item(Key={'PK': 'USER#u-42', 'SK': 'PROFILE'})
+# Latency: ~5 ms
+
+# With DAX (just change the client!)
+import amazondax
+dax_client = amazondax.AmazonDaxClient(
+    endpoint_url='dax://my-cluster.abc123.dax-clusters.us-east-1.amazonaws.com:8111'
+)
+table = dax_client.Table('ECommerce')
+result = table.get_item(Key={'PK': 'USER#u-42', 'SK': 'PROFILE'})
+# Latency: ~0.2 ms (25x faster)
+
+# DAX caching behavior:
+# - Item cache: caches GetItem/BatchGetItem results
+# - Query cache: caches Query/Scan results
+# - Write-through: writes go to both DAX and DynamoDB
+# - TTL: default 5 minutes (configurable)
+# - Cache invalidation: automatic on writes</code></pre>
+
+      <p>When to use DAX vs. Redis as a DynamoDB cache:</p>
+      <table style="width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.85rem;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Criteria</th><th style="text-align:left;padding:0.5em;">DAX</th><th style="text-align:left;padding:0.5em;">Redis</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Integration</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Drop-in (same API)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Requires cache-aside code</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Data structures</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">None (just cached items)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Rich (sorted sets, lists, etc.)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Cache invalidation</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Automatic write-through</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Manual (you manage TTL/eviction)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Cost</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~$0.27/hr per node</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Varies (ElastiCache pricing)</td></tr>
+          <tr><td style="padding:0.5em;">Use case</td><td style="padding:0.5em;">Read-heavy DynamoDB only</td><td style="padding:0.5em;">Multi-source caching, pub/sub, etc.</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ==================== SECTION 5: COMPARISON TABLE ==================== -->
+      <h2 id="comparison">Redis vs DynamoDB vs Memcached</h2>
+      <p>These three are often confused or conflated in system design discussions. They serve very different purposes:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.2rem 0; font-size:0.82rem;">
+        <thead><tr style="border-bottom:2px solid var(--line);">
+          <th style="text-align:left;padding:0.6em;">Dimension</th>
+          <th style="text-align:left;padding:0.6em;"><span class="kv-badge redis">Redis</span></th>
+          <th style="text-align:left;padding:0.6em;"><span class="kv-badge dynamo">DynamoDB</span></th>
+          <th style="text-align:left;padding:0.6em;"><span class="kv-badge memcached">Memcached</span></th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Type</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">In-memory data structure store</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Managed NoSQL (SSD-backed)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">In-memory cache (strings only)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Data model</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Strings, Lists, Sets, ZSets, Hashes, Streams, HLL, Bitmaps</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Items (JSON-like) with typed attributes</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Binary strings (blobs) only</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Max value size</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">512 MB</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">400 KB per item</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">1 MB (default)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Latency</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Sub-ms (in-memory)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">1–5 ms (SSD); μs with DAX</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Sub-ms (in-memory)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Persistence</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Optional (RDB + AOF)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Always durable (3-AZ replication)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">None (pure cache)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Consistency</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Strong (single node) / eventual (replicas)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Strong or eventually consistent (per query)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">N/A (no replication)</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Scaling</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis Cluster (manual sharding)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Automatic (serverless)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Client-side sharding</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Secondary indexes</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Manual (sorted sets as indexes)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">GSI + LSI (up to 25 total)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">None</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Transactions</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">MULTI/EXEC (optimistic locking)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">TransactWriteItems / TransactGetItems (ACID, up to 100 items)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">CAS (check and set) only</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Scripting</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Lua scripts (atomic)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">ConditionExpressions, UpdateExpressions</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">None</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Pub/Sub</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Yes (Pub/Sub + Streams)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">DynamoDB Streams (CDC)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">No</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Multi-threading</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Single-threaded cmd processing (I/O threads since 6.0)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Managed (transparent)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Multi-threaded</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);font-weight:600;">Ops burden</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Medium (you manage cluster)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Low (fully managed)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Medium (you manage servers)</td></tr>
+          <tr><td style="padding:0.5em;font-weight:600;">Pricing</td><td style="padding:0.5em;">Per node (RAM-based)</td><td style="padding:0.5em;">Per RCU/WCU or per request</td><td style="padding:0.5em;">Per node (RAM-based)</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ==================== SECTION 6: WHEN TO USE EACH ==================== -->
+      <h2 id="when-to-use">When to Use Each</h2>
+
+      <div class="ds-grid">
+        <div>
+          <h4 style="color:#92400e;">Choose Redis When…</h4>
+          <ul style="font-size:0.88rem;">
+            <li><strong>Sub-millisecond latency</strong> is required (caching, session store, rate limiting)</li>
+            <li>You need <strong>rich data structures</strong> — leaderboards (sorted sets), queues (lists), unique counts (HyperLogLog)</li>
+            <li>You want <strong>atomic operations</strong> on complex data (Lua scripts, MULTI/EXEC)</li>
+            <li><strong>Pub/Sub or Streams</strong> for real-time messaging within a service</li>
+            <li>Data fits in memory (<strong>RAM is the limit</strong>)</li>
+            <li>You can tolerate <strong>some data loss</strong> (even with AOF everysec, 1 second window)</li>
+            <li>Use as a <strong>complement</strong> to a primary database, not as the primary database itself (unless ephemeral data)</li>
+          </ul>
+        </div>
+        <div>
+          <h4 style="color:#1e40af;">Choose DynamoDB When…</h4>
+          <ul style="font-size:0.88rem;">
+            <li>You need a <strong>durable, scalable primary database</strong> with consistent single-digit ms latency</li>
+            <li>Access patterns are <strong>known and limited</strong> (design your keys/indexes upfront)</li>
+            <li>You want <strong>zero operational overhead</strong> — no servers, patches, backups to manage</li>
+            <li><strong>Auto-scaling</strong> for unpredictable traffic (on-demand mode)</li>
+            <li><strong>Multi-region</strong> with Global Tables (active-active replication)</li>
+            <li>You're already in <strong>AWS ecosystem</strong> (Lambda + DynamoDB Streams + API Gateway)</li>
+            <li>Data exceeds what fits in memory but you still need <strong>fast key-based access</strong></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="ds-grid">
+        <div>
+          <h4 style="color:#065f46;">Choose Memcached When…</h4>
+          <ul style="font-size:0.88rem;">
+            <li>You need a <strong>simple, multi-threaded cache</strong> for small string/blob values</li>
+            <li>Workload is <strong>read-heavy</strong> and can benefit from multi-core utilization</li>
+            <li>You don't need persistence, data structures, or pub/sub</li>
+            <li>You want the <strong>simplest possible caching layer</strong> with minimal features</li>
+            <li>Large working set that benefits from Memcached's <strong>more efficient memory usage</strong> per key (no overhead for data structure metadata)</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Common Architecture Patterns</h4>
+          <ul style="font-size:0.88rem;">
+            <li><strong>Cache-aside + DynamoDB:</strong> Redis/Memcached fronting DynamoDB for hot reads</li>
+            <li><strong>Redis as primary + PostgreSQL as source of truth:</strong> Fast reads from Redis, periodic sync to SQL for reporting</li>
+            <li><strong>DynamoDB + Streams + Lambda:</strong> Event-driven architecture, DynamoDB as event store</li>
+            <li><strong>Redis Streams as message broker:</strong> Between microservices when Kafka is overkill</li>
+            <li><strong>DynamoDB + DAX + CloudFront:</strong> Full AWS caching stack for API responses</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Interview framework:</strong> When asked "What database would you use?", start with: (1) What are the access patterns? (2) What's the consistency requirement? (3) What's the scale? (4) Is this ephemeral or durable data? If the answer is "fast key-based lookups, ephemeral, sub-ms latency" → Redis. If it's "durable, scalable, key-based access, managed" → DynamoDB. If it's "pure cache, simple values, multi-threaded" → Memcached.
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="nosql-document.html"><span>Previous</span><span>&#8592; Document Stores</span></a>
+        <a class="next" href="nosql-column.html"><span>Next</span><span>Column-Family Stores &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,r,fill,extra){var a={x:''+x,y:''+y,width:''+w,height:''+h,rx:''+(r||0),fill:fill||'#eee'};if(extra)for(var k in extra)a[k]=extra[k];return el('rect',a);}
+    function line(x1,y1,x2,y2,color,w){return el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color||'#999','stroke-width':''+(w||2)});}
+    function arrow(x1,y1,x2,y2,color){var g=el('g',{});g.appendChild(line(x1,y1,x2,y2,color,2));var angle=Math.atan2(y2-y1,x2-x1),sz=8;var p=el('polygon',{points:(x2-sz*Math.cos(angle-0.4))+','+(y2-sz*Math.sin(angle-0.4))+' '+x2+','+y2+' '+(x2-sz*Math.cos(angle+0.4))+','+(y2-sz*Math.sin(angle+0.4)),fill:color||'#999'});g.appendChild(p);return g;}
+    function circle(cx,cy,r,fill,extra){var a={cx:''+cx,cy:''+cy,r:''+r,fill:fill||'#eee'};if(extra)for(var k in extra)a[k]=extra[k];return el('circle',a);}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ==================== ANIMATION 1: Hash Table Lookup ==================== */
+    (function(){
+      var svg=document.getElementById('hash-svg'),info=document.getElementById('hash-info'),out=document.getElementById('hash-output');
+      var brand='#0a8f6a',blue='#2563eb',orange='#f59e0b',red='#ef4444',purple='#7c3aed';
+
+      var bucketCount=8;
+      var bucketW=70,bucketH=36,bucketGap=8;
+      var tableX=300,tableY=80;
+
+      /* pre-loaded entries in the hash table */
+      var entries=[
+        {key:'user:10',value:'Alice',bucket:2,chain:0},
+        {key:'user:25',value:'Bob',bucket:5,chain:0},
+        {key:'user:42',value:'Carol',bucket:2,chain:1},
+        {key:'user:7',value:'Dave',bucket:7,chain:0},
+        {key:'user:18',value:'Eve',bucket:5,chain:1},
+        {key:'sess:abc',value:'{uid:42}',bucket:3,chain:0}
+      ];
+
+      var steps=[
+        {desc:'Hash table with 8 buckets. Some buckets have chains (collisions via linked lists).',phase:'init'},
+        {desc:'Lookup: GET "user:42". Step 1: Compute hash("user:42")',phase:'hash',lookupKey:'user:42'},
+        {desc:'hash("user:42") = 53274. Compute 53274 % 8 = 2. Go to bucket 2.',phase:'bucket',lookupKey:'user:42',bucket:2,hashVal:53274},
+        {desc:'Bucket 2 head → "user:10"→"Alice". Key "user:10" ≠ "user:42". Follow chain pointer →',phase:'chain0',lookupKey:'user:42',bucket:2,chainIdx:0},
+        {desc:'Next node → "user:42"→"Carol". Key matches! Return "Carol". Lookup complete in O(2) — chain length.',phase:'found',lookupKey:'user:42',bucket:2,chainIdx:1,value:'Carol'},
+        {desc:'Collision resolution: Bucket 5 also has a chain. "user:25"→"Bob" and "user:18"→"Eve" both hash to bucket 5.',phase:'collision',bucket:5},
+        {desc:'Load factor α = 6/8 = 0.75. At α ≥ 1, Redis triggers incremental rehashing to a table with 16 buckets.',phase:'loadfactor'}
+      ];
+
+      var step=0;
+
+      function drawBuckets(svg,highlightBucket,highlightChain){
+        /* Draw bucket array */
+        svg.appendChild(txt('Buckets[ ]',{x:''+(tableX+bucketW/2),y:''+(tableY-12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12','font-weight':'700',fill:'var(--ink)'}));
+        for(var i=0;i<bucketCount;i++){
+          var y=tableY+i*(bucketH+bucketGap);
+          var hl=(i===highlightBucket);
+          svg.appendChild(rect(tableX,y,bucketW,bucketH,6,hl?'rgba(37,99,235,0.15)':'#f3f4f6',{stroke:hl?blue:'#d1d5db','stroke-width':hl?'2.5':'1'}));
+          svg.appendChild(txt('['+i+']',{x:''+(tableX+14),y:''+(y+22),'font-family':'Consolas,monospace','font-size':'11','font-weight':'600',fill:hl?blue:'var(--ink-muted)'}));
+        }
+
+        /* Draw chained entries */
+        for(var e=0;e<entries.length;e++){
+          var ent=entries[e];
+          var by=tableY+ent.bucket*(bucketH+bucketGap);
+          var ex=tableX+bucketW+30+ent.chain*160;
+          var ey=by;
+          var isHl=(ent.bucket===highlightBucket && highlightChain!==undefined && ent.chain<=highlightChain);
+          var isMatch=(ent.bucket===highlightBucket && highlightChain!==undefined && ent.chain===highlightChain);
+
+          /* Arrow from bucket or prev node */
+          var ax=ent.chain===0?(tableX+bucketW):(ex-160+130);
+          svg.appendChild(arrow(ax,ey+bucketH/2,ex-2,ey+bucketH/2,isHl?blue:'#bbb'));
+
+          /* Entry box */
+          svg.appendChild(rect(ex,ey,130,bucketH,6,isMatch?'rgba(10,143,106,0.18)':isHl?'rgba(37,99,235,0.08)':'#fff',{stroke:isMatch?brand:isHl?blue:'#d1d5db','stroke-width':isMatch?'2.5':isHl?'2':'1'}));
+          svg.appendChild(txt(ent.key,{x:''+(ex+6),y:''+(ey+14),'font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:isMatch?brand:isHl?blue:'var(--ink)'}));
+          svg.appendChild(txt('→ '+ent.value,{x:''+(ex+6),y:''+(ey+28),'font-family':'Consolas,monospace','font-size':'9',fill:isMatch?brand:'var(--ink-muted)'}));
+        }
+      }
+
+      function draw(idx){
+        clearSvg(svg);
+        if(idx<0){
+          svg.appendChild(txt('Click "Step" to walk through a hash table lookup with collision chaining',{x:'350',y:'180','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'var(--ink-muted)'}));
+          info.textContent='';out.textContent='';return;
+        }
+        var s=steps[idx];
+
+        if(s.phase==='init'){
+          drawBuckets(svg);
+        }
+        else if(s.phase==='hash'){
+          /* Show key being hashed */
+          svg.appendChild(rect(30,130,120,36,8,'rgba(124,58,237,0.12)',{stroke:purple,'stroke-width':'2'}));
+          svg.appendChild(txt('key: "'+s.lookupKey+'"',{x:'90',y:'153','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:purple}));
+
+          svg.appendChild(rect(170,130,100,36,8,'rgba(245,158,11,0.12)',{stroke:orange,'stroke-width':'2'}));
+          svg.appendChild(txt('hash( )',{x:'220',y:'148','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:orange}));
+          svg.appendChild(txt('SipHash',{x:'220',y:'161','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'8',fill:orange}));
+
+          svg.appendChild(arrow(150,148,170,148,orange));
+          drawBuckets(svg);
+        }
+        else if(s.phase==='bucket'){
+          svg.appendChild(rect(30,130,120,36,8,'rgba(124,58,237,0.12)',{stroke:purple,'stroke-width':'2'}));
+          svg.appendChild(txt('key: "'+s.lookupKey+'"',{x:'90',y:'153','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:purple}));
+
+          svg.appendChild(rect(170,130,100,36,8,'rgba(245,158,11,0.12)',{stroke:orange,'stroke-width':'2'}));
+          svg.appendChild(txt('hash = '+s.hashVal,{x:'220',y:'148','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:orange}));
+          svg.appendChild(txt(s.hashVal+' % 8 = '+s.bucket,{x:'220',y:'161','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:orange}));
+
+          svg.appendChild(arrow(150,148,170,148,orange));
+          svg.appendChild(arrow(270,148,tableX-4,tableY+s.bucket*(bucketH+bucketGap)+bucketH/2,blue));
+          drawBuckets(svg,s.bucket);
+        }
+        else if(s.phase==='chain0'){
+          svg.appendChild(rect(30,40,220,28,6,'rgba(37,99,235,0.08)',{stroke:blue,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Scanning chain at bucket '+s.bucket+'… comparing keys',{x:'140',y:'59','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:blue}));
+          drawBuckets(svg,s.bucket,s.chainIdx);
+          /* X mark on first entry */
+          var ex=tableX+bucketW+30;
+          var ey=tableY+s.bucket*(bucketH+bucketGap);
+          svg.appendChild(txt('✗ ≠',{x:''+(ex+135),y:''+(ey+22),'font-family':'Manrope,sans-serif','font-size':'13','font-weight':'700',fill:red}));
+        }
+        else if(s.phase==='found'){
+          svg.appendChild(rect(30,40,220,28,6,'rgba(10,143,106,0.12)',{stroke:brand,'stroke-width':'1.5'}));
+          svg.appendChild(txt('✓ Key matched! Return value: "'+s.value+'"',{x:'140',y:'59','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:brand}));
+          drawBuckets(svg,s.bucket,s.chainIdx);
+          /* Checkmark on matching entry */
+          var ex2=tableX+bucketW+30+s.chainIdx*160;
+          var ey2=tableY+s.bucket*(bucketH+bucketGap);
+          svg.appendChild(txt('✓',{x:''+(ex2+135),y:''+(ey2+22),'font-family':'Manrope,sans-serif','font-size':'14','font-weight':'700',fill:brand}));
+          /* X on prev */
+          var ex1=tableX+bucketW+30;
+          svg.appendChild(txt('✗',{x:''+(ex1+135),y:''+(ey2+22),'font-family':'Manrope,sans-serif','font-size':'14','font-weight':'700',fill:red}));
+        }
+        else if(s.phase==='collision'){
+          svg.appendChild(rect(30,40,280,28,6,'rgba(245,158,11,0.1)',{stroke:orange,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Collision at bucket 5: two entries share the same hash slot',{x:'170',y:'59','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:orange}));
+          drawBuckets(svg,s.bucket,1);
+        }
+        else if(s.phase==='loadfactor'){
+          drawBuckets(svg);
+          svg.appendChild(rect(30,30,290,55,8,'rgba(239,68,68,0.08)',{stroke:red,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Load factor α = n/m = 6/8 = 0.75',{x:'175',y:'50','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11','font-weight':'700',fill:red}));
+          svg.appendChild(txt('When α ≥ 1 → Redis doubles table size & rehashes incrementally',{x:'175',y:'70','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:red}));
+
+          /* Progress bar showing rehash */
+          svg.appendChild(rect(50,340,250,18,4,'#f3f4f6',{stroke:'#d1d5db','stroke-width':'1'}));
+          svg.appendChild(rect(50,340,100,18,4,'rgba(10,143,106,0.4)'));
+          svg.appendChild(txt('Incremental rehash: 40% complete (1 bucket per operation)',{x:'175',y:'336','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+        }
+
+        info.textContent=s.desc;
+        out.textContent=(idx+1)+' of '+steps.length;
+      }
+
+      draw(-1);
+      document.getElementById('hash-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('hash-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+
+    /* ==================== ANIMATION 2: Redis Cluster Hash Slot Routing ==================== */
+    (function(){
+      var svg=document.getElementById('cluster-svg'),info=document.getElementById('cluster-info'),out=document.getElementById('cluster-output');
+      var brand='#0a8f6a',blue='#2563eb',orange='#f59e0b',red='#ef4444',purple='#7c3aed',teal='#0d9488';
+
+      /* 6 nodes: 3 masters + 3 replicas */
+      var masters=[
+        {id:'M1',label:'Master A',x:180,y:160,color:blue,slots:'0–5460',slotStart:0,slotEnd:5460},
+        {id:'M2',label:'Master B',x:350,y:160,color:brand,slots:'5461–10922',slotStart:5461,slotEnd:10922},
+        {id:'M3',label:'Master C',x:520,y:160,color:purple,slots:'10923–16383',slotStart:10923,slotEnd:16383}
+      ];
+      var replicas=[
+        {id:'R1',label:'Replica A',x:180,y:290,color:blue,master:'M1'},
+        {id:'R2',label:'Replica B',x:350,y:290,color:brand,master:'M2'},
+        {id:'R3',label:'Replica C',x:520,y:290,color:purple,master:'M3'}
+      ];
+
+      var steps=[
+        {desc:'Redis Cluster: 3 masters, 3 replicas. 16,384 hash slots distributed across masters.',phase:'init'},
+        {desc:'Client wants to GET "user:500". Client has a cached slot map and sends to Master A.',phase:'client'},
+        {desc:'CRC16("user:500") = 7365. Slot 7365 is owned by Master B (5461–10922), not Master A.',phase:'hash'},
+        {desc:'Master A responds: -MOVED 7365 192.168.1.2:6379. Client updates its slot map cache.',phase:'moved'},
+        {desc:'Client re-sends GET "user:500" directly to Master B. Master B returns the value.',phase:'redirect'},
+        {desc:'Master B replicates asynchronously to Replica B. If Master B fails, Replica B is promoted.',phase:'replicate'},
+        {desc:'Smart clients cache slot→node mapping after MOVED. Future requests for slot 7365 go directly to B.',phase:'smart'}
+      ];
+
+      var step=0;
+      var nodeR=32;
+
+      function drawNode(svg,n,highlight,dimmed){
+        var opacity=dimmed?0.3:1;
+        svg.appendChild(circle(n.x,n.y,nodeR,highlight?n.color:'#f3f4f6',{stroke:n.color,'stroke-width':highlight?'3':'1.5',opacity:''+opacity}));
+        svg.appendChild(txt(n.label,{x:''+n.x,y:''+(n.y+4),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'700',fill:highlight?'#fff':n.color,opacity:''+opacity}));
+      }
+
+      function drawSlotLabel(svg,m,highlight){
+        svg.appendChild(txt('Slots: '+m.slots,{x:''+m.x,y:''+(m.y-nodeR-10),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8','font-weight':'600',fill:highlight?m.color:'var(--ink-muted)'}));
+      }
+
+      function drawReplicaArrow(svg,m,r,active){
+        svg.appendChild(line(m.x,m.y+nodeR+2,r.x,r.y-nodeR-2,active?m.color:'#e5e7eb',active?2:1));
+        svg.appendChild(txt('repl',{x:''+(m.x+12),y:''+(m.y+nodeR+22),'font-family':'Consolas,monospace','font-size':'7',fill:active?m.color:'#ccc'}));
+      }
+
+      function draw(idx){
+        clearSvg(svg);
+        if(idx<0){
+          svg.appendChild(txt('Click "Step" to see how Redis Cluster routes a key via hash slots',{x:'350',y:'210','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'var(--ink-muted)'}));
+          info.textContent='';out.textContent='';return;
+        }
+        var s=steps[idx];
+
+        /* Slot distribution bar at top */
+        var barY=30,barH=14,barW=400,barX=150;
+        svg.appendChild(rect(barX,barY,barW,barH,4,'#f3f4f6',{stroke:'#d1d5db','stroke-width':'1'}));
+        var w1=barW*(5461/16384),w2=barW*(5462/16384),w3=barW*(5461/16384);
+        svg.appendChild(rect(barX,barY,w1,barH,0,'rgba(37,99,235,0.3)'));
+        svg.appendChild(rect(barX+w1,barY,w2,barH,0,'rgba(10,143,106,0.3)'));
+        svg.appendChild(rect(barX+w1+w2,barY,w3,barH,0,'rgba(124,58,237,0.3)'));
+        svg.appendChild(txt('0',{x:''+barX,y:''+(barY+barH+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('5460',{x:''+(barX+w1),y:''+(barY+barH+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('10922',{x:''+(barX+w1+w2),y:''+(barY+barH+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('16383',{x:''+(barX+barW),y:''+(barY+barH+12),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('16,384 Hash Slots',{x:''+(barX+barW/2),y:''+(barY-6),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'600',fill:'var(--ink)'}));
+
+        if(s.phase==='init'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],true);drawSlotLabel(svg,masters[i],true);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false);}
+          for(var i=0;i<masters.length;i++){drawReplicaArrow(svg,masters[i],replicas[i],false);}
+        }
+        else if(s.phase==='client'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],i===0);drawSlotLabel(svg,masters[i],i===0);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false,true);}
+          for(var i=0;i<masters.length;i++){drawReplicaArrow(svg,masters[i],replicas[i],false);}
+          /* Client */
+          svg.appendChild(rect(20,140,90,40,8,'rgba(37,99,235,0.1)',{stroke:blue,'stroke-width':'2'}));
+          svg.appendChild(txt('Client',{x:'65',y:'157','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:blue}));
+          svg.appendChild(txt('GET user:500',{x:'65',y:'170','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:blue}));
+          svg.appendChild(arrow(110,160,masters[0].x-nodeR-2,160,blue));
+        }
+        else if(s.phase==='hash'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],i===1);drawSlotLabel(svg,masters[i],i===1);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false,true);}
+          for(var i=0;i<masters.length;i++){drawReplicaArrow(svg,masters[i],replicas[i],false);}
+          /* Hash calculation */
+          svg.appendChild(rect(20,140,90,40,8,'rgba(37,99,235,0.1)',{stroke:blue,'stroke-width':'2'}));
+          svg.appendChild(txt('Client',{x:'65',y:'157','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:blue}));
+          svg.appendChild(txt('GET user:500',{x:'65',y:'170','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:blue}));
+          svg.appendChild(arrow(110,160,masters[0].x-nodeR-2,160,blue));
+          /* Hash info */
+          svg.appendChild(rect(170,85,210,30,6,'rgba(245,158,11,0.12)',{stroke:orange,'stroke-width':'1.5'}));
+          svg.appendChild(txt('CRC16("user:500") % 16384 = 7365',{x:'275',y:'103','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:orange}));
+          /* Slot marker on bar */
+          var slotX=barX+barW*(7365/16384);
+          svg.appendChild(line(slotX,barY-3,slotX,barY+barH+3,red,2.5));
+          svg.appendChild(txt('7365',{x:''+slotX,y:''+(barY-8),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'700',fill:red}));
+        }
+        else if(s.phase==='moved'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],i===0||i===1);drawSlotLabel(svg,masters[i]);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false,true);}
+          /* Client */
+          svg.appendChild(rect(20,140,90,40,8,'rgba(37,99,235,0.1)',{stroke:blue,'stroke-width':'2'}));
+          svg.appendChild(txt('Client',{x:'65',y:'157','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:blue}));
+          svg.appendChild(txt('GET user:500',{x:'65',y:'170','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:blue}));
+          svg.appendChild(arrow(110,160,masters[0].x-nodeR-2,160,blue));
+          /* MOVED response */
+          svg.appendChild(arrow(masters[0].x-nodeR-2,175,112,175,red));
+          svg.appendChild(rect(115,195,180,28,6,'rgba(239,68,68,0.12)',{stroke:red,'stroke-width':'1.5'}));
+          svg.appendChild(txt('-MOVED 7365 → Master B',{x:'205',y:'213','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:red}));
+        }
+        else if(s.phase==='redirect'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],i===1);drawSlotLabel(svg,masters[i],i===1);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false,true);}
+          /* Client */
+          svg.appendChild(rect(20,140,90,40,8,'rgba(10,143,106,0.1)',{stroke:brand,'stroke-width':'2'}));
+          svg.appendChild(txt('Client',{x:'65',y:'157','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:brand}));
+          svg.appendChild(txt('GET user:500',{x:'65',y:'170','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:brand}));
+          /* Direct to B */
+          svg.appendChild(arrow(110,155,masters[1].x-nodeR-2,155,brand));
+          svg.appendChild(txt('→ redirect to correct node',{x:'220',y:'148','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:brand}));
+          /* Response */
+          svg.appendChild(arrow(masters[1].x-nodeR-2,170,112,170,brand));
+          svg.appendChild(rect(140,230,140,24,6,'rgba(10,143,106,0.12)',{stroke:brand,'stroke-width':'1.5'}));
+          svg.appendChild(txt('✓ "Carol" returned',{x:'210',y:'246','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9','font-weight':'600',fill:brand}));
+        }
+        else if(s.phase==='replicate'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],i===1);drawSlotLabel(svg,masters[i]);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],i===1);}
+          for(var i=0;i<masters.length;i++){drawReplicaArrow(svg,masters[i],replicas[i],i===1);}
+          /* Failover label */
+          svg.appendChild(rect(400,260,200,44,8,'rgba(10,143,106,0.08)',{stroke:brand,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Async replication to Replica B.',{x:'500',y:'276','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:brand}));
+          svg.appendChild(txt('If Master B fails → Replica B promoted.',{x:'500',y:'292','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'600',fill:brand}));
+        }
+        else if(s.phase==='smart'){
+          for(var i=0;i<masters.length;i++){drawNode(svg,masters[i],true);drawSlotLabel(svg,masters[i],true);}
+          for(var i=0;i<replicas.length;i++){drawNode(svg,replicas[i],false,true);}
+          /* Slot map cache */
+          svg.appendChild(rect(120,340,460,50,8,'rgba(37,99,235,0.06)',{stroke:blue,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Client Slot Map Cache (updated after MOVED)',{x:'350',y:'356','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9','font-weight':'700',fill:blue}));
+          svg.appendChild(txt('Slot 0–5460 → A    |    Slot 5461–10922 → B    |    Slot 10923–16383 → C',{x:'350',y:'376','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink)'}));
+          /* Direct arrows */
+          svg.appendChild(arrow(200,340,masters[0].x,masters[0].y+nodeR+2,blue));
+          svg.appendChild(arrow(350,340,masters[1].x,masters[1].y+nodeR+2,brand));
+          svg.appendChild(arrow(500,340,masters[2].x,masters[2].y+nodeR+2,purple));
+          svg.appendChild(txt('Future requests go directly — no more MOVED redirects',{x:'350',y:'406','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)'}));
+        }
+
+        info.textContent=s.desc;
+        out.textContent=(idx+1)+' of '+steps.length;
+      }
+
+      draw(-1);
+      document.getElementById('cluster-step').addEventListener('click',function(){if(step>=steps.length)return;draw(step);step++;});
+      document.getElementById('cluster-reset').addEventListener('click',function(){step=0;draw(-1);});
+    })();
+  })();
+  </script>
+</body>
+</html>

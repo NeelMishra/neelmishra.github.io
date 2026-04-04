@@ -735,6 +735,124 @@ var BLOG_TREE = [
     ]
   },
   {
+    name: 'hld',
+    label: 'High Level Design',
+    children: [
+      {
+        name: 'foundations',
+        label: 'Foundations',
+        children: [
+          { title: 'Introduction', file: 'hld/foundations/intro.html', links: ['hld/foundations/scaling.html'] },
+          { title: 'Scaling', file: 'hld/foundations/scaling.html', links: ['hld/foundations/intro.html', 'hld/foundations/load-balancing.html'] },
+          { title: 'Load Balancing', file: 'hld/foundations/load-balancing.html', links: ['hld/foundations/scaling.html', 'hld/foundations/caching.html'] },
+          { title: 'Caching Strategies', file: 'hld/foundations/caching.html', links: ['hld/foundations/load-balancing.html', 'hld/foundations/databases.html'] },
+          { title: 'SQL vs NoSQL', file: 'hld/foundations/databases.html', links: ['hld/foundations/caching.html', 'hld/foundations/cap-theorem.html'] },
+          { title: 'CAP Theorem & PACELC', file: 'hld/foundations/cap-theorem.html', links: ['hld/foundations/databases.html', 'hld/foundations/acid-base.html'] },
+          { title: 'ACID vs BASE', file: 'hld/foundations/acid-base.html', links: ['hld/foundations/cap-theorem.html', 'hld/foundations/consistent-hashing.html'] },
+          { title: 'Consistent Hashing', file: 'hld/foundations/consistent-hashing.html', links: ['hld/foundations/acid-base.html', 'hld/foundations/cdn.html'] },
+          { title: 'CDN & Edge Computing', file: 'hld/foundations/cdn.html', links: ['hld/foundations/consistent-hashing.html', 'hld/foundations/api-design.html'] },
+          { title: 'API Design', file: 'hld/foundations/api-design.html', links: ['hld/foundations/cdn.html', 'hld/building-blocks/message-queues.html'] }
+        ]
+      },
+      {
+        name: 'building-blocks',
+        label: 'Building Blocks',
+        children: [
+          { title: 'Message Queues', file: 'hld/building-blocks/message-queues.html', links: ['hld/foundations/api-design.html', 'hld/building-blocks/database-sharding.html'] },
+          { title: 'Database Sharding', file: 'hld/building-blocks/database-sharding.html', links: ['hld/building-blocks/message-queues.html', 'hld/building-blocks/replication.html'] },
+          { title: 'Replication', file: 'hld/building-blocks/replication.html', links: ['hld/building-blocks/database-sharding.html', 'hld/building-blocks/rate-limiting.html'] },
+          { title: 'Rate Limiting', file: 'hld/building-blocks/rate-limiting.html', links: ['hld/building-blocks/replication.html', 'hld/building-blocks/service-discovery.html'] },
+          { title: 'Service Discovery', file: 'hld/building-blocks/service-discovery.html', links: ['hld/building-blocks/rate-limiting.html', 'hld/building-blocks/proxies.html'] },
+          { title: 'Proxies & API Gateway', file: 'hld/building-blocks/proxies.html', links: ['hld/building-blocks/service-discovery.html', 'hld/building-blocks/bloom-filters.html'] },
+          { title: 'Bloom Filters', file: 'hld/building-blocks/bloom-filters.html', links: ['hld/building-blocks/proxies.html', 'hld/building-blocks/distributed-locking.html'] },
+          { title: 'Distributed Locking', file: 'hld/building-blocks/distributed-locking.html', links: ['hld/building-blocks/bloom-filters.html', 'hld/building-blocks/heartbeat-health.html'] },
+          { title: 'Heartbeat & Health', file: 'hld/building-blocks/heartbeat-health.html', links: ['hld/building-blocks/distributed-locking.html', 'hld/building-blocks/logging-monitoring.html'] },
+          { title: 'Observability', file: 'hld/building-blocks/logging-monitoring.html', links: ['hld/building-blocks/heartbeat-health.html', 'hld/data-storage/sql-internals.html'] }
+        ]
+      },
+      {
+        name: 'data-storage',
+        label: 'Data Storage',
+        children: [
+          { title: 'SQL Internals', file: 'hld/data-storage/sql-internals.html', links: ['hld/building-blocks/logging-monitoring.html', 'hld/data-storage/nosql-document.html'] },
+          { title: 'Document Stores', file: 'hld/data-storage/nosql-document.html', links: ['hld/data-storage/sql-internals.html', 'hld/data-storage/nosql-keyvalue.html'] },
+          { title: 'Key-Value Stores', file: 'hld/data-storage/nosql-keyvalue.html', links: ['hld/data-storage/nosql-document.html', 'hld/data-storage/nosql-column.html'] },
+          { title: 'Column-Family Stores', file: 'hld/data-storage/nosql-column.html', links: ['hld/data-storage/nosql-keyvalue.html', 'hld/data-storage/nosql-graph.html'] },
+          { title: 'Graph Databases', file: 'hld/data-storage/nosql-graph.html', links: ['hld/data-storage/nosql-column.html', 'hld/data-storage/time-series.html'] },
+          { title: 'Time-Series Databases', file: 'hld/data-storage/time-series.html', links: ['hld/data-storage/nosql-graph.html', 'hld/data-storage/search-engines.html'] },
+          { title: 'Search Engines', file: 'hld/data-storage/search-engines.html', links: ['hld/data-storage/time-series.html', 'hld/data-storage/object-storage.html'] },
+          { title: 'Object Storage', file: 'hld/data-storage/object-storage.html', links: ['hld/data-storage/search-engines.html', 'hld/distributed-systems/consensus.html'] }
+        ]
+      },
+      {
+        name: 'distributed-systems',
+        label: 'Distributed Systems',
+        children: [
+          { title: 'Consensus: Paxos & Raft', file: 'hld/distributed-systems/consensus.html', links: ['hld/data-storage/object-storage.html', 'hld/distributed-systems/vector-clocks.html'] },
+          { title: 'Vector Clocks', file: 'hld/distributed-systems/vector-clocks.html', links: ['hld/distributed-systems/consensus.html', 'hld/distributed-systems/gossip-protocol.html'] },
+          { title: 'Gossip Protocol', file: 'hld/distributed-systems/gossip-protocol.html', links: ['hld/distributed-systems/vector-clocks.html', 'hld/distributed-systems/two-phase-commit.html'] },
+          { title: 'Two-Phase Commit', file: 'hld/distributed-systems/two-phase-commit.html', links: ['hld/distributed-systems/gossip-protocol.html', 'hld/distributed-systems/saga-pattern.html'] },
+          { title: 'Saga Pattern', file: 'hld/distributed-systems/saga-pattern.html', links: ['hld/distributed-systems/two-phase-commit.html', 'hld/distributed-systems/circuit-breaker.html'] },
+          { title: 'Circuit Breaker', file: 'hld/distributed-systems/circuit-breaker.html', links: ['hld/distributed-systems/saga-pattern.html', 'hld/distributed-systems/leader-election.html'] },
+          { title: 'Leader Election', file: 'hld/distributed-systems/leader-election.html', links: ['hld/distributed-systems/circuit-breaker.html', 'hld/distributed-systems/idempotency.html'] },
+          { title: 'Idempotency', file: 'hld/distributed-systems/idempotency.html', links: ['hld/distributed-systems/leader-election.html', 'hld/architecture-patterns/microservices.html'] }
+        ]
+      },
+      {
+        name: 'architecture-patterns',
+        label: 'Architecture Patterns',
+        children: [
+          { title: 'Microservices', file: 'hld/architecture-patterns/microservices.html', links: ['hld/distributed-systems/idempotency.html', 'hld/architecture-patterns/event-driven.html'] },
+          { title: 'Event-Driven', file: 'hld/architecture-patterns/event-driven.html', links: ['hld/architecture-patterns/microservices.html', 'hld/architecture-patterns/cqrs-event-sourcing.html'] },
+          { title: 'CQRS & Event Sourcing', file: 'hld/architecture-patterns/cqrs-event-sourcing.html', links: ['hld/architecture-patterns/event-driven.html', 'hld/architecture-patterns/ddd.html'] },
+          { title: 'Domain-Driven Design', file: 'hld/architecture-patterns/ddd.html', links: ['hld/architecture-patterns/cqrs-event-sourcing.html', 'hld/architecture-patterns/serverless.html'] },
+          { title: 'Serverless', file: 'hld/architecture-patterns/serverless.html', links: ['hld/architecture-patterns/ddd.html', 'hld/architecture-patterns/data-pipelines.html'] },
+          { title: 'Data Pipelines', file: 'hld/architecture-patterns/data-pipelines.html', links: ['hld/architecture-patterns/serverless.html', 'hld/real-world/url-shortener.html'] }
+        ]
+      },
+      {
+        name: 'real-world',
+        label: 'Real-World Designs',
+        children: [
+          { title: 'URL Shortener', file: 'hld/real-world/url-shortener.html', links: ['hld/architecture-patterns/data-pipelines.html', 'hld/real-world/pastebin.html'] },
+          { title: 'Pastebin', file: 'hld/real-world/pastebin.html', links: ['hld/real-world/url-shortener.html', 'hld/real-world/rate-limiter.html'] },
+          { title: 'Rate Limiter', file: 'hld/real-world/rate-limiter.html', links: ['hld/real-world/pastebin.html', 'hld/real-world/key-value-store.html'] },
+          { title: 'Key-Value Store', file: 'hld/real-world/key-value-store.html', links: ['hld/real-world/rate-limiter.html', 'hld/real-world/unique-id-generator.html'] },
+          { title: 'Unique ID Generator', file: 'hld/real-world/unique-id-generator.html', links: ['hld/real-world/key-value-store.html', 'hld/real-world/notification-system.html'] },
+          { title: 'Notification System', file: 'hld/real-world/notification-system.html', links: ['hld/real-world/unique-id-generator.html', 'hld/real-world/chat-system.html'] },
+          { title: 'Chat System', file: 'hld/real-world/chat-system.html', links: ['hld/real-world/notification-system.html', 'hld/real-world/search-autocomplete.html'] },
+          { title: 'Search Autocomplete', file: 'hld/real-world/search-autocomplete.html', links: ['hld/real-world/chat-system.html', 'hld/real-world/youtube.html'] },
+          { title: 'YouTube', file: 'hld/real-world/youtube.html', links: ['hld/real-world/search-autocomplete.html', 'hld/real-world/google-drive.html'] },
+          { title: 'Google Drive', file: 'hld/real-world/google-drive.html', links: ['hld/real-world/youtube.html', 'hld/real-world/news-feed.html'] },
+          { title: 'News Feed', file: 'hld/real-world/news-feed.html', links: ['hld/real-world/google-drive.html', 'hld/real-world/proximity-service.html'] },
+          { title: 'Proximity Service', file: 'hld/real-world/proximity-service.html', links: ['hld/real-world/news-feed.html', 'hld/real-world/nearby-friends.html'] },
+          { title: 'Nearby Friends', file: 'hld/real-world/nearby-friends.html', links: ['hld/real-world/proximity-service.html', 'hld/real-world/google-maps.html'] },
+          { title: 'Google Maps', file: 'hld/real-world/google-maps.html', links: ['hld/real-world/nearby-friends.html', 'hld/real-world/uber.html'] },
+          { title: 'Uber', file: 'hld/real-world/uber.html', links: ['hld/real-world/google-maps.html', 'hld/real-world/twitter.html'] },
+          { title: 'Twitter', file: 'hld/real-world/twitter.html', links: ['hld/real-world/uber.html', 'hld/real-world/ticketmaster.html'] },
+          { title: 'Ticketmaster', file: 'hld/real-world/ticketmaster.html', links: ['hld/real-world/twitter.html', 'hld/real-world/stock-exchange.html'] },
+          { title: 'Stock Exchange', file: 'hld/real-world/stock-exchange.html', links: ['hld/real-world/ticketmaster.html', 'hld/real-world/web-crawler.html'] },
+          { title: 'Web Crawler', file: 'hld/real-world/web-crawler.html', links: ['hld/real-world/stock-exchange.html', 'hld/real-world/payment-system.html'] },
+          { title: 'Payment System', file: 'hld/real-world/payment-system.html', links: ['hld/real-world/web-crawler.html', 'hld/real-world/hotel-reservation.html'] },
+          { title: 'Hotel Reservation', file: 'hld/real-world/hotel-reservation.html', links: ['hld/real-world/payment-system.html', 'hld/real-world/email-system.html'] },
+          { title: 'Email System', file: 'hld/real-world/email-system.html', links: ['hld/real-world/hotel-reservation.html', 'hld/real-world/ad-click-aggregator.html'] },
+          { title: 'Ad Click Aggregator', file: 'hld/real-world/ad-click-aggregator.html', links: ['hld/real-world/email-system.html', 'hld/case-studies/netflix-architecture.html'] }
+        ]
+      },
+      {
+        name: 'case-studies',
+        label: 'Case Studies',
+        children: [
+          { title: 'Netflix Architecture', file: 'hld/case-studies/netflix-architecture.html', links: ['hld/real-world/ad-click-aggregator.html', 'hld/case-studies/uber-engineering.html'] },
+          { title: 'Uber Engineering', file: 'hld/case-studies/uber-engineering.html', links: ['hld/case-studies/netflix-architecture.html', 'hld/case-studies/discord-infrastructure.html'] },
+          { title: 'Discord at Scale', file: 'hld/case-studies/discord-infrastructure.html', links: ['hld/case-studies/uber-engineering.html', 'hld/case-studies/slack-architecture.html'] },
+          { title: 'Slack Architecture', file: 'hld/case-studies/slack-architecture.html', links: ['hld/case-studies/discord-infrastructure.html', 'hld/case-studies/interview-framework.html'] },
+          { title: 'Interview Framework', file: 'hld/case-studies/interview-framework.html', links: ['hld/case-studies/slack-architecture.html'] }
+        ]
+      }
+    ]
+  },
+  {
     name: 'ml',
     label: 'Machine Learning',
     children: [

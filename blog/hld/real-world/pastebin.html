@@ -1,0 +1,1153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design Pastebin: a complete system design walkthrough covering API design, database schema, object storage, caching, CDN, key generation, paste expiration, abuse prevention, and scaling strategies.">
+  <title>Design: Pastebin | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Part 44 of 70</span></div>
+
+      <h1>Design: Pastebin</h1>
+      <p class="post-meta">April 2026 &middot; 24 min read</p>
+
+      <!-- ================================================================ -->
+      <!--  1. PROBLEM STATEMENT                                            -->
+      <!-- ================================================================ -->
+      <h2 id="problem">Problem Statement</h2>
+      <p>Pastebin is a web service that allows users to store and share plain-text or code snippets via a unique URL. Users paste content into a text area, receive a short link, and anyone with that link can read the content. Pastes can optionally expire, be password-protected, or be made private to the creator.</p>
+
+      <p>The core challenge is deceptively simple — accept text, store it, and return a link. But when you're handling <strong>10 million pastes per day</strong> with a read-heavy workload, the system must manage massive storage volumes, serve reads with sub-100ms latency, and handle abuse at scale. The design decisions around <strong>where</strong> to store content (database vs. object storage), how to <strong>generate unique keys</strong>, how to <strong>expire old pastes</strong> efficiently, and how to <strong>cache hot content</strong> are what make this a rich system design problem.</p>
+
+      <div class="callout">
+        <strong>Why Pastebin?</strong> This problem sits at the intersection of URL shortening, object storage, and content delivery. It tests your understanding of blob storage, caching layers, key generation, and TTL management — all fundamental building blocks in distributed systems.
+      </div>
+
+      <p>Popular services in this space include Pastebin.com, GitHub Gist, Hastebin, and Ghostbin. They share a common architecture but differ in features like collaboration, syntax highlighting, revision history, and monetization models.</p>
+
+      <!-- ================================================================ -->
+      <!--  2. REQUIREMENTS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3>Functional Requirements</h3>
+      <ol>
+        <li><strong>Create paste:</strong> Users can upload text/code and receive a unique short URL (e.g., <code>pastebin.com/aB3kX9</code>)</li>
+        <li><strong>Read paste:</strong> Anyone with the URL can view the content. The system renders the text with optional syntax highlighting</li>
+        <li><strong>Delete paste:</strong> Creators can delete their own pastes. The system also auto-deletes expired pastes</li>
+        <li><strong>Custom alias:</strong> Users may optionally specify a custom URL slug (e.g., <code>pastebin.com/my-config</code>)</li>
+        <li><strong>Syntax highlighting:</strong> Support language-based syntax highlighting for at least 50 languages</li>
+        <li><strong>Expiration:</strong> Pastes can have a TTL — 10 minutes, 1 hour, 1 day, 1 week, 1 month, or never</li>
+        <li><strong>Visibility:</strong> Public pastes are listed and searchable; unlisted pastes are only accessible via direct URL; private pastes require authentication</li>
+        <li><strong>User accounts (optional):</strong> Registered users can manage their pastes — view history, delete, edit</li>
+      </ol>
+
+      <h3>Non-Functional Requirements</h3>
+      <ol>
+        <li><strong>High availability:</strong> The system must be available 99.9% of the time (≤ 8.76 hours downtime/year)</li>
+        <li><strong>Low read latency:</strong> P99 read latency under 100ms for cached content, under 300ms for cold reads</li>
+        <li><strong>Durability:</strong> Once a paste is created, it must not be lost until it expires or is deleted</li>
+        <li><strong>Scalability:</strong> Handle 10M new pastes/day with a 5:1 read-to-write ratio</li>
+        <li><strong>Consistency:</strong> Eventual consistency is acceptable — a paste may take a few seconds to propagate to all read replicas</li>
+        <li><strong>Content size limit:</strong> Max 10 MB per paste (average ~10 KB)</li>
+      </ol>
+
+      <h3>Out of Scope</h3>
+      <ul>
+        <li>Real-time collaborative editing (Google Docs-style)</li>
+        <li>Version control / diff between edits</li>
+        <li>File uploads (images, binaries)</li>
+        <li>Commenting or social features</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  3. CAPACITY ESTIMATION                                          -->
+      <!-- ================================================================ -->
+      <h2 id="estimation">Capacity Estimation</h2>
+      <p>Back-of-the-envelope calculations set the guardrails for our architecture. Let's work through the numbers methodically.</p>
+
+      <h3>Traffic</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Calculation</th><th style="text-align:left; padding:0.5em;">Value</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">New pastes / day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Given</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>10 M</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Writes / second</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10M / 86,400</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~116 writes/s</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read:Write ratio</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Given</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>5:1</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Reads / day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10M × 5</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>50 M</strong></td></tr>
+          <tr><td style="padding:0.5em;">Reads / second</td><td style="padding:0.5em;">50M / 86,400</td><td style="padding:0.5em;"><strong>~580 reads/s</strong></td></tr>
+        </tbody>
+      </table>
+
+      <p>At peak (assume 3× average), we need to handle <strong>~350 writes/s</strong> and <strong>~1,740 reads/s</strong>. These are comfortable numbers for a horizontally-scaled system with caching.</p>
+
+      <h3>Storage</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Calculation</th><th style="text-align:left; padding:0.5em;">Value</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Average paste size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Given</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>10 KB</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Content storage / day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10M × 10 KB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~100 GB/day</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Content storage / year</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">100 GB × 365</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~36.5 TB/year</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Content storage / 5 years</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">36.5 TB × 5</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~182 TB</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Total pastes in 5 years</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10M × 365 × 5</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~18.25 B</strong></td></tr>
+          <tr><td style="padding:0.5em;">Metadata per paste</td><td style="padding:0.5em;">~500 bytes (ID, user, lang, expiry, timestamps, visibility)</td><td style="padding:0.5em;"><strong>~9 TB metadata in 5 years</strong></td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key insight:</strong> 182 TB of content over 5 years is far too much for a relational database, but trivial for object storage like Amazon S3 (which can hold exabytes). This is the fundamental reason we <strong>separate metadata from content</strong>: metadata goes into a database, content goes into S3/blob storage.
+      </div>
+
+      <h3>Bandwidth</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Direction</th><th style="text-align:left; padding:0.5em;">Calculation</th><th style="text-align:left; padding:0.5em;">Bandwidth</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Ingress (writes)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">116 writes/s × 10 KB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~1.16 MB/s</strong></td></tr>
+          <tr><td style="padding:0.5em;">Egress (reads)</td><td style="padding:0.5em;">580 reads/s × 10 KB</td><td style="padding:0.5em;"><strong>~5.8 MB/s</strong></td></tr>
+        </tbody>
+      </table>
+
+      <p>These bandwidth numbers are modest. Even with 3× peak multiplier, we're under 20 MB/s egress — well within the capacity of a single CDN edge node. A CDN will absorb the vast majority of read traffic for popular pastes.</p>
+
+      <h3>Key Length</h3>
+      <p>We need unique keys for 18.25 billion pastes over 5 years. Using Base62 (a–z, A–Z, 0–9):</p>
+      <ul>
+        <li>6 characters → 62⁶ = <strong>56.8 billion</strong> combinations</li>
+        <li>7 characters → 62⁷ = <strong>3.52 trillion</strong> combinations</li>
+        <li>8 characters → 62⁸ = <strong>218 trillion</strong> combinations</li>
+      </ul>
+      <p>A <strong>6-character Base62 key</strong> gives us 56.8B combinations — more than 3× the 18.25B pastes we expect. Adding 2 characters (8 total) provides a 12,000× safety margin. We'll use <strong>8 characters</strong> for comfortable headroom and negligible collision probability.</p>
+
+      <!-- ================================================================ -->
+      <!--  4. API DESIGN                                                   -->
+      <!-- ================================================================ -->
+      <h2 id="api-design">API Design</h2>
+      <p>We'll expose a RESTful API. Authentication is via API keys for programmatic access or session tokens for web users.</p>
+
+      <h3>Create Paste</h3>
+<pre><code>POST /api/v1/pastes
+Content-Type: application/json
+Authorization: Bearer &lt;api_key&gt;  (optional for anonymous pastes)
+
+{
+  "content":     "def hello():\n    print('Hello, world!')",
+  "title":       "My Python Snippet",       // optional
+  "language":    "python",                   // optional, for syntax highlighting
+  "expiration":  "1d",                       // 10m, 1h, 1d, 1w, 1m, never
+  "visibility":  "unlisted",                 // public, unlisted, private
+  "custom_alias": "my-snippet",              // optional custom URL slug
+  "password":    "s3cret"                    // optional password protection
+}
+
+Response (201 Created):
+{
+  "id":          "aB3kX9Qm",
+  "url":         "https://pastebin.com/aB3kX9Qm",
+  "title":       "My Python Snippet",
+  "language":    "python",
+  "visibility":  "unlisted",
+  "expires_at":  "2026-04-16T12:00:00Z",
+  "created_at":  "2026-04-15T12:00:00Z",
+  "size_bytes":  42
+}</code></pre>
+
+      <h3>Read Paste</h3>
+<pre><code>GET /api/v1/pastes/{paste_id}
+Authorization: Bearer &lt;api_key&gt;  (required for private pastes)
+
+Response (200 OK):
+{
+  "id":          "aB3kX9Qm",
+  "title":       "My Python Snippet",
+  "content":     "def hello():\n    print('Hello, world!')",
+  "language":    "python",
+  "visibility":  "unlisted",
+  "view_count":  42,
+  "created_at":  "2026-04-15T12:00:00Z",
+  "expires_at":  "2026-04-16T12:00:00Z"
+}
+
+// For password-protected pastes:
+GET /api/v1/pastes/{paste_id}?password=s3cret</code></pre>
+
+      <h3>Delete Paste</h3>
+<pre><code>DELETE /api/v1/pastes/{paste_id}
+Authorization: Bearer &lt;api_key&gt;
+
+Response (204 No Content)
+
+// Only the creator can delete. Attempting to delete
+// someone else's paste returns 403 Forbidden.</code></pre>
+
+      <h3>List User Pastes</h3>
+<pre><code>GET /api/v1/users/me/pastes?page=1&amp;limit=20
+Authorization: Bearer &lt;api_key&gt;
+
+Response (200 OK):
+{
+  "pastes": [
+    { "id": "aB3kX9Qm", "title": "My Python Snippet", ... },
+    { "id": "xY7pR2Ln", "title": "Nginx Config", ... }
+  ],
+  "total": 147,
+  "page": 1,
+  "limit": 20
+}</code></pre>
+
+      <h3>Rate Limiting Headers</h3>
+      <p>Every response includes rate limiting headers:</p>
+<pre><code>X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 57
+X-RateLimit-Reset: 1713184800</code></pre>
+      <ul>
+        <li><strong>Anonymous users:</strong> 10 creates/hour, 60 reads/minute</li>
+        <li><strong>Registered users:</strong> 100 creates/hour, 300 reads/minute</li>
+        <li><strong>Premium users:</strong> 1000 creates/hour, 3000 reads/minute</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  5. DATABASE DESIGN                                              -->
+      <!-- ================================================================ -->
+      <h2 id="database-design">Database Design</h2>
+      <p>We separate concerns: <strong>metadata in a database</strong>, <strong>content in object storage</strong>. This is the most critical design decision for Pastebin.</p>
+
+      <h3>Why Not Store Content in the Database?</h3>
+      <ul>
+        <li><strong>Size:</strong> 182 TB of content in 5 years — relational databases struggle with this volume, and storage costs are 5–10× higher than S3</li>
+        <li><strong>Performance:</strong> Large TEXT/BLOB columns degrade query performance and make backups painfully slow</li>
+        <li><strong>Scaling:</strong> Sharding a database with large blobs is far harder than sharding metadata-only tables</li>
+        <li><strong>Cost:</strong> S3 costs ~$0.023/GB/month. RDS storage costs ~$0.115/GB/month — a 5× difference</li>
+      </ul>
+
+      <h3>Paste Metadata Schema (SQL)</h3>
+<pre><code>CREATE TABLE pastes (
+    id              VARCHAR(8) PRIMARY KEY,    -- Base62 unique key
+    title           VARCHAR(255),
+    user_id         BIGINT,                    -- NULL for anonymous pastes
+    language        VARCHAR(50) DEFAULT 'text',
+    visibility      ENUM('public','unlisted','private') DEFAULT 'unlisted',
+    password_hash   VARCHAR(255),              -- bcrypt hash if password-protected
+    content_key     VARCHAR(255) NOT NULL,     -- S3 object key
+    size_bytes      INT NOT NULL,
+    view_count      BIGINT DEFAULT 0,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at      DATETIME,                  -- NULL = never expires
+    deleted_at      DATETIME,                  -- soft delete
+    INDEX idx_user_id (user_id),
+    INDEX idx_expires (expires_at),
+    INDEX idx_visibility_created (visibility, created_at DESC)
+);</code></pre>
+
+      <h3>User Schema</h3>
+<pre><code>CREATE TABLE users (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username        VARCHAR(50) UNIQUE NOT NULL,
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,
+    api_key         VARCHAR(64) UNIQUE NOT NULL,
+    tier            ENUM('free','premium') DEFAULT 'free',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_api_key (api_key)
+);</code></pre>
+
+      <h3>Storage Layout</h3>
+      <p>Each paste's content is stored in object storage (S3) with the key derived from the paste ID:</p>
+<pre><code>s3://pastebin-content/{shard}/{paste_id}
+
+Examples:
+  s3://pastebin-content/aB/aB3kX9Qm      → shard by first 2 chars
+  s3://pastebin-content/xY/xY7pR2Ln
+  s3://pastebin-content/Z9/Z9mNpQ4w</code></pre>
+
+      <p>Sharding the S3 prefix by the first 2 characters prevents hot-prefix issues and distributes requests across partitions. With Base62, this gives us 62² = 3,844 top-level prefixes — excellent distribution.</p>
+
+      <h3>Database Choice: SQL vs NoSQL</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Factor</th><th style="text-align:left; padding:0.5em;">SQL (PostgreSQL / MySQL)</th><th style="text-align:left; padding:0.5em;">NoSQL (DynamoDB / Cassandra)</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Schema</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Fixed schema, migrations required</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Flexible schema, easy to evolve</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Rich queries, JOINs, aggregations</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Key-value lookups, limited queries</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Write scaling</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Vertical then sharding</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Horizontal from day one</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Consistency</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Strong (ACID)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Tunable (eventual by default)</td></tr>
+          <tr><td style="padding:0.5em;">Verdict</td><td style="padding:0.5em;" colspan="2">Either works. SQL for admin queries and analytics; NoSQL for pure key-value at extreme scale. <strong>We'll use PostgreSQL</strong> initially — the metadata is small (~9 TB in 5 years), relational queries are useful, and we can shard later.</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  6. HIGH-LEVEL ARCHITECTURE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system has five major layers:</p>
+      <ol>
+        <li><strong>CDN layer:</strong> CloudFront / Cloudflare caches popular pastes at the edge</li>
+        <li><strong>API server layer:</strong> Stateless application servers behind a load balancer</li>
+        <li><strong>Cache layer:</strong> Redis cluster caches hot paste metadata and content</li>
+        <li><strong>Metadata store:</strong> PostgreSQL with read replicas</li>
+        <li><strong>Content store:</strong> Amazon S3 (or equivalent object storage) for the actual paste text</li>
+      </ol>
+
+<pre><code>                        ┌─────────────┐
+                        │   Clients   │
+                        │ (Web / API) │
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │     CDN     │ ◄── Caches GET /paste/{id} responses
+                        │ CloudFront  │
+                        └──────┬──────┘
+                               │ cache miss
+                        ┌──────▼──────┐
+                        │    Load     │
+                        │  Balancer   │
+                        └──────┬──────┘
+                               │
+                 ┌─────────────┼─────────────┐
+                 │             │             │
+          ┌──────▼──────┐ ┌──────▼──────┐ ┌──────▼──────┐
+          │  API Server │ │  API Server │ │  API Server │
+          │    (N=3+)   │ │    (N=3+)   │ │    (N=3+)   │
+          └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+                 │               │               │
+         ┌───────┼───────────────┼───────────────┼───────┐
+         │       │               │               │       │
+  ┌──────▼──────┐│        ┌──────▼──────┐        │┌──────▼──────┐
+  │    Redis    ││        │ PostgreSQL  │        ││   Amazon    │
+  │   Cluster   ││        │  (Primary)  │        ││     S3      │
+  │  (Cache)    ││        │             │        ││  (Content)  │
+  └─────────────┘│        └──────┬──────┘        │└─────────────┘
+                 │        ┌──────▼──────┐        │
+                 │        │  Read       │        │
+                 │        │  Replicas   │        │
+                 │        └─────────────┘        │
+                 │                               │
+          ┌──────▼──────┐                 ┌──────▼──────┐
+          │ Key Gen Svc │                 │  Cleanup    │
+          │ (pre-gen    │                 │  Worker     │
+          │  unique IDs)│                 │ (expiration)│
+          └─────────────┘                 └─────────────┘</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  7. CREATE PASTE FLOW – animated                                 -->
+      <!-- ================================================================ -->
+      <h2 id="create-flow">Create Paste Flow</h2>
+      <p>When a user creates a paste, the request flows through multiple components. Let's trace the complete write path:</p>
+
+      <ol>
+        <li><strong>Client</strong> sends a POST request with paste content, language, expiration, and visibility</li>
+        <li><strong>API Server</strong> validates the request — checks content size (&le; 10 MB), rate limits, and input sanitization</li>
+        <li><strong>Key Generation Service</strong> provides a unique 8-character Base62 key (pre-generated from a pool)</li>
+        <li><strong>S3 Upload:</strong> Content is stored in S3 at key <code>s3://pastebin-content/{shard}/{paste_id}</code></li>
+        <li><strong>Metadata Insert:</strong> A row is inserted into PostgreSQL with the paste ID, user ID, language, expiry, S3 key, etc.</li>
+        <li><strong>Cache Warm:</strong> The paste metadata + content are written to Redis so the first read is fast</li>
+        <li><strong>Response:</strong> The API returns the paste URL to the client</li>
+      </ol>
+
+      <div class="anim-container" id="create-anim">
+        <h4>&#9654; Create Paste Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the write path: from client request to stored paste and returned URL.</p>
+        <svg id="create-svg" width="720" height="340" viewBox="0 0 720 340"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="create-step">Step &rarr;</button>
+          <button class="anim-btn" id="create-auto">&#9654; Auto Play</button>
+          <button class="anim-btn" id="create-reset">Reset</button>
+          <span class="anim-output" id="create-output"></span>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Why S3 before DB?</strong> We write content to S3 first because S3 is more durable (11 nines). If the DB insert fails after S3 upload, we lose a metadata row (which can be retried or cleaned up). If the DB insert succeeds but S3 fails, the paste is broken — the user has a URL pointing to missing content. Always write the hard-to-recover data first.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  8. READ PASTE FLOW – animated                                   -->
+      <!-- ================================================================ -->
+      <h2 id="read-flow">Read Paste Flow</h2>
+      <p>Reads are the dominant traffic pattern (5× writes). We optimize the read path with multiple cache layers:</p>
+
+      <ol>
+        <li><strong>CDN check:</strong> If the paste is popular and public, CloudFront serves it from the edge — no request reaches our servers</li>
+        <li><strong>Redis check:</strong> On CDN miss, the API server checks Redis for cached content</li>
+        <li><strong>Database check:</strong> On cache miss, fetch metadata from PostgreSQL (read replica)</li>
+        <li><strong>S3 fetch:</strong> Use the <code>content_key</code> from metadata to fetch the actual content from S3</li>
+        <li><strong>Cache populate:</strong> Store the result in Redis (with TTL) for subsequent reads</li>
+        <li><strong>Return response:</strong> Send the paste content back to the client (CDN may cache it for future requests)</li>
+      </ol>
+
+      <div class="anim-container" id="read-anim">
+        <h4>&#9654; Read Paste Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the read path: CDN → cache → database → object storage.</p>
+        <svg id="read-svg" width="720" height="340" viewBox="0 0 720 340"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="read-step">Step &rarr;</button>
+          <button class="anim-btn" id="read-auto">&#9654; Auto Play</button>
+          <button class="anim-btn" id="read-reset">Reset</button>
+          <span class="anim-output" id="read-output"></span>
+        </div>
+      </div>
+
+      <p>In practice, the CDN and Redis cache will absorb <strong>80–90% of all reads</strong>. A Zipfian distribution means a small fraction of pastes receive the majority of views — and those are precisely the ones sitting in cache.</p>
+
+      <!-- ================================================================ -->
+      <!--  9. KEY GENERATION                                               -->
+      <!-- ================================================================ -->
+      <h2 id="key-generation">Key Generation</h2>
+      <p>Generating unique, short, URL-safe keys is the same challenge as a URL shortener. Let's evaluate three approaches:</p>
+
+      <h3>Approach 1: Hash + Truncate</h3>
+      <p>Hash the content (e.g., MD5 or SHA-256) and take the first 8 characters of the Base62-encoded hash.</p>
+<pre><code>key = base62_encode(md5(content + timestamp + user_id))[:8]
+// Example: "aB3kX9Qm"</code></pre>
+      <ul>
+        <li><strong>Pros:</strong> Simple, deterministic for same content</li>
+        <li><strong>Cons:</strong> Collisions possible (birthday paradox — ~50% chance of collision after 62⁴ = 14.7M keys with 8 chars). Need collision handling loop</li>
+      </ul>
+
+      <h3>Approach 2: Pre-Generated Key Pool (Recommended)</h3>
+      <p>A dedicated <strong>Key Generation Service (KGS)</strong> pre-generates unique 8-character Base62 keys and stores them in a separate database. When an API server needs a key, it takes one from the pool.</p>
+<pre><code>// Key Generation Service
+// Pre-generate and store in a two-table system:
+
+CREATE TABLE unused_keys (
+    key_value VARCHAR(8) PRIMARY KEY
+);
+
+CREATE TABLE used_keys (
+    key_value VARCHAR(8) PRIMARY KEY
+);
+
+// Batch fetch: API server requests N keys at startup
+SELECT key_value FROM unused_keys LIMIT 1000;
+// Move to used_keys in a transaction
+// API server keeps them in an in-memory buffer</code></pre>
+      <ul>
+        <li><strong>Pros:</strong> Zero collisions (keys are unique by construction), very fast (in-memory buffer), no runtime computation</li>
+        <li><strong>Cons:</strong> Extra service to manage, need to pre-populate keys</li>
+      </ul>
+
+      <div class="callout">
+        <strong>How many keys to pre-generate?</strong> At 10M pastes/day, we use 10M keys/day. Pre-generating 100M keys (10 days' worth) takes about 3 minutes and occupies ~800 MB of storage. The KGS can replenish in the background.
+      </div>
+
+      <h3>Approach 3: Snowflake-style ID</h3>
+      <p>Generate a 64-bit unique ID (timestamp + machine ID + sequence) and Base62-encode it. Produces 11-character strings — longer than ideal for a short URL but guaranteed unique without coordination.</p>
+
+      <h3>Our Choice: Pre-Generated Key Pool</h3>
+      <p>The KGS approach gives us the best trade-off: short keys (8 chars), zero collision probability, no per-request computation, and clean separation of concerns. Each API server fetches a batch of keys on startup and refills when its buffer runs low.</p>
+
+      <h3>Handling Custom Aliases</h3>
+      <p>When a user requests a custom alias like <code>pastebin.com/my-config</code>:</p>
+      <ol>
+        <li>Check if the alias is already taken in the <code>pastes</code> table</li>
+        <li>If available, use it as the paste ID (skip the KGS)</li>
+        <li>If taken, return HTTP 409 Conflict</li>
+        <li>Custom aliases must be 3–30 characters, alphanumeric + hyphens only</li>
+      </ol>
+
+      <!-- ================================================================ -->
+      <!--  10. CONTENT STORAGE                                             -->
+      <!-- ================================================================ -->
+      <h2 id="content-storage">Content Storage</h2>
+      <p>The content store is the heart of Pastebin. Let's go deep on why object storage is the right choice and how to optimize it.</p>
+
+      <h3>Why S3 / Blob Storage?</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Property</th><th style="text-align:left; padding:0.5em;">S3</th><th style="text-align:left; padding:0.5em;">Database (BLOB column)</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Durability</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">99.999999999% (11 nines)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Depends on backup strategy</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cost per GB/month</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">$0.023</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">$0.115+ (RDS gp3)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Max object size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">5 TB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 GB (MySQL LONGBLOB)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Throughput</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">5,500 GET/s, 3,500 PUT/s per prefix</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Limited by connections</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Backups</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cross-region replication built-in</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Manual snapshots</td></tr>
+          <tr><td style="padding:0.5em;">CDN integration</td><td style="padding:0.5em;">CloudFront origin natively</td><td style="padding:0.5em;">Requires app-layer proxy</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Storage Tiers for Cost Optimization</h3>
+      <p>Not all pastes are accessed equally. We can use S3 lifecycle policies to move cold pastes to cheaper tiers:</p>
+<pre><code>// S3 Lifecycle Policy
+{
+  "Rules": [
+    {
+      "ID": "Transition-to-IA",
+      "Status": "Enabled",
+      "Transitions": [
+        { "Days": 30,  "StorageClass": "STANDARD_IA" },  // $0.0125/GB
+        { "Days": 180, "StorageClass": "GLACIER_IR" }     // $0.004/GB
+      ]
+    }
+  ]
+}</code></pre>
+      <p>This reduces our 5-year storage cost from ~$50K/year (all Standard) to ~$12K/year (tiered). A <strong>75% cost reduction</strong> with no impact on active pastes.</p>
+
+      <h3>Compression</h3>
+      <p>Text compresses extremely well. Using gzip or zstd before storing to S3:</p>
+      <ul>
+        <li>Average compression ratio for code/text: <strong>3–5×</strong></li>
+        <li>10 KB average paste → ~2.5 KB after compression</li>
+        <li>182 TB → ~45 TB effective storage over 5 years</li>
+        <li>The API server compresses before upload and decompresses on read. The extra CPU is negligible compared to the storage savings.</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  11. CACHING                                                     -->
+      <!-- ================================================================ -->
+      <h2 id="caching">Caching Strategy</h2>
+      <p>With a 5:1 read:write ratio and Zipfian access patterns (a few pastes get most views), caching is critical.</p>
+
+      <h3>Cache Layer 1: Redis</h3>
+      <p>A Redis cluster sits between the API servers and the database/S3. We cache two things:</p>
+      <ol>
+        <li><strong>Paste metadata:</strong> key → serialized metadata (small, ~500 bytes)</li>
+        <li><strong>Paste content:</strong> key → compressed content (avg ~2.5 KB after gzip)</li>
+      </ol>
+<pre><code>// Redis key scheme
+paste:meta:{paste_id}   → JSON metadata    TTL: 1 hour
+paste:content:{paste_id} → gzipped content  TTL: 1 hour
+
+// Cache-aside pattern (read path):
+content = redis.get("paste:content:" + pasteId)
+if content == null:
+    metadata = db.query("SELECT * FROM pastes WHERE id = ?", pasteId)
+    content = s3.getObject(metadata.content_key)
+    redis.setex("paste:content:" + pasteId, 3600, content)
+    redis.setex("paste:meta:" + pasteId, 3600, metadata)
+return content</code></pre>
+
+      <h3>Cache Sizing</h3>
+      <p>How much Redis memory do we need? Following the <strong>80/20 rule</strong>: 20% of pastes account for 80% of reads.</p>
+      <ul>
+        <li>Daily unique pastes read: ~50M / 5 (assume each hot paste is read 5 times) = ~10M unique pastes</li>
+        <li>Cache the top 20%: 2M pastes × (500 bytes metadata + 2.5 KB content) = <strong>~6 GB</strong></li>
+        <li>A single Redis node (64 GB) can hold 10× this easily</li>
+        <li>We'll run a <strong>3-node Redis cluster</strong> for high availability (primary + 2 replicas)</li>
+      </ul>
+
+      <h3>Cache Layer 2: CDN</h3>
+      <p>For public, non-expiring pastes, the CDN (CloudFront/Cloudflare) caches the rendered HTML response at edge nodes:</p>
+<pre><code>// CDN cache headers for public pastes
+Cache-Control: public, max-age=300, s-maxage=3600
+Vary: Accept-Encoding
+
+// CDN cache headers for private/unlisted pastes
+Cache-Control: private, no-store
+// (CDN will not cache these)</code></pre>
+      <ul>
+        <li>Public pastes: cached for 1 hour at the CDN edge (s-maxage=3600)</li>
+        <li>Unlisted pastes: cached briefly (max-age=300) — accessible by URL but not indexed</li>
+        <li>Private pastes: never cached at the CDN (no-store)</li>
+      </ul>
+
+      <h3>Cache Invalidation</h3>
+      <p>When a paste is deleted or updated:</p>
+      <ol>
+        <li>Delete from Redis: <code>redis.del("paste:meta:" + id, "paste:content:" + id)</code></li>
+        <li>Purge from CDN: <code>cloudfront.createInvalidation("/" + pasteId)</code></li>
+        <li>For expired pastes, the cache TTL naturally evicts them — no active invalidation needed</li>
+      </ol>
+
+      <!-- ================================================================ -->
+      <!--  12. PASTE EXPIRATION                                            -->
+      <!-- ================================================================ -->
+      <h2 id="expiration">Paste Expiration</h2>
+      <p>Expiration is essential to prevent unbounded storage growth. Our 182 TB estimate assumes no expiration — with it, actual storage will be significantly less.</p>
+
+      <h3>Lazy Expiration (Read-Time Check)</h3>
+      <p>On every read, check if the paste has expired:</p>
+<pre><code>metadata = fetchPasteMetadata(pasteId)
+if metadata.expires_at != null && metadata.expires_at < now():
+    return 404 "Paste expired"
+// Serve the paste normally</code></pre>
+      <p>This is simple and catches all expired pastes on access. But it doesn't reclaim storage — expired pastes still sit in S3 and the database until cleaned up.</p>
+
+      <h3>Active Expiration (Background Cleanup)</h3>
+      <p>A background <strong>Cleanup Worker</strong> runs periodically (every 5 minutes) to find and delete expired pastes:</p>
+<pre><code>-- Find expired pastes in batches
+SELECT id, content_key FROM pastes
+WHERE expires_at IS NOT NULL
+  AND expires_at < NOW()
+  AND deleted_at IS NULL
+ORDER BY expires_at ASC
+LIMIT 1000;
+
+-- For each expired paste:
+-- 1. Delete from S3:     s3.deleteObject(content_key)
+-- 2. Delete from Redis:  redis.del("paste:meta:" + id, "paste:content:" + id)
+-- 3. Soft-delete in DB:  UPDATE pastes SET deleted_at = NOW() WHERE id = ?</code></pre>
+
+      <h3>Why Soft Delete?</h3>
+      <p>We use soft deletes (<code>deleted_at</code> timestamp) instead of hard deletes because:</p>
+      <ul>
+        <li><strong>Audit trail:</strong> We can track when and why pastes were removed</li>
+        <li><strong>Abuse investigation:</strong> Deleted pastes can be reviewed for policy violations</li>
+        <li><strong>Undo:</strong> Accidental deletions can be reversed within a grace period</li>
+        <li>A separate <strong>purge job</strong> hard-deletes rows older than 30 days from the <code>deleted_at</code> timestamp</li>
+      </ul>
+
+      <h3>TTL in Redis</h3>
+      <p>When caching a paste with an expiration, set the Redis TTL to <code>min(1 hour, time_until_expiry)</code>. This ensures the cache never serves stale content past the paste's expiration.</p>
+
+      <!-- ================================================================ -->
+      <!--  13. SCALING                                                     -->
+      <!-- ================================================================ -->
+      <h2 id="scaling">Scaling</h2>
+      <p>Let's scale each component for our target: 10M writes/day, 50M reads/day, with 3× peak bursts.</p>
+
+      <h3>API Servers</h3>
+      <ul>
+        <li>Stateless — scale horizontally behind a load balancer (ALB/NLB)</li>
+        <li>Each server handles ~500 requests/s → need <strong>4–5 servers</strong> at peak (1,740 reads + 350 writes = ~2,100 req/s)</li>
+        <li>Auto-scaling group: min 3, max 10, scale on CPU (70%) or request count</li>
+      </ul>
+
+      <h3>Database Scaling</h3>
+      <p>PostgreSQL with read replicas handles our workload comfortably:</p>
+      <ul>
+        <li><strong>Write path:</strong> Single primary handles 350 writes/s easily (PostgreSQL can handle 10K+ writes/s)</li>
+        <li><strong>Read path:</strong> 3–5 read replicas with connection pooling (PgBouncer). Each replica handles ~1,000 reads/s</li>
+        <li><strong>Connection pooling:</strong> PgBouncer limits active connections to prevent overwhelming the database</li>
+      </ul>
+
+      <h3>Database Sharding (When Needed)</h3>
+      <p>When the metadata table exceeds ~1 TB (roughly after 2 years), shard by paste ID:</p>
+<pre><code>// Shard assignment: hash the paste ID
+shard_number = hash(paste_id) % num_shards
+
+// With 16 shards:
+// Each shard holds ~1.14B pastes (after 5 years)
+// Each shard is ~562 GB — comfortable for a single PostgreSQL instance
+
+// The first 2 characters of the paste ID provide natural sharding:
+// shard = first_2_chars(paste_id) % num_shards</code></pre>
+
+      <h3>S3 Scaling</h3>
+      <p>S3 scales automatically — it's one of the most scalable services in AWS. With our prefix-based sharding (first 2 characters), we distribute load across thousands of partitions. No action needed.</p>
+
+      <h3>Redis Scaling</h3>
+      <ul>
+        <li>Start with a single Redis primary + 2 replicas (Redis Cluster mode)</li>
+        <li>At scale, use Redis Cluster with <strong>6+ nodes</strong> and data sharding across slots</li>
+        <li>Key distribution is naturally uniform (Base62 paste IDs)</li>
+      </ul>
+
+      <h3>CDN Scaling</h3>
+      <p>The CDN absorbs the bulk of read traffic. For popular pastes (e.g., shared on social media), the CDN can serve millions of requests/second from edge nodes without any load on our origin servers.</p>
+
+      <h3>Geographic Distribution</h3>
+      <p>For global users, deploy in multiple regions:</p>
+<pre><code>Region          Components          Purpose
+────────────────────────────────────────────────────────
+us-east-1       Full stack           Primary region
+eu-west-1       API + Redis + DB     European users
+ap-southeast-1  API + Redis + DB     Asian users
+────────────────────────────────────────────────────────
+S3: Cross-region replication to all regions
+CDN: Global edge network (200+ PoPs)</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  14. ABUSE PREVENTION                                            -->
+      <!-- ================================================================ -->
+      <h2 id="abuse-prevention">Abuse Prevention</h2>
+      <p>Pastebin services are notoriously abused for malware distribution, credential dumps, phishing pages, and spam. A robust abuse prevention system is critical.</p>
+
+      <h3>Rate Limiting</h3>
+      <p>Apply rate limits at multiple levels:</p>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Level</th><th style="text-align:left; padding:0.5em;">Limit</th><th style="text-align:left; padding:0.5em;">Implementation</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">IP-based</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10 creates/hour</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redis sliding window counter</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">User-based</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">100 creates/hour</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Token bucket per API key</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Global</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">50K creates/hour</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Circuit breaker at load balancer</td></tr>
+          <tr><td style="padding:0.5em;">Read rate</td><td style="padding:0.5em;">300 reads/min per IP</td><td style="padding:0.5em;">CDN-level WAF rule</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Spam Detection</h3>
+      <ul>
+        <li><strong>Content hashing:</strong> Hash each paste and check against known-spam hashes. Block duplicates of known malicious content</li>
+        <li><strong>Link density:</strong> Flag pastes with an unusually high ratio of URLs to text — a strong indicator of SEO spam</li>
+        <li><strong>Keyword filters:</strong> Block or flag pastes containing known phishing patterns, credential formats, or malware signatures</li>
+        <li><strong>ML classifier:</strong> At scale, train a classifier on reported-spam pastes to auto-flag new ones</li>
+      </ul>
+
+      <h3>Content Moderation</h3>
+<pre><code>// Moderation pipeline
+1. User creates paste
+2. Paste is stored and available immediately (optimistic)
+3. Async: Content is sent to moderation queue
+4. Automated checks run:
+   a. Regex patterns for credentials, SSNs, credit cards
+   b. URL reputation check (Google Safe Browsing API)
+   c. Spam classifier score
+5. If flagged → paste is hidden, creator notified
+6. If score is borderline → human review queue
+7. If clean → no action needed</code></pre>
+
+      <h3>CAPTCHA</h3>
+      <p>Anonymous paste creation requires a CAPTCHA (reCAPTCHA v3 or hCaptcha) to prevent automated spam bots. Authenticated users with good history bypass CAPTCHA.</p>
+
+      <h3>Reporting</h3>
+      <p>Every paste page includes a "Report Abuse" button. Reports go into a moderation queue with priority based on the number of unique reporters and the paste's view count.</p>
+
+      <!-- ================================================================ -->
+      <!--  15. ADDITIONAL CONSIDERATIONS                                   -->
+      <!-- ================================================================ -->
+      <h2 id="additional">Additional Considerations</h2>
+
+      <h3>Syntax Highlighting</h3>
+      <p>Syntax highlighting is done <strong>client-side</strong> using a library like Prism.js or highlight.js. The server stores raw text — the browser renders the highlighted version. This keeps the server stateless and avoids storing rendered HTML.</p>
+<pre><code>// Client-side rendering
+&lt;pre&gt;&lt;code class="language-python"&gt;
+  {{ raw paste content }}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;script src="prism.js"&gt;&lt;/script&gt;</code></pre>
+
+      <h3>Analytics</h3>
+      <p>Track per-paste view counts without hitting the database on every read:</p>
+      <ul>
+        <li>Increment view count in Redis: <code>INCR paste:views:{id}</code></li>
+        <li>Flush to database in batches (every 5 minutes or every 100 increments)</li>
+        <li>This decouples the hot read path from database writes</li>
+      </ul>
+
+      <h3>Search</h3>
+      <p>For public paste search, use Elasticsearch:</p>
+      <ul>
+        <li>Index paste metadata (title, language, tags) and optionally the first 1 KB of content</li>
+        <li>Full-text search with language-aware analyzers</li>
+        <li>Only public pastes are indexed — unlisted and private are excluded</li>
+      </ul>
+
+      <h3>Monitoring &amp; Alerting</h3>
+      <p>Key metrics to monitor:</p>
+      <ul>
+        <li><strong>Create latency P99:</strong> Alert if &gt; 500ms (target: &lt; 200ms)</li>
+        <li><strong>Read latency P99:</strong> Alert if &gt; 300ms (target: &lt; 100ms for cached)</li>
+        <li><strong>Cache hit rate:</strong> Alert if &lt; 70% (target: &gt; 85%)</li>
+        <li><strong>S3 error rate:</strong> Alert if &gt; 0.1%</li>
+        <li><strong>Expired pastes queue depth:</strong> Alert if cleanup worker falls behind by &gt; 100K pastes</li>
+        <li><strong>Abuse reports/hour:</strong> Alert if spike &gt; 3× normal rate</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  16. COMPLETE ARCHITECTURE DIAGRAM                               -->
+      <!-- ================================================================ -->
+      <h2 id="final-architecture">Complete Architecture</h2>
+      <p>Putting it all together, here's the complete architecture with all components and their interactions:</p>
+
+<pre><code>                          ┌──────────────────────────────────────────────┐
+                          │              CLIENTS                        │
+                          │  Web Browser  │  CLI Tool  │  API Client    │
+                          └──────────┬─────────────────┬───────────────┘
+                                     │                 │
+                          ┌──────────▼─────────────────▼───────────────┐
+                          │           CDN (CloudFront)                  │
+                          │  • Caches public paste responses            │
+                          │  • WAF rules for rate limiting              │
+                          │  • SSL termination                          │
+                          │  • 200+ global edge locations               │
+                          └──────────────────┬─────────────────────────┘
+                                             │ cache miss
+                          ┌──────────────────▼─────────────────────────┐
+                          │        Load Balancer (ALB)                  │
+                          │  • Health checks on API servers             │
+                          │  • SSL offloading                           │
+                          │  • Sticky sessions (optional)               │
+                          └────┬──────────┬──────────┬─────────────────┘
+                               │          │          │
+                       ┌───────▼──┐ ┌─────▼────┐ ┌──▼───────┐
+                       │ API Srv 1│ │ API Srv 2│ │ API Srv N│
+                       │(stateless│ │(stateless│ │(stateless│
+                       └───┬──┬───┘ └──┬──┬────┘ └──┬──┬────┘
+                           │  │        │  │         │  │
+             ┌─────────────┘  │        │  │         │  └────────────┐
+             │                │        │  │         │               │
+      ┌──────▼──────┐ ┌──────▼────────▼──▼─────────▼──────┐ ┌─────▼──────┐
+      │ Key Gen Svc │ │         Redis Cluster              │ │  Amazon S3 │
+      │             │ │  • paste:meta:{id}                 │ │            │
+      │ Pre-gen pool│ │  • paste:content:{id}              │ │ /shard/id  │
+      │ of 8-char   │ │  • paste:views:{id}                │ │ gzipped    │
+      │ Base62 keys │ │  • ratelimit:{ip}                  │ │ content    │
+      └─────────────┘ └──────────────┬─────────────────────┘ └────────────┘
+                                     │ cache miss
+                      ┌──────────────▼─────────────────────┐
+                      │      PostgreSQL (Primary)           │
+                      │  • pastes table                     │
+                      │  • users table                      │
+                      └──────────┬─────────────────────────┘
+                      ┌──────────▼─────────────────────────┐
+                      │     Read Replicas (3-5)             │
+                      │  • Serve all read queries           │
+                      │  • Async replication from primary   │
+                      └────────────────────────────────────┘
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │                    BACKGROUND WORKERS                                │
+    │                                                                      │
+    │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌────────────┐ │
+    │  │  Cleanup    │  │ View Count  │  │  Content    │  │ Analytics  │ │
+    │  │  Worker     │  │  Flusher    │  │  Moderator  │  │ Aggregator │ │
+    │  │ (expire     │  │ (Redis →    │  │ (spam/abuse │  │ (metrics   │ │
+    │  │  pastes)    │  │  Postgres)  │  │  detection) │  │  pipeline) │ │
+    │  └─────────────┘  └─────────────┘  └─────────────┘  └────────────┘ │
+    └──────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <h3>Data Flow Summary</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Operation</th><th style="text-align:left; padding:0.5em;">Components Involved</th><th style="text-align:left; padding:0.5em;">Latency Target</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Create paste</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">API → KGS → S3 → PostgreSQL → Redis</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">P99 &lt; 200ms</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read (CDN hit)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">CDN edge node only</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">P99 &lt; 20ms</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read (cache hit)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">API → Redis</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">P99 &lt; 50ms</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Read (cache miss)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">API → Redis (miss) → PostgreSQL → S3 → Redis</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">P99 &lt; 300ms</td></tr>
+          <tr><td style="padding:0.5em;">Delete paste</td><td style="padding:0.5em;">API → PostgreSQL → Redis → CDN purge</td><td style="padding:0.5em;">P99 &lt; 100ms</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  17. TRADE-OFFS & ALTERNATIVES                                   -->
+      <!-- ================================================================ -->
+      <h2 id="trade-offs">Trade-Offs &amp; Alternatives</h2>
+
+      <h3>SQL vs DynamoDB for Metadata</h3>
+      <p>We chose PostgreSQL for its rich query capabilities (admin dashboards, analytics, complex filters). DynamoDB would give us automatic sharding and single-digit-ms latency but sacrifices ad-hoc queries. At our scale (116 writes/s average), PostgreSQL is more than adequate.</p>
+
+      <h3>S3 vs Cassandra for Content</h3>
+      <p>Some designs store paste content in Cassandra (key → blob). This gives sub-10ms reads (faster than S3's 50–100ms) but at much higher operational cost. With Redis caching absorbing 85%+ of reads, the S3 latency is invisible to most users.</p>
+
+      <h3>Separate Content vs Inline</h3>
+      <p>For very small pastes (&lt; 1 KB), storing content directly in the database row (inline) would be faster and simpler. A hybrid approach — inline for &lt; 1 KB, S3 for everything else — optimizes both cases:</p>
+<pre><code>if paste.size < 1024:
+    metadata.inline_content = paste.content   // store in DB
+    metadata.content_key = null
+else:
+    s3.putObject(content_key, paste.content)  // store in S3
+    metadata.inline_content = null
+    metadata.content_key = content_key</code></pre>
+
+      <h3>Encryption at Rest</h3>
+      <p>All S3 content should be encrypted (SSE-S3 or SSE-KMS). For password-protected pastes, consider additional application-layer encryption using the user's password as a key derivation input (AES-256-GCM).</p>
+
+      <h3>Eventual Consistency Implications</h3>
+      <p>With read replicas and cache layers, a newly created paste might not be immediately visible:</p>
+      <ul>
+        <li><strong>Mitigation 1:</strong> After creating a paste, return the full paste data in the response — the client can display it immediately</li>
+        <li><strong>Mitigation 2:</strong> Write to Redis on create (cache warming) — subsequent reads from any server hit the cache</li>
+        <li><strong>Mitigation 3:</strong> For the creator's own requests, read from the primary database (read-your-writes consistency)</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  SUMMARY                                                         -->
+      <!-- ================================================================ -->
+      <h2 id="summary">Summary</h2>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Component</th><th style="text-align:left; padding:0.5em;">Technology</th><th style="text-align:left; padding:0.5em;">Purpose</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">CDN</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">CloudFront / Cloudflare</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cache public pastes at the edge</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Load Balancer</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">AWS ALB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Distribute traffic to API servers</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">API Servers</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Go / Java / Node.js</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Stateless request handling</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Key Generation</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Custom service + DB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Pre-generated unique 8-char keys</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cache</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redis Cluster</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hot paste metadata + content</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Metadata DB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">PostgreSQL + replicas</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Paste metadata, user accounts</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Content Store</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Amazon S3</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Paste content (gzipped)</td></tr>
+          <tr><td style="padding:0.5em;">Background Workers</td><td style="padding:0.5em;">Custom services</td><td style="padding:0.5em;">Expiration cleanup, moderation, analytics</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key takeaways:</strong> (1) Separate metadata from content — databases for small structured data, object storage for large blobs. (2) Pre-generate keys to avoid runtime collision handling. (3) Cache aggressively — CDN for public pastes, Redis for hot content. (4) Use lifecycle policies and compression to manage storage costs. (5) Build abuse prevention from day one — Pastebin is a high-abuse-risk service.
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="url-shortener.html"><span>Previous</span><span>&#8592; URL Shortener</span></a>
+        <a class="next" href="rate-limiter.html"><span>Next</span><span>Rate Limiter &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* === Shared SVG helpers === */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(s,attrs){var t=el('text',attrs);t.textContent=s;return t;}
+    function clearSvg(svg){while(svg.firstChild)svg.removeChild(svg.firstChild);}
+
+    /* colour palette */
+    var COL={
+      client:'#6366f1',   api:'#0ea5e9',    kgs:'#f59e0b',
+      db:'#10b981',       s3:'#8b5cf6',     cache:'#ef4444',
+      cdn:'#ec4899',      arrow:'#64748b',   box:'#f8fafc',
+      hit:'#22c55e',      miss:'#ef4444',    bg:'#ffffff',
+      textDark:'#1e293b', textLight:'#ffffff'
+    };
+
+    function drawArrow(svg,x1,y1,x2,y2,color,dashed){
+      var dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
+      var ux=dx/len,uy=dy/len;
+      var ax2=x2-ux*10,ay2=y2-uy*10;
+      var line=el('line',{x1:x1,y1:y1,x2:ax2,y2:ay2,stroke:color||COL.arrow,'stroke-width':'2'});
+      if(dashed) line.setAttribute('stroke-dasharray','6,4');
+      svg.appendChild(line);
+      var angle=Math.atan2(dy,dx);
+      var a1=angle+Math.PI*0.82, a2=angle-Math.PI*0.82;
+      var pts=ax2+','+ay2+' '+(ax2+10*Math.cos(a1))+','+(ay2+10*Math.sin(a1))+' '+(ax2+10*Math.cos(a2))+','+(ay2+10*Math.sin(a2));
+      svg.appendChild(el('polygon',{points:pts,fill:color||COL.arrow}));
+    }
+
+    function drawBox(svg,x,y,w,h,fill,label,textColor){
+      svg.appendChild(el('rect',{x:x,y:y,width:w,height:h,rx:'8',fill:fill,stroke:'#cbd5e1','stroke-width':'1.5'}));
+      svg.appendChild(txt(label,{x:x+w/2,y:y+h/2+5,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13','font-weight':'700',fill:textColor||COL.textLight}));
+    }
+
+    function drawLabel(svg,x,y,text,color){
+      svg.appendChild(txt(text,{x:x,y:y,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10.5','font-weight':'500',fill:color||'#64748b'}));
+    }
+
+    /* ============================================================ */
+    /*  CREATE PASTE ANIMATION                                       */
+    /* ============================================================ */
+    (function(){
+      var svg=document.getElementById('create-svg');
+      var out=document.getElementById('create-output');
+      if(!svg) return;
+
+      /* box positions */
+      var boxes=[
+        {id:'client', x:10,  y:30,  w:90, h:44, fill:COL.client, label:'Client'},
+        {id:'api',    x:140, y:30,  w:90, h:44, fill:COL.api,    label:'API Server'},
+        {id:'kgs',    x:140, y:130, w:90, h:44, fill:COL.kgs,    label:'Key Gen Svc', tc:COL.textDark},
+        {id:'s3',     x:300, y:130, w:90, h:44, fill:COL.s3,     label:'S3 Storage'},
+        {id:'db',     x:460, y:130, w:90, h:44, fill:COL.db,     label:'PostgreSQL'},
+        {id:'cache',  x:620, y:130, w:90, h:44, fill:COL.cache,  label:'Redis Cache'},
+        {id:'resp',   x:620, y:30,  w:90, h:44, fill:COL.client, label:'Response'}
+      ];
+
+      var steps=[
+        {desc:'1. Client sends POST /api/v1/pastes with content, language, and expiration',
+         arrow:[55,74, 185,74], color:COL.client, highlight:'client'},
+        {desc:'2. API server validates request: checks size ≤ 10 MB, rate limit, sanitize input',
+         arrow:null, color:COL.api, highlight:'api'},
+        {desc:'3. API requests a unique key from the Key Generation Service (pre-generated pool)',
+         arrow:[185,74, 185,130], color:COL.kgs, highlight:'kgs'},
+        {desc:'4. Store compressed content in S3 at s3://pastebin-content/{shard}/{paste_id}',
+         arrow:[230,152, 300,152], color:COL.s3, highlight:'s3'},
+        {desc:'5. Insert metadata row into PostgreSQL (id, user, language, expiry, S3 key)',
+         arrow:[390,152, 460,152], color:COL.db, highlight:'db'},
+        {desc:'6. Warm the cache: write metadata + content to Redis (TTL = min(1h, expiry))',
+         arrow:[550,152, 620,152], color:COL.cache, highlight:'cache'},
+        {desc:'7. Return paste URL to client: { "url": "https://pastebin.com/aB3kX9Qm" }',
+         arrow:[665,130, 665,74], color:COL.client, highlight:'resp'}
+      ];
+
+      var stepIdx=-1,autoTimer=null;
+
+      function draw(idx){
+        clearSvg(svg);
+        /* draw connecting dotted lines for context */
+        svg.appendChild(el('line',{x1:230,y1:52,x2:620,y2:52,stroke:'#e2e8f0','stroke-width':'1','stroke-dasharray':'4,4'}));
+        svg.appendChild(el('line',{x1:185,y1:74,x2:185,y2:280,stroke:'#e2e8f0','stroke-width':'1','stroke-dasharray':'4,4'}));
+
+        /* draw boxes */
+        for(var i=0;i<boxes.length;i++){
+          var b=boxes[i];
+          var opacity=(idx>=0 && steps[idx].highlight===b.id)?'1':'0.65';
+          var g=el('g',{opacity:opacity});
+          var r=el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:'8',fill:b.fill,stroke:'#cbd5e1','stroke-width':'1.5'});
+          g.appendChild(r);
+          g.appendChild(txt(b.label,{x:b.x+b.w/2,y:b.y+b.h/2+5,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12','font-weight':'700',fill:b.tc||COL.textLight}));
+          svg.appendChild(g);
+        }
+
+        /* draw all previous arrows (faded) */
+        for(var j=0;j<=idx;j++){
+          if(steps[j].arrow){
+            var a=steps[j].arrow;
+            var c=(j===idx)?steps[j].color:'#cbd5e1';
+            drawArrow(svg,a[0],a[1],a[2],a[3],c,j!==idx);
+          }
+        }
+
+        /* step description */
+        if(idx>=0){
+          svg.appendChild(el('rect',{x:10,y:220,width:700,height:44,rx:'6',fill:'#f1f5f9',stroke:'#e2e8f0','stroke-width':'1'}));
+          /* word-wrap long description */
+          var words=steps[idx].desc.split(' '),line='',lineY=240,lines=[];
+          for(var w=0;w<words.length;w++){
+            var test=line+(line?' ':'')+words[w];
+            if(test.length>85){lines.push(line);line=words[w];}
+            else line=test;
+          }
+          lines.push(line);
+          for(var l=0;l<lines.length;l++){
+            svg.appendChild(txt(lines[l],{x:20,y:236+l*16,'font-family':'Manrope,sans-serif','font-size':'12',fill:COL.textDark}));
+          }
+          out.textContent='Step '+(idx+1)+' of '+steps.length;
+        } else {
+          svg.appendChild(txt('Click "Step" to trace the create paste flow',{x:360,y:240,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'#94a3b8'}));
+          out.textContent='';
+        }
+
+        /* step counter circles at bottom */
+        for(var s=0;s<steps.length;s++){
+          var cx=260+s*32, cy=300;
+          svg.appendChild(el('circle',{cx:cx,cy:cy,r:10,fill:s<=idx?steps[s].color:'#e2e8f0',stroke:'#cbd5e1','stroke-width':'1'}));
+          svg.appendChild(txt(''+(s+1),{x:cx,y:cy+4,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:s<=idx?'#fff':'#94a3b8'}));
+        }
+      }
+
+      draw(-1);
+
+      document.getElementById('create-step').addEventListener('click',function(){
+        if(stepIdx<steps.length-1){stepIdx++;draw(stepIdx);}
+      });
+
+      document.getElementById('create-auto').addEventListener('click',function(){
+        if(autoTimer){clearInterval(autoTimer);autoTimer=null;return;}
+        if(stepIdx>=steps.length-1){stepIdx=-1;draw(-1);}
+        autoTimer=setInterval(function(){
+          if(stepIdx>=steps.length-1){clearInterval(autoTimer);autoTimer=null;return;}
+          stepIdx++;draw(stepIdx);
+        },1800);
+      });
+
+      document.getElementById('create-reset').addEventListener('click',function(){
+        if(autoTimer){clearInterval(autoTimer);autoTimer=null;}
+        stepIdx=-1;draw(-1);
+      });
+    })();
+
+    /* ============================================================ */
+    /*  READ PASTE ANIMATION                                         */
+    /* ============================================================ */
+    (function(){
+      var svg=document.getElementById('read-svg');
+      var out=document.getElementById('read-output');
+      if(!svg) return;
+
+      var boxes=[
+        {id:'client', x:10,  y:30,  w:90, h:44, fill:COL.client, label:'Client'},
+        {id:'cdn',    x:140, y:30,  w:90, h:44, fill:COL.cdn,    label:'CDN'},
+        {id:'api',    x:300, y:30,  w:90, h:44, fill:COL.api,    label:'API Server'},
+        {id:'cache',  x:300, y:130, w:90, h:44, fill:COL.cache,  label:'Redis Cache'},
+        {id:'db',     x:460, y:130, w:90, h:44, fill:COL.db,     label:'PostgreSQL'},
+        {id:'s3',     x:620, y:130, w:90, h:44, fill:COL.s3,     label:'S3 Storage'},
+        {id:'resp',   x:10,  y:130, w:90, h:44, fill:COL.hit,    label:'Response'}
+      ];
+
+      var steps=[
+        {desc:'1. Client sends GET /api/v1/pastes/{id} — request hits the CDN first',
+         arrow:[55,74, 185,74], color:COL.client, highlight:'client'},
+        {desc:'2. CDN cache MISS — the paste is not cached at the edge (or is unlisted/private)',
+         arrow:[230,52, 300,52], color:COL.miss, highlight:'cdn'},
+        {desc:'3. API server checks Redis cache for paste:meta:{id} and paste:content:{id}',
+         arrow:[345,74, 345,130], color:COL.cache, highlight:'cache'},
+        {desc:'4. Cache MISS — fetch metadata from PostgreSQL read replica',
+         arrow:[390,152, 460,152], color:COL.miss, highlight:'db'},
+        {desc:'5. Use content_key from metadata to fetch content from S3',
+         arrow:[550,152, 620,152], color:COL.s3, highlight:'s3'},
+        {desc:'6. Populate Redis cache: store metadata + content with TTL for future reads',
+         arrow:[390,170, 345,170], color:COL.cache, highlight:'cache', reverseCache:true},
+        {desc:'7. Return paste content to client. CDN may cache the response for public pastes.',
+         arrow:[300,52, 55,130], color:COL.hit, highlight:'resp'}
+      ];
+
+      var stepIdx=-1,autoTimer=null;
+
+      function draw(idx){
+        clearSvg(svg);
+        svg.appendChild(el('line',{x1:100,y1:52,x2:620,y2:52,stroke:'#e2e8f0','stroke-width':'1','stroke-dasharray':'4,4'}));
+        svg.appendChild(el('line',{x1:345,y1:74,x2:345,y2:280,stroke:'#e2e8f0','stroke-width':'1','stroke-dasharray':'4,4'}));
+
+        for(var i=0;i<boxes.length;i++){
+          var b=boxes[i];
+          var opacity=(idx>=0 && steps[idx].highlight===b.id)?'1':'0.65';
+          var g=el('g',{opacity:opacity});
+          g.appendChild(el('rect',{x:b.x,y:b.y,width:b.w,height:b.h,rx:'8',fill:b.fill,stroke:'#cbd5e1','stroke-width':'1.5'}));
+          g.appendChild(txt(b.label,{x:b.x+b.w/2,y:b.y+b.h/2+5,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12','font-weight':'700',fill:COL.textLight}));
+          svg.appendChild(g);
+        }
+
+        for(var j=0;j<=idx;j++){
+          if(steps[j].arrow){
+            var a=steps[j].arrow;
+            var c=(j===idx)?steps[j].color:'#cbd5e1';
+            drawArrow(svg,a[0],a[1],a[2],a[3],c,j!==idx);
+          }
+          /* draw HIT/MISS labels for CDN and cache steps */
+          if(j===1 && j<=idx){
+            drawLabel(svg,265,45,'MISS',COL.miss);
+          }
+          if(j===3 && j<=idx){
+            drawLabel(svg,425,145,'MISS',COL.miss);
+          }
+          if(j===5 && j<=idx){
+            drawLabel(svg,370,185,'POPULATE',COL.hit);
+          }
+        }
+
+        if(idx>=0){
+          svg.appendChild(el('rect',{x:10,y:220,width:700,height:44,rx:'6',fill:'#f1f5f9',stroke:'#e2e8f0','stroke-width':'1'}));
+          var words=steps[idx].desc.split(' '),line='',lines=[];
+          for(var w=0;w<words.length;w++){
+            var test=line+(line?' ':'')+words[w];
+            if(test.length>85){lines.push(line);line=words[w];}
+            else line=test;
+          }
+          lines.push(line);
+          for(var l=0;l<lines.length;l++){
+            svg.appendChild(txt(lines[l],{x:20,y:236+l*16,'font-family':'Manrope,sans-serif','font-size':'12',fill:COL.textDark}));
+          }
+          out.textContent='Step '+(idx+1)+' of '+steps.length;
+        } else {
+          svg.appendChild(txt('Click "Step" to trace the read paste flow',{x:360,y:240,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'13',fill:'#94a3b8'}));
+          out.textContent='';
+        }
+
+        for(var s=0;s<steps.length;s++){
+          var cx=228+s*38, cy=300;
+          svg.appendChild(el('circle',{cx:cx,cy:cy,r:10,fill:s<=idx?steps[s].color:'#e2e8f0',stroke:'#cbd5e1','stroke-width':'1'}));
+          svg.appendChild(txt(''+(s+1),{x:cx,y:cy+4,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10','font-weight':'700',fill:s<=idx?'#fff':'#94a3b8'}));
+        }
+      }
+
+      draw(-1);
+
+      document.getElementById('read-step').addEventListener('click',function(){
+        if(stepIdx<steps.length-1){stepIdx++;draw(stepIdx);}
+      });
+
+      document.getElementById('read-auto').addEventListener('click',function(){
+        if(autoTimer){clearInterval(autoTimer);autoTimer=null;return;}
+        if(stepIdx>=steps.length-1){stepIdx=-1;draw(-1);}
+        autoTimer=setInterval(function(){
+          if(stepIdx>=steps.length-1){clearInterval(autoTimer);autoTimer=null;return;}
+          stepIdx++;draw(stepIdx);
+        },1800);
+      });
+
+      document.getElementById('read-reset').addEventListener('click',function(){
+        if(autoTimer){clearInterval(autoTimer);autoTimer=null;}
+        stepIdx=-1;draw(-1);
+      });
+    })();
+
+  })();
+  </script>
+</body>
+</html>

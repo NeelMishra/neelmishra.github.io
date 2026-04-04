@@ -1,0 +1,1472 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design Uber / Ride-Sharing: location service, driver matching with geohash, trip lifecycle, ETA computation, H3 hexagonal surge pricing, payment authorization, and DISCO dispatch at 20M rides/day.">
+  <title>Design: Uber / Ride-Sharing | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <style>
+    .compare-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .compare-table th,.compare-table td{padding:0.5rem 0.75rem;border:1px solid var(--line);text-align:left}
+    .compare-table th{background:var(--card);font-weight:700}
+    .good{color:#10b981;font-weight:600}
+    .bad{color:#ef4444;font-weight:600}
+    .callout{border-left:3px solid var(--brand);background:var(--card);padding:0.7rem 1rem;border-radius:0 8px 8px 0;margin:0.8rem 0;font-size:0.92rem}
+    .callout strong{color:var(--brand)}
+    .endpoint-block{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:0.8rem 0}
+    .endpoint-block h4{margin:0 0 0.5rem;font-size:0.95rem}
+    .anim-container{border:1px solid var(--line);border-radius:8px;padding:1.5rem;background:var(--card);margin:1.5rem 0}
+    .anim-container h4{margin-top:0}
+    .anim-controls{margin-top:1rem;display:flex;gap:0.6rem;align-items:center}
+    .anim-btn{padding:0.5rem 1rem;background:var(--brand);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:0.9rem}
+    .anim-btn:hover{opacity:0.9}
+    .anim-output{font-size:0.85rem;color:var(--ink-muted);margin-left:auto}
+    .flow-step{display:inline-block;background:var(--card);border:1px solid var(--line);padding:0.25rem 0.6rem;border-radius:6px;font-size:0.85rem;font-weight:600;margin:0.15rem}
+    .flow-arrow{display:inline-block;margin:0 0.2rem;color:var(--ink-muted);font-size:0.85rem}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Part 57 of 70</span></div>
+
+      <h1>Design: Uber / Ride-Sharing</h1>
+      <p class="post-meta">April 2026 &middot; 30 min read</p>
+
+      <p>Uber connects millions of riders with drivers in real time. Behind a deceptively simple "request a ride" button lies one of the most complex distributed systems ever built: a service that must ingest millions of GPS pings per second, match riders with optimal drivers in under two seconds, compute accurate ETAs over live road graphs, adjust pricing dynamically across thousands of city zones, and orchestrate payments — all while handling <strong>20 million rides per day</strong> across 70+ countries.</p>
+
+      <p>In this post we'll design the complete ride-sharing system from the ground up: the location ingestion pipeline, the matching algorithm, the trip lifecycle state machine, the H3 hexagonal grid for surge pricing, ETA computation with ML, and the payment authorization flow. We'll look at how Uber's real DISCO dispatch system works and the engineering trade-offs behind every decision.</p>
+
+      <!-- ================================================================ -->
+      <!--  1. REQUIREMENTS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3>Functional Requirements</h3>
+      <ul>
+        <li><strong>Request a ride:</strong> Rider opens app, enters pickup &amp; drop-off, selects ride type (UberX, Pool, Black), and requests</li>
+        <li><strong>Match with nearest driver:</strong> System finds optimal available driver and offers the trip</li>
+        <li><strong>Real-time tracking:</strong> Both rider and driver see each other's live location on the map</li>
+        <li><strong>ETA computation:</strong> Accurate estimated time of arrival before and during the trip</li>
+        <li><strong>Surge pricing:</strong> Dynamic price multiplier based on real-time supply/demand per geographic zone</li>
+        <li><strong>Payment processing:</strong> Charge rider and pay driver at trip completion</li>
+        <li><strong>Rating system:</strong> Mutual rating after ride completion</li>
+        <li><strong>Trip history:</strong> Riders and drivers can view past trips</li>
+      </ul>
+
+      <h3>Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Scale:</strong> 20 million rides/day, ~500 million location updates/day from drivers</li>
+        <li><strong>Latency:</strong> Match rider to driver in &lt;2 seconds; location updates reflected in &lt;1 second</li>
+        <li><strong>Availability:</strong> 99.99% uptime — every minute of downtime means thousands of stranded riders</li>
+        <li><strong>Consistency:</strong> A ride must never be double-assigned to two drivers (strong consistency on matching)</li>
+        <li><strong>Durability:</strong> No trip or payment data may be lost</li>
+      </ul>
+
+      <h3>Scale Estimation</h3>
+      <table class="compare-table">
+        <thead><tr><th>Metric</th><th>Value</th><th>Derived Rate</th></tr></thead>
+        <tbody>
+          <tr><td>Rides per day</td><td>20 million</td><td>~230 rides/sec</td></tr>
+          <tr><td>Active drivers online</td><td>~5 million peak</td><td>—</td></tr>
+          <tr><td>Location updates per driver</td><td>Every 3-4 seconds</td><td>—</td></tr>
+          <tr><td>Location updates (total)</td><td>~500M/day</td><td>~1.3M writes/sec peak</td></tr>
+          <tr><td>Average trip duration</td><td>15 minutes</td><td>~3.5M concurrent trips</td></tr>
+          <tr><td>WebSocket connections</td><td>~10 million concurrent</td><td>riders + drivers</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  2. HIGH-LEVEL ARCHITECTURE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system decomposes into these core services:</p>
+
+      <table class="compare-table">
+        <thead><tr><th>Service</th><th>Responsibility</th><th>Key Technology</th></tr></thead>
+        <tbody>
+          <tr><td><strong>API Gateway</strong></td><td>Authentication, rate limiting, routing</td><td>NGINX / Envoy</td></tr>
+          <tr><td><strong>Location Service</strong></td><td>Ingest &amp; store real-time driver positions</td><td>Redis + Geospatial Index</td></tr>
+          <tr><td><strong>Matching Service (DISCO)</strong></td><td>Find optimal driver for each ride request</td><td>Geohash + Custom Algorithm</td></tr>
+          <tr><td><strong>Trip Service</strong></td><td>Manage ride lifecycle state machine</td><td>PostgreSQL + Kafka</td></tr>
+          <tr><td><strong>ETA Service</strong></td><td>Compute ETAs using road graph + ML</td><td>Graph DB + TensorFlow</td></tr>
+          <tr><td><strong>Pricing Service</strong></td><td>Compute fare + surge multiplier</td><td>H3 Grid + Redis</td></tr>
+          <tr><td><strong>Payment Service</strong></td><td>Authorize, capture, and settle payments</td><td>Stripe / Internal Ledger</td></tr>
+          <tr><td><strong>Notification Service</strong></td><td>Push notifications &amp; WebSocket updates</td><td>WebSocket + APNS/FCM</td></tr>
+          <tr><td><strong>User Service</strong></td><td>Rider/driver profiles, ratings, preferences</td><td>PostgreSQL</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>┌─────────────┐     ┌─────────────┐
+│  Rider App  │     │ Driver App  │
+└──────┬──────┘     └──────┬──────┘
+       │ HTTPS/WSS         │ HTTPS/WSS
+       ▼                   ▼
+┌─────────────────────────────────┐
+│          API Gateway            │
+│   (Auth, Rate Limit, Route)     │
+└──┬────┬────┬────┬────┬────┬─────┘
+   │    │    │    │    │    │
+   ▼    ▼    ▼    ▼    ▼    ▼
+┌────┐┌────┐┌────┐┌────┐┌────┐┌────┐
+│Loc.││Trip││DISC││ETA ││Pric││Pay │
+│Svc ││Svc ││ O  ││Svc ││Svc ││Svc │
+└─┬──┘└─┬──┘└─┬──┘└─┬──┘└─┬──┘└─┬──┘
+  │     │     │     │     │     │
+  ▼     ▼     ▼     ▼     ▼     ▼
+┌─────────────────────────────────┐
+│     Redis Cluster (Locations)   │
+│     PostgreSQL  (Trips, Users)  │
+│     Kafka       (Events)        │
+│     S3          (Trip Logs)     │
+└─────────────────────────────────┘</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  3. RIDER & DRIVER FLOWS                                         -->
+      <!-- ================================================================ -->
+      <h2 id="flows">Rider &amp; Driver Flows</h2>
+
+      <h3>Rider Flow</h3>
+      <p>The rider's journey through the system:</p>
+      <p>
+        <span class="flow-step">Open App</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Enter Pickup &amp; Destination</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">See Fare Estimate + Surge</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Request Ride</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Wait for Match</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Track Driver Approach</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Driver Arrives</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">In-Trip Tracking</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Arrive at Destination</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Pay &amp; Rate</span>
+      </p>
+
+      <div class="endpoint-block">
+        <h4>POST /v1/rides/request</h4>
+        <pre><code>{
+  "rider_id": "usr_abc123",
+  "pickup": { "lat": 37.7749, "lng": -122.4194 },
+  "dropoff": { "lat": 37.3382, "lng": -121.8863 },
+  "ride_type": "UberX",
+  "payment_method_id": "pm_visa_4242"
+}</code></pre>
+        <p>Returns a <code>ride_id</code> and initiates the matching process. The rider receives real-time updates via WebSocket.</p>
+      </div>
+
+      <h3>Driver Flow</h3>
+      <p>
+        <span class="flow-step">Go Online</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Send Location Every 3-4s</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Receive Ride Request</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Accept / Decline (15s timeout)</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Navigate to Pickup</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Confirm Rider Pickup</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Navigate to Destination</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Complete Trip</span><span class="flow-arrow">&rarr;</span>
+        <span class="flow-step">Get Paid</span>
+      </p>
+
+      <div class="endpoint-block">
+        <h4>POST /v1/drivers/location</h4>
+        <pre><code>{
+  "driver_id": "drv_xyz789",
+  "lat": 37.7751,
+  "lng": -122.4180,
+  "heading": 45,
+  "speed_kmh": 32,
+  "timestamp": 1714500000000,
+  "status": "available"
+}</code></pre>
+        <p>Sent every 3-4 seconds by the driver app. This is the highest-throughput endpoint in the entire system (~1.3M writes/sec peak).</p>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  4. LOCATION SERVICE                                             -->
+      <!-- ================================================================ -->
+      <h2 id="location-service">Location Service</h2>
+      <p>The location service is the beating heart of Uber. It must ingest, store, and serve millions of GPS coordinates per second with sub-second latency.</p>
+
+      <h3>Why Redis with Geospatial Index?</h3>
+      <p>Redis provides the <code>GEOADD</code> / <code>GEOSEARCH</code> commands backed by a sorted set where each member's score is a <strong>52-bit geohash</strong>. This gives us:</p>
+      <ul>
+        <li><strong>O(log N) insert</strong> for each location update</li>
+        <li><strong>O(N + log M) radius query</strong> where N is results returned and M is total members</li>
+        <li><strong>In-memory speed:</strong> sub-millisecond latency for both writes and reads</li>
+      </ul>
+
+      <pre><code># Driver sends location update → Location Service writes to Redis:
+
+GEOADD drivers:available -122.4180 37.7751 "drv_xyz789"
+
+# When matching needs nearby drivers:
+GEOSEARCH drivers:available
+  FROMLONLAT -122.4194 37.7749
+  BYRADIUS 5 km
+  ASC
+  COUNT 20
+  WITHCOORD WITHDIST
+
+# Returns:
+# 1) "drv_xyz789" — 0.15 km — (37.7751, -122.4180)
+# 2) "drv_abc456" — 0.82 km — (37.7780, -122.4210)
+# 3) "drv_def012" — 1.45 km — (37.7690, -122.4100)
+# ...</code></pre>
+
+      <h3>How Geohash Works</h3>
+      <p>A <strong>geohash</strong> encodes a (latitude, longitude) pair into a single integer by interleaving the bits of the binary representations of latitude and longitude. Points that are geographically close share a common prefix in their geohash.</p>
+
+      <pre><code>Geohash encoding for (37.7749, -122.4194):
+
+Step 1: Encode latitude 37.7749 into binary
+  Range [-90, 90] → midpoint 0 → 37.7749 > 0 → bit 1
+  Range [0, 90]   → midpoint 45 → 37.7749 < 45 → bit 0
+  Range [0, 45]   → midpoint 22.5 → 37.7749 > 22.5 → bit 1
+  ... continue for desired precision
+
+Step 2: Encode longitude -122.4194 into binary
+  Range [-180, 180] → midpoint 0 → -122.4194 < 0 → bit 0
+  Range [-180, 0]   → midpoint -90 → -122.4194 < -90 → bit 0
+  Range [-180, -90] → midpoint -135 → -122.4194 > -135 → bit 1
+  ... continue
+
+Step 3: Interleave bits (lon, lat, lon, lat, ...)
+  = 0, 1, 0, 0, 1, 1, ... → "9q8yyz" (base32)</code></pre>
+
+      <div class="callout">
+        <strong>Geohash precision:</strong> A 6-character geohash covers ~1.2 km × 0.6 km. A 7-character geohash covers ~153 m × 153 m. Uber uses geohash prefixes of length 6-7 for driver lookups, which balances query efficiency with spatial precision.
+      </div>
+
+      <h3>Location Ingestion Pipeline</h3>
+      <p>With 1.3 million location writes per second at peak, we need a robust ingestion pipeline:</p>
+
+      <pre><code>Driver App
+    │
+    ▼ (every 3-4 seconds)
+┌──────────────┐
+│  API Gateway  │  ← rate limit per driver: 1 update/sec
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ Kafka Topic   │  ← "driver-locations" — partitioned by driver_id
+│ (Buffer)      │     ~100 partitions, 3 replicas
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ Location      │  ← Kafka consumers (100+ instances)
+│ Consumers     │     Batch writes to Redis
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ Redis Cluster │  ← 50+ shards, each handling ~26K writes/sec
+│ (Geospatial)  │     Shard key: geohash prefix (colocate nearby drivers)
+└──────────────┘</code></pre>
+
+      <h3>Multi-Region Sharding</h3>
+      <p>Uber shards the location store by <strong>city or region</strong>. A ride request in San Francisco only queries the SF Redis shard — it never needs to scan drivers in New York. This partitioning is natural for a ride-sharing system:</p>
+
+      <pre><code>Redis sharding strategy:
+  Shard key = city_id (e.g., "sf", "nyc", "london")
+
+  drivers:sf:available      → Redis shard 1-5  (SF drivers)
+  drivers:nyc:available     → Redis shard 6-10 (NYC drivers)
+  drivers:london:available  → Redis shard 11-15 (London drivers)
+
+Benefits:
+  ✓ Queries never cross city boundaries
+  ✓ Hot cities get more shards
+  ✓ Independent scaling per region
+  ✓ Failure isolation — NYC outage doesn't affect SF</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  5. MATCHING ALGORITHM                                           -->
+      <!-- ================================================================ -->
+      <h2 id="matching">Matching Algorithm &amp; DISCO</h2>
+      <p>The matching service — internally called <strong>DISCO</strong> (Dispatch Optimization) at Uber — is the brain of the system. It takes a ride request and finds the best available driver. This is not simply "find the nearest driver." DISCO optimizes for the <strong>global system</strong>: minimizing total wait time across all riders, not just the current one.</p>
+
+      <h3>Basic Matching: Radius Search + Ranking</h3>
+      <p>The foundational algorithm works in stages:</p>
+
+      <pre><code>function matchDriver(rideRequest):
+    pickup = rideRequest.pickup       // (lat, lng)
+    rideType = rideRequest.rideType   // "UberX", "Pool", etc.
+
+    // Stage 1: Find candidate drivers within radius
+    radius = 5.0  // km, start with 5km
+    candidates = redis.GEOSEARCH(
+        key = "drivers:{city}:available",
+        center = pickup,
+        radius = radius,
+        count = 20,
+        sort = "ASC"  // nearest first
+    )
+
+    // Stage 2: Filter by eligibility
+    candidates = candidates.filter(driver =>
+        driver.rideType.includes(rideType) &&
+        driver.rating >= MIN_RATING &&
+        driver.vehicleCapacity >= rideRequest.passengers &&
+        !driver.hasActiveOffer  // not already offered another ride
+    )
+
+    // Stage 3: If too few candidates, expand radius
+    if candidates.length < 3:
+        radius = 10.0
+        candidates = redis.GEOSEARCH(..., radius=10.0, count=50)
+        candidates = applyFilters(candidates)
+
+    // Stage 4: Rank by composite score
+    for each driver in candidates:
+        driver.eta = etaService.compute(driver.location, pickup)
+        driver.score = rankDriver(driver, rideRequest)
+
+    // Stage 5: Sort by score, offer to best
+    candidates.sortBy(d => d.score, DESC)
+    return offerToDriver(candidates[0], rideRequest)</code></pre>
+
+      <h3>Ranking Function</h3>
+      <p>The ranking score considers multiple factors:</p>
+
+      <pre><code>function rankDriver(driver, request):
+    // Lower ETA is better (normalize to 0-1)
+    etaScore = 1.0 - (driver.eta / MAX_ETA)
+
+    // Closer distance is better
+    distScore = 1.0 - (driver.distance / MAX_DISTANCE)
+
+    // Driver rating (4.5-5.0 → 0.9-1.0)
+    ratingScore = driver.rating / 5.0
+
+    // Driver acceptance rate (higher is better)
+    acceptScore = driver.acceptanceRate
+
+    // Trip completion heading — is the driver heading toward pickup?
+    headingScore = cos(angleBetween(driver.heading, bearingTo(driver.loc, request.pickup)))
+    headingScore = max(0, headingScore)  // only reward driving toward
+
+    return (
+        0.40 * etaScore +
+        0.25 * distScore +
+        0.15 * ratingScore +
+        0.10 * acceptScore +
+        0.10 * headingScore
+    )</code></pre>
+
+      <div class="callout">
+        <strong>Why ETA > Distance?</strong> A driver 2 km away on a highway may arrive in 3 minutes, while a driver 1 km away in gridlock may take 10 minutes. ETA-based ranking produces dramatically better outcomes than pure distance ranking.
+      </div>
+
+      <h3>The Offer Cascade</h3>
+      <p>When a driver is selected, they receive a push notification with 15 seconds to accept. If they don't respond or decline:</p>
+
+      <pre><code>function offerToDriver(driver, ride):
+    // Mark driver as "offered" (prevent double-dispatch)
+    redis.SET("offer:{driver.id}", ride.id, EX=20)
+
+    // Send push notification
+    notify(driver, {
+        type: "RIDE_OFFER",
+        ride_id: ride.id,
+        pickup: ride.pickup,
+        dropoff: ride.dropoff,
+        fare_estimate: ride.fare,
+        timeout: 15  // seconds
+    })
+
+    // Wait for response
+    response = await withTimeout(15_seconds):
+        driver.respondToOffer(ride.id)
+
+    if response == ACCEPTED:
+        tripService.createTrip(ride, driver)
+        notifyRider(ride.rider, "Driver matched!")
+        return SUCCESS
+
+    if response == DECLINED or response == TIMEOUT:
+        redis.DEL("offer:{driver.id}")
+        // Move to next candidate
+        nextDriver = getNextCandidate(ride)
+        if nextDriver:
+            return offerToDriver(nextDriver, ride)
+        else:
+            notifyRider(ride.rider, "No drivers available")
+            return NO_MATCH</code></pre>
+
+      <h3>DISCO: Global Optimization</h3>
+      <p>Uber's real DISCO system goes beyond greedy nearest-driver matching. It uses <strong>batched matching</strong> — collecting ride requests over a short window (2-3 seconds) and solving the assignment problem globally:</p>
+
+      <pre><code>DISCO Batched Matching:
+
+Every 2 seconds:
+  1. Collect all pending ride requests → R = {r1, r2, ..., rN}
+  2. Collect all available drivers     → D = {d1, d2, ..., dM}
+  3. Build cost matrix C[i][j] = ETA(driver_j → rider_i)
+  4. Solve assignment: minimize total ΣC[i][j]
+     subject to: each driver assigned to at most 1 rider
+                 each rider assigned to exactly 1 driver (if possible)
+  5. This is the Hungarian Algorithm (or auction algorithm for speed)
+
+Why batching beats greedy:
+  Rider A at (1,1), Rider B at (2,2)
+  Driver X at (1,2), Driver Y at (2,1)
+
+  Greedy (process A first):
+    A → X (nearest, dist=1), B → Y (dist=1) → total = 2
+
+  But if A arrived 1 second before B:
+    A → Y (dist=√2 ≈ 1.41), B → X (dist=√2 ≈ 1.41) → total = 2.82
+
+  Batched optimal:
+    A → X (dist=1), B → Y (dist=1) → total = 2 ✓
+
+  Batching ensures global optimality regardless of arrival order.</code></pre>
+
+      <!-- Ride Matching Animation -->
+      <div class="anim-container" id="match-anim">
+        <h4>&#9654; Ride Matching Animation</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how the system matches a rider with the optimal driver using radius search, filtering, and ranking.</p>
+        <svg id="match-svg" width="720" height="420" viewBox="0 0 720 420" style="max-width:100%;height:auto"></svg>
+        <div id="match-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="match-step">Step &rarr;</button>
+          <button class="anim-btn" id="match-reset">Reset</button>
+          <span class="anim-output" id="match-output"></span>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  6. TRIP SERVICE                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="trip-service">Trip Service &amp; State Machine</h2>
+      <p>The Trip Service manages the complete lifecycle of every ride through a strict state machine. Each state transition is recorded as an event in Kafka, making the entire trip history auditable and replayable.</p>
+
+      <h3>Trip State Machine</h3>
+      <pre><code>                    ┌──────────────┐
+                    │  REQUESTED   │
+                    └──────┬───────┘
+                           │ driver accepts
+                           ▼
+                    ┌──────────────┐
+          timeout   │   ACCEPTED   │──────────────────┐
+         ────────── └──────┬───────┘                  │
+                           │ driver starts driving    │
+                           ▼                          │
+                    ┌──────────────┐                  │
+                    │   EN_ROUTE   │                  │
+                    └──────┬───────┘                  │
+                           │ driver arrives at pickup │
+                           ▼                          │
+                    ┌──────────────┐                  │
+         rider      │   ARRIVED    │  5-min wait      │
+         no-show    └──────┬───────┘  timeout ────────┤
+         ──────────────────│                          │
+                           │ rider gets in            │
+                           ▼                          │
+                    ┌──────────────┐                  │
+                    │ IN_PROGRESS  │                  │
+                    └──────┬───────┘                  │
+                           │ arrive at destination    │
+                           ▼                          ▼
+                    ┌──────────────┐          ┌──────────────┐
+                    │  COMPLETED   │          │  CANCELLED   │
+                    └──────────────┘          └──────────────┘</code></pre>
+
+      <h3>Trip Data Model</h3>
+      <pre><code>CREATE TABLE trips (
+    id              UUID PRIMARY KEY,
+    rider_id        UUID NOT NULL REFERENCES users(id),
+    driver_id       UUID REFERENCES users(id),  -- NULL until matched
+    status          VARCHAR(20) NOT NULL DEFAULT 'REQUESTED',
+
+    -- Locations
+    pickup_lat      DECIMAL(9,6) NOT NULL,
+    pickup_lng      DECIMAL(9,6) NOT NULL,
+    dropoff_lat     DECIMAL(9,6) NOT NULL,
+    dropoff_lng     DECIMAL(9,6) NOT NULL,
+
+    -- Timing
+    requested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    accepted_at     TIMESTAMPTZ,
+    pickup_at       TIMESTAMPTZ,
+    dropoff_at      TIMESTAMPTZ,
+    cancelled_at    TIMESTAMPTZ,
+
+    -- Pricing
+    ride_type       VARCHAR(20) NOT NULL,
+    base_fare       DECIMAL(10,2),
+    surge_multiplier DECIMAL(4,2) DEFAULT 1.00,
+    final_fare      DECIMAL(10,2),
+    distance_km     DECIMAL(8,2),
+    duration_min    DECIMAL(8,2),
+
+    -- Payment
+    payment_method_id VARCHAR(64),
+    payment_intent_id VARCHAR(64),    -- Stripe hold
+    payment_status    VARCHAR(20) DEFAULT 'PENDING',
+
+    -- Ratings
+    rider_rating    SMALLINT CHECK (rider_rating BETWEEN 1 AND 5),
+    driver_rating   SMALLINT CHECK (driver_rating BETWEEN 1 AND 5),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_trips_rider ON trips(rider_id, created_at DESC);
+CREATE INDEX idx_trips_driver ON trips(driver_id, created_at DESC);
+CREATE INDEX idx_trips_status ON trips(status) WHERE status NOT IN ('COMPLETED', 'CANCELLED');</code></pre>
+
+      <h3>State Transition Events</h3>
+      <p>Every state change emits a Kafka event consumed by downstream services:</p>
+
+      <pre><code>// Kafka topic: "trip-events"
+{
+  "event_type": "TRIP_ACCEPTED",
+  "trip_id": "trip_abc123",
+  "driver_id": "drv_xyz789",
+  "rider_id": "usr_abc123",
+  "timestamp": "2026-04-15T10:23:45Z",
+  "metadata": {
+    "driver_location": { "lat": 37.7751, "lng": -122.4180 },
+    "eta_to_pickup": 240  // seconds
+  }
+}
+
+Consumers:
+  → Notification Service: push "Driver en route, 4 min away" to rider
+  → Analytics Service: log matching latency metric
+  → Location Service: start tracking driver→pickup route
+  → Payment Service: authorize hold on rider's payment method</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  7. ETA COMPUTATION                                              -->
+      <!-- ================================================================ -->
+      <h2 id="eta">ETA Computation</h2>
+      <p>Accurate ETAs are critical — they determine matching decisions, rider expectations, and driver earnings. Uber computes ETAs using a layered approach combining graph algorithms with machine learning.</p>
+
+      <h3>Layer 1: Road Graph + Dijkstra</h3>
+      <p>The foundation is a weighted directed graph of the road network:</p>
+      <pre><code>Road graph structure:
+  Nodes: intersections (~50M globally)
+  Edges: road segments between intersections
+  Edge weight: travel time = distance / speed_limit
+
+  Shortest path: Dijkstra's algorithm (or A* with haversine heuristic)
+
+  Optimization: Contraction Hierarchies (CH)
+    - Precompute shortcuts between important nodes
+    - Reduces Dijkstra from O(E log V) to O(k log k) where k << V
+    - Typical: 50M nodes → query in ~0.5ms with CH</code></pre>
+
+      <h3>Layer 2: Live Traffic Overlay</h3>
+      <p>Static road speeds are wildly inaccurate during rush hour. Uber overlays live traffic data from its own drivers:</p>
+      <pre><code>Every road segment has a real-time speed:
+
+  segment_speeds = {
+    "Market_St_1_2":    { speed: 15 kmh, updated: "10:23:42" },
+    "Market_St_2_3":    { speed: 8 kmh,  updated: "10:23:41" },  // congestion!
+    "Highway_101_45_46":{ speed: 95 kmh, updated: "10:23:43" },
+  }
+
+Source: GPS traces from all Uber drivers on the road
+Update frequency: every 60 seconds per segment
+Storage: Redis (fast reads for routing engine)
+
+ETA with live traffic:
+  For each edge in the shortest path:
+    travel_time = segment_distance / live_speed[segment]
+  total_eta = Σ travel_times + Σ turn_penalties + pickup_overhead</code></pre>
+
+      <h3>Layer 3: ML-Based Correction</h3>
+      <p>Even with live traffic, graph-based ETAs have systematic errors (traffic lights, school zones, construction). Uber uses a gradient-boosted decision tree model to correct:</p>
+
+      <pre><code>Features:
+  - Graph ETA (from Layer 1+2)
+  - Time of day, day of week
+  - Weather (rain → +15% ETA)
+  - Historical trip times on this route
+  - Current surge level (proxy for congestion)
+  - Number of traffic signals on route
+  - Special events (concerts, sports games)
+
+Model: XGBoost / LightGBM
+  Input:  feature vector → Output: corrected_eta
+  Training data: millions of completed trips (actual duration vs. predicted)
+
+Result:
+  Graph ETA alone:     ±25% error
+  Graph + live traffic: ±15% error
+  Graph + traffic + ML: ±8% error  ← production accuracy</code></pre>
+
+      <div class="callout">
+        <strong>ETA at scale:</strong> Uber's ETA service handles ~200K requests/second globally. Each request computes routes using Contraction Hierarchies (sub-millisecond), overlays live traffic (Redis lookup), and applies the ML correction model — all in under 50ms end-to-end.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  8. SURGE PRICING & H3 GRID                                      -->
+      <!-- ================================================================ -->
+      <h2 id="surge-pricing">Surge Pricing &amp; H3 Hexagonal Grid</h2>
+      <p>Surge pricing is Uber's mechanism to balance supply and demand in real time. When rider demand exceeds driver supply in an area, prices increase to incentivize more drivers to that area and to reduce demand from price-sensitive riders.</p>
+
+      <h3>Why Hexagons? The H3 Grid System</h3>
+      <p>Uber developed the <strong>H3 hierarchical hexagonal grid system</strong> to divide the entire planet into hexagonal cells. Why hexagons instead of squares or other shapes?</p>
+
+      <table class="compare-table">
+        <thead><tr><th>Property</th><th>Square Grid</th><th>Hexagonal Grid (H3)</th></tr></thead>
+        <tbody>
+          <tr><td>Neighbor distance</td><td class="bad">Unequal (√2 for diagonal)</td><td class="good">Equal for all 6 neighbors</td></tr>
+          <tr><td>Edge effects</td><td class="bad">8 neighbors, inconsistent adjacency</td><td class="good">6 neighbors, uniform adjacency</td></tr>
+          <tr><td>Coverage</td><td>Tessellates perfectly</td><td>Approximately tessellates (small gaps)</td></tr>
+          <tr><td>Movement modeling</td><td class="bad">Diagonal bias</td><td class="good">Natural for movement in any direction</td></tr>
+          <tr><td>Visual representation</td><td>Familiar</td><td class="good">Closer to circles (better for radii)</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>H3 Resolution Levels (selected):
+┌────────────┬───────────────────────┬────────────────────────────┐
+│ Resolution │ Hex Edge Length       │ Hex Area                   │
+├────────────┼───────────────────────┼────────────────────────────┤
+│ 0          │ ~1107.71 km           │ ~4,357,449.42 km²          │
+│ 4          │ ~22.61 km             │ ~1,770.35 km²              │
+│ 7          │ ~1.22 km              │ ~5.16 km²                  │  ← city zones
+│ 8          │ ~0.46 km              │ ~0.74 km²                  │  ← surge pricing
+│ 9          │ ~0.17 km              │ ~0.105 km²                 │  ← fine-grained
+│ 15         │ ~0.51 m               │ ~0.90 m²                   │
+└────────────┴───────────────────────┴────────────────────────────┘
+
+Uber uses Resolution 8 for surge pricing:
+  Each cell ≈ 0.74 km² (about 6 city blocks)
+  San Francisco ≈ 160 cells at resolution 8
+  Perfect granularity for supply/demand zones</code></pre>
+
+      <h3>H3 Indexing</h3>
+      <p>Every GPS coordinate maps to a unique H3 cell index at each resolution:</p>
+
+      <pre><code>import h3
+
+# Convert (lat, lng) to H3 cell at resolution 8
+cell = h3.latlng_to_cell(37.7749, -122.4194, 8)
+# → '8828308281fffff'
+
+# Get center of a cell
+center = h3.cell_to_latlng('8828308281fffff')
+# → (37.77488, -122.41941)
+
+# Get all 6 neighboring cells (ring distance 1)
+neighbors = h3.grid_ring('8828308281fffff', 1)
+# → {'8828308283fffff', '8828308285fffff', ...}
+
+# Get all cells within k rings (disk)
+disk = h3.grid_disk('8828308281fffff', 2)
+# → 19 cells (center + ring 1 + ring 2)
+
+# Hierarchical: get parent (coarser) and children (finer)
+parent = h3.cell_to_parent('8828308281fffff', 7)
+children = h3.cell_to_children('8828308281fffff', 9)  # 7 children</code></pre>
+
+      <h3>Supply/Demand Ratio Computation</h3>
+      <p>Every 30-60 seconds, the pricing service computes the surge multiplier per H3 cell:</p>
+
+      <pre><code>function computeSurge(city):
+    cells = h3.getCellsForCity(city, resolution=8)
+
+    for each cell in cells:
+        // Count supply: available drivers in this cell
+        supply = countDriversInCell(cell, status="available")
+
+        // Count demand: ride requests in last 5 minutes
+        demand = countRecentRequests(cell, window=5_minutes)
+
+        // Compute raw ratio
+        if supply == 0:
+            ratio = MAX_SURGE  // no supply → max surge
+        else:
+            ratio = demand / supply
+
+        // Map ratio to surge multiplier using a curve
+        surge = surgeCurve(ratio)
+
+        // Smooth with neighbors to avoid sharp boundaries
+        neighborSurges = getNeighborSurges(cell)
+        smoothedSurge = 0.6 * surge + 0.4 * avg(neighborSurges)
+
+        // Clamp to allowed range
+        smoothedSurge = clamp(smoothedSurge, 1.0, MAX_SURGE)
+
+        redis.SET("surge:{cell}", smoothedSurge, EX=120)
+
+    return surgeMap
+
+// Surge curve: piecewise linear
+function surgeCurve(ratio):
+    if ratio <= 1.0:  return 1.0     // balanced or oversupply
+    if ratio <= 1.5:  return 1.2     // slight demand increase
+    if ratio <= 2.0:  return 1.5     // moderate surge
+    if ratio <= 3.0:  return 2.0     // high demand
+    if ratio <= 5.0:  return 3.0     // very high demand
+    return 5.0                        // extreme (concerts, NYE, etc.)</code></pre>
+
+      <h3>Fare Calculation with Surge</h3>
+      <pre><code>function calculateFare(trip):
+    baseRate = getRateCard(trip.city, trip.rideType)
+    // e.g., { baseFare: $2.50, perKm: $1.20, perMin: $0.35, bookingFee: $2.00 }
+
+    distanceFare = trip.distance_km * baseRate.perKm
+    timeFare     = trip.duration_min * baseRate.perMin
+
+    subtotal = baseRate.baseFare + distanceFare + timeFare
+
+    // Apply surge
+    surgeCell = h3.latlng_to_cell(trip.pickup_lat, trip.pickup_lng, 8)
+    surge = redis.GET("surge:{surgeCell}") || 1.0
+
+    surgedFare = subtotal * surge
+
+    // Add fees
+    totalFare = surgedFare + baseRate.bookingFee
+
+    // Apply minimum fare
+    totalFare = max(totalFare, baseRate.minimumFare)
+
+    return {
+        baseFare: subtotal,
+        surgeMultiplier: surge,
+        surgeAmount: surgedFare - subtotal,
+        bookingFee: baseRate.bookingFee,
+        totalFare: totalFare
+    }</code></pre>
+
+      <!-- Surge Pricing Animation -->
+      <div class="anim-container" id="surge-anim">
+        <h4>&#9654; Surge Pricing — H3 Hexagonal Grid</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch supply/demand shift across city zones. Green = balanced, Yellow = moderate demand, Red = high demand. Each hex shows its surge multiplier.</p>
+        <svg id="surge-svg" width="720" height="420" viewBox="0 0 720 420" style="max-width:100%;height:auto"></svg>
+        <div id="surge-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="surge-step">Step &rarr;</button>
+          <button class="anim-btn" id="surge-reset">Reset</button>
+          <span class="anim-output" id="surge-output"></span>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  9. PAYMENT SERVICE                                              -->
+      <!-- ================================================================ -->
+      <h2 id="payment">Payment Service</h2>
+      <p>The payment flow must handle the unique challenge of ride-sharing: the final amount is unknown when the trip starts. Uber uses an <strong>authorize-then-capture</strong> pattern.</p>
+
+      <h3>Payment Flow</h3>
+      <pre><code>Timeline:
+─────────────────────────────────────────────────────────────────
+│ Request Ride      │ Trip Starts     │ Trip Ends        │ Settle
+│                   │                 │                  │
+│ 1. Validate       │ 3. Trip in      │ 4. Calculate     │ 6. Pay
+│    payment method │    progress     │    final fare    │    driver
+│                   │                 │                  │
+│ 2. Auth hold      │                 │ 5. Capture       │ 7. Reconcile
+│    (estimated     │                 │    actual amount │
+│     fare + 20%)   │                 │    from hold     │
+─────────────────────────────────────────────────────────────────</code></pre>
+
+      <h3>Step-by-Step Payment Flow</h3>
+
+      <pre><code>// Step 1: When rider requests a ride
+function onRideRequested(ride):
+    // Validate payment method is active
+    paymentMethod = paymentService.getMethod(ride.payment_method_id)
+    if !paymentMethod.isValid():
+        return error("Invalid payment method")
+
+    // Estimate fare (route distance + current surge)
+    estimate = pricingService.estimateFare(ride)
+    // e.g., $24.50
+
+    // Step 2: Place authorization hold (estimate + 20% buffer)
+    holdAmount = estimate.totalFare * 1.20  // $29.40
+    authorization = stripe.paymentIntents.create({
+        amount: holdAmount,
+        currency: "usd",
+        payment_method: paymentMethod.stripeId,
+        capture_method: "manual",  // ← don't charge yet!
+        metadata: { ride_id: ride.id }
+    })
+
+    ride.payment_intent_id = authorization.id
+    ride.save()
+
+// Step 5: When trip completes
+function onTripCompleted(trip):
+    // Calculate actual fare
+    actualFare = pricingService.calculateFare(trip)
+    // e.g., $22.80 (shorter route than estimated)
+
+    // Capture the actual amount from the held funds
+    stripe.paymentIntents.capture(
+        trip.payment_intent_id,
+        { amount_to_capture: actualFare.totalFare }
+    )
+    // The remaining hold ($29.40 - $22.80 = $6.60) is released
+
+    trip.final_fare = actualFare.totalFare
+    trip.payment_status = "CAPTURED"
+    trip.save()
+
+// Step 6: Pay the driver (weekly settlement)
+function weeklyDriverPayout(driver):
+    trips = getCompletedTrips(driver, thisWeek)
+    totalEarnings = sum(trip.final_fare * 0.75 for trip in trips)
+    // Driver gets 75%, Uber keeps 25% commission
+
+    uberCommission = sum(trip.final_fare * 0.25 for trip in trips)
+
+    stripe.transfers.create({
+        amount: totalEarnings,
+        destination: driver.stripeConnectAccount,
+        metadata: { week: currentWeek, trip_count: trips.length }
+    })</code></pre>
+
+      <div class="callout">
+        <strong>Why authorize-then-capture?</strong> If a rider's card is declined after the trip, Uber eats the cost. By placing a hold upfront, the funds are guaranteed. The hold expires after 7 days if not captured, so Uber captures within minutes of trip completion.
+      </div>
+
+      <h3>Edge Cases</h3>
+      <table class="compare-table">
+        <thead><tr><th>Scenario</th><th>Handling</th></tr></thead>
+        <tbody>
+          <tr><td>Fare exceeds authorization hold</td><td>Capture the hold amount, charge the remainder as a separate transaction</td></tr>
+          <tr><td>Rider cancels after match</td><td>Capture cancellation fee ($5-10) from hold, release the rest</td></tr>
+          <tr><td>Driver cancels</td><td>Release full hold, no charge to rider</td></tr>
+          <tr><td>Trip route deviates significantly</td><td>Flag for manual review; use route-based fare, not meter fare</td></tr>
+          <tr><td>Card expired between auth and capture</td><td>Auth is still valid (holds survive expiry during hold period)</td></tr>
+          <tr><td>Dispute / chargeback</td><td>Automated evidence submission with GPS trail + trip receipt</td></tr>
+          <tr><td>Split fare (Uber feature)</td><td>Multiple auth holds on multiple cards; capture proportionally</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Idempotency &amp; Double-Charge Prevention</h3>
+      <pre><code>// Every payment operation uses an idempotency key
+function capturePayment(trip):
+    idempotencyKey = "capture:{trip.id}:{trip.final_fare}"
+
+    result = stripe.paymentIntents.capture(
+        trip.payment_intent_id,
+        { amount_to_capture: trip.final_fare },
+        { idempotencyKey: idempotencyKey }
+    )
+
+    // If this function is retried (network timeout, crash, etc.),
+    // Stripe returns the same result without charging again.
+    return result</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  10. DRIVER DISPATCH - DISCO DEEP DIVE                           -->
+      <!-- ================================================================ -->
+      <h2 id="disco">DISCO: Dispatch Optimization Deep Dive</h2>
+      <p>Uber's DISCO system is one of the most sophisticated real-time optimization engines in production. Let's look at the advanced features beyond basic matching.</p>
+
+      <h3>Forward Dispatch</h3>
+      <p>When a driver is completing a trip and is 2-3 minutes from drop-off, DISCO can pre-match them with a new rider near the drop-off location:</p>
+      <pre><code>function forwardDispatch():
+    // Find drivers completing trips in the next 3 minutes
+    completingSoon = tripService.getTripsCompletingIn(minutes=3)
+
+    for each trip in completingSoon:
+        // Predicted drop-off location
+        dropoff = trip.dropoff
+
+        // Find pending ride requests near that drop-off
+        nearbyRequests = matchingService.getPendingRequests(
+            near = dropoff,
+            radius = 2.0  // km
+        )
+
+        if nearbyRequests.length > 0:
+            // Pre-assign (driver hasn't finished current trip yet)
+            bestMatch = rankAndSelect(trip.driver, nearbyRequests)
+            bestMatch.status = "PRE_MATCHED"
+            bestMatch.assigned_driver = trip.driver_id
+            bestMatch.eta = trip.timeToCompletion + etaFromDropoffToPickup
+
+Benefits:
+  ✓ Reduces rider wait time by 2-3 minutes
+  ✓ Reduces driver idle time (higher utilization)
+  ✓ Particularly effective in high-demand areas</code></pre>
+
+      <h3>Supply Positioning</h3>
+      <p>DISCO doesn't just match — it also <strong>repositions</strong> idle drivers to where demand is predicted to appear:</p>
+      <pre><code>function repositionDrivers(city):
+    // Predict demand for next 15 minutes per H3 cell
+    demandForecast = mlModel.predictDemand(city, horizon=15_min)
+
+    // Current supply per cell
+    currentSupply = locationService.getSupplyByCell(city)
+
+    // Find undersupplied cells
+    for each cell in city.cells:
+        deficit = demandForecast[cell] - currentSupply[cell]
+        if deficit > THRESHOLD:
+            // Find nearest idle drivers in oversupplied neighbor cells
+            idleDrivers = findIdleDriversNear(cell, radius=3_km)
+            // Send gentle nudge: "Head to downtown for more requests"
+            for driver in idleDrivers[:deficit]:
+                notify(driver, {
+                    type: "REPOSITION_SUGGESTION",
+                    destination: cell.center,
+                    reason: "High demand expected in this area",
+                    incentive: "$3 bonus for next trip from this zone"
+                })</code></pre>
+
+      <h3>Pool Matching (UberPool / UberX Share)</h3>
+      <p>Pool rides add another dimension of complexity — matching multiple riders heading in the same direction into a single vehicle:</p>
+
+      <pre><code>function poolMatch(newRequest):
+    // Find active pool trips with available seats
+    activePoolTrips = tripService.getActivePoolTrips(
+        near = newRequest.pickup,
+        radius = 1.5  // km
+    )
+
+    for each poolTrip in activePoolTrips:
+        // Check if adding this rider makes the route efficient
+        currentRoute = poolTrip.optimizedRoute
+        newRoute = routeOptimizer.addStop(
+            currentRoute,
+            pickup = newRequest.pickup,
+            dropoff = newRequest.dropoff
+        )
+
+        detour = newRoute.totalTime - currentRoute.totalTime
+        maxDetour = 0.25 * currentRoute.totalTime  // max 25% longer
+
+        if detour <= maxDetour && poolTrip.seats > 0:
+            candidates.add({
+                trip: poolTrip,
+                detour: detour,
+                savings: computeFareSavings(newRequest, poolTrip)
+            })
+
+    if candidates.length > 0:
+        // Pick the pool trip with minimum detour
+        best = candidates.sortBy(c => c.detour).first()
+        addRiderToPool(best.trip, newRequest)
+    else:
+        // Start a new pool trip (match with a fresh driver)
+        startNewPoolTrip(newRequest)</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  11. REAL-TIME COMMUNICATION                                     -->
+      <!-- ================================================================ -->
+      <h2 id="realtime">Real-Time Communication</h2>
+      <p>Uber maintains persistent WebSocket connections with every active rider and driver app. This enables sub-second location updates, instant match notifications, and live trip tracking.</p>
+
+      <h3>WebSocket Architecture</h3>
+      <pre><code>┌─────────────┐     ┌─────────────┐
+│  Rider App  │     │ Driver App  │
+│  (WSS)      │     │  (WSS)      │
+└──────┬──────┘     └──────┬──────┘
+       │                   │
+       ▼                   ▼
+┌─────────────────────────────────┐
+│     WebSocket Gateway Cluster   │  ← 1000+ servers
+│     (Sticky sessions via LB)    │     ~10K connections/server
+└──────┬──────────────────┬───────┘
+       │                  │
+       ▼                  ▼
+┌──────────────┐  ┌──────────────┐
+│ Redis Pub/Sub │  │ Connection   │
+│ (Channel per  │  │ Registry     │
+│  trip_id)     │  │ (which server│
+└──────────────┘  │  has which    │
+                  │  user?)       │
+                  └──────────────┘
+
+Message flow for location update:
+  1. Driver app sends GPS update via WebSocket
+  2. Gateway publishes to Redis channel "trip:{trip_id}"
+  3. Gateway serving the rider subscribes to that channel
+  4. Rider receives driver location in < 500ms</code></pre>
+
+      <h3>Connection Management</h3>
+      <pre><code>// When driver goes online:
+ws.onConnect(driver_id):
+    // Register in connection registry
+    redis.HSET("ws:connections", driver_id, this_server_id)
+    // Subscribe driver to their personal channel
+    subscribe("driver:{driver_id}")
+
+// When ride is matched:
+function onRideMatched(trip):
+    // Create a trip channel
+    tripChannel = "trip:{trip.id}"
+    // Subscribe both rider and driver to it
+    routeToUser(trip.rider_id, { subscribe: tripChannel })
+    routeToUser(trip.driver_id, { subscribe: tripChannel })
+
+// When driver location updates during trip:
+function onDriverLocation(driver_id, lat, lng):
+    trip = getActiveTrip(driver_id)
+    redis.PUBLISH("trip:{trip.id}", JSON.stringify({
+        type: "DRIVER_LOCATION",
+        lat: lat, lng: lng,
+        heading: heading,
+        eta_seconds: computeETA(lat, lng, trip)
+    }))</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  12. DATA PIPELINE & ANALYTICS                                   -->
+      <!-- ================================================================ -->
+      <h2 id="data-pipeline">Data Pipeline &amp; Analytics</h2>
+      <p>Uber generates enormous amounts of data that feed back into improving every aspect of the system.</p>
+
+      <h3>Event Streaming Architecture</h3>
+      <pre><code>All services emit events to Kafka:
+
+┌──────────┐  ┌──────────┐  ┌──────────┐
+│ Location │  │  Trip    │  │ Payment  │
+│ Service  │  │ Service  │  │ Service  │
+└────┬─────┘  └────┬─────┘  └────┬─────┘
+     │             │             │
+     ▼             ▼             ▼
+┌──────────────────────────────────────┐
+│           Apache Kafka               │
+│  Topics:                             │
+│   driver-locations  (1.3M msg/sec)   │
+│   trip-events       (500 msg/sec)    │
+│   payment-events    (300 msg/sec)    │
+│   surge-updates     (50 msg/sec)     │
+└──────┬───────────┬───────────┬───────┘
+       │           │           │
+       ▼           ▼           ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ Real-Time│ │   Data   │ │    ML    │
+│ Dashbrd  │ │   Lake   │ │ Training │
+│ (Flink)  │ │ (S3/HDFS)│ │ Pipeline │
+└──────────┘ └──────────┘ └──────────┘</code></pre>
+
+      <h3>Key Metrics Tracked</h3>
+      <table class="compare-table">
+        <thead><tr><th>Metric</th><th>Use Case</th><th>Update Frequency</th></tr></thead>
+        <tbody>
+          <tr><td>ETA accuracy</td><td>Retrain ETA ML model</td><td>Real-time</td></tr>
+          <tr><td>Match accept rate</td><td>Tune matching radius &amp; ranking</td><td>Per minute</td></tr>
+          <tr><td>Surge effectiveness</td><td>Calibrate surge curves</td><td>Per 5 minutes</td></tr>
+          <tr><td>Driver utilization</td><td>Reposition idle drivers</td><td>Per minute</td></tr>
+          <tr><td>Cancellation rate</td><td>Identify UX friction points</td><td>Hourly</td></tr>
+          <tr><td>Payment failure rate</td><td>Trigger retry or fallback</td><td>Real-time</td></tr>
+          <tr><td>P99 matching latency</td><td>SLA monitoring</td><td>Real-time</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  13. FAULT TOLERANCE                                             -->
+      <!-- ================================================================ -->
+      <h2 id="fault-tolerance">Fault Tolerance &amp; Reliability</h2>
+
+      <h3>What Happens When Things Fail?</h3>
+      <table class="compare-table">
+        <thead><tr><th>Failure</th><th>Impact</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>Redis shard down</td><td>Location queries fail for that city</td><td>Replica promotion in &lt;5s; fallback to stale cache</td></tr>
+          <tr><td>Matching service crash</td><td>New rides can't be matched</td><td>Multiple replicas; Kafka buffers unmatched requests</td></tr>
+          <tr><td>Kafka broker down</td><td>Event delivery delayed</td><td>3x replication; producer retries with idempotency</td></tr>
+          <tr><td>Payment provider outage</td><td>Can't authorize holds</td><td>Fallback to secondary provider; allow trip with post-charge</td></tr>
+          <tr><td>ETA service slow</td><td>Matching uses stale ETAs</td><td>Circuit breaker; fall back to distance-based matching</td></tr>
+          <tr><td>WebSocket gateway crash</td><td>Users lose real-time updates</td><td>Client auto-reconnects; server-sent events as fallback</td></tr>
+          <tr><td>Database primary down</td><td>Trip writes fail</td><td>Automatic failover to replica; write-ahead log preserves data</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Graceful Degradation Hierarchy</h3>
+      <pre><code>Level 0: Everything healthy
+  → Full functionality
+
+Level 1: ETA service degraded
+  → Use cached ETAs (stale by up to 60s)
+  → Match by distance instead of ETA
+  → Show "ETA approximate" in rider app
+
+Level 2: Surge pricing unavailable
+  → Default to 1.0x (no surge)
+  → Accept lower revenue rather than show errors
+
+Level 3: Payment service down
+  → Allow trips to proceed (collect payment later)
+  → Flag trips as "payment_pending"
+  → Process when service recovers
+
+Level 4: Matching service overloaded
+  → Shed load: only process UberX (highest volume type)
+  → Queue premium rides (Black, SUV) for processing next
+  → Increase matching radius to reduce computation
+
+Level 5: Catastrophic multi-service failure
+  → Static pricing, basic nearest-driver match
+  → "We're experiencing issues" banner in app
+  → Preserve trip safety features (911 button, trip sharing)</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  14. SUMMARY                                                     -->
+      <!-- ================================================================ -->
+      <h2 id="summary">Summary &amp; Key Takeaways</h2>
+
+      <table class="compare-table">
+        <thead><tr><th>Component</th><th>Technology</th><th>Key Design Decision</th></tr></thead>
+        <tbody>
+          <tr><td>Location Store</td><td>Redis Geospatial</td><td>In-memory for sub-ms reads; sharded by city</td></tr>
+          <tr><td>Matching</td><td>DISCO (Custom)</td><td>Batched Hungarian algorithm over greedy nearest</td></tr>
+          <tr><td>Trip Lifecycle</td><td>PostgreSQL + Kafka</td><td>State machine with event sourcing for auditability</td></tr>
+          <tr><td>ETA</td><td>Graph + ML</td><td>Contraction Hierarchies + live traffic + XGBoost correction</td></tr>
+          <tr><td>Surge Pricing</td><td>H3 Grid + Redis</td><td>Hexagonal cells for uniform neighbor distances</td></tr>
+          <tr><td>Payment</td><td>Stripe / Internal</td><td>Authorize-then-capture for unknown final amounts</td></tr>
+          <tr><td>Real-Time</td><td>WebSocket + Redis Pub/Sub</td><td>Per-trip channels for efficient fan-out</td></tr>
+          <tr><td>Data Pipeline</td><td>Kafka → Flink → S3</td><td>All events streamed for real-time and batch analytics</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>The fundamental insight of Uber's architecture:</strong> Ride-sharing is a <em>real-time marketplace</em> matching problem. Every design decision — from H3 hexagons to DISCO's batched matching to forward dispatch — serves one goal: minimize the time between a rider pressing "Request" and a car arriving at their location, while keeping the system economically sustainable for drivers.
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="google-maps.html"><span>Previous</span><span>&#8592; Design: Google Maps</span></a>
+        <a class="next" href="twitter.html"><span>Next</span><span>Design: Twitter &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ================================================================
+       ANIMATION 1: Ride Matching
+       ================================================================ */
+    (function(){
+      var svg=document.getElementById('match-svg'),
+          info=document.getElementById('match-info'),
+          out=document.getElementById('match-output');
+      var step=0,maxSteps=7;
+
+      // Positions: rider and 5 drivers on the "map"
+      var rider={x:360,y:240,label:'Rider'};
+      var drivers=[
+        {x:280,y:160,label:'D1',dist:1.2,eta:3,inRadius:true,rank:2},
+        {x:440,y:180,label:'D2',dist:1.8,eta:5,inRadius:true,rank:3},
+        {x:320,y:320,label:'D3',dist:0.9,eta:2,inRadius:true,rank:1},   // best
+        {x:150,y:100,label:'D4',dist:4.5,eta:12,inRadius:false,rank:0},
+        {x:580,y:350,label:'D5',dist:5.1,eta:14,inRadius:false,rank:0}
+      ];
+      var RADIUS=140;
+
+      function drawMap(bg){
+        // Background grid
+        for(var gx=0;gx<720;gx+=60){
+          svg.appendChild(el('line',{x1:''+gx,y1:'0',x2:''+gx,y2:'420',stroke:'var(--line)',opacity:'0.3','stroke-width':'0.5'}));
+        }
+        for(var gy=0;gy<420;gy+=60){
+          svg.appendChild(el('line',{x1:'0',y1:''+gy,x2:'720',y2:''+gy,stroke:'var(--line)',opacity:'0.3','stroke-width':'0.5'}));
+        }
+        // "Roads"
+        svg.appendChild(el('line',{x1:'0',y1:'240',x2:'720',y2:'240',stroke:'#ccc','stroke-width':'3'}));
+        svg.appendChild(el('line',{x1:'360',y1:'0',x2:'360',y2:'420',stroke:'#ccc','stroke-width':'3'}));
+        svg.appendChild(el('line',{x1:'0',y1:'120',x2:'720',y2:'120',stroke:'#ddd','stroke-width':'1.5'}));
+        svg.appendChild(el('line',{x1:'180',y1:'0',x2:'180',y2:'420',stroke:'#ddd','stroke-width':'1.5'}));
+        svg.appendChild(el('line',{x1:'540',y1:'0',x2:'540',y2:'420',stroke:'#ddd','stroke-width':'1.5'}));
+        svg.appendChild(el('line',{x1:'0',y1:'360',x2:'720',y2:'360',stroke:'#ddd','stroke-width':'1.5'}));
+      }
+
+      function drawRider(){
+        svg.appendChild(el('circle',{cx:''+rider.x,cy:''+rider.y,r:'10',fill:'#ef4444'}));
+        svg.appendChild(el('circle',{cx:''+rider.x,cy:''+rider.y,r:'14',fill:'none',stroke:'#ef4444','stroke-width':'2',opacity:'0.4'}));
+        svg.appendChild(txt('Rider',{x:''+rider.x,y:''+(rider.y-20),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#ef4444'}));
+      }
+
+      function drawDriver(d,color,showInfo){
+        svg.appendChild(el('circle',{cx:''+d.x,cy:''+d.y,r:'8',fill:color}));
+        svg.appendChild(txt(d.label,{x:''+d.x,y:''+(d.y-14),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:color}));
+        if(showInfo){
+          svg.appendChild(txt(d.dist+'km / '+d.eta+'min',{x:''+d.x,y:''+(d.y+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+        }
+      }
+
+      function draw(n){
+        clearSvg(svg);
+        // Title
+        svg.appendChild(el('rect',{x:'0',y:'0',width:'720',height:'420',fill:'var(--bg,#fff)',rx:'0'}));
+        drawMap();
+
+        if(n<1){
+          // Initial: show rider and all drivers
+          drawRider();
+          for(var i=0;i<drivers.length;i++) drawDriver(drivers[i],'#3b82f6',false);
+          svg.appendChild(txt('Rider (red) and 5 nearby drivers (blue)',{x:'360',y:'408','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink-muted)'}));
+          info.textContent='Click "Step" to begin the matching process.';
+          out.textContent='';
+          return;
+        }
+
+        drawRider();
+
+        if(n>=1){
+          // Step 1: Rider requests ride — pulse on rider
+          svg.appendChild(el('circle',{cx:''+rider.x,cy:''+rider.y,r:'18',fill:'none',stroke:'#ef4444','stroke-width':'2','stroke-dasharray':'4,3',opacity:'0.6'}));
+          for(var i=0;i<drivers.length;i++) drawDriver(drivers[i],'#3b82f6',false);
+        }
+        if(n>=2){
+          // Step 2: Draw search radius circle
+          svg.appendChild(el('circle',{cx:''+rider.x,cy:''+rider.y,r:''+RADIUS,fill:'rgba(59,130,246,0.06)',stroke:'#3b82f6','stroke-width':'2','stroke-dasharray':'8,4'}));
+          svg.appendChild(txt('5 km radius',{x:''+(rider.x+RADIUS+8),y:''+(rider.y-6),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'#3b82f6'}));
+        }
+        if(n>=3){
+          // Step 3: Highlight drivers IN radius (D1, D2, D3), grey out D4, D5
+          for(var i=0;i<drivers.length;i++){
+            var d=drivers[i];
+            if(d.inRadius){
+              drawDriver(d,'#3b82f6',true);
+            } else {
+              drawDriver(d,'#ccc',false);
+              svg.appendChild(txt('out of range',{x:''+d.x,y:''+(d.y+20),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#ccc'}));
+            }
+          }
+        }
+        if(n>=4){
+          // Step 4: Rank drivers — show rank badges
+          for(var i=0;i<drivers.length;i++){
+            var d=drivers[i];
+            if(d.inRadius){
+              var badge=d.rank===1?'#10b981':d.rank===2?'#f59e0b':'#6b7280';
+              svg.appendChild(el('circle',{cx:''+(d.x+14),cy:''+(d.y-10),r:'9',fill:badge}));
+              svg.appendChild(txt('#'+d.rank,{x:''+(d.x+14),y:''+(d.y-6),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:'#fff'}));
+            }
+          }
+          svg.appendChild(txt('Ranked: #1 D3 (2min), #2 D1 (3min), #3 D2 (5min)',{x:'360',y:'408','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+        }
+        if(n>=5){
+          // Step 5: Send offer to D3 (best ranked) — animated line
+          var best=drivers[2]; // D3
+          svg.appendChild(el('line',{x1:''+rider.x,y1:''+rider.y,x2:''+best.x,y2:''+best.y,stroke:'#10b981','stroke-width':'2.5','stroke-dasharray':'6,3'}));
+          svg.appendChild(el('circle',{cx:''+best.x,cy:''+best.y,r:'14',fill:'none',stroke:'#10b981','stroke-width':'2.5'}));
+          svg.appendChild(txt('OFFER SENT',{x:''+(best.x+30),y:''+(best.y+4),'text-anchor':'start','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'#10b981'}));
+        }
+        if(n>=6){
+          // Step 6: D3 accepts
+          var best=drivers[2];
+          svg.appendChild(el('circle',{cx:''+best.x,cy:''+best.y,r:'14',fill:'none',stroke:'#10b981','stroke-width':'3'}));
+          svg.appendChild(txt('✓ ACCEPTED',{x:''+(best.x+30),y:''+(best.y+4),'text-anchor':'start','font-family':'Syne,sans-serif','font-weight':'800','font-size':'12',fill:'#10b981'}));
+          svg.appendChild(el('line',{x1:''+rider.x,y1:''+rider.y,x2:''+best.x,y2:''+best.y,stroke:'#10b981','stroke-width':'3'}));
+        }
+        if(n>=7){
+          // Step 7: Match confirmed — highlight pair
+          var best=drivers[2];
+          svg.appendChild(el('rect',{x:'200',y:'16',width:'320',height:'36',rx:'8',fill:'#10b981'}));
+          svg.appendChild(txt('MATCH CONFIRMED — D3 en route to Rider',{x:'360',y:'40','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'#fff'}));
+        }
+
+        var msgs=[
+          '',
+          'Step 1: Rider requests a ride from this location.',
+          'Step 2: System draws a 5 km search radius around pickup.',
+          'Step 3: Found 3 drivers in radius (D1, D2, D3). D4 and D5 are out of range.',
+          'Step 4: Rank by composite score (ETA 40%, distance 25%, rating 15%, …). D3 is best (ETA: 2min).',
+          'Step 5: Offer sent to D3 (15-second timeout to accept).',
+          'Step 6: D3 accepts the ride offer!',
+          'Step 7: Match confirmed. Trip created. D3 navigates to rider pickup.'
+        ];
+        info.textContent=msgs[n]||'';
+        out.textContent='Step '+n+' of '+maxSteps;
+      }
+
+      draw(0);
+      document.getElementById('match-step').addEventListener('click',function(){if(step>=maxSteps)return;step++;draw(step);});
+      document.getElementById('match-reset').addEventListener('click',function(){step=0;draw(0);});
+    })();
+
+    /* ================================================================
+       ANIMATION 2: Surge Pricing — H3 Hexagonal Grid
+       ================================================================ */
+    (function(){
+      var svg=document.getElementById('surge-svg'),
+          info=document.getElementById('surge-info'),
+          out=document.getElementById('surge-output');
+      var step=0,maxSteps=5;
+
+      // Hexagon geometry
+      var HEX_SIZE=42;
+      var HEX_W=HEX_SIZE*Math.sqrt(3);
+      var HEX_H=HEX_SIZE*2;
+      var COLS=8,ROWS=4;
+      var OX=60,OY=60;
+
+      // Cell states across steps: [supply, demand] per cell
+      // 32 cells (8x4), each has a supply/demand at each step
+      var cellData=[];
+      function initCells(){
+        cellData=[];
+        for(var r=0;r<ROWS;r++){
+          for(var c=0;c<COLS;c++){
+            cellData.push({supply:5,demand:3,surge:1.0,label:''});
+          }
+        }
+      }
+
+      // Scenario steps: simulate evening rush building up
+      var scenarios=[
+        {name:'Balanced — Normal Afternoon',desc:'Supply and demand are balanced across the city. All cells show 1.0x.',
+         mods:function(){initCells();}},
+        {name:'Early Rush — Downtown Heats Up',desc:'Offices close downtown (cells 9,10,17,18). Demand rises, drivers still spread out.',
+         mods:function(){initCells();
+           var hot=[9,10,17,18];
+           for(var i=0;i<hot.length;i++){cellData[hot[i]].demand=8;cellData[hot[i]].supply=3;}
+         }},
+        {name:'Peak Rush — Surge Spreads',desc:'Demand spikes in downtown + nightlife district (cells 5,6,13,14). Surge multipliers climb.',
+         mods:function(){initCells();
+           var hot=[9,10,17,18];var warm=[5,6,13,14,11,19];
+           for(var i=0;i<hot.length;i++){cellData[hot[i]].demand=12;cellData[hot[i]].supply=2;}
+           for(var i=0;i<warm.length;i++){cellData[warm[i]].demand=8;cellData[warm[i]].supply=3;}
+         }},
+        {name:'Drivers Reposition',desc:'Surge attracts drivers to hot zones. Supply increases in high-surge cells, prices start balancing.',
+         mods:function(){initCells();
+           var hot=[9,10,17,18];var warm=[5,6,13,14,11,19];
+           for(var i=0;i<hot.length;i++){cellData[hot[i]].demand=10;cellData[hot[i]].supply=5;}
+           for(var i=0;i<warm.length;i++){cellData[warm[i]].demand=7;cellData[warm[i]].supply=4;}
+           // residential areas now slightly undersupplied
+           var res=[0,1,2,3,24,25,26,27];
+           for(var i=0;i<res.length;i++){cellData[res[i]].demand=5;cellData[res[i]].supply=2;}
+         }},
+        {name:'Late Night — Concert Ends',desc:'A concert venue (cell 22) floods with riders. Extreme localized surge.',
+         mods:function(){initCells();
+           cellData[22].demand=25;cellData[22].supply=1;
+           cellData[21].demand=12;cellData[21].supply=2;
+           cellData[23].demand=10;cellData[23].supply=2;
+           cellData[14].demand=8;cellData[14].supply=3;
+           cellData[30].demand=10;cellData[30].supply=2;
+         }}
+      ];
+
+      function computeSurges(){
+        for(var i=0;i<cellData.length;i++){
+          var c=cellData[i];
+          if(c.supply===0){c.surge=5.0;}
+          else{
+            var ratio=c.demand/c.supply;
+            if(ratio<=1.0)c.surge=1.0;
+            else if(ratio<=1.5)c.surge=1.2;
+            else if(ratio<=2.0)c.surge=1.5;
+            else if(ratio<=3.0)c.surge=2.0;
+            else if(ratio<=5.0)c.surge=3.0;
+            else c.surge=5.0;
+          }
+        }
+      }
+
+      function surgeColor(s){
+        if(s<=1.0)return '#10b981';
+        if(s<=1.2)return '#84cc16';
+        if(s<=1.5)return '#eab308';
+        if(s<=2.0)return '#f97316';
+        if(s<=3.0)return '#ef4444';
+        return '#991b1b';
+      }
+      function surgeFill(s){
+        if(s<=1.0)return 'rgba(16,185,129,0.18)';
+        if(s<=1.2)return 'rgba(132,204,22,0.22)';
+        if(s<=1.5)return 'rgba(234,179,8,0.25)';
+        if(s<=2.0)return 'rgba(249,115,22,0.28)';
+        if(s<=3.0)return 'rgba(239,68,68,0.32)';
+        return 'rgba(153,27,27,0.4)';
+      }
+
+      function hexPoints(cx,cy,size){
+        var pts=[];
+        for(var a=0;a<6;a++){
+          var angle=Math.PI/180*(60*a-30);
+          pts.push((cx+size*Math.cos(angle)).toFixed(1)+','+(cy+size*Math.sin(angle)).toFixed(1));
+        }
+        return pts.join(' ');
+      }
+
+      function hexCenter(row,col){
+        var x=OX+col*HEX_W+(row%2===1?HEX_W/2:0);
+        var y=OY+row*(HEX_H*0.75);
+        return {x:x,y:y};
+      }
+
+      function draw(n){
+        clearSvg(svg);
+        svg.appendChild(el('rect',{x:'0',y:'0',width:'720',height:'420',fill:'var(--bg,#fff)',rx:'0'}));
+
+        if(n<1){
+          // Show empty grid
+          initCells();computeSurges();
+          drawGrid(false);
+          svg.appendChild(txt('H3 Hexagonal City Grid — Click "Step" to simulate demand shifts',{x:'360',y:'408','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink-muted)'}));
+          info.textContent='';out.textContent='';
+          return;
+        }
+
+        var sc=scenarios[n-1];
+        sc.mods();
+        computeSurges();
+
+        // Title
+        svg.appendChild(txt(sc.name,{x:'360',y:'20','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+
+        drawGrid(true);
+
+        // Legend
+        var legs=[{s:1.0,l:'1.0x'},{s:1.5,l:'1.5x'},{s:2.0,l:'2.0x'},{s:3.0,l:'3.0x'},{s:5.0,l:'5.0x'}];
+        for(var li=0;li<legs.length;li++){
+          var lx=500+li*45,ly=398;
+          svg.appendChild(el('rect',{x:''+lx,y:''+ly,width:'14',height:'14',rx:'3',fill:surgeFill(legs[li].s),stroke:surgeColor(legs[li].s),'stroke-width':'1.5'}));
+          svg.appendChild(txt(legs[li].l,{x:''+(lx+22),y:''+(ly+12),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink-muted)'}));
+        }
+        svg.appendChild(txt('Surge:',{x:'480',y:'410','text-anchor':'end','font-family':'Syne,sans-serif','font-weight':'600','font-size':'10',fill:'var(--ink-muted)'}));
+
+        info.textContent=sc.desc;
+        out.textContent='Step '+n+' of '+maxSteps;
+      }
+
+      function drawGrid(showData){
+        for(var r=0;r<ROWS;r++){
+          for(var c=0;c<COLS;c++){
+            var idx=r*COLS+c;
+            var ctr=hexCenter(r,c);
+            var cd=cellData[idx];
+            var pts=hexPoints(ctr.x,ctr.y,HEX_SIZE);
+            svg.appendChild(el('polygon',{points:pts,fill:showData?surgeFill(cd.surge):'rgba(200,200,200,0.1)',stroke:showData?surgeColor(cd.surge):'var(--line)','stroke-width':showData?'2':'1'}));
+            if(showData){
+              svg.appendChild(txt(cd.surge.toFixed(1)+'x',{x:''+ctr.x,y:''+(ctr.y+2),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':cd.surge>1.0?'13':'11',fill:surgeColor(cd.surge)}));
+              // Show supply/demand small text
+              svg.appendChild(txt('S:'+cd.supply+' D:'+cd.demand,{x:''+ctr.x,y:''+(ctr.y+16),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)'}));
+            }
+          }
+        }
+      }
+
+      draw(0);
+      document.getElementById('surge-step').addEventListener('click',function(){if(step>=maxSteps)return;step++;draw(step);});
+      document.getElementById('surge-reset').addEventListener('click',function(){step=0;draw(0);});
+    })();
+
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count"
+          async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

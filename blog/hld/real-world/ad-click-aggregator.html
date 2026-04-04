@@ -1,0 +1,1529 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design: Ad Click Aggregator — real-time click counting at 10B/day with Kafka, Flink, Lambda architecture, deduplication via Bloom filters, ClickHouse OLAP storage, and fraud detection.">
+  <title>Design: Ad Click Aggregator | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Post 65 of 70</span></div>
+
+      <h1>Design: Ad Click Aggregator</h1>
+      <p class="post-meta">April 2026 &middot; 24 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           1. PROBLEM STATEMENT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="problem">The Problem</h2>
+      <p>Online advertising is a <strong>$600+ billion industry</strong>, and at its core lies a deceptively simple question: <em>How many times was this ad clicked?</em> The answer drives billing (advertisers pay per click), optimization (which ad creatives perform better), and fraud detection (are these clicks legitimate?).</p>
+
+      <p>At the scale of a major ad network — Google Ads, Meta Ads, or a large DSP — this question must be answered <strong>billions of times per day</strong>, with results available in <strong>near real-time</strong> (seconds, not hours), while ensuring every click is counted <strong>exactly once</strong>.</p>
+
+      <div class="callout">
+        <strong>Why this is hard:</strong> A simple <code>SELECT COUNT(*) FROM clicks WHERE ad_id = X AND ts &gt; NOW() - INTERVAL 5 MINUTE</code> would work for 1,000 clicks/day. At 10 billion clicks/day (~115,000 clicks/second), you need a fundamentally different architecture.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           2. REQUIREMENTS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <ul>
+        <li><strong>Count ad clicks in real-time</strong> — aggregate clicks per ad across multiple time windows (1-minute, 5-minute, 1-hour, 1-day)</li>
+        <li><strong>Support analytical queries</strong> — "How many clicks did ad X receive in the last 5 minutes?" with sub-second latency</li>
+        <li><strong>Deduplicate clicks</strong> — same user clicking the same ad within 1 minute counts as 1 click</li>
+        <li><strong>Support filtering dimensions</strong> — aggregate by ad_id, campaign_id, advertiser_id, country, device_type</li>
+        <li><strong>Historical queries</strong> — query click data for any time range in the past (up to 2 years)</li>
+        <li><strong>Fraud detection</strong> — flag abnormal click patterns for investigation</li>
+      </ul>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Scale:</strong> 10 billion clicks/day → ~115K clicks/second average, ~500K/second peak</li>
+        <li><strong>Latency:</strong> Real-time aggregates available within 5 seconds of the click</li>
+        <li><strong>Accuracy:</strong> Exactly-once counting — no missed clicks, no double-counting</li>
+        <li><strong>Availability:</strong> 99.99% uptime — ad billing cannot go down</li>
+        <li><strong>Durability:</strong> Zero data loss — every click event must be persisted</li>
+      </ul>
+
+      <h3 id="back-of-envelope">Back-of-Envelope Estimation</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Metric</th><th style="text-align:left;padding:0.5em;">Calculation</th><th style="text-align:left;padding:0.5em;">Result</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Daily clicks</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Given</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">10 billion</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Avg clicks/second</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">10B / 86,400</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~115,740 / sec</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Peak clicks/second</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~4× average</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~500,000 / sec</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Click event size</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">JSON: ~500 bytes</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">500 B</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Daily raw data</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">10B × 500 B</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~5 TB / day</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Daily ingestion bandwidth</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">5 TB / 86,400</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~58 MB / sec avg</td></tr>
+          <tr><td style="padding:0.5em;">Yearly raw storage</td><td style="padding:0.5em;">5 TB × 365</td><td style="padding:0.5em;">~1.8 PB / year</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           3. DATA MODEL
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="data-model">Data Model</h2>
+
+      <h3 id="click-event-schema">Click Event Schema</h3>
+      <p>Each ad click generates an event with the following structure:</p>
+      <pre><code>{
+  "click_id":      "c-8f14e45f-ceea-362a-929f-5c3b6e1d7a12",
+  "ad_id":         "ad-00042837",
+  "campaign_id":   "camp-001294",
+  "advertiser_id": "adv-000512",
+  "user_id":       "u-7a3b1f9e",
+  "timestamp":     1714567890123,
+  "ip_address":    "203.0.113.42",
+  "country":       "US",
+  "device_type":   "mobile",
+  "os":            "iOS",
+  "browser":       "Safari",
+  "referrer_url":  "https://example.com/article/123",
+  "landing_url":   "https://advertiser.com/product/456",
+  "is_organic":    false
+}</code></pre>
+
+      <h3 id="aggregated-data-model">Aggregated Data Model</h3>
+      <p>Pre-aggregated counts stored per time window:</p>
+      <pre><code>┌──────────────────────────────────────────────────────────────┐
+│  Aggregation Record                                          │
+├──────────────────────────────────────────────────────────────┤
+│  ad_id:          "ad-00042837"                               │
+│  window_start:   2026-04-15T10:05:00Z                        │
+│  window_size:    1_MINUTE                                    │
+│  click_count:    1,247                                       │
+│  unique_users:   1,189                                       │
+│  country_breakdown: { "US": 634, "UK": 213, "DE": 178, … }  │
+│  device_breakdown:  { "mobile": 823, "desktop": 424 }       │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           4. HIGH-LEVEL ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system follows a <strong>streaming-first</strong> architecture with a Lambda architecture overlay for correctness guarantees:</p>
+
+      <pre><code>                        ┌─────────────────────────────────────────────────┐
+                        │                  Ad Click Flow                   │
+                        └─────────────────────────────────────────────────┘
+
+  User clicks ad        Ad Server logs click       Kafka ingestion
+  ─────────────── ──►  ───────────────────── ──►  ──────────────────
+                                                         │
+                                 ┌───────────────────────┼───────────────────────┐
+                                 │                       │                       │
+                                 ▼                       ▼                       ▼
+                        ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+                        │   Speed      │       │   Batch      │       │   Raw Data   │
+                        │   Layer      │       │   Layer      │       │   Lake       │
+                        │  (Flink)     │       │  (Spark)     │       │  (S3/HDFS)   │
+                        └──────┬───────┘       └──────┬───────┘       └──────────────┘
+                               │                      │
+                               ▼                      ▼
+                        ┌──────────────┐       ┌──────────────┐
+                        │  Real-Time   │       │   Batch      │
+                        │  Agg Store   │       │   Agg Store  │
+                        │ (ClickHouse) │       │ (ClickHouse) │
+                        └──────┬───────┘       └──────┬───────┘
+                               │                      │
+                               └──────────┬───────────┘
+                                          ▼
+                                   ┌──────────────┐
+                                   │   Serving    │
+                                   │   Layer      │
+                                   │  (Query API) │
+                                   └──────┬───────┘
+                                          │
+                                          ▼
+                                   ┌──────────────┐
+                                   │  Dashboards  │
+                                   │  &amp; Billing   │
+                                   └──────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           5. KAFKA INGESTION LAYER
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="kafka-ingestion">Kafka Ingestion Layer</h2>
+      <p>Apache Kafka serves as the <strong>central nervous system</strong> of the pipeline. Every click event enters the system through Kafka, providing durability, ordering guarantees (per partition), and decoupling between producers and consumers.</p>
+
+      <h3 id="topic-design">Topic Design</h3>
+      <pre><code># Primary click events topic — partitioned by ad_id for ordering guarantees
+Topic: ad-clicks
+  Partitions: 256    (supports ~2,000 events/sec per partition)
+  Replication: 3     (fault tolerance — survive 2 broker failures)
+  Retention: 7 days  (reprocessing window)
+  Cleanup: delete    (compaction not needed — append-only)
+
+# Dead letter queue for malformed / unprocessable events
+Topic: ad-clicks-dlq
+  Partitions: 16
+  Replication: 3
+  Retention: 30 days
+
+# Aggregated results (for downstream consumers)
+Topic: ad-click-aggregates
+  Partitions: 64
+  Replication: 3
+  Retention: 3 days</code></pre>
+
+      <h3 id="partitioning-strategy">Partitioning Strategy</h3>
+      <p>Partitioning by <code>ad_id</code> is critical: it ensures all clicks for a given ad land on the <strong>same partition</strong>, enabling correct per-ad counting without cross-partition coordination.</p>
+
+      <pre><code>// Kafka producer configuration (Java)
+Properties props = new Properties();
+props.put("bootstrap.servers",       "kafka-1:9092,kafka-2:9092,kafka-3:9092");
+props.put("key.serializer",          "org.apache.kafka.common.serialization.StringSerializer");
+props.put("value.serializer",        "org.apache.kafka.common.serialization.StringSerializer");
+props.put("acks",                    "all");           // Wait for all replicas
+props.put("retries",                 3);               // Retry on transient failures
+props.put("enable.idempotence",      "true");          // Exactly-once producer
+props.put("max.in.flight.requests",  5);               // Safe with idempotence
+props.put("compression.type",        "lz4");           // ~70% compression ratio
+props.put("linger.ms",              5);                // Micro-batch for throughput
+props.put("batch.size",             65536);            // 64KB batches
+
+KafkaProducer&lt;String, String&gt; producer = new KafkaProducer&lt;&gt;(props);
+
+// Partition by ad_id — all clicks for same ad go to same partition
+ProducerRecord&lt;String, String&gt; record = new ProducerRecord&lt;&gt;(
+    "ad-clicks",
+    clickEvent.getAdId(),        // key = ad_id → deterministic partition
+    objectMapper.writeValueAsString(clickEvent)
+);
+
+producer.send(record, (metadata, exception) -&gt; {
+    if (exception != null) {
+        // Route to DLQ after exhausting retries
+        deadLetterProducer.send(new ProducerRecord&lt;&gt;("ad-clicks-dlq",
+            clickEvent.getAdId(), objectMapper.writeValueAsString(clickEvent)));
+        metrics.counter("click.produce.failed").increment();
+    } else {
+        metrics.counter("click.produce.success").increment();
+    }
+});</code></pre>
+
+      <div class="callout">
+        <strong>Why partition by ad_id?</strong> With 256 partitions and ~115K clicks/sec, each partition handles ~450 clicks/sec on average. This keeps per-partition throughput well within Kafka's capabilities (~10K messages/sec per partition). More importantly, it enables <strong>stateful stream processing</strong> — the Flink operator counting clicks for ad X sees all of ad X's clicks on one task without shuffling.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           6. ANIMATION 1: REAL-TIME AGGREGATION PIPELINE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="realtime-aggregation">Real-Time Aggregation Pipeline</h2>
+      <p>The speed layer uses <strong>Apache Flink</strong> for stateful stream processing with exactly-once semantics. Click events flow through a pipeline of operators: deduplication → windowed aggregation → sink to aggregation store.</p>
+
+      <h3 id="pipeline-visual">Interactive: Real-Time Aggregation Pipeline</h3>
+      <p>Step through the full pipeline — from ad click event to aggregated count in the query service:</p>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="pipeline-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="pipeline-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="pipeline-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="pipeline-anim" viewBox="0 0 820 370" style="width:100%;max-width:820px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="pipeline-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           7. FLINK STREAM PROCESSING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="flink-processing">Flink Stream Processing</h2>
+
+      <h3 id="flink-job">Flink Job — Windowed Click Aggregation</h3>
+      <p>The core Flink job implements deduplication, windowed counting, and exactly-once delivery to the sink:</p>
+
+      <pre><code>// Flink Streaming Job: Ad Click Aggregator
+public class AdClickAggregatorJob {
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // ── Exactly-once checkpointing ──────────────────────────────────
+        env.enableCheckpointing(60_000);  // Checkpoint every 60 seconds
+        env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+        env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30_000);
+        env.getCheckpointConfig().setCheckpointTimeout(120_000);
+        env.getCheckpointConfig().setMaxConcurrentCheckpoints(1);
+        env.getCheckpointConfig().setExternalizedCheckpointCleanup(
+            ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+
+        // State backend: RocksDB for large state (dedup + window state)
+        env.setStateBackend(new EmbeddedRocksDBStateBackend());
+        env.getCheckpointConfig().setCheckpointStorage("s3://flink-checkpoints/ad-clicks/");
+
+        // ── Kafka Source ────────────────────────────────────────────────
+        KafkaSource&lt;ClickEvent&gt; source = KafkaSource.&lt;ClickEvent&gt;builder()
+            .setBootstrapServers("kafka-1:9092,kafka-2:9092,kafka-3:9092")
+            .setTopics("ad-clicks")
+            .setGroupId("flink-ad-click-aggregator")
+            .setStartingOffsets(OffsetsInitializer.committedOffsets(OffsetResetStrategy.EARLIEST))
+            .setDeserializer(new ClickEventDeserializationSchema())
+            .build();
+
+        DataStream&lt;ClickEvent&gt; clicks = env.fromSource(
+            source,
+            WatermarkStrategy
+                .&lt;ClickEvent&gt;forBoundedOutOfOrderness(Duration.ofSeconds(10))
+                .withTimestampAssigner((event, ts) -&gt; event.getTimestamp())
+                .withIdleness(Duration.ofMinutes(1)),
+            "Kafka-Click-Source"
+        );
+
+        // ── Step 1: Deduplication ───────────────────────────────────────
+        // Same user + same ad within 60 seconds = 1 click
+        DataStream&lt;ClickEvent&gt; deduplicated = clicks
+            .keyBy(e -&gt; e.getUserId() + ":" + e.getAdId())
+            .process(new ClickDeduplicationFunction())
+            .name("Click-Deduplication");
+
+        // ── Step 2: 1-Minute Tumbling Window Aggregation ────────────────
+        DataStream&lt;ClickAggregate&gt; oneMinAggs = deduplicated
+            .keyBy(ClickEvent::getAdId)
+            .window(TumblingEventTimeWindows.of(Time.minutes(1)))
+            .allowedLateness(Time.seconds(30))
+            .sideOutputLateData(lateOutputTag)
+            .aggregate(new ClickCountAggregator(), new ClickWindowFunction())
+            .name("1-Min-Window-Aggregation");
+
+        // ── Step 3: 5-Minute Tumbling Window Aggregation ────────────────
+        DataStream&lt;ClickAggregate&gt; fiveMinAggs = deduplicated
+            .keyBy(ClickEvent::getAdId)
+            .window(TumblingEventTimeWindows.of(Time.minutes(5)))
+            .allowedLateness(Time.minutes(1))
+            .sideOutputLateData(lateOutputTag)
+            .aggregate(new ClickCountAggregator(), new ClickWindowFunction())
+            .name("5-Min-Window-Aggregation");
+
+        // ── Step 4: 1-Hour Tumbling Window Aggregation ──────────────────
+        DataStream&lt;ClickAggregate&gt; hourlyAggs = deduplicated
+            .keyBy(ClickEvent::getAdId)
+            .window(TumblingEventTimeWindows.of(Time.hours(1)))
+            .allowedLateness(Time.minutes(5))
+            .sideOutputLateData(lateOutputTag)
+            .aggregate(new ClickCountAggregator(), new ClickWindowFunction())
+            .name("1-Hour-Window-Aggregation");
+
+        // ── Step 5: Sink to ClickHouse ──────────────────────────────────
+        oneMinAggs.union(fiveMinAggs, hourlyAggs)
+            .addSink(new ClickHouseAggSink("jdbc:clickhouse://clickhouse:8123/ad_analytics"))
+            .name("ClickHouse-Sink");
+
+        // ── Late data handling ──────────────────────────────────────────
+        oneMinAggs.getSideOutput(lateOutputTag)
+            .addSink(new KafkaSink&lt;&gt;("ad-clicks-late"))
+            .name("Late-Data-Sink");
+
+        env.execute("Ad Click Aggregator Pipeline");
+    }
+}</code></pre>
+
+      <h3 id="dedup-function">Deduplication Function</h3>
+      <p>The deduplication operator uses Flink's <strong>keyed state</strong> with a TTL to track recently seen clicks. It keys by <code>(user_id, ad_id)</code> and drops duplicate clicks within a 60-second window:</p>
+
+      <pre><code>public class ClickDeduplicationFunction
+    extends KeyedProcessFunction&lt;String, ClickEvent, ClickEvent&gt; {
+
+    // State: timestamp of last seen click for this (user, ad) pair
+    private ValueState&lt;Long&gt; lastSeenState;
+
+    @Override
+    public void open(Configuration params) {
+        ValueStateDescriptor&lt;Long&gt; desc = new ValueStateDescriptor&lt;&gt;(
+            "last-seen-ts", Types.LONG);
+
+        // Auto-expire state after 90 seconds (slightly > dedup window)
+        StateTtlConfig ttl = StateTtlConfig.newBuilder(Time.seconds(90))
+            .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+            .setStateVisibility(
+                StateTtlConfig.StateVisibility.NeverReturnExpired)
+            .cleanupInRocksdbCompactFilter(1000)
+            .build();
+        desc.enableTimeToLive(ttl);
+
+        lastSeenState = getRuntimeContext().getState(desc);
+    }
+
+    @Override
+    public void processElement(ClickEvent click, Context ctx,
+                               Collector&lt;ClickEvent&gt; out) throws Exception {
+        Long lastSeen = lastSeenState.value();
+        long now = click.getTimestamp();
+
+        if (lastSeen == null || (now - lastSeen) &gt; 60_000) {
+            // New click or outside dedup window → emit
+            lastSeenState.update(now);
+            out.collect(click);
+            ctx.output(metricsTag, new Metric("click.unique", 1));
+        } else {
+            // Duplicate within 60s → suppress
+            ctx.output(metricsTag, new Metric("click.duplicate", 1));
+        }
+    }
+}</code></pre>
+
+      <h3 id="aggregator-function">Aggregation Function</h3>
+      <pre><code>public class ClickCountAggregator
+    implements AggregateFunction&lt;ClickEvent, ClickAccumulator, ClickAccumulator&gt; {
+
+    @Override
+    public ClickAccumulator createAccumulator() {
+        return new ClickAccumulator();
+    }
+
+    @Override
+    public ClickAccumulator add(ClickEvent click, ClickAccumulator acc) {
+        acc.totalClicks++;
+        acc.uniqueUsers.add(click.getUserId());
+        acc.countryBreakdown.merge(click.getCountry(), 1L, Long::sum);
+        acc.deviceBreakdown.merge(click.getDeviceType(), 1L, Long::sum);
+        return acc;
+    }
+
+    @Override
+    public ClickAccumulator getResult(ClickAccumulator acc) {
+        return acc;
+    }
+
+    @Override
+    public ClickAccumulator merge(ClickAccumulator a, ClickAccumulator b) {
+        a.totalClicks += b.totalClicks;
+        a.uniqueUsers.addAll(b.uniqueUsers);
+        b.countryBreakdown.forEach((k, v) -&gt;
+            a.countryBreakdown.merge(k, v, Long::sum));
+        b.deviceBreakdown.forEach((k, v) -&gt;
+            a.deviceBreakdown.merge(k, v, Long::sum));
+        return a;
+    }
+}
+
+// Window function adds window metadata to the aggregate
+public class ClickWindowFunction
+    extends ProcessWindowFunction&lt;ClickAccumulator, ClickAggregate, String, TimeWindow&gt; {
+
+    @Override
+    public void process(String adId, Context ctx,
+                        Iterable&lt;ClickAccumulator&gt; accs,
+                        Collector&lt;ClickAggregate&gt; out) {
+        ClickAccumulator acc = accs.iterator().next();
+        TimeWindow window = ctx.window();
+
+        out.collect(new ClickAggregate(
+            adId,
+            Instant.ofEpochMilli(window.getStart()),
+            Instant.ofEpochMilli(window.getEnd()),
+            windowSizeName(window),
+            acc.totalClicks,
+            acc.uniqueUsers.size(),
+            acc.countryBreakdown,
+            acc.deviceBreakdown
+        ));
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           8. CLICK DEDUPLICATION STRATEGIES
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="deduplication">Click Deduplication Strategies</h2>
+      <p>Deduplication is critical for accurate billing. A user accidentally double-clicking an ad should not charge the advertiser twice. There are multiple approaches, each with distinct trade-offs:</p>
+
+      <h3 id="dedup-comparison">Strategy Comparison</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Strategy</th><th style="text-align:left;padding:0.5em;">Space</th><th style="text-align:left;padding:0.5em;">Accuracy</th><th style="text-align:left;padding:0.5em;">Latency</th><th style="text-align:left;padding:0.5em;">Use Case</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Flink Keyed State</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~20 bytes/key, RocksDB</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Exact (within TTL)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Microseconds</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Primary dedup in stream</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Redis SET with TTL</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~100 bytes/key</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Exact</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~1 ms (network)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Cross-service dedup</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Bloom Filter</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~10 bits/element</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">~1% false positives</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Microseconds</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Pre-filter before exact check</td></tr>
+          <tr><td style="padding:0.5em;">Counting Bloom Filter</td><td style="padding:0.5em;">~40 bits/element</td><td style="padding:0.5em;">~1% FP, supports delete</td><td style="padding:0.5em;">Microseconds</td><td style="padding:0.5em;">Time-window rotation</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="redis-dedup">Redis-Based Deduplication</h3>
+      <p>For cross-service deduplication (e.g., the ad server itself deduplicating before sending to Kafka):</p>
+      <pre><code># Redis deduplication with 60-second TTL
+# Key format: dedup:{user_id}:{ad_id}
+# Value: 1 (existence check only)
+
+def is_duplicate_click(redis_client, user_id, ad_id, ttl_seconds=60):
+    """
+    Returns True if this click is a duplicate (should be suppressed).
+    Uses SET NX (set-if-not-exists) for atomic check-and-set.
+    """
+    key = f"dedup:{user_id}:{ad_id}"
+
+    # SET key 1 NX EX 60
+    # NX = only set if not exists
+    # EX = expire after 60 seconds
+    was_set = redis_client.set(key, 1, nx=True, ex=ttl_seconds)
+
+    if was_set:
+        # Key didn't exist → first click → NOT a duplicate
+        return False
+    else:
+        # Key already existed → duplicate within TTL window
+        return True
+
+# Memory estimate for Redis dedup:
+# 115K clicks/sec × 60s TTL = ~6.9M active keys
+# ~100 bytes per key (key + overhead) = ~690 MB
+# With Redis Cluster (3 shards) = ~230 MB per shard</code></pre>
+
+      <h3 id="bloom-dedup">Bloom Filter Pre-Filtering</h3>
+      <p>For extremely high throughput, use a two-layer dedup: Bloom filter as a fast pre-filter, then exact check only for potential duplicates:</p>
+      <pre><code>public class TwoLayerDeduplication {
+    // Rotating Bloom filters — current minute + previous minute
+    private BloomFilter&lt;String&gt; currentMinuteFilter;
+    private BloomFilter&lt;String&gt; previousMinuteFilter;
+    private long currentMinuteTs;
+
+    // Expected elements: 115K clicks/sec × 60s = ~7M per minute
+    // Target FPR: 0.1% → ~10 bits/element → ~8.75 MB per filter
+    private static final int EXPECTED_INSERTIONS = 7_000_000;
+    private static final double FPP = 0.001;
+
+    public TwoLayerDeduplication() {
+        this.currentMinuteFilter = BloomFilter.create(
+            Funnels.stringFunnel(StandardCharsets.UTF_8),
+            EXPECTED_INSERTIONS, FPP);
+        this.previousMinuteFilter = BloomFilter.create(
+            Funnels.stringFunnel(StandardCharsets.UTF_8),
+            EXPECTED_INSERTIONS, FPP);
+        this.currentMinuteTs = currentMinute();
+    }
+
+    public boolean isDuplicate(String userId, String adId) {
+        rotateIfNeeded();
+        String key = userId + ":" + adId;
+
+        // Fast path: if NOT in either Bloom filter → definitely unique
+        if (!currentMinuteFilter.mightContain(key) &amp;&amp;
+            !previousMinuteFilter.mightContain(key)) {
+            currentMinuteFilter.put(key);
+            return false;
+        }
+
+        // Slow path: Bloom filter says "maybe" → check exact store
+        // (Redis or Flink state)
+        return checkExactStore(key);
+    }
+
+    private void rotateIfNeeded() {
+        long now = currentMinute();
+        if (now &gt; currentMinuteTs) {
+            previousMinuteFilter = currentMinuteFilter;
+            currentMinuteFilter = BloomFilter.create(
+                Funnels.stringFunnel(StandardCharsets.UTF_8),
+                EXPECTED_INSERTIONS, FPP);
+            currentMinuteTs = now;
+        }
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           9. AGGREGATION STORE — CLICKHOUSE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="aggregation-store">Aggregation Store — ClickHouse</h2>
+      <p><strong>ClickHouse</strong> is an ideal aggregation store for this use case: it's a columnar OLAP database designed for real-time analytical queries over billions of rows, with sub-second latency for aggregation queries.</p>
+
+      <h3 id="clickhouse-schema">ClickHouse Schema</h3>
+      <pre><code>-- Raw click events (for batch reprocessing and auditing)
+CREATE TABLE ad_clicks_raw ON CLUSTER '{cluster}'
+(
+    click_id       String,
+    ad_id          LowCardinality(String),
+    campaign_id    LowCardinality(String),
+    advertiser_id  LowCardinality(String),
+    user_id        String,
+    timestamp      DateTime64(3, 'UTC'),
+    ip_address     IPv4,
+    country        LowCardinality(FixedString(2)),
+    device_type    Enum8('desktop' = 1, 'mobile' = 2, 'tablet' = 3),
+    os             LowCardinality(String),
+    browser        LowCardinality(String),
+    referrer_url   String,
+    landing_url    String,
+    is_duplicate   UInt8 DEFAULT 0,
+
+    -- Partition and sort keys for efficient scans
+    event_date     Date DEFAULT toDate(timestamp)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/ad_clicks_raw',
+                             '{replica}')
+PARTITION BY toYYYYMMDD(event_date)
+ORDER BY (ad_id, timestamp, click_id)
+TTL event_date + INTERVAL 90 DAY
+SETTINGS index_granularity = 8192;
+
+-- Pre-aggregated 1-minute click counts
+CREATE TABLE ad_click_counts_1m ON CLUSTER '{cluster}'
+(
+    ad_id          LowCardinality(String),
+    campaign_id    LowCardinality(String),
+    advertiser_id  LowCardinality(String),
+    window_start   DateTime('UTC'),
+    window_end     DateTime('UTC'),
+    click_count    UInt64,
+    unique_users   UInt64,
+    country        LowCardinality(FixedString(2)),
+    device_type    Enum8('desktop' = 1, 'mobile' = 2, 'tablet' = 3),
+
+    event_date     Date DEFAULT toDate(window_start)
+)
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/ad_click_counts_1m',
+                                     '{replica}',
+                                     (click_count, unique_users))
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (ad_id, country, device_type, window_start)
+TTL event_date + INTERVAL 2 YEAR
+SETTINGS index_granularity = 8192;
+
+-- Materialized view: auto-aggregate raw → 1-minute
+CREATE MATERIALIZED VIEW ad_click_counts_1m_mv ON CLUSTER '{cluster}'
+TO ad_click_counts_1m
+AS
+SELECT
+    ad_id,
+    campaign_id,
+    advertiser_id,
+    toStartOfMinute(timestamp)                         AS window_start,
+    toStartOfMinute(timestamp) + INTERVAL 1 MINUTE     AS window_end,
+    count()                                             AS click_count,
+    uniqExact(user_id)                                  AS unique_users,
+    country,
+    device_type
+FROM ad_clicks_raw
+WHERE is_duplicate = 0
+GROUP BY ad_id, campaign_id, advertiser_id, window_start,
+         window_end, country, device_type;
+
+-- 1-hour rollup from 1-minute aggregates
+CREATE TABLE ad_click_counts_1h ON CLUSTER '{cluster}'
+(
+    ad_id          LowCardinality(String),
+    campaign_id    LowCardinality(String),
+    advertiser_id  LowCardinality(String),
+    window_start   DateTime('UTC'),
+    window_end     DateTime('UTC'),
+    click_count    UInt64,
+    unique_users   UInt64,
+    country        LowCardinality(FixedString(2)),
+    device_type    Enum8('desktop' = 1, 'mobile' = 2, 'tablet' = 3),
+    event_date     Date DEFAULT toDate(window_start)
+)
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/ad_click_counts_1h',
+                                     '{replica}',
+                                     (click_count, unique_users))
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (ad_id, country, device_type, window_start)
+TTL event_date + INTERVAL 2 YEAR
+SETTINGS index_granularity = 8192;</code></pre>
+
+      <h3 id="query-examples">Query Examples</h3>
+      <pre><code>-- Query 1: Clicks for ad X in the last 5 minutes (real-time)
+SELECT
+    sum(click_count)    AS total_clicks,
+    sum(unique_users)   AS total_unique
+FROM ad_click_counts_1m
+WHERE ad_id = 'ad-00042837'
+  AND window_start &gt;= now() - INTERVAL 5 MINUTE;
+-- Response time: ~5ms (scans only 5 rows per shard)
+
+-- Query 2: Hourly trend for campaign over 7 days
+SELECT
+    toStartOfHour(window_start) AS hour,
+    sum(click_count)            AS clicks,
+    sum(unique_users)           AS uniques
+FROM ad_click_counts_1h
+WHERE campaign_id = 'camp-001294'
+  AND window_start &gt;= now() - INTERVAL 7 DAY
+GROUP BY hour
+ORDER BY hour;
+-- Response time: ~50ms (168 hourly buckets)
+
+-- Query 3: Top ads by country breakdown
+SELECT
+    ad_id,
+    country,
+    sum(click_count) AS clicks
+FROM ad_click_counts_1h
+WHERE advertiser_id = 'adv-000512'
+  AND window_start &gt;= now() - INTERVAL 24 HOUR
+GROUP BY ad_id, country
+ORDER BY clicks DESC
+LIMIT 100;
+-- Response time: ~100ms</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           10. LAMBDA ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="lambda-architecture">Lambda Architecture</h2>
+      <p>Real-time stream processing is fast but can drift from ground truth due to late-arriving events, reprocessing after failures, or edge cases in deduplication. The <strong>Lambda architecture</strong> addresses this by running two parallel computation paths:</p>
+
+      <ol>
+        <li><strong>Speed Layer (Flink)</strong> — provides low-latency approximate results within seconds. Handles dedup and windowed aggregation in real-time. May slightly over- or under-count due to late arrivals.</li>
+        <li><strong>Batch Layer (Spark)</strong> — reprocesses raw click data periodically (every 1–6 hours). Produces exact, reconciled counts by processing the complete dataset with full deduplication.</li>
+        <li><strong>Serving Layer (Query API)</strong> — merges results from both layers. For recent data (&lt; 2 hours), serve speed layer results. For older data, serve batch layer results. During overlap, prefer batch results.</li>
+      </ol>
+
+      <h3 id="lambda-visual">Interactive: Lambda Architecture</h3>
+      <p>Watch how real-time and batch layers work together — and how the batch layer corrects speed layer drift over time:</p>
+      <div class="anim-container" style="margin:2em 0;">
+        <div style="display:flex;align-items:center;gap:0.75em;margin-bottom:0.75em;flex-wrap:wrap;">
+          <button id="lambda-step" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:#0a8f6a;color:#fff;font-weight:700;cursor:pointer;">Step ▶</button>
+          <button id="lambda-reset" style="padding:0.4em 1.2em;border:none;border-radius:6px;background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;border:1px solid var(--line);">Reset</button>
+          <span id="lambda-output" style="font-size:0.92em;color:var(--ink-muted);"></span>
+        </div>
+        <svg id="lambda-anim" viewBox="0 0 820 420" style="width:100%;max-width:820px;background:var(--surface);border-radius:12px;border:1px solid var(--line);"></svg>
+        <p id="lambda-info" style="min-height:2.5em;margin-top:0.75em;font-size:0.97em;color:var(--ink-muted);"></p>
+      </div>
+
+      <h3 id="batch-spark">Batch Layer — Spark Aggregation</h3>
+      <pre><code># Spark batch aggregation job (runs every hour)
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+spark = SparkSession.builder \
+    .appName("AdClickBatchAggregator") \
+    .config("spark.sql.shuffle.partitions", 256) \
+    .config("spark.sql.adaptive.enabled", True) \
+    .getOrCreate()
+
+# Read raw click events from data lake (S3/HDFS)
+raw_clicks = spark.read.parquet(
+    "s3://ad-data-lake/clicks/",
+    mergeSchema=True
+).filter(
+    F.col("event_date") >= F.date_sub(F.current_date(), 2)
+)
+
+# Step 1: Exact deduplication using window functions
+# Keep only the FIRST click per (user_id, ad_id) within 60-second windows
+dedup_window = Window.partitionBy("user_id", "ad_id") \
+    .orderBy("timestamp")
+
+deduped = raw_clicks \
+    .withColumn("prev_ts",
+        F.lag("timestamp").over(dedup_window)) \
+    .filter(
+        F.col("prev_ts").isNull() |  # first click ever
+        (F.unix_timestamp("timestamp") -
+         F.unix_timestamp("prev_ts") > 60)  # > 60s gap
+    ) \
+    .drop("prev_ts")
+
+# Step 2: Aggregate into 1-minute windows
+minute_aggs = deduped \
+    .withColumn("window_start",
+        F.date_trunc("minute", "timestamp")) \
+    .groupBy("ad_id", "campaign_id", "advertiser_id",
+             "window_start", "country", "device_type") \
+    .agg(
+        F.count("*").alias("click_count"),
+        F.countDistinct("user_id").alias("unique_users")
+    ) \
+    .withColumn("window_end",
+        F.col("window_start") + F.expr("INTERVAL 1 MINUTE")) \
+    .withColumn("source", F.lit("batch"))
+
+# Step 3: Write to batch aggregation store
+minute_aggs.write \
+    .format("jdbc") \
+    .option("url", "jdbc:clickhouse://clickhouse:8123/ad_analytics") \
+    .option("dbtable", "ad_click_counts_1m_batch") \
+    .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
+    .mode("overwrite") \
+    .save()
+
+print(f"Batch aggregation complete: {minute_aggs.count()} records")</code></pre>
+
+      <h3 id="data-reconciliation">Data Reconciliation</h3>
+      <p>The reconciliation service compares speed layer and batch layer results, flagging and correcting discrepancies:</p>
+
+      <pre><code>-- Reconciliation query: compare real-time vs batch counts
+-- Run after each batch job completes
+SELECT
+    rt.ad_id,
+    rt.window_start,
+    rt.click_count    AS realtime_count,
+    bt.click_count    AS batch_count,
+    abs(rt.click_count - bt.click_count) AS discrepancy,
+    round(abs(rt.click_count - bt.click_count) * 100.0
+          / bt.click_count, 2)           AS discrepancy_pct
+FROM ad_click_counts_1m AS rt
+JOIN ad_click_counts_1m_batch AS bt
+  ON rt.ad_id = bt.ad_id
+ AND rt.window_start = bt.window_start
+ AND rt.country = bt.country
+ AND rt.device_type = bt.device_type
+WHERE bt.window_start &gt;= now() - INTERVAL 6 HOUR
+  AND abs(rt.click_count - bt.click_count) &gt; 0
+ORDER BY discrepancy_pct DESC
+LIMIT 100;
+
+-- Auto-correct: replace real-time counts with batch counts
+-- for windows where batch data is available
+INSERT INTO ad_click_counts_1m
+SELECT
+    bt.ad_id, bt.campaign_id, bt.advertiser_id,
+    bt.window_start, bt.window_end,
+    bt.click_count, bt.unique_users,
+    bt.country, bt.device_type, toDate(bt.window_start)
+FROM ad_click_counts_1m_batch AS bt
+WHERE bt.window_start &gt;= now() - INTERVAL 6 HOUR;
+-- SummingMergeTree will merge the old + new rows on next compaction
+-- Use ReplacingMergeTree if you need exact replacement semantics</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           11. EXACTLY-ONCE SEMANTICS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="exactly-once">Exactly-Once Counting</h2>
+      <p>Achieving exactly-once semantics end-to-end requires coordination across three layers:</p>
+
+      <h3 id="e2e-exactly-once">End-to-End Exactly-Once Pipeline</h3>
+      <pre><code>┌─────────────────────────────────────────────────────────────────────┐
+│                  Exactly-Once Guarantee Chain                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Producer          Kafka            Flink           ClickHouse      │
+│  ─────────         ─────            ─────           ──────────      │
+│  idempotent   →   exactly-once  →  checkpointed →  idempotent      │
+│  producer          replication     state + offsets   upserts         │
+│                                                                     │
+│  acks=all          min.isr=2       checkpoint       ReplacingMerge  │
+│  retries=3         unclean=false   interval=60s     Tree or         │
+│  idempotence       log repl=3      RocksDB state    deduplicate     │
+│  =true                              backend         on INSERT       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <p><strong>Flink checkpointing</strong> is the linchpin. During a checkpoint, Flink atomically snapshots:</p>
+      <ul>
+        <li><strong>Kafka consumer offsets</strong> — exactly which messages have been processed</li>
+        <li><strong>Operator state</strong> — window accumulator contents, dedup state</li>
+        <li><strong>Sink pre-commit</strong> — buffered writes to ClickHouse</li>
+      </ul>
+
+      <p>On failure recovery, Flink restores from the last successful checkpoint: it resets Kafka offsets, restores operator state, and replays from the checkpoint position. Any writes to ClickHouse are idempotent (using ReplacingMergeTree or dedup on INSERT), so replayed outputs don't cause double-counting.</p>
+
+      <pre><code>// Flink ClickHouse sink with idempotent writes
+public class ClickHouseAggSink extends RichSinkFunction&lt;ClickAggregate&gt;
+    implements CheckpointedFunction {
+
+    private ListState&lt;ClickAggregate&gt; bufferedState;
+    private List&lt;ClickAggregate&gt; buffer = new ArrayList&lt;&gt;();
+
+    @Override
+    public void invoke(ClickAggregate agg, Context ctx) {
+        buffer.add(agg);
+        if (buffer.size() &gt;= 1000) {
+            flushBuffer();
+        }
+    }
+
+    @Override
+    public void snapshotState(FunctionSnapshotContext ctx) throws Exception {
+        // Flush to ClickHouse before checkpoint completes
+        flushBuffer();
+        bufferedState.clear();
+        bufferedState.addAll(buffer);
+    }
+
+    @Override
+    public void initializeState(FunctionInitializationContext ctx) throws Exception {
+        bufferedState = ctx.getOperatorStateStore()
+            .getListState(new ListStateDescriptor&lt;&gt;("ch-buffer",
+                ClickAggregate.class));
+
+        if (ctx.isRestored()) {
+            // Re-flush any buffered records from pre-failure checkpoint
+            for (ClickAggregate agg : bufferedState.get()) {
+                buffer.add(agg);
+            }
+            flushBuffer();  // Idempotent — ClickHouse deduplicates
+        }
+    }
+
+    private void flushBuffer() {
+        if (buffer.isEmpty()) return;
+        // INSERT with deduplication —
+        // ClickHouse ReplicatedMergeTree deduplicates by (ad_id, window_start)
+        String sql = "INSERT INTO ad_click_counts_1m " +
+            "(ad_id, campaign_id, advertiser_id, window_start, " +
+            " window_end, click_count, unique_users, country, device_type) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (ClickAggregate agg : buffer) {
+                ps.setString(1, agg.adId);
+                ps.setString(2, agg.campaignId);
+                ps.setString(3, agg.advertiserId);
+                ps.setTimestamp(4, Timestamp.from(agg.windowStart));
+                ps.setTimestamp(5, Timestamp.from(agg.windowEnd));
+                ps.setLong(6, agg.clickCount);
+                ps.setLong(7, agg.uniqueUsers);
+                ps.setString(8, agg.country);
+                ps.setString(9, agg.deviceType);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+            buffer.clear();
+        }
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           12. QUERY SERVICE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="query-service">Query Service</h2>
+      <p>The query service is a thin API layer that routes queries to the appropriate store based on the time range and freshness requirements:</p>
+
+      <pre><code>@RestController
+@RequestMapping("/api/v1/clicks")
+public class ClickQueryController {
+
+    private final ClickHouseTemplate clickHouse;
+    private final CacheManager cache;
+
+    // GET /api/v1/clicks/ad/{adId}?window=5m
+    @GetMapping("/ad/{adId}")
+    public ClickResponse getAdClicks(
+            @PathVariable String adId,
+            @RequestParam(defaultValue = "5m") String window,
+            @RequestParam(required = false) String country,
+            @RequestParam(required = false) String device) {
+
+        Duration dur = parseDuration(window);
+        String cacheKey = String.format("clicks:%s:%s:%s:%s",
+            adId, window, country, device);
+
+        // Cache short windows briefly (10s), longer windows more (60s)
+        Duration cacheTtl = dur.toMinutes() &lt;= 5
+            ? Duration.ofSeconds(10)
+            : Duration.ofSeconds(60);
+
+        return cache.get(cacheKey, cacheTtl, () -&gt; {
+            // Choose table based on window size
+            String table = chooseTable(dur);
+
+            // Build and execute ClickHouse query
+            return clickHouse.query(
+                "SELECT sum(click_count) AS clicks, " +
+                "       sum(unique_users) AS uniques " +
+                "FROM " + table + " " +
+                "WHERE ad_id = ? " +
+                "  AND window_start &gt;= now() - toIntervalSecond(?) " +
+                buildFilters(country, device),
+                adId, dur.getSeconds()
+            );
+        });
+    }
+
+    // Route to the most efficient table
+    private String chooseTable(Duration window) {
+        if (window.toHours() &gt;= 24) return "ad_click_counts_1h";
+        if (window.toMinutes() &gt;= 10) return "ad_click_counts_1h";
+        return "ad_click_counts_1m";
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           13. FRAUD DETECTION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="fraud-detection">Fraud Detection</h2>
+      <p>Click fraud costs advertisers an estimated <strong>$100 billion annually</strong>. The aggregator must detect and filter fraudulent clicks before they affect billing. Fraud signals are evaluated at multiple levels:</p>
+
+      <h3 id="fraud-signals">Fraud Detection Signals</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Signal</th><th style="text-align:left;padding:0.5em;">Detection Method</th><th style="text-align:left;padding:0.5em;">Action</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">IP click flooding</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">&gt; 50 clicks from same IP in 1 minute</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Block IP, flag clicks</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Click farm patterns</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">High click volume from narrow IP range + low conversion</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Flag campaign, alert</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Bot signatures</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Missing/invalid browser fingerprint, datacenter IPs</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Drop click</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Geographic anomalies</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Clicks from non-targeted regions</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Exclude from billing</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Timing patterns</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Perfectly periodic clicks (e.g., exactly every 5 seconds)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Flag as bot</td></tr>
+          <tr><td style="padding:0.5em;">CTR anomalies</td><td style="padding:0.5em;">Click-through rate &gt; 3σ above campaign average</td><td style="padding:0.5em;">Hold for review</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="fraud-flink">Real-Time Fraud Detection in Flink</h3>
+      <pre><code>public class ClickFraudDetector
+    extends KeyedProcessFunction&lt;String, ClickEvent, FraudAlert&gt; {
+
+    // State: sliding window of click timestamps per IP
+    private MapState&lt;String, List&lt;Long&gt;&gt; ipClickWindows;
+    // State: per-ad click velocity
+    private ValueState&lt;ClickVelocity&gt; adVelocity;
+
+    @Override
+    public void open(Configuration params) {
+        MapStateDescriptor&lt;String, List&lt;Long&gt;&gt; ipDesc =
+            new MapStateDescriptor&lt;&gt;("ip-clicks", String.class,
+                TypeInformation.of(new TypeHint&lt;List&lt;Long&gt;&gt;(){}));
+        StateTtlConfig ipTtl = StateTtlConfig
+            .newBuilder(Time.minutes(5))
+            .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+            .build();
+        ipDesc.enableTimeToLive(ipTtl);
+        ipClickWindows = getRuntimeContext().getMapState(ipDesc);
+
+        ValueStateDescriptor&lt;ClickVelocity&gt; velDesc =
+            new ValueStateDescriptor&lt;&gt;("ad-velocity", ClickVelocity.class);
+        adVelocity = getRuntimeContext().getState(velDesc);
+    }
+
+    @Override
+    public void processElement(ClickEvent click, Context ctx,
+                               Collector&lt;FraudAlert&gt; out) throws Exception {
+        String ip = click.getIpAddress();
+        long now = click.getTimestamp();
+
+        // ── Check 1: IP flooding ────────────────────────────────
+        List&lt;Long&gt; ipClicks = ipClickWindows.get(ip);
+        if (ipClicks == null) ipClicks = new ArrayList&lt;&gt;();
+
+        // Remove clicks older than 60 seconds
+        ipClicks.removeIf(ts -&gt; (now - ts) &gt; 60_000);
+        ipClicks.add(now);
+        ipClickWindows.put(ip, ipClicks);
+
+        if (ipClicks.size() &gt; 50) {
+            out.collect(new FraudAlert(
+                FraudType.IP_FLOODING, click,
+                "IP " + ip + " made " + ipClicks.size() +
+                " clicks in 60s"));
+            return; // Don't count this click
+        }
+
+        // ── Check 2: Timing pattern (periodic clicks) ──────────
+        if (ipClicks.size() &gt;= 5) {
+            List&lt;Long&gt; intervals = new ArrayList&lt;&gt;();
+            for (int i = 1; i &lt; ipClicks.size(); i++) {
+                intervals.add(ipClicks.get(i) - ipClicks.get(i - 1));
+            }
+            double stdDev = calculateStdDev(intervals);
+            if (stdDev &lt; 100) { // Less than 100ms variation = bot
+                out.collect(new FraudAlert(
+                    FraudType.BOT_PATTERN, click,
+                    "Periodic click pattern (σ=" + stdDev + "ms)"));
+                return;
+            }
+        }
+
+        // ── Check 3: Click velocity anomaly ─────────────────────
+        ClickVelocity vel = adVelocity.value();
+        if (vel == null) vel = new ClickVelocity();
+        vel.addClick(now);
+        adVelocity.update(vel);
+
+        if (vel.getCurrentRate() &gt; vel.getMovingAverage() * 3) {
+            out.collect(new FraudAlert(
+                FraudType.VELOCITY_ANOMALY, click,
+                "Click rate " + vel.getCurrentRate() +
+                "/min vs avg " + vel.getMovingAverage() + "/min"));
+        }
+    }
+}</code></pre>
+
+      <h3 id="ip-filtering">IP-Based Filtering</h3>
+      <pre><code># IP reputation database: maintain a set of known-bad IPs
+# Updated from threat intelligence feeds + own detection
+
+class IPReputationFilter:
+    def __init__(self, redis_client):
+        self.redis = redis_client
+        # Bloom filter for datacenter IP ranges (fast pre-filter)
+        self.datacenter_ips = load_datacenter_ip_bloom_filter()
+
+    def is_suspicious(self, ip_address: str) -&gt; tuple[bool, str]:
+        # Check 1: Known bad IP (blacklisted)
+        if self.redis.sismember("ip:blacklist", ip_address):
+            return True, "blacklisted"
+
+        # Check 2: Datacenter / VPN / Proxy IP
+        if self.datacenter_ips.might_contain(ip_address):
+            return True, "datacenter_ip"
+
+        # Check 3: Rate limit per IP
+        key = f"ip:rate:{ip_address}"
+        count = self.redis.incr(key)
+        if count == 1:
+            self.redis.expire(key, 60)  # 60-second window
+        if count &gt; 100:
+            # Auto-blacklist for 1 hour
+            self.redis.sadd("ip:blacklist", ip_address)
+            self.redis.expire(f"ip:blacklist:{ip_address}", 3600)
+            return True, "rate_limited"
+
+        return False, "clean"</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           14. SCALING & OPERATIONAL CONCERNS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="scaling">Scaling &amp; Operational Concerns</h2>
+
+      <h3 id="kafka-scaling">Kafka Scaling</h3>
+      <pre><code>┌────────────────────────────────────────────────────────────────────┐
+│  Kafka Cluster Sizing                                              │
+├────────────────────────────────────────────────────────────────────┤
+│  Brokers:      15 (5 racks × 3 brokers)                           │
+│  Partitions:   256 (ad-clicks topic)                               │
+│  Replication:  3 (cross-rack)                                      │
+│  Throughput:   ~58 MB/sec ingress, ~174 MB/sec with replication    │
+│  Disk:         7 days retention × 5 TB/day = 35 TB → 12 TB/broker │
+│  Network:      Each broker: ~12 MB/sec in, ~35 MB/sec out          │
+│                (3× for replication + consumer fan-out)              │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <h3 id="flink-scaling">Flink Scaling</h3>
+      <pre><code>┌────────────────────────────────────────────────────────────────────┐
+│  Flink Cluster Sizing                                              │
+├────────────────────────────────────────────────────────────────────┤
+│  TaskManagers:     32 (8 cores, 32 GB each)                        │
+│  Parallelism:      256 (matches Kafka partitions)                  │
+│  Checkpoint:       60s interval, S3 backend                        │
+│  State size:       ~50 GB (dedup state + window accumulators)      │
+│  RocksDB:          512 MB write buffer per TM, bloom filter on     │
+│  Watermark delay:  10 seconds (bounded out-of-order)               │
+│  Recovery time:    ~30 seconds from checkpoint                     │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <h3 id="clickhouse-scaling">ClickHouse Cluster</h3>
+      <pre><code>┌────────────────────────────────────────────────────────────────────┐
+│  ClickHouse Cluster Sizing                                         │
+├────────────────────────────────────────────────────────────────────┤
+│  Shards:     8 (distributed across AZs)                            │
+│  Replicas:   2 per shard (16 nodes total)                          │
+│  CPU:        32 cores per node                                     │
+│  RAM:        256 GB per node (hot data in memory)                  │
+│  Disk:       8 TB NVMe SSD per node                                │
+│  Data:       Raw clicks ~90 days (compressed ~2:1 → 225 TB total)  │
+│              Aggregates ~2 years (very compact)                     │
+│  Queries:    Sub-second for recent aggregates                      │
+│              &lt; 5s for full table scans over 24h                    │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           15. ALTERNATIVE STORE COMPARISON
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="store-alternatives">Aggregation Store Alternatives</h2>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Store</th><th style="text-align:left;padding:0.5em;">Type</th><th style="text-align:left;padding:0.5em;">Strengths</th><th style="text-align:left;padding:0.5em;">Weaknesses</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><strong>ClickHouse</strong></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Columnar OLAP</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Fastest aggregation queries, great compression, SQL interface</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">No true upsert, eventual consistency on merges</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><strong>Apache Druid</strong></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Real-time OLAP</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Native Kafka ingestion, sub-second for recent data, built-in rollup</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Complex operations, high memory usage</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><strong>InfluxDB</strong></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Time-Series DB</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Purpose-built for time-series, built-in downsampling, Flux query language</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Limited JOIN support, less flexible dimensions</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);"><strong>Apache Pinot</strong></td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Real-time OLAP</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Upsert support, low-latency, LinkedIn-scale proven</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Smaller community, steeper learning curve</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Redis + PostgreSQL</strong></td><td style="padding:0.5em;">Cache + RDBMS</td><td style="padding:0.5em;">Simple, familiar, good for moderate scale</td><td style="padding:0.5em;">Won't scale to 10B clicks/day without significant engineering</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           16. MONITORING & ALERTING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="monitoring">Monitoring &amp; Alerting</h2>
+      <pre><code># Key metrics to monitor
+┌──────────────────────────────────────────────────────────────────┐
+│  Metric                          │  Alert Threshold              │
+├──────────────────────────────────┼───────────────────────────────┤
+│  Kafka consumer lag              │  &gt; 100K messages              │
+│  Flink checkpoint duration       │  &gt; 120 seconds                │
+│  Flink checkpoint failures       │  &gt; 3 consecutive              │
+│  End-to-end latency (click→agg)  │  &gt; 10 seconds (p99)          │
+│  Dedup ratio                     │  &lt; 1% or &gt; 20% (anomaly)     │
+│  ClickHouse query latency (p99)  │  &gt; 500 ms                    │
+│  Fraud alert rate                │  &gt; 5% of total clicks         │
+│  Batch-vs-RT discrepancy         │  &gt; 2% per window              │
+│  Data lake write failures        │  Any                          │
+│  Kafka broker disk usage         │  &gt; 80%                        │
+└──────────────────────────────────┴───────────────────────────────┘</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           17. SUMMARY
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="summary">Summary</h2>
+      <table style="width:100%;border-collapse:collapse;margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left;padding:0.5em;">Component</th><th style="text-align:left;padding:0.5em;">Technology</th><th style="text-align:left;padding:0.5em;">Role</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Ingestion</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Apache Kafka (256 partitions)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Durable, ordered event stream</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Speed Layer</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Apache Flink</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Real-time dedup + windowed aggregation</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Batch Layer</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Apache Spark</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Hourly exact reprocessing</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Aggregation Store</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">ClickHouse (8 shards × 2 replicas)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Sub-second OLAP queries</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Deduplication</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Flink state + Redis + Bloom filter</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Multi-layer click dedup</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Fraud Detection</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Flink CEP + IP reputation DB</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Real-time fraud filtering</td></tr>
+          <tr><td style="padding:0.5em;border-bottom:1px solid var(--line);">Data Lake</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">S3 / HDFS (Parquet format)</td><td style="padding:0.5em;border-bottom:1px solid var(--line);">Raw event archive for reprocessing</td></tr>
+          <tr><td style="padding:0.5em;">Query Service</td><td style="padding:0.5em;">Spring Boot REST API</td><td style="padding:0.5em;">Unified query interface with caching</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key design decisions:</strong> (1) Kafka partitioned by ad_id enables local aggregation without shuffles. (2) Lambda architecture provides both low-latency results and exact correctness via batch reconciliation. (3) Three-layer deduplication (Bloom filter → Flink state → batch dedup) balances throughput and accuracy. (4) ClickHouse's columnar storage and SummingMergeTree engine are purpose-built for exactly this workload.
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="email-system.html"><span>Previous</span><span>&#8592; Email System</span></a>
+        <a class="next" href="../case-studies/netflix-architecture.html"><span>Next</span><span>Netflix Architecture &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,fill,stroke,rx){var r=el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,fill:fill,rx:''+(rx||8)});if(stroke)r.setAttribute('stroke',stroke);r.setAttribute('stroke-width','1.5');return r;}
+    function arrow(x1,y1,x2,y2,color,sw){
+      var g=el('g',{});
+      g.appendChild(el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':''+(sw||2)}));
+      var angle=Math.atan2(y2-y1,x2-x1);var hl=10;
+      var p1x=x2-hl*Math.cos(angle-0.4);var p1y=y2-hl*Math.sin(angle-0.4);
+      var p2x=x2-hl*Math.cos(angle+0.4);var p2y=y2-hl*Math.sin(angle+0.4);
+      g.appendChild(el('polygon',{points:x2+','+y2+' '+p1x+','+p1y+' '+p2x+','+p2y,fill:color}));
+      return g;
+    }
+    function dashedLine(x1,y1,x2,y2,color){return el('line',{x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'1.5','stroke-dasharray':'6,4'});}
+
+    /* ════════════════════════════════════════════════════════════════════
+       ANIMATION 1: Real-Time Aggregation Pipeline
+       ════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('pipeline-anim');
+      var info=document.getElementById('pipeline-info');
+      var out=document.getElementById('pipeline-output');
+
+      var steps=[
+        {desc:'A user clicks an ad. The ad server captures the click event with metadata (ad_id, user_id, timestamp, IP, device, country) and sends it to the ingestion layer.',
+         active:[],highlight:''},
+        {desc:'The click event arrives at Kafka. Using ad_id as the partition key, Kafka routes it to a specific partition — ensuring all clicks for the same ad land together for ordered processing.',
+         active:['kafka'],highlight:'kafka'},
+        {desc:'Flink consumes from Kafka. The Deduplication operator checks: has this (user_id, ad_id) pair been seen in the last 60 seconds? If so, the click is suppressed. If not, it passes through.',
+         active:['kafka','dedup'],highlight:'dedup'},
+        {desc:'The deduplicated click enters the Flink Window Aggregation operator. It\'s added to a 1-minute tumbling window keyed by ad_id. The window accumulator increments: total clicks, unique users, country/device breakdowns.',
+         active:['kafka','dedup','window'],highlight:'window'},
+        {desc:'When the 1-minute window closes (watermark passes window end), Flink emits the aggregated result: { ad_id: "ad-42837", window: "10:05-10:06", clicks: 1,247, uniques: 1,189 }.',
+         active:['kafka','dedup','window','emit'],highlight:'window'},
+        {desc:'The aggregated counts are written to ClickHouse via batch INSERT. The SummingMergeTree engine efficiently stores and merges these pre-aggregated rows.',
+         active:['kafka','dedup','window','store'],highlight:'store'},
+        {desc:'The Query Service reads from ClickHouse. A query like "clicks for ad X in last 5 minutes" scans just 5 rows from the 1-minute aggregate table — returning in ~5ms.',
+         active:['kafka','dedup','window','store','query'],highlight:'query'}
+      ];
+
+      function draw(stepIdx){
+        while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+        // Title
+        svg.appendChild(txt('Real-Time Aggregation Pipeline',{x:'410',y:'24','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+
+        var bw=110,bh=52,y0=70,gap=18;
+        // Box positions
+        var boxes=[
+          {id:'click', label:'Ad Click',     sublabel:'Event',       x:20,  y:y0, color:'#e3f2fd',border:'#2196f3'},
+          {id:'kafka', label:'Kafka',         sublabel:'Partitioned', x:20+bw+gap, y:y0, color:'#fff3e0',border:'#ff9800'},
+          {id:'dedup', label:'Dedup',         sublabel:'Flink State', x:20+2*(bw+gap), y:y0, color:'#fce4ec',border:'#e91e63'},
+          {id:'window',label:'Window Agg',    sublabel:'1-min Tumble',x:20+3*(bw+gap), y:y0, color:'#e8f5e9',border:'#4caf50'},
+          {id:'store', label:'ClickHouse',    sublabel:'Agg Store',   x:20+4*(bw+gap), y:y0, color:'#f3e5f5',border:'#9c27b0'},
+          {id:'query', label:'Query API',     sublabel:'Serving',     x:20+5*(bw+gap), y:y0, color:'#e0f7fa',border:'#00bcd4'}
+        ];
+
+        var activeSet={};
+        if(stepIdx>=0 && stepIdx<steps.length){
+          for(var a=0;a<steps[stepIdx].active.length;a++) activeSet[steps[stepIdx].active[a]]=true;
+        }
+        var hl=stepIdx>=0?steps[stepIdx].highlight:'';
+
+        // Draw arrows first (behind boxes)
+        for(var i=0;i<boxes.length-1;i++){
+          var fromX=boxes[i].x+bw;
+          var toX=boxes[i+1].x;
+          var cy=y0+bh/2;
+          var aColor=(activeSet[boxes[i+1].id])?boxes[i+1].border:'#ccc';
+          svg.appendChild(arrow(fromX+4,cy,toX-4,cy,aColor,2));
+        }
+
+        // Draw boxes
+        for(var i=0;i<boxes.length;i++){
+          var b=boxes[i];
+          var isActive=activeSet[b.id]||(i===0 && stepIdx>=0);
+          var isHL=(b.id===hl);
+          var opacity=isActive?'1':'0.35';
+          var g=el('g',{opacity:opacity});
+          var r=rect(b.x,b.y,bw,bh,b.color,isHL?b.border:'var(--line)',8);
+          if(isHL){r.setAttribute('stroke-width','3');r.setAttribute('filter','url(#glow)');}
+          g.appendChild(r);
+          g.appendChild(txt(b.label,{x:''+(b.x+bw/2),y:''+(b.y+22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'var(--ink)'}));
+          g.appendChild(txt(b.sublabel,{x:''+(b.x+bw/2),y:''+(b.y+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+          svg.appendChild(g);
+        }
+
+        // Detail section below
+        var detailY=y0+bh+30;
+
+        if(stepIdx===1){
+          // Show Kafka partitions
+          svg.appendChild(txt('Kafka Partitions (by ad_id)',{x:'410',y:''+(detailY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'#ff9800'}));
+          for(var p=0;p<6;p++){
+            var px=110+p*105;
+            svg.appendChild(rect(px,detailY+10,95,30,'#fff3e0','#ff9800',6));
+            svg.appendChild(txt('P'+p+(p<3?' (ad-42837)':''),{x:''+(px+47),y:''+(detailY+29),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'var(--ink)'}));
+          }
+          svg.appendChild(txt('ad_id hash % 256 → partition assignment',{x:'410',y:''+(detailY+58),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        if(stepIdx===2){
+          // Show dedup state
+          svg.appendChild(txt('Dedup State (keyed by user:ad)',{x:'410',y:''+(detailY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'#e91e63'}));
+          var dedupEntries=[
+            {key:'u-7a3b:ad-42837', ts:'10:05:12', status:'✓ NEW'},
+            {key:'u-7a3b:ad-42837', ts:'10:05:14', status:'✗ DUP (2s gap)'},
+            {key:'u-9f1c:ad-42837', ts:'10:05:15', status:'✓ NEW'},
+            {key:'u-7a3b:ad-42837', ts:'10:06:30', status:'✓ NEW (78s gap)'}
+          ];
+          for(var d=0;d<dedupEntries.length;d++){
+            var dy=detailY+14+d*20;
+            var dup=dedupEntries[d].status.indexOf('DUP')>=0;
+            svg.appendChild(rect(100,dy,620,18,dup?'#fce4ec':'#e8f5e9','transparent',4));
+            svg.appendChild(txt(dedupEntries[d].key,{x:'110',y:''+(dy+13),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+            svg.appendChild(txt(dedupEntries[d].ts,{x:'380',y:''+(dy+13),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)'}));
+            svg.appendChild(txt(dedupEntries[d].status,{x:'550',y:''+(dy+13),'text-anchor':'start','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'10',fill:dup?'#e91e63':'#4caf50'}));
+          }
+        }
+
+        if(stepIdx===3||stepIdx===4){
+          // Show window accumulator
+          svg.appendChild(txt('1-Minute Window: 10:05:00 → 10:06:00',{x:'410',y:''+(detailY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'#4caf50'}));
+          svg.appendChild(rect(140,detailY+10,540,70,'#e8f5e9','#4caf50',8));
+          svg.appendChild(txt('ad_id: ad-42837',{x:'160',y:''+(detailY+30),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+          svg.appendChild(txt('click_count: '+(stepIdx===4?'1,247':'1,246 → 1,247'),{x:'160',y:''+(detailY+46),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'11',fill:stepIdx===4?'#4caf50':'var(--ink)'}));
+          svg.appendChild(txt('unique_users: '+(stepIdx===4?'1,189':'1,188 → 1,189'),{x:'420',y:''+(detailY+46),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+          svg.appendChild(txt('countries: {US:634, UK:213, DE:178, ...}',{x:'160',y:''+(detailY+62),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)'}));
+          if(stepIdx===4){
+            svg.appendChild(txt('⏰ WINDOW CLOSED — emitting aggregate',{x:'410',y:''+(detailY+92),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:'#ff9800'}));
+          }
+        }
+
+        if(stepIdx===5){
+          // Show ClickHouse insert
+          svg.appendChild(txt('INSERT INTO ad_click_counts_1m',{x:'410',y:''+(detailY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'#9c27b0'}));
+          svg.appendChild(rect(100,detailY+10,620,55,'#f3e5f5','#9c27b0',8));
+          svg.appendChild(txt("(ad-42837, camp-001294, adv-000512, '10:05', '10:06',",{x:'120',y:''+(detailY+30),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(txt(" 1247, 1189, 'US', 'mobile')",{x:'120',y:''+(detailY+45),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(txt('SummingMergeTree auto-merges on (ad_id, window_start)',{x:'410',y:''+(detailY+75),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        if(stepIdx===6){
+          // Show query result
+          svg.appendChild(txt('GET /api/v1/clicks/ad/ad-42837?window=5m',{x:'410',y:''+(detailY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'#00bcd4'}));
+          svg.appendChild(rect(160,detailY+10,500,55,'#e0f7fa','#00bcd4',8));
+          svg.appendChild(txt('{ "total_clicks": 6,182, "unique_users": 5,847,',{x:'180',y:''+(detailY+30),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(txt('  "window": "5m",  "latency_ms": 4.7 }',{x:'180',y:''+(detailY+45),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(txt('Scanned 5 rows from 1-min aggregate table → 4.7ms',{x:'410',y:''+(detailY+75),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        // Step counter bar
+        var barY=330;
+        svg.appendChild(rect(20,barY,780,30,'#f5f5f5','var(--line)',6));
+        if(stepIdx>=0){
+          var pct=((stepIdx+1)/steps.length)*780;
+          svg.appendChild(rect(20,barY,pct,30,'#e8f5e9','#4caf50',6));
+        }
+        svg.appendChild(txt(stepIdx>=0?('Step '+(stepIdx+1)+' of '+steps.length):'Click Step to begin',{x:'410',y:''+(barY+19),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'11',fill:'var(--ink)'}));
+      }
+
+      function drawInit(){draw(-1);info.textContent='Click "Step" to trace a click event through the entire real-time aggregation pipeline.';out.textContent='';}
+      drawInit();
+      var step=0;
+      document.getElementById('pipeline-step').addEventListener('click',function(){
+        if(step>=steps.length)return;
+        draw(step);
+        info.textContent=steps[step].desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length;
+        step++;
+      });
+      document.getElementById('pipeline-reset').addEventListener('click',function(){step=0;drawInit();});
+    })();
+
+    /* ════════════════════════════════════════════════════════════════════
+       ANIMATION 2: Lambda Architecture
+       ════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('lambda-anim');
+      var info=document.getElementById('lambda-info');
+      var out=document.getElementById('lambda-output');
+
+      var steps=[
+        {desc:'Raw click data flows in continuously from Kafka. It\'s simultaneously written to the data lake (S3/HDFS as Parquet files) and consumed by the Speed Layer (Flink) for real-time processing.',
+         phase:'ingest'},
+        {desc:'Speed Layer (Flink): Processes clicks in real-time with ~5 second latency. Produces approximate counts — fast but may have small inaccuracies due to late arrivals or edge cases in dedup.',
+         phase:'speed'},
+        {desc:'The Speed Layer result is available immediately: ad-42837 had 1,247 clicks in window 10:05-10:06. This is an approximate count (actual may differ by ±0.5%).',
+         phase:'speed-result'},
+        {desc:'Batch Layer (Spark): Every hour, reprocesses the raw data from the data lake with perfect deduplication. It takes longer (minutes) but produces exact counts.',
+         phase:'batch'},
+        {desc:'Batch Layer completes: ad-42837 actually had 1,243 clicks in window 10:05-10:06. The speed layer over-counted by 4 clicks (0.3% error) due to a late dedup race condition.',
+         phase:'batch-result'},
+        {desc:'Serving Layer merges both: For recent data (< 2 hours), serve speed layer. For older data, replace with batch results. The batch layer "corrects" the speed layer over time.',
+         phase:'serving'},
+        {desc:'A query arrives: "clicks for ad-42837, last 3 hours." Serving layer returns batch results for hours 1-2 (exact) and speed layer results for the most recent hour (approximate). Best of both worlds!',
+         phase:'query'}
+      ];
+
+      function draw(stepIdx){
+        while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+        var phase=stepIdx>=0?steps[stepIdx].phase:'';
+
+        // Title
+        svg.appendChild(txt('Lambda Architecture: Speed + Batch + Serving',{x:'410',y:'24','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+
+        // ── Raw data source ──
+        var srcX=30,srcY=95,srcW=120,srcH=50;
+        var srcActive=stepIdx>=0;
+        var g0=el('g',{opacity:srcActive?'1':'0.35'});
+        g0.appendChild(rect(srcX,srcY,srcW,srcH,'#e3f2fd','#2196f3',8));
+        g0.appendChild(txt('Kafka',{x:''+(srcX+srcW/2),y:''+(srcY+22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+        g0.appendChild(txt('Raw Clicks',{x:''+(srcX+srcW/2),y:''+(srcY+38),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        svg.appendChild(g0);
+
+        // ── Data Lake ──
+        var dlX=200,dlY=175,dlW=120,dlH=45;
+        var dlActive=stepIdx>=0;
+        var gDL=el('g',{opacity:dlActive?'1':'0.4'});
+        gDL.appendChild(rect(dlX,dlY,dlW,dlH,'#f5f5f5','var(--line)',8));
+        gDL.appendChild(txt('Data Lake',{x:''+(dlX+dlW/2),y:''+(dlY+18),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'11',fill:'var(--ink)'}));
+        gDL.appendChild(txt('S3 / HDFS',{x:''+(dlX+dlW/2),y:''+(dlY+33),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:'var(--ink-muted)'}));
+        svg.appendChild(gDL);
+
+        // Arrow: Kafka → Data Lake
+        if(srcActive) svg.appendChild(arrow(srcX+srcW,srcY+srcH/2+15,dlX,dlY+dlH/2,'#90a4ae',1.5));
+
+        // ── Speed Layer ──
+        var spX=230,spY=55,spW=160,spH=55;
+        var spActive=phase==='speed'||phase==='speed-result'||phase==='serving'||phase==='query';
+        var spHL=phase==='speed'||phase==='speed-result';
+        var gSp=el('g',{opacity:spActive||stepIdx>=1?'1':'0.3'});
+        gSp.appendChild(rect(spX,spY,spW,spH,spHL?'#fff3e0':'#fff8e1',spHL?'#ff9800':'#ffb74d',8));
+        if(spHL)gSp.firstChild.setAttribute('stroke-width','2.5');
+        gSp.appendChild(txt('Speed Layer',{x:''+(spX+spW/2),y:''+(spY+20),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#e65100'}));
+        gSp.appendChild(txt('Flink • Real-Time • ~5s',{x:''+(spX+spW/2),y:''+(spY+36),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        if(phase==='speed-result'||phase==='serving'||phase==='query'){
+          gSp.appendChild(txt('≈ 1,247 clicks',{x:''+(spX+spW/2),y:''+(spY+49),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:'#ff9800'}));
+        }
+        svg.appendChild(gSp);
+
+        // Arrow: Kafka → Speed Layer
+        if(stepIdx>=0) svg.appendChild(arrow(srcX+srcW,srcY+srcH/2-10,spX,spY+spH/2,'#ff9800',spHL?2.5:1.5));
+
+        // ── Batch Layer ──
+        var btX=230,btY=245,btW=160,btH=55;
+        var btActive=phase==='batch'||phase==='batch-result'||phase==='serving'||phase==='query';
+        var btHL=phase==='batch'||phase==='batch-result';
+        var gBt=el('g',{opacity:btActive||stepIdx>=3?'1':'0.3'});
+        gBt.appendChild(rect(btX,btY,btW,btH,btHL?'#e8f5e9':'#f1f8e9',btHL?'#4caf50':'#81c784',8));
+        if(btHL)gBt.firstChild.setAttribute('stroke-width','2.5');
+        gBt.appendChild(txt('Batch Layer',{x:''+(btX+btW/2),y:''+(btY+20),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#1b5e20'}));
+        gBt.appendChild(txt('Spark • Hourly • Exact',{x:''+(btX+btW/2),y:''+(btY+36),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        if(phase==='batch-result'||phase==='serving'||phase==='query'){
+          gBt.appendChild(txt('= 1,243 clicks',{x:''+(btX+btW/2),y:''+(btY+49),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:'#4caf50'}));
+        }
+        svg.appendChild(gBt);
+
+        // Arrow: Data Lake → Batch Layer
+        if(stepIdx>=3) svg.appendChild(arrow(dlX+dlW/2,dlY+dlH,btX+btW/2-30,btY,btHL?'#4caf50':'#90a4ae',1.5));
+
+        // ── Serving Layer ──
+        var svX=500,svY=135,svW=160,svH=80;
+        var svActive=phase==='serving'||phase==='query';
+        var svHL=phase==='serving'||phase==='query';
+        var gSv=el('g',{opacity:svActive||stepIdx>=5?'1':'0.3'});
+        gSv.appendChild(rect(svX,svY,svW,svH,svHL?'#e8eaf6':'#f5f5f5',svHL?'#5c6bc0':'#9fa8da',8));
+        if(svHL)gSv.firstChild.setAttribute('stroke-width','2.5');
+        gSv.appendChild(txt('Serving Layer',{x:''+(svX+svW/2),y:''+(svY+20),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#283593'}));
+        gSv.appendChild(txt('Merges Both Views',{x:''+(svX+svW/2),y:''+(svY+36),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        if(phase==='serving'||phase==='query'){
+          gSv.appendChild(txt('Recent: Speed Layer',{x:''+(svX+svW/2),y:''+(svY+52),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#ff9800'}));
+          gSv.appendChild(txt('Older: Batch Layer',{x:''+(svX+svW/2),y:''+(svY+66),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#4caf50'}));
+        }
+        svg.appendChild(gSv);
+
+        // Arrow: Speed Layer → Serving
+        if(stepIdx>=2) svg.appendChild(arrow(spX+spW,spY+spH/2,svX,svY+20,(phase==='serving'||phase==='query')?'#ff9800':'#ddd',1.5));
+        // Arrow: Batch Layer → Serving
+        if(stepIdx>=4) svg.appendChild(arrow(btX+btW,btY+btH/2,svX,svY+svH-20,(phase==='serving'||phase==='query')?'#4caf50':'#ddd',1.5));
+
+        // ── Query result (rightmost) ──
+        if(phase==='query'){
+          var qX=700,qY=155;
+          svg.appendChild(arrow(svX+svW,svY+svH/2,qX-5,qY+15,'#5c6bc0',2));
+          svg.appendChild(rect(qX,qY,105,40,'#e8eaf6','#5c6bc0',8));
+          svg.appendChild(txt('Query',{x:''+(qX+52),y:''+(qY+17),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:'#283593'}));
+          svg.appendChild(txt('Result',{x:''+(qX+52),y:''+(qY+31),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        // ── Correction visualization ──
+        if(phase==='batch-result'||phase==='serving'||phase==='query'){
+          var corrY=330;
+          svg.appendChild(txt('Batch Correction',{x:'410',y:''+(corrY),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'600','font-size':'12',fill:'var(--ink)'}));
+
+          // Speed bar
+          var barLeft=150,barW=520,barTop=corrY+10;
+          svg.appendChild(rect(barLeft,barTop,barW,22,'#fff3e0','#ff9800',4));
+          svg.appendChild(txt('Speed: ≈ 1,247 clicks (approximate)',{x:''+(barLeft+barW/2),y:''+(barTop+15),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#e65100'}));
+
+          // Batch bar (slightly shorter to show correction)
+          var batchW=barW*1243/1247;
+          svg.appendChild(rect(barLeft,barTop+28,batchW,22,'#e8f5e9','#4caf50',4));
+          svg.appendChild(txt('Batch: = 1,243 clicks (exact)',{x:''+(barLeft+batchW/2),y:''+(barTop+43),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#1b5e20'}));
+
+          // Discrepancy marker
+          svg.appendChild(rect(barLeft+batchW,barTop+28,barW-batchW,22,'#ffcdd2','#e53935',4));
+          svg.appendChild(txt('Δ4',{x:''+(barLeft+batchW+(barW-batchW)/2),y:''+(barTop+43),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:'#c62828'}));
+          svg.appendChild(txt('0.3% over-count corrected by batch layer',{x:'410',y:''+(barTop+68),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        // Progress bar
+        var barY=390;
+        svg.appendChild(rect(20,barY,780,22,'#f5f5f5','var(--line)',6));
+        if(stepIdx>=0){
+          var pct=((stepIdx+1)/steps.length)*780;
+          svg.appendChild(rect(20,barY,pct,22,'#e8eaf6','#5c6bc0',6));
+        }
+        svg.appendChild(txt(stepIdx>=0?('Step '+(stepIdx+1)+' of '+steps.length):'Click Step to begin',{x:'410',y:''+(barY+15),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'600','font-size':'11',fill:'var(--ink)'}));
+      }
+
+      function drawInit(){draw(-1);info.textContent='Click "Step" to see how the Lambda architecture combines real-time speed with batch accuracy.';out.textContent='';}
+      drawInit();
+      var step=0;
+      document.getElementById('lambda-step').addEventListener('click',function(){
+        if(step>=steps.length)return;
+        draw(step);
+        info.textContent=steps[step].desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length;
+        step++;
+      });
+      document.getElementById('lambda-reset').addEventListener('click',function(){step=0;drawInit();});
+    })();
+
+  })();
+  </script>
+</body>
+</html>

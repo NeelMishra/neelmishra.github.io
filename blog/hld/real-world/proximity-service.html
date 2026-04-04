@@ -1,0 +1,1380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design: Proximity Service (Yelp) — geohash encoding, quadtree spatial indexing, Haversine distance, PostGIS, Redis GEOSEARCH, and scalable architecture for finding nearby businesses.">
+  <title>Design: Proximity Service (Yelp) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs &middot; Part 6</a><span>&middot; Post 54 of 70</span></div>
+
+      <h1>Design: Proximity Service (Yelp)</h1>
+      <p class="post-meta">April 2026 &middot; 26 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           1. PROBLEM STATEMENT
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="problem">The Problem</h2>
+      <p>You open Yelp, Google Maps, or Uber Eats and search for "pizza near me." Within milliseconds, you get a ranked list of nearby pizza restaurants sorted by distance, rating, and relevance. Behind this seemingly simple query lies one of the most interesting problems in system design: <strong>spatial proximity search</strong>.</p>
+
+      <p>The challenge isn't just finding things that are close — it's doing so across <strong>hundreds of millions of businesses</strong> with sub-100ms latency while supporting complex filters (open now, 4+ stars, $$$ price range) and handling millions of concurrent queries.</p>
+
+      <div class="callout">
+        <strong>Why is this hard?</strong> Traditional database indexes work on one-dimensional data (sort by price, filter by name). But proximity is inherently <em>two-dimensional</em> — you need to efficiently find all points within a radius on a 2D plane (or more precisely, on a sphere). A B-tree index on latitude won't help with longitude, and vice versa.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           2. REQUIREMENTS
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3 id="functional-req">Functional Requirements</h3>
+      <ul>
+        <li><strong>Search nearby businesses</strong> — given a user's latitude/longitude and a search radius (e.g., 1 km, 5 km, 25 km), return all businesses within that radius</li>
+        <li><strong>Filter results</strong> — by category (restaurant, gas station, hotel), rating, price range, open/closed status</li>
+        <li><strong>Sort results</strong> — by distance, rating, popularity, or a weighted combination</li>
+        <li><strong>Business CRUD</strong> — business owners can add, update, or remove their listings (name, address, hours, photos, etc.)</li>
+        <li><strong>View business details</strong> — users can click on a business to see full details, reviews, photos, menu</li>
+      </ul>
+
+      <h3 id="non-functional-req">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Scale</strong> — 200 million businesses worldwide, 500 million daily active users</li>
+        <li><strong>Latency</strong> — search results within 200ms (p99), business detail page within 100ms</li>
+        <li><strong>Availability</strong> — 99.99% uptime; users must always be able to search</li>
+        <li><strong>Read-heavy</strong> — search:write ratio is roughly 1000:1 (millions of searches per second vs. thousands of business updates per day)</li>
+        <li><strong>Eventual consistency OK</strong> — if a business updates its hours, it's acceptable for the change to propagate in minutes, not milliseconds</li>
+      </ul>
+
+      <h3 id="back-of-envelope">Back-of-Envelope Estimates</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Estimate</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Total businesses</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">200 million</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Daily active users</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">500 million</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Search QPS (avg)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~5,000 per second (500M × 5 searches/day ÷ 86,400)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Peak search QPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~25,000 per second (5× average)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Business data size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~2 KB per business × 200M = ~400 GB</td></tr>
+          <tr><td style="padding:0.5em;">Geospatial index size</td><td style="padding:0.5em;">~20 bytes per entry × 200M = ~4 GB (fits in memory!)</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The geospatial index (just coordinates + business ID) is only ~4 GB. This easily fits in memory on a single server. The challenge isn't raw data size — it's query throughput (25K QPS) and the need for low-latency spatial queries across a two-dimensional space.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           3. HIGH-LEVEL ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system naturally splits into two mostly independent services:</p>
+
+      <pre><code>┌─────────────────────────────────────────────────────────────────────┐
+│                         CLIENTS                                     │
+│       (Mobile App, Web App, Third-Party API Consumers)              │
+└──────────┬─────────────────────────────────┬────────────────────────┘
+           │ GET /search?lat=X&lng=Y&r=5km   │ POST/PUT /businesses
+           ▼                                 ▼
+┌─────────────────────┐          ┌──────────────────────┐
+│   Location-Based    │          │     Business         │
+│   Search Service    │          │     Service          │
+│   (read-heavy)      │          │     (write path)     │
+└────────┬────────────┘          └────────┬─────────────┘
+         │                                │
+         │ ┌──────────────┐               │
+         ├─▶  Geo Index   │               │
+         │ │ (Redis /     │               │
+         │ │  Geohash)    │◄──────────────┤ update index
+         │ └──────────────┘               │ on write
+         │                                │
+         │ ┌──────────────┐    ┌──────────▼──────────┐
+         └─▶  Cache       │    │  Business Database   │
+           │ (Redis)      │◄───│  (PostgreSQL)        │
+           └──────────────┘    └─────────────────────┘</code></pre>
+
+      <ol>
+        <li><strong>Location-Based Search (LBS) Service</strong> — handles all proximity queries. Stateless, horizontally scalable. Reads from the geospatial index and cache. No writes.</li>
+        <li><strong>Business Service</strong> — handles all CRUD operations for business data. Writes to the primary database and updates the geospatial index asynchronously.</li>
+        <li><strong>Geospatial Index</strong> — the core data structure that enables fast spatial queries. Can be Redis with <code>GEOADD</code>/<code>GEOSEARCH</code>, PostGIS, or an in-memory quadtree.</li>
+        <li><strong>Business Database</strong> — stores all business metadata (name, address, hours, photos, reviews). PostgreSQL with read replicas.</li>
+        <li><strong>Cache Layer</strong> — caches business details and popular search results. Business data changes infrequently, so high cache hit rates are achievable.</li>
+      </ol>
+
+      <h3 id="api-design">API Design</h3>
+      <pre><code>// Search nearby businesses
+GET /api/v1/search/nearby
+  ?latitude=37.7749
+  &longitude=-122.4194
+  &radius=5000          // meters
+  &category=restaurant  // optional filter
+  &sort_by=distance     // distance | rating | popularity
+  &limit=20
+  &offset=0
+
+Response:
+{
+  "total": 142,
+  "businesses": [
+    {
+      "id": "biz_8x7k2m",
+      "name": "Joe's Pizza",
+      "latitude": 37.7751,
+      "longitude": -122.4183,
+      "distance_meters": 105,
+      "rating": 4.5,
+      "category": "restaurant",
+      "price_range": "$$",
+      "is_open": true,
+      "thumbnail_url": "https://cdn.example.com/..."
+    },
+    ...
+  ]
+}
+
+// Get business details
+GET /api/v1/businesses/{business_id}
+
+// Create / update business
+POST /api/v1/businesses
+PUT  /api/v1/businesses/{business_id}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           4. GEOSPATIAL INDEXING APPROACHES
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="geospatial-indexing">Geospatial Indexing Approaches</h2>
+      <p>The central challenge: given a point (lat, lng) and a radius, how do you efficiently find all businesses within that circle? Let's examine the four major approaches.</p>
+
+      <h3 id="naive-approach">The Naive Approach (Why It Fails)</h3>
+      <p>The simplest idea is to scan every business and compute its distance from the query point:</p>
+      <pre><code>SELECT id, name, latitude, longitude,
+       haversine(query_lat, query_lng, latitude, longitude) AS dist
+FROM businesses
+WHERE haversine(query_lat, query_lng, latitude, longitude) &lt; 5000
+ORDER BY dist
+LIMIT 20;</code></pre>
+      <p>With 200 million rows, this full-table scan takes <strong>minutes</strong>, not milliseconds. We can add a bounding-box filter:</p>
+      <pre><code>-- Bounding box pre-filter (uses B-tree indexes on lat/lng)
+WHERE latitude  BETWEEN 37.73 AND 37.82
+  AND longitude BETWEEN -122.46 AND -122.38</code></pre>
+      <p>This helps but still requires scanning all businesses within the bounding box and computing exact distances. For dense urban areas, that box might contain thousands of businesses. We need a <em>spatial index</em>.</p>
+
+      <h3 id="geohash-overview">Approach 1: Geohash</h3>
+      <p>A geohash is a clever encoding that converts a 2D coordinate (latitude, longitude) into a <strong>1D string</strong>. This lets you use ordinary B-tree indexes for spatial queries.</p>
+
+      <p><strong>The core idea:</strong> recursively divide the Earth's surface into a grid. At each step, divide the current cell in half — first by longitude (left/right → 0/1), then by latitude (bottom/top → 0/1). Each bit narrows the cell. After enough bits, you have a small cell that precisely locates a point.</p>
+
+      <p>The resulting binary string is encoded in <strong>base32</strong> (characters: <code>0123456789bcdefghjkmnpqrstuvwxyz</code> — note the missing <code>a, i, l, o</code> to avoid confusion).</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Geohash Length</th><th style="text-align:left; padding:0.5em;">Cell Width</th><th style="text-align:left; padding:0.5em;">Cell Height</th><th style="text-align:left; padding:0.5em;">Use Case</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">1</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">5,000 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">5,000 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Continent-scale</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">2</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1,250 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">625 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Country</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">3</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">156 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">156 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Large region</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">4</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">39.1 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">19.5 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">City / metro area</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">5</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4.9 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4.9 km</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Neighborhood</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>6</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>1.2 km</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>0.61 km</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Walking distance (most common)</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">7</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">153 m</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">153 m</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Street block</td></tr>
+          <tr><td style="padding:0.5em;">8</td><td style="padding:0.5em;">38.2 m</td><td style="padding:0.5em;">19.1 m</td><td style="padding:0.5em;">Building-level</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="quadtree-overview">Approach 2: Quadtree</h3>
+      <p>A quadtree is an in-memory tree data structure that recursively subdivides a 2D space into four quadrants. Unlike geohash (which uses a fixed grid), a quadtree is <strong>adaptive</strong> — dense areas get more subdivisions, sparse areas stay as large cells.</p>
+
+      <pre><code>// Quadtree node
+class QuadTreeNode {
+    Boundary bounds;           // {x, y, width, height}
+    int MAX_CAPACITY = 100;    // max businesses per leaf
+    List&lt;Business&gt; businesses; // only in leaf nodes
+    QuadTreeNode NW, NE, SW, SE; // children (null for leaves)
+
+    void insert(Business b) {
+        if (!bounds.contains(b.location)) return;
+
+        if (isLeaf() && businesses.size() &lt; MAX_CAPACITY) {
+            businesses.add(b);
+        } else {
+            if (isLeaf()) subdivide(); // split into 4 children
+            NW.insert(b); NE.insert(b);
+            SW.insert(b); SE.insert(b);
+        }
+    }
+
+    List&lt;Business&gt; searchRadius(Point center, double radius) {
+        List&lt;Business&gt; results = new ArrayList&lt;&gt;();
+        if (!bounds.intersectsCircle(center, radius)) return results;
+
+        if (isLeaf()) {
+            for (Business b : businesses)
+                if (distance(center, b.location) &lt;= radius)
+                    results.add(b);
+        } else {
+            results.addAll(NW.searchRadius(center, radius));
+            results.addAll(NE.searchRadius(center, radius));
+            results.addAll(SW.searchRadius(center, radius));
+            results.addAll(SE.searchRadius(center, radius));
+        }
+        return results;
+    }
+}</code></pre>
+
+      <p><strong>Advantages:</strong> Adaptive granularity (Manhattan gets tiny cells, Sahara gets huge ones), efficient range queries, easy to visualize. <strong>Disadvantages:</strong> Must live in memory (can't use database indexes), harder to distribute across multiple servers, updates require tree rebalancing.</p>
+
+      <h3 id="rtree-overview">Approach 3: R-tree</h3>
+      <p>R-trees are the spatial equivalent of B-trees. They group nearby objects into <strong>minimum bounding rectangles (MBRs)</strong> at each level of the tree. Used internally by PostGIS and most spatial databases.</p>
+      <ul>
+        <li>Each internal node contains MBRs of its children</li>
+        <li>A search for "all points within radius R of point P" starts at the root, prunes branches whose MBR doesn't intersect the query circle, and recurses into matching branches</li>
+        <li>Balanced tree — all leaves at the same depth → O(log N) search</li>
+        <li>Supports efficient inserts and deletes (unlike quadtree, which may need restructuring)</li>
+      </ul>
+
+      <h3 id="s2-overview">Approach 4: Google S2 Geometry</h3>
+      <p>S2 is Google's approach. Instead of projecting the sphere onto a flat grid (which distorts areas near the poles), S2:</p>
+      <ol>
+        <li><strong>Projects the sphere onto a cube</strong> — 6 faces, minimal distortion</li>
+        <li><strong>Maps each cube face to a unit square</strong> using a non-linear transform</li>
+        <li><strong>Fills each face with a Hilbert curve</strong> — a space-filling curve that maps 2D points to 1D values while preserving locality (nearby 2D points → nearby 1D values)</li>
+        <li>Each point on Earth gets a <strong>64-bit S2 cell ID</strong></li>
+      </ol>
+
+      <p>S2 cells at level 30 are ~1 cm². At level 12, they're ~3.3 km² (comparable to geohash length 5). The Hilbert curve ordering means a range scan on S2 cell IDs efficiently retrieves spatially nearby points.</p>
+
+      <div class="callout">
+        <strong>Comparison summary:</strong> Geohash is simplest (works with any database), Quadtree is best for in-memory adaptive indexing, R-tree is what PostGIS uses under the hood, and S2 is used by Google services for its superior handling of polar regions and uniform cell sizes. For most proximity services, <strong>geohash + Redis</strong> or <strong>PostGIS (R-tree)</strong> is the pragmatic choice.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           5. GEOHASH DEEP DIVE
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="geohash-deep-dive">Geohash Deep Dive</h2>
+
+      <h3 id="encoding-algorithm">The Encoding Algorithm</h3>
+      <p>Let's encode the coordinates of the Statue of Liberty: <strong>(40.6892, -74.0445)</strong></p>
+
+      <pre><code>// Step 1: Interleave longitude and latitude bits
+// Longitude range: [-180, 180], Latitude range: [-90, 90]
+// Odd bit positions → longitude, Even bit positions → latitude
+
+function encodeGeohash(lat, lng, precision) {
+    const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+    let latRange = [-90, 90];
+    let lngRange = [-180, 180];
+    let hash = '';
+    let bits = 0;
+    let currentBit = 0;
+    let isLng = true;  // start with longitude
+
+    while (hash.length &lt; precision) {
+        if (isLng) {
+            let mid = (lngRange[0] + lngRange[1]) / 2;
+            if (lng >= mid) {
+                currentBit = currentBit * 2 + 1; // bit = 1
+                lngRange[0] = mid;
+            } else {
+                currentBit = currentBit * 2;     // bit = 0
+                lngRange[1] = mid;
+            }
+        } else {
+            let mid = (latRange[0] + latRange[1]) / 2;
+            if (lat >= mid) {
+                currentBit = currentBit * 2 + 1;
+                latRange[0] = mid;
+            } else {
+                currentBit = currentBit * 2;
+                latRange[1] = mid;
+            }
+        }
+
+        isLng = !isLng;
+        bits++;
+
+        if (bits === 5) {
+            hash += BASE32[currentBit];
+            bits = 0;
+            currentBit = 0;
+        }
+    }
+    return hash;
+}
+
+// encodeGeohash(40.6892, -74.0445, 9) → "dr5r7p4rx"</code></pre>
+
+      <p>Let's trace through the first few bits for <strong>longitude = -74.0445</strong>:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Step</th><th style="text-align:left; padding:0.5em;">Range</th><th style="text-align:left; padding:0.5em;">Mid</th><th style="text-align:left; padding:0.5em;">-74.0445 vs Mid</th><th style="text-align:left; padding:0.5em;">Bit</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">1</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">[-180, 180]</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">0</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">-74 &lt; 0 → left half</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>0</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">2</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">[-180, 0]</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">-90</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">-74 ≥ -90 → right half</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>1</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">3</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">[-90, 0]</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">-45</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">-74 &lt; -45 → left half</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>0</strong></td></tr>
+          <tr><td style="padding:0.5em;">4</td><td style="padding:0.5em;">[-90, -45]</td><td style="padding:0.5em;">-67.5</td><td style="padding:0.5em;">-74 &lt; -67.5 → left half</td><td style="padding:0.5em;"><strong>0</strong></td></tr>
+        </tbody>
+      </table>
+
+      <p>The interleaved bit stream (lng, lat, lng, lat, ...) is grouped into 5-bit chunks and mapped to base32 characters. Each character adds 5 bits of precision.</p>
+
+      <h3 id="boundary-problem">The Boundary Problem</h3>
+      <p>Geohash has a critical edge case: <strong>two locations that are physically close can have completely different geohash prefixes</strong> if they fall on opposite sides of a cell boundary.</p>
+
+      <pre><code>// These two cafés are 50 meters apart, but their geohashes
+// share NO common prefix at length 6:
+Café A: (40.7128, -74.0060) → geohash "dr5reg..."
+Café B: (40.7130, -74.0062) → geohash "dr5rew..."
+
+// Even worse — at the boundary of geohash cells:
+Point 1: geohash "9q8yyk"  (San Francisco)
+Point 2: geohash "9q8yys"  (100m away, but different cell)</code></pre>
+
+      <p>If you only search within the user's own geohash cell, you'll miss nearby businesses in adjacent cells.</p>
+
+      <h3 id="nine-cell-solution">The Solution: Search 9 Cells</h3>
+      <p>The standard solution is to search the user's cell <strong>plus all 8 neighboring cells</strong>:</p>
+
+      <pre><code>┌──────────┬──────────┬──────────┐
+│ NW       │ N        │ NE       │
+│ 9q8yyh   │ 9q8yyk   │ 9q8yym   │
+├──────────┼──────────┼──────────┤
+│ W        │ ★ USER   │ E        │
+│ 9q8yy5   │ 9q8yy7   │ 9q8yys   │
+├──────────┼──────────┼──────────┤
+│ SW       │ S        │ SE       │
+│ 9q8yy4   │ 9q8yy6   │ 9q8yy1   │
+└──────────┴──────────┴──────────┘
+
+Query: SELECT * FROM businesses
+       WHERE geohash IN ('9q8yy7','9q8yyh','9q8yyk','9q8yym',
+                          '9q8yy5','9q8yys','9q8yy4','9q8yy6','9q8yy1')</code></pre>
+
+      <p>Computing neighbors is O(1) — you simply increment/decrement the geohash string using a lookup table. This guarantees that any point within the cell's width/height of the user will be included in the search.</p>
+
+      <!-- Geohash Animation -->
+      <div class="anim-container" id="geohash-anim">
+        <h4>&#9654; Geohash Grid: Proximity Search</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how a proximity search works: compute the user's geohash, find the cell + 8 neighbors, filter by radius.</p>
+        <svg id="geohash-svg" width="700" height="480" viewBox="0 0 700 480"></svg>
+        <div id="geohash-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="geohash-step">Step &rarr;</button>
+          <button class="anim-btn" id="geohash-reset">Reset</button>
+          <span class="anim-output" id="geohash-output"></span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           6. TWO-STEP SEARCH
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="two-step-search">The Two-Step Search Algorithm</h2>
+      <p>Proximity search always follows two steps:</p>
+
+      <h3 id="step1-candidates">Step 1: Find Candidate Businesses (Coarse Filter)</h3>
+      <p>Use the geospatial index to quickly retrieve a <strong>superset</strong> of possible results. This is fast but imprecise — it returns all businesses in a square region (the 9 geohash cells), not a circular radius.</p>
+
+      <pre><code>function findCandidates(userLat, userLng, radiusMeters) {
+    // Choose geohash precision based on radius
+    let precision = radiusToGeohashPrecision(radiusMeters);
+    // Precision 6 (~1.2 km cells) for radius 1-5 km
+    // Precision 5 (~5 km cells) for radius 5-25 km
+    // Precision 4 (~40 km cells) for radius 25+ km
+
+    let userGeohash = encodeGeohash(userLat, userLng, precision);
+    let neighbors = getNeighbors(userGeohash); // 8 adjacent cells
+    let cells = [userGeohash, ...neighbors];   // 9 cells total
+
+    // Query all businesses in these 9 cells
+    return db.query(
+        `SELECT * FROM businesses WHERE geohash_${precision}
+         IN (${cells.map(c => `'${c}'`).join(',')})`
+    );
+}</code></pre>
+
+      <h3 id="step2-filter">Step 2: Filter by Exact Distance (Fine Filter)</h3>
+      <p>For each candidate, compute the <strong>exact</strong> great-circle distance using the Haversine formula and filter out any business beyond the radius.</p>
+
+      <h3 id="haversine">The Haversine Formula</h3>
+      <p>The Haversine formula computes the great-circle distance between two points on a sphere. It accounts for Earth's curvature, unlike simple Euclidean distance.</p>
+
+      <pre><code>// The Haversine Formula
+// Given two points (φ₁, λ₁) and (φ₂, λ₂) in radians:
+//
+//   a = sin²(Δφ/2) + cos(φ₁) · cos(φ₂) · sin²(Δλ/2)
+//   c = 2 · atan2(√a, √(1−a))
+//   d = R · c
+//
+// where R = 6,371 km (Earth's mean radius)
+
+function haversine(lat1, lng1, lat2, lng2) {
+    const R = 6371000; // Earth's radius in meters
+    const toRad = deg => deg * Math.PI / 180;
+
+    const φ1 = toRad(lat1), φ2 = toRad(lat2);
+    const Δφ = toRad(lat2 - lat1);
+    const Δλ = toRad(lng2 - lng1);
+
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ/2) * Math.sin(Δλ/2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+    return R * c; // distance in meters
+}
+
+// haversine(40.6892, -74.0445, 40.7484, -73.9857) = 6,970 m
+// (Statue of Liberty to Empire State Building)</code></pre>
+
+      <div class="callout">
+        <strong>Why not Euclidean distance?</strong> At the equator, 1° of longitude ≈ 111 km. But at latitude 60°, 1° of longitude ≈ 55.5 km (cells shrink as you approach the poles). Euclidean distance using raw lat/lng would overestimate east-west distances at high latitudes. The Haversine formula handles this correctly.
+      </div>
+
+      <h3 id="full-search-flow">Complete Search Flow</h3>
+      <pre><code>function searchNearby(userLat, userLng, radiusMeters, filters) {
+    // Step 1: Coarse filter — get candidates from geohash cells
+    let candidates = findCandidates(userLat, userLng, radiusMeters);
+
+    // Step 2: Fine filter — exact distance check
+    let results = candidates
+        .map(biz => ({
+            ...biz,
+            distance: haversine(userLat, userLng, biz.lat, biz.lng)
+        }))
+        .filter(biz => biz.distance &lt;= radiusMeters);
+
+    // Step 3: Apply business filters
+    if (filters.category)
+        results = results.filter(b => b.category === filters.category);
+    if (filters.minRating)
+        results = results.filter(b => b.rating >= filters.minRating);
+    if (filters.openNow)
+        results = results.filter(b => isOpen(b, Date.now()));
+
+    // Step 4: Sort
+    if (filters.sortBy === 'distance')
+        results.sort((a, b) => a.distance - b.distance);
+    else if (filters.sortBy === 'rating')
+        results.sort((a, b) => b.rating - a.rating);
+
+    return results.slice(0, filters.limit || 20);
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           7. DATABASE DESIGN
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="database">Database Design</h2>
+
+      <h3 id="business-schema">Business Metadata — PostgreSQL</h3>
+      <pre><code>CREATE TABLE businesses (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            VARCHAR(255) NOT NULL,
+    description     TEXT,
+    latitude        DECIMAL(10, 7) NOT NULL,
+    longitude       DECIMAL(10, 7) NOT NULL,
+    address         TEXT NOT NULL,
+    city            VARCHAR(100),
+    state           VARCHAR(50),
+    country         VARCHAR(50),
+    zip_code        VARCHAR(20),
+    category        VARCHAR(50) NOT NULL,
+    price_range     SMALLINT CHECK (price_range BETWEEN 1 AND 4),
+    phone           VARCHAR(20),
+    website         VARCHAR(255),
+    rating          DECIMAL(2,1) DEFAULT 0.0,
+    review_count    INTEGER DEFAULT 0,
+    photo_urls      TEXT[],            -- PostgreSQL array
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Precomputed geohash columns for different precisions
+    geohash_4       CHAR(4) NOT NULL,  -- ~40 km cells
+    geohash_5       CHAR(5) NOT NULL,  -- ~5 km cells
+    geohash_6       CHAR(6) NOT NULL   -- ~1.2 km cells
+);
+
+CREATE TABLE business_hours (
+    business_id     UUID REFERENCES businesses(id),
+    day_of_week     SMALLINT NOT NULL, -- 0=Mon, 6=Sun
+    open_time       TIME,
+    close_time      TIME,
+    is_closed       BOOLEAN DEFAULT false,
+    PRIMARY KEY (business_id, day_of_week)
+);
+
+-- Indexes for search
+CREATE INDEX idx_geohash_4 ON businesses(geohash_4);
+CREATE INDEX idx_geohash_5 ON businesses(geohash_5);
+CREATE INDEX idx_geohash_6 ON businesses(geohash_6);
+CREATE INDEX idx_category   ON businesses(category);
+CREATE INDEX idx_lat_lng    ON businesses(latitude, longitude);</code></pre>
+
+      <h3 id="postgis">PostGIS — Native Spatial Queries</h3>
+      <p>If you're already using PostgreSQL, <strong>PostGIS</strong> is the most powerful option. It adds native geometry types and spatial indexes (R-tree via GiST).</p>
+
+      <pre><code>-- Enable PostGIS extension
+CREATE EXTENSION postgis;
+
+-- Add a geography column (uses sphere math automatically)
+ALTER TABLE businesses ADD COLUMN location GEOGRAPHY(POINT, 4326);
+
+-- Populate from existing lat/lng
+UPDATE businesses SET location = ST_SetSRID(
+    ST_MakePoint(longitude, latitude), 4326
+)::geography;
+
+-- Create spatial index (GiST = R-tree under the hood)
+CREATE INDEX idx_location_gist ON businesses USING GIST(location);
+
+-- Search for businesses within 5 km of a point
+SELECT id, name, rating,
+       ST_Distance(location, ST_SetSRID(
+           ST_MakePoint(-122.4194, 37.7749), 4326
+       )::geography) AS distance_meters
+FROM businesses
+WHERE ST_DWithin(
+    location,
+    ST_SetSRID(ST_MakePoint(-122.4194, 37.7749), 4326)::geography,
+    5000  -- 5000 meters = 5 km
+)
+AND category = 'restaurant'
+AND rating >= 4.0
+ORDER BY distance_meters
+LIMIT 20;
+
+-- This uses the spatial index for the DWithin filter,
+-- then computes exact distance for sorting.
+-- Typical query time: 5-20ms for millions of rows!</code></pre>
+
+      <div class="callout">
+        <strong>ST_DWithin vs ST_Distance:</strong> <code>ST_DWithin(geom, geom, distance)</code> is an index-accelerated predicate — it uses the R-tree to quickly eliminate far-away points. <code>ST_Distance</code> computes exact distance but cannot use the index. Always use <code>ST_DWithin</code> in the <code>WHERE</code> clause and <code>ST_Distance</code> only for <code>ORDER BY</code>.
+      </div>
+
+      <h3 id="redis-geo">Redis — In-Memory Geospatial Index</h3>
+      <p>Redis has built-in geospatial commands that use geohash internally. For a read-heavy proximity service, this is often the best choice due to its sub-millisecond latency.</p>
+
+      <pre><code>-- Add businesses to the geospatial index
+-- GEOADD key longitude latitude member
+GEOADD businesses:geo -122.4194 37.7749 "biz_001"
+GEOADD businesses:geo -122.4089 37.7837 "biz_002"
+GEOADD businesses:geo -122.4000 37.7900 "biz_003"
+
+-- Bulk add (more efficient)
+GEOADD businesses:geo
+    -122.4194 37.7749 "biz_001"
+    -122.4089 37.7837 "biz_002"
+    -122.4000 37.7900 "biz_003"
+
+-- Search within 5 km radius (Redis 6.2+)
+GEOSEARCH businesses:geo
+    FROMLONLAT -122.4194 37.7749
+    BYRADIUS 5 km
+    ASC                   -- sort by distance
+    COUNT 20              -- limit results
+    WITHCOORD             -- include coordinates
+    WITHDIST              -- include distance
+
+-- Result:
+-- 1) "biz_001", "0.0000", "-122.4194", "37.7749"
+-- 2) "biz_002", "1.2345", "-122.4089", "37.7837"
+-- 3) "biz_003", "2.3456", "-122.4000", "37.7900"
+
+-- Get the geohash of a member
+GEOHASH businesses:geo "biz_001"
+-- → "9q8yyk0h0"
+
+-- Get the position of a member
+GEOPOS businesses:geo "biz_001"
+-- → "-122.4194" "37.7749"
+
+-- Distance between two businesses
+GEODIST businesses:geo "biz_001" "biz_002" km
+-- → "1.2345"</code></pre>
+
+      <p><strong>How Redis implements this under the hood:</strong> Each <code>GEOADD</code> computes a 52-bit geohash of the coordinates and stores it as the score in a sorted set (ZSET). <code>GEOSEARCH</code> computes the geohash of the query point, determines which geohash ranges cover the search area (the 9-cell approach), performs range scans on the sorted set, and applies exact distance filtering. All in ~0.1ms.</p>
+
+      <pre><code># Application code: combine Redis geo with business data
+import redis
+
+r = redis.Redis()
+
+def search_nearby(lat, lng, radius_km, category=None, limit=20):
+    # Step 1: Get candidate business IDs from Redis
+    results = r.geosearch(
+        'businesses:geo',
+        longitude=lng, latitude=lat,
+        radius=radius_km, unit='km',
+        sort='ASC', count=limit * 3,  # over-fetch for filtering
+        withcoord=True, withdist=True
+    )
+
+    # Step 2: Fetch full business details from cache/DB
+    biz_ids = [r['member'] for r in results]
+    businesses = get_businesses_batch(biz_ids)  # Redis hash or DB
+
+    # Step 3: Apply filters
+    if category:
+        businesses = [b for b in businesses if b['category'] == category]
+
+    # Step 4: Merge distance info and return
+    distance_map = {r['member']: r['dist'] for r in results}
+    for b in businesses:
+        b['distance_km'] = distance_map.get(b['id'], 0)
+
+    return businesses[:limit]</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           8. QUADTREE DEEP DIVE + ANIMATION
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="quadtree-deep-dive">Quadtree Deep Dive</h2>
+      <p>Let's trace through how a quadtree builds itself and performs a proximity search. Unlike geohash (which uses fixed-size cells), the quadtree adapts to data density.</p>
+
+      <h3 id="quadtree-building">Building the Quadtree</h3>
+      <pre><code>// Build a quadtree from 200M businesses:
+// 1. Start with a single node covering entire world
+//    bounds = {lat: [-90, 90], lng: [-180, 180]}
+//    businesses = all 200M
+//
+// 2. 200M > MAX_CAPACITY (100) → SPLIT into 4 quadrants:
+//    NW: lat [0, 90],  lng [-180, 0]    — 45M businesses
+//    NE: lat [0, 90],  lng [0, 180]     — 55M businesses
+//    SW: lat [-90, 0], lng [-180, 0]    — 40M businesses
+//    SE: lat [-90, 0], lng [0, 180]     — 60M businesses
+//
+// 3. Each quadrant still has > 100 → SPLIT recursively
+//    ...until each leaf node has ≤ 100 businesses
+//
+// For 200M businesses with MAX_CAPACITY=100:
+//   Tree depth ≈ log₄(200M / 100) ≈ 10-12 levels
+//   Total leaf nodes ≈ 200M / 100 = 2M nodes
+//   Memory ≈ 2M nodes × ~100 bytes = ~200 MB</code></pre>
+
+      <h3 id="quadtree-search">Searching the Quadtree</h3>
+      <pre><code>// Search: "Find all businesses within 2 km of (37.77, -122.42)"
+// The search circle intersects only a few quadtree cells:
+//
+// Level 0: Root covers world → circle intersects? YES → recurse
+// Level 1: NW quadrant covers N. America → intersects? YES → recurse
+// Level 2: Sub-quadrant covers California → intersects? YES → recurse
+// ...
+// Level 10: Leaf covering 2 blocks of SF → intersects? YES
+//           → check all 87 businesses in this leaf
+//           → compute exact distance for each
+//           → 12 are within 2 km radius
+//
+// Total nodes visited: ~40 (out of 2M)
+// Total distance computations: ~200 (out of 200M)
+// Time complexity: O(log N + k) where k = result set size</code></pre>
+
+      <!-- Quadtree Animation -->
+      <div class="anim-container" id="quadtree-anim">
+        <h4>&#9654; Quadtree: Spatial Subdivision &amp; Search</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch a quadtree recursively split dense regions, then search for businesses near a query point.</p>
+        <svg id="quadtree-svg" width="700" height="520" viewBox="0 0 700 520"></svg>
+        <div id="quadtree-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="quadtree-step">Step &rarr;</button>
+          <button class="anim-btn" id="quadtree-reset">Reset</button>
+          <span class="anim-output" id="quadtree-output"></span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           9. CACHING STRATEGY
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="caching">Caching Strategy</h2>
+      <p>Business data is <strong>read-heavy and rarely changes</strong>. A restaurant's name, address, and hours might update a few times per year. This makes aggressive caching highly effective.</p>
+
+      <h3 id="cache-layers">Cache Layers</h3>
+      <pre><code>┌───────────────────────────────────────────────────────────────┐
+│                       CACHE ARCHITECTURE                       │
+├───────────────────────────────────────────────────────────────┤
+│                                                               │
+│  Layer 1: CDN / Edge Cache                                    │
+│  ├── Static assets (photos, logos)                            │
+│  └── Popular search results (geohash-based cache keys)        │
+│      Key: "search:9q8yy:restaurant:5km"                       │
+│      TTL: 5 minutes (stale-while-revalidate)                  │
+│                                                               │
+│  Layer 2: Application Cache (Redis)                           │
+│  ├── Business details: "biz:{id}" → full JSON                 │
+│  │   TTL: 1 hour                                              │
+│  ├── Geohash cell contents: "cell:{geohash}" → [biz_ids]     │
+│  │   TTL: 30 minutes                                          │
+│  └── Popular search results                                   │
+│      TTL: 5 minutes                                           │
+│                                                               │
+│  Layer 3: Database Read Replicas                              │
+│  ├── 5-10 PostgreSQL replicas for read queries                │
+│  └── PostGIS indexes on each replica                          │
+│                                                               │
+│  Layer 4: Primary Database                                    │
+│  └── Single-leader PostgreSQL (writes only)                   │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘</code></pre>
+
+      <h3 id="cache-keys">Cache Key Design</h3>
+      <pre><code># Business detail cache
+key:  "biz:biz_8x7k2m"
+value: {"id":"biz_8x7k2m","name":"Joe's Pizza","rating":4.5,...}
+ttl:  3600  # 1 hour
+
+# Geohash cell cache — all business IDs in a geohash cell
+key:  "geo:cell:9q8yyk"
+value: ["biz_001","biz_002","biz_003",...]
+ttl:  1800  # 30 min
+
+# Search result cache — full response for common queries
+key:  "search:9q8yyk:restaurant:5km:rating"
+value: [{"id":"biz_001","name":"Joe's Pizza","distance":105,...},...]
+ttl:  300   # 5 min (search results change more often due to open/close)</code></pre>
+
+      <h3 id="cache-invalidation">Cache Invalidation</h3>
+      <pre><code>// When a business is updated:
+function onBusinessUpdate(business) {
+    // 1. Invalidate business detail cache
+    cache.delete(`biz:${business.id}`);
+
+    // 2. If location changed, update geospatial index
+    if (business.locationChanged) {
+        redis.zrem('businesses:geo', business.id);
+        redis.geoadd('businesses:geo',
+            business.longitude, business.latitude, business.id);
+
+        // Invalidate old and new geohash cell caches
+        cache.delete(`geo:cell:${business.oldGeohash6}`);
+        cache.delete(`geo:cell:${business.newGeohash6}`);
+    }
+
+    // 3. Invalidate search caches for affected cells
+    // (Use a pattern-based deletion or let TTL expire)
+    let affectedCells = [business.geohash6, ...getNeighbors(business.geohash6)];
+    affectedCells.forEach(cell => {
+        cache.deletePattern(`search:${cell}:*`);
+    });
+}</code></pre>
+
+      <div class="callout">
+        <strong>Write-behind pattern:</strong> Since business updates are rare (search:write = 1000:1), we can afford eventual consistency. When a business owner updates their hours, the change goes to the primary DB immediately, but cache invalidation propagates over the next few minutes. Users might see stale hours for a short window — perfectly acceptable.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           10. SCALING
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="scaling">Scaling the System</h2>
+
+      <h3 id="read-scaling">Read Path Scaling</h3>
+      <p>The search service is <strong>stateless</strong> and read-only, making it trivially horizontally scalable:</p>
+
+      <pre><code>┌──────────────────┐
+│  Load Balancer   │
+│  (Layer 7)       │
+└────┬───┬───┬─────┘
+     │   │   │
+┌────▼┐┌─▼──┐┌▼────┐
+│LBS-1││LBS-2││LBS-N│  ← N stateless search servers
+└──┬──┘└──┬──┘└──┬──┘
+   │      │      │
+   ▼      ▼      ▼
+┌──────────────────┐     ┌──────────────────┐
+│  Redis Cluster   │     │  DB Read Replicas│
+│  (Geo Index +    │     │  (PostgreSQL)    │
+│   Cache)         │     │  5-10 replicas   │
+└──────────────────┘     └──────────────────┘</code></pre>
+
+      <ul>
+        <li><strong>LBS servers</strong> — add more instances behind the load balancer; zero state to manage</li>
+        <li><strong>Redis Cluster</strong> — shard the geo index by region (US-West, US-East, Europe, Asia). Each shard handles queries for its geographic area</li>
+        <li><strong>DB replicas</strong> — add more read replicas to handle business detail queries that miss the cache</li>
+      </ul>
+
+      <h3 id="geo-sharding">Geographic Sharding</h3>
+      <pre><code>// Shard the geo index by geographic region
+// Each shard covers a set of geohash prefixes
+
+Shard 1 (US-West):    geohash prefixes 9q*, 9r*, 9w*, 9x*
+Shard 2 (US-East):    geohash prefixes dr*, dq*, dp*
+Shard 3 (Europe):     geohash prefixes u0*-u9*, gc*, gf*
+Shard 4 (Asia):       geohash prefixes w*, x*, y*
+
+// Routing: compute 2-char geohash prefix from query point,
+// look up which shard handles that prefix
+function routeToShard(lat, lng) {
+    let prefix = encodeGeohash(lat, lng, 2);
+    return shardMap[prefix]; // O(1) lookup
+}</code></pre>
+
+      <h3 id="write-scaling">Write Path Scaling</h3>
+      <p>Business updates are infrequent (~1,000 writes/sec vs. 25,000 reads/sec), so the write path is simpler:</p>
+
+      <pre><code>Business Update Flow:
+1. Business Service validates and writes to primary PostgreSQL
+2. PostgreSQL replicates to read replicas (async, &lt; 1 sec)
+3. Business Service publishes event to message queue (Kafka)
+4. Geo Index Updater consumes event, updates Redis GEOADD
+5. Cache Invalidator consumes event, deletes stale cache entries
+
+┌─────────┐     ┌──────────┐     ┌─────────┐
+│ Business │────▶│ Primary  │────▶│ Read    │
+│ Service  │     │ DB       │     │ Replicas│
+└────┬─────┘     └──────────┘     └─────────┘
+     │
+     │ publish event
+     ▼
+┌─────────────┐
+│   Kafka     │
+└──┬──────┬───┘
+   │      │
+   ▼      ▼
+┌──────┐ ┌──────────┐
+│ Geo  │ │ Cache    │
+│ Index│ │Invalidate│
+│Update│ │ r        │
+└──────┘ └──────────┘</code></pre>
+
+      <h3 id="multi-region">Multi-Region Deployment</h3>
+      <pre><code>// Deploy in multiple regions for low latency worldwide
+// Each region has a full copy of the geo index for its area
+
+Region: US-West (Oregon)
+├── LBS servers × 20
+├── Redis Cluster (Americas data)
+├── PostgreSQL replicas × 5
+└── CDN edge cache
+
+Region: Europe (Frankfurt)
+├── LBS servers × 15
+├── Redis Cluster (Europe + Africa data)
+├── PostgreSQL replicas × 5
+└── CDN edge cache
+
+Region: Asia (Singapore)
+├── LBS servers × 15
+├── Redis Cluster (Asia-Pacific data)
+├── PostgreSQL replicas × 5
+└── CDN edge cache
+
+// Cross-region sync for the business database:
+// Single primary DB in US-West (writes)
+// Async replication to Europe and Asia (read replicas)
+// Replication lag: 50-200ms (acceptable for business updates)</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           11. ADVANCED TOPICS
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="advanced">Advanced Topics</h2>
+
+      <h3 id="dynamic-radius">Dynamic Radius Adjustment</h3>
+      <p>What if the user searches within 1 km but only 2 results are found? Automatically expand:</p>
+      <pre><code>function searchWithMinResults(lat, lng, initialRadius, minResults) {
+    let radius = initialRadius;
+    let maxRadius = initialRadius * 10;
+    let results;
+
+    while (radius &lt;= maxRadius) {
+        results = searchNearby(lat, lng, radius);
+        if (results.length >= minResults) break;
+        radius *= 2;  // double the radius each time
+    }
+
+    return results;
+}</code></pre>
+
+      <h3 id="ranking">Ranking Algorithm</h3>
+      <p>Real proximity services don't just sort by distance. They use a weighted score:</p>
+      <pre><code>function rankingScore(business, userLat, userLng) {
+    const dist = haversine(userLat, userLng, business.lat, business.lng);
+    const maxDist = 10000; // 10 km normalization factor
+
+    // Distance score: 1.0 (very close) → 0.0 (at max distance)
+    const distScore = Math.max(0, 1 - dist / maxDist);
+
+    // Rating score: normalized 0-1
+    const ratingScore = business.rating / 5.0;
+
+    // Popularity score: log scale of review count
+    const popScore = Math.min(1, Math.log10(business.reviewCount + 1) / 4);
+
+    // Recency boost: recently updated businesses get a bump
+    const daysSinceUpdate = (Date.now() - business.updatedAt) / 86400000;
+    const recencyBoost = daysSinceUpdate &lt; 30 ? 0.1 : 0;
+
+    // Weighted combination
+    return 0.4 * distScore +
+           0.3 * ratingScore +
+           0.2 * popScore +
+           0.1 * recencyBoost;
+}</code></pre>
+
+      <h3 id="geofencing">Geofencing with Geohash</h3>
+      <p>Geohash is also useful for geofencing — triggering actions when users enter/leave geographic areas:</p>
+      <pre><code>// Check if user entered a promotion zone
+function checkGeofence(userLat, userLng, fenceGeohash, fencePrecision) {
+    let userGeohash = encodeGeohash(userLat, userLng, fencePrecision);
+    if (userGeohash === fenceGeohash) {
+        triggerNotification("You're near Joe's Pizza! 20% off today.");
+    }
+}
+
+// Real-time geofencing with Redis pub/sub:
+// When user location updates, compute geohash
+// If geohash changed → publish to "location_updates" channel
+// Geofence service subscribes and checks against active fences</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           12. PUTTING IT ALL TOGETHER
+           ═══════════════════════════════════════════════════════════════ -->
+      <h2 id="summary">Putting It All Together</h2>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Component</th><th style="text-align:left; padding:0.5em;">Technology</th><th style="text-align:left; padding:0.5em;">Why</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Geospatial index</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redis GEOADD + GEOSEARCH</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Sub-ms latency, built-in geohash, sorted set efficiency</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Business metadata</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">PostgreSQL + PostGIS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">ACID for writes, ST_DWithin for fallback search</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cache</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Redis (separate from geo)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Business details, search results</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Event streaming</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Kafka</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Async propagation of business updates</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Search service</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Stateless Go/Java microservice</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Horizontally scalable, no session state</td></tr>
+          <tr><td style="padding:0.5em;">CDN</td><td style="padding:0.5em;">CloudFront / Fastly</td><td style="padding:0.5em;">Edge cache for photos and popular results</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="trade-offs">Key Trade-offs</h3>
+      <ul>
+        <li><strong>Geohash vs. Quadtree</strong> — Geohash works with any database (just a string index). Quadtree is more space-efficient for non-uniform distributions but requires in-memory management. Most production systems use geohash (or the database's built-in spatial index).</li>
+        <li><strong>Redis vs. PostGIS</strong> — Redis is faster (0.1ms vs. 5ms) but requires maintaining a separate data store. PostGIS is simpler (single database) but slower under extreme load. Use Redis for the hot path, PostGIS as a fallback.</li>
+        <li><strong>Fixed grid vs. adaptive</strong> — Geohash cells are fixed size, so Manhattan and the Sahara get the same cell resolution. Quadtree/S2 adapt to density. In practice, choosing the right geohash precision per query radius works well enough.</li>
+        <li><strong>Consistency vs. availability</strong> — We choose availability (AP in CAP). A 5-minute stale business listing is acceptable. Users searching should always get results, even if slightly outdated.</li>
+      </ul>
+
+      <h3 id="interview-checklist">Interview Checklist</h3>
+      <ol>
+        <li><strong>Clarify requirements</strong> — radius range, number of businesses, read/write ratio</li>
+        <li><strong>Choose spatial index</strong> — geohash (simple, DB-friendly) or quadtree (adaptive, in-memory)</li>
+        <li><strong>Explain the two-step search</strong> — coarse filter (spatial index) → fine filter (Haversine)</li>
+        <li><strong>Show the boundary problem</strong> — and the 9-cell solution</li>
+        <li><strong>Database schema</strong> — precomputed geohash columns, PostGIS as alternative</li>
+        <li><strong>Caching strategy</strong> — business data rarely changes → aggressive TTLs</li>
+        <li><strong>Scaling</strong> — stateless search service, Redis geo sharding, multi-region deployment</li>
+      </ol>
+
+      <nav class="post-nav">
+        <a class="prev" href="news-feed.html"><span>Previous</span><span>&#8592; Design: News Feed</span></a>
+        <a class="next" href="nearby-friends.html"><span>Next</span><span>Design: Nearby Friends &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ============================================================
+       ANIMATION 1 — Geohash Grid: Proximity Search
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('geohash-svg'),
+          info=document.getElementById('geohash-info'),
+          out=document.getElementById('geohash-output');
+
+      // 5×5 grid representing geohash cells
+      var COLS=5, ROWS=5, CW=90, CH=70, PAD=30, TOP=50;
+      var GRID_W=COLS*CW, GRID_H=ROWS*CH;
+
+      // Geohash labels for each cell (row-major, top to bottom)
+      var labels=[
+        '9q8yz','9q8yz','9q9p0','9q9p1','9q9p4',
+        '9q8yw','9q8yx','9q8yy','9q8yz','9q9p0',
+        '9q8yt','9q8yu','9q8yv','9q8yw','9q8yx',
+        '9q8ys','9q8yt','9q8yu','9q8yv','9q8yw',
+        '9q8ye','9q8ys','9q8yt','9q8yu','9q8yv'
+      ];
+
+      // User is in cell (2,2) = center
+      var USER_COL=2, USER_ROW=2;
+      var USER_X=PAD+USER_COL*CW+CW/2, USER_Y=TOP+USER_ROW*CH+CH/2;
+
+      // Businesses: {col, row, offsetX, offsetY, name, inRadius}
+      var businesses=[
+        {col:1,row:1,ox:20,oy:15,name:'Café Luna',inRadius:true},
+        {col:2,row:1,ox:40,oy:20,name:"Joe's Pizza",inRadius:true},
+        {col:3,row:1,ox:15,oy:40,name:'Sushi Place',inRadius:true},
+        {col:1,row:2,ox:60,oy:30,name:'Gas Station',inRadius:true},
+        {col:2,row:2,ox:20,oy:20,name:'Book Store',inRadius:true},
+        {col:3,row:2,ox:50,oy:50,name:'Gym',inRadius:true},
+        {col:1,row:3,ox:30,oy:20,name:'Pharmacy',inRadius:true},
+        {col:2,row:3,ox:45,oy:35,name:'Bar & Grill',inRadius:true},
+        {col:3,row:3,ox:25,oy:15,name:'Laundry',inRadius:false},
+        {col:0,row:0,ox:40,oy:30,name:'Airport',inRadius:false},
+        {col:4,row:4,ox:30,oy:40,name:'Farm',inRadius:false},
+        {col:0,row:2,ox:20,oy:50,name:'Park',inRadius:false},
+        {col:4,row:2,ox:50,oy:20,name:'Mall',inRadius:false},
+        {col:2,row:0,ox:35,oy:45,name:'Hotel',inRadius:false},
+        {col:2,row:4,ox:30,oy:25,name:'School',inRadius:false}
+      ];
+
+      // Radius in pixels (covers roughly 1.5 cells from center)
+      var RADIUS_PX=CW*1.4;
+
+      // Steps
+      var steps=[
+        {label:'Show map with businesses',
+         desc:'A 5×5 grid of geohash cells. Each cell represents a ~1 km² region. Businesses are plotted at their locations.'},
+        {label:'Compute user geohash',
+         desc:'User at (37.775, -122.419) → encode to geohash → "9q8yv". This identifies the cell the user is in.'},
+        {label:'Find 8 neighbor cells',
+         desc:'The boundary problem: nearby businesses may be in adjacent cells. Solution: also search the 8 neighboring cells (highlighted in blue).'},
+        {label:'Retrieve all businesses in 9 cells',
+         desc:'Query: SELECT * FROM businesses WHERE geohash IN (9 cells). Found 9 candidate businesses in the highlighted cells.'},
+        {label:'Draw search radius circle',
+         desc:'The 9-cell area is a square superset. Now apply the Haversine formula to filter by exact circular radius (the green circle).'},
+        {label:'Filter by exact distance',
+         desc:'Compute haversine(user, business) for each candidate. Keep only those within 1.5 km radius. "Laundry" is outside → removed. 8 results remain.'},
+        {label:'Return sorted results',
+         desc:'Sort remaining businesses by distance ascending. Return top N results: Book Store (50m), Joe\'s Pizza (120m), Café Luna (180m), ...'}
+      ];
+
+      function drawGrid(highlightCenter, highlightNeighbors, showRadius, showCandidates, showFiltered, showSorted){
+        clearSvg(svg);
+        // Title
+        svg.appendChild(txt('Geohash Grid — Proximity Search',{x:''+(PAD+GRID_W/2),y:'28','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'15',fill:'var(--ink)'}));
+
+        // Draw grid cells
+        for(var r=0;r<ROWS;r++){
+          for(var c=0;c<COLS;c++){
+            var x=PAD+c*CW, y=TOP+r*CH;
+            var isCenter=c===USER_COL&&r===USER_ROW;
+            var isNeighbor=highlightNeighbors&&Math.abs(c-USER_COL)<=1&&Math.abs(r-USER_ROW)<=1&&!isCenter;
+
+            var fill='#fffdf9';
+            if(highlightCenter&&isCenter) fill='#0a8f6a22';
+            if(isNeighbor) fill='#2196f318';
+
+            svg.appendChild(el('rect',{x:''+x,y:''+y,width:''+CW,height:''+CH,
+              fill:fill,stroke:isCenter&&highlightCenter?'#0a8f6a':isNeighbor?'#2196f3':'var(--line)',
+              'stroke-width':isCenter&&highlightCenter?'2.5':isNeighbor?'2':'1'}));
+
+            // Cell label
+            var lbl=labels[r*COLS+c];
+            svg.appendChild(txt(lbl,{x:''+(x+5),y:''+(y+13),'font-family':'Consolas,monospace','font-size':'8',fill:'var(--ink-muted)',opacity:'0.7'}));
+          }
+        }
+
+        // Draw businesses
+        for(var i=0;i<businesses.length;i++){
+          var b=businesses[i];
+          var bx=PAD+b.col*CW+b.ox, by=TOP+b.row*CH+b.oy;
+          var dist=Math.sqrt(Math.pow(bx-USER_X,2)+Math.pow(by-USER_Y,2));
+          var withinRadius=dist<=RADIUS_PX;
+          var inNineCell=Math.abs(b.col-USER_COL)<=1&&Math.abs(b.row-USER_ROW)<=1;
+
+          var dotFill='#aaa';
+          var dotR='4';
+          var showLabel=false;
+
+          if(showSorted&&withinRadius&&inNineCell){
+            dotFill='#0a8f6a';dotR='6';showLabel=true;
+          } else if(showFiltered){
+            if(inNineCell&&withinRadius){dotFill='#0a8f6a';dotR='6';showLabel=true;}
+            else if(inNineCell&&!withinRadius){dotFill='#e74c3c';dotR='5';showLabel=true;}
+            else {dotFill='#ccc';dotR='3';}
+          } else if(showCandidates&&inNineCell){
+            dotFill='#f59e0b';dotR='5';showLabel=true;
+          } else if(!showCandidates&&!showFiltered&&!showSorted){
+            dotFill='#666';dotR='4';showLabel=false;
+          }
+
+          svg.appendChild(el('circle',{cx:''+bx,cy:''+by,r:dotR,fill:dotFill}));
+          if(showLabel){
+            svg.appendChild(txt(b.name,{x:''+(bx+8),y:''+(by+3),'font-family':'Manrope,sans-serif','font-size':'9',fill:'var(--ink)','font-weight':'600'}));
+          }
+        }
+
+        // Draw user
+        svg.appendChild(el('circle',{cx:''+USER_X,cy:''+USER_Y,r:'8',fill:'#ff6b35',stroke:'#fff','stroke-width':'2'}));
+        svg.appendChild(txt('★',{x:''+USER_X,y:''+(USER_Y+4),'text-anchor':'middle','font-size':'10',fill:'#fff'}));
+
+        // Draw radius circle
+        if(showRadius){
+          svg.appendChild(el('circle',{cx:''+USER_X,cy:''+USER_Y,r:''+RADIUS_PX,
+            fill:'none',stroke:'#0a8f6a','stroke-width':'2','stroke-dasharray':'6,4',opacity:'0.8'}));
+          svg.appendChild(txt('r = 1.5 km',{x:''+(USER_X+RADIUS_PX-35),y:''+(USER_Y-RADIUS_PX+15),
+            'font-family':'Consolas,monospace','font-size':'10',fill:'#0a8f6a','font-weight':'700'}));
+        }
+
+        // Legend
+        var ly=TOP+ROWS*CH+20;
+        if(showSorted){
+          svg.appendChild(el('circle',{cx:''+(PAD+10),cy:''+ly,r:'5',fill:'#ff6b35'}));
+          svg.appendChild(txt('User',{x:''+(PAD+20),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('circle',{cx:''+(PAD+80),cy:''+ly,r:'5',fill:'#0a8f6a'}));
+          svg.appendChild(txt('Within radius (sorted)',{x:''+(PAD+90),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+        } else if(showFiltered){
+          svg.appendChild(el('circle',{cx:''+(PAD+10),cy:''+ly,r:'5',fill:'#0a8f6a'}));
+          svg.appendChild(txt('Within radius',{x:''+(PAD+20),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('circle',{cx:''+(PAD+130),cy:''+ly,r:'5',fill:'#e74c3c'}));
+          svg.appendChild(txt('Outside radius (removed)',{x:''+(PAD+140),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+        }
+      }
+
+      function drawInit(){
+        drawGrid(false,false,false,false,false,false);
+        info.textContent='';out.textContent='Click "Step" to walk through the proximity search algorithm.';
+      }
+
+      drawInit();
+      var step=0;
+
+      document.getElementById('geohash-step').addEventListener('click',function(){
+        if(step>=steps.length) return;
+        var s=steps[step];
+        switch(step){
+          case 0: drawGrid(false,false,false,false,false,false); break;
+          case 1: drawGrid(true,false,false,false,false,false); break;
+          case 2: drawGrid(true,true,false,false,false,false); break;
+          case 3: drawGrid(true,true,false,true,false,false); break;
+          case 4: drawGrid(true,true,true,true,false,false); break;
+          case 5: drawGrid(true,true,true,false,true,false); break;
+          case 6: drawGrid(true,true,true,false,false,true); break;
+        }
+        info.textContent=s.desc;
+        out.textContent='Step '+(step+1)+' of '+steps.length+': '+s.label;
+        step++;
+      });
+
+      document.getElementById('geohash-reset').addEventListener('click',function(){
+        step=0;drawInit();
+      });
+    })();
+
+
+    /* ============================================================
+       ANIMATION 2 — Quadtree: Spatial Subdivision & Search
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('quadtree-svg'),
+          info=document.getElementById('quadtree-info'),
+          out=document.getElementById('quadtree-output');
+
+      var SZ=400, PAD=30, TOP=50;
+      // Random-ish but deterministic business locations (x, y in 0-1 space)
+      // Cluster most in the top-right for interesting splits
+      var allBiz=[
+        // Dense cluster (top-right area, ~20 businesses)
+        {x:.72,y:.18},{x:.78,y:.22},{x:.65,y:.15},{x:.80,y:.28},{x:.70,y:.25},
+        {x:.75,y:.12},{x:.68,y:.20},{x:.82,y:.18},{x:.73,y:.30},{x:.77,y:.15},
+        {x:.69,y:.27},{x:.81,y:.24},{x:.74,y:.10},{x:.76,y:.32},{x:.83,y:.20},
+        {x:.71,y:.14},{x:.79,y:.26},{x:.67,y:.22},{x:.85,y:.16},{x:.66,y:.30},
+        // Sparse elsewhere
+        {x:.2,y:.3},{x:.35,y:.6},{x:.15,y:.75},{x:.4,y:.45},{x:.1,y:.2},
+        {x:.5,y:.7},{x:.3,y:.85},{x:.45,y:.35},{x:.25,y:.55},{x:.12,y:.9},
+        {x:.55,y:.5},{x:.6,y:.8},{x:.38,y:.15},{x:.88,y:.65},{x:.92,y:.85},
+        {x:.58,y:.42},{x:.42,y:.92},{x:.33,y:.7},{x:.9,y:.5},{x:.48,y:.1}
+      ];
+
+      // Query point
+      var QX=0.73, QY=0.20;
+      var Q_RADIUS=0.12; // search radius in normalized coords
+      var MAX_CAP=6; // max businesses per leaf for this demo
+
+      // Quadtree structure: {x,y,w,h, children:[], businesses:[]}
+      function makeNode(x,y,w,h){return {x:x,y:y,w:w,h:h,children:null,businesses:[]};}
+
+      function insertAll(node, pts){
+        for(var i=0;i<pts.length;i++){
+          var p=pts[i];
+          if(p.x>=node.x&&p.x<node.x+node.w&&p.y>=node.y&&p.y<node.y+node.h){
+            node.businesses.push(p);
+          }
+        }
+      }
+
+      function shouldSplit(node){return node.businesses.length>MAX_CAP;}
+
+      function splitNode(node){
+        var hw=node.w/2, hh=node.h/2;
+        node.children=[
+          makeNode(node.x,    node.y,    hw,hh), // NW
+          makeNode(node.x+hw, node.y,    hw,hh), // NE
+          makeNode(node.x,    node.y+hh, hw,hh), // SW
+          makeNode(node.x+hw, node.y+hh, hw,hh)  // SE
+        ];
+        for(var i=0;i<node.businesses.length;i++){
+          var p=node.businesses[i];
+          for(var c=0;c<4;c++){
+            var ch=node.children[c];
+            if(p.x>=ch.x&&p.x<ch.x+ch.w&&p.y>=ch.y&&p.y<ch.y+ch.h){
+              ch.businesses.push(p);break;
+            }
+          }
+        }
+        node.businesses=[];
+      }
+
+      // Build progressive split states
+      function buildStates(){
+        var root=makeNode(0,0,1,1);
+        insertAll(root,allBiz);
+        var states=[{desc:'Start: single node containing all '+allBiz.length+' businesses. Max capacity per cell = '+MAX_CAP+'.',tree:JSON.parse(JSON.stringify(root))}];
+
+        // BFS split
+        var queue=[root];
+        var splitCount=0;
+        while(queue.length>0&&splitCount<8){
+          var n=queue.shift();
+          if(!n.children&&shouldSplit(n)){
+            splitNode(n);
+            splitCount++;
+            states.push({desc:'Split cell ['+n.x.toFixed(2)+','+n.y.toFixed(2)+' '+n.w.toFixed(2)+'×'+n.h.toFixed(2)+'] → had '+0+' businesses (>'+MAX_CAP+'). Now 4 quadrants.',tree:JSON.parse(JSON.stringify(root))});
+            for(var c=0;c<4;c++) queue.push(n.children[c]);
+          } else if(n.children){
+            for(var c2=0;c2<4;c2++) queue.push(n.children[c2]);
+          }
+        }
+        // Continue splitting until done
+        queue=[root];
+        while(queue.length>0){
+          var n2=queue.shift();
+          if(!n2.children&&shouldSplit(n2)){
+            splitNode(n2);
+            for(var c3=0;c3<4;c3++) queue.push(n2.children[c3]);
+          } else if(n2.children){
+            for(var c4=0;c4<4;c4++) queue.push(n2.children[c4]);
+          }
+        }
+        states.push({desc:'Quadtree fully built. Dense regions (top-right cluster) have smaller cells; sparse regions have large cells. This is the adaptive advantage.',tree:JSON.parse(JSON.stringify(root))});
+
+        // Search steps
+        states.push({desc:'Search: find businesses within radius of query point (orange ★). Traverse tree, prune branches whose bounds don\'t intersect the search circle.',tree:JSON.parse(JSON.stringify(root)),showSearch:true});
+        states.push({desc:'Result: only leaf cells intersecting the circle are checked. Green dots = within radius. Red dots = in cell but outside radius (filtered by Haversine). Most of the tree was never visited!',tree:JSON.parse(JSON.stringify(root)),showSearch:true,showResult:true});
+
+        return states;
+      }
+
+      var states=buildStates();
+
+      function drawTree(node, searchMode, resultMode){
+        if(!node) return;
+        var x=PAD+node.x*SZ, y=TOP+node.y*SZ, w=node.w*SZ, h=node.h*SZ;
+
+        // Check if this cell intersects the search circle
+        var intersects=false;
+        if(searchMode){
+          var nearX=Math.max(node.x,Math.min(QX,node.x+node.w));
+          var nearY=Math.max(node.y,Math.min(QY,node.y+node.h));
+          var dx2=QX-nearX, dy2=QY-nearY;
+          intersects=Math.sqrt(dx2*dx2+dy2*dy2)<=Q_RADIUS;
+        }
+
+        var fill='#fffdf9';
+        if(searchMode&&intersects) fill='#2196f310';
+        if(searchMode&&!intersects) fill='#f5f5f5';
+
+        svg.appendChild(el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,
+          fill:fill,stroke:searchMode&&intersects?'#2196f3':'var(--line)',
+          'stroke-width':searchMode&&intersects?'2':'0.8'}));
+
+        if(node.children){
+          for(var c=0;c<4;c++) drawTree(node.children[c],searchMode,resultMode);
+        }
+
+        // Draw businesses in leaf nodes
+        if(!node.children){
+          for(var i=0;i<node.businesses.length;i++){
+            var b=node.businesses[i];
+            var bx=PAD+b.x*SZ, by=TOP+b.y*SZ;
+            var dotFill='#666';
+            var dotR=3;
+
+            if(resultMode){
+              var dd=Math.sqrt(Math.pow(b.x-QX,2)+Math.pow(b.y-QY,2));
+              if(intersects&&dd<=Q_RADIUS){dotFill='#0a8f6a';dotR=5;}
+              else if(intersects){dotFill='#e74c3c';dotR=4;}
+              else {dotFill='#ccc';dotR=2.5;}
+            } else if(searchMode&&intersects){
+              dotFill='#f59e0b';dotR=4;
+            }
+
+            svg.appendChild(el('circle',{cx:''+bx,cy:''+by,r:''+dotR,fill:dotFill}));
+          }
+        }
+      }
+
+      function drawState(st){
+        clearSvg(svg);
+        svg.appendChild(txt('Quadtree — Spatial Subdivision & Search',{x:''+(PAD+SZ/2),y:'28','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'15',fill:'var(--ink)'}));
+
+        drawTree(st.tree,!!st.showSearch,!!st.showResult);
+
+        // Draw query point and radius if in search mode
+        if(st.showSearch){
+          var qpx=PAD+QX*SZ, qpy=TOP+QY*SZ, rpx=Q_RADIUS*SZ;
+          svg.appendChild(el('circle',{cx:''+qpx,cy:''+qpy,r:''+rpx,
+            fill:'none',stroke:'#0a8f6a','stroke-width':'2','stroke-dasharray':'6,4',opacity:'0.7'}));
+          svg.appendChild(el('circle',{cx:''+qpx,cy:''+qpy,r:'8',fill:'#ff6b35',stroke:'#fff','stroke-width':'2'}));
+          svg.appendChild(txt('★',{x:''+qpx,y:''+(qpy+4),'text-anchor':'middle','font-size':'10',fill:'#fff'}));
+        }
+
+        // Legend
+        var ly=TOP+SZ+15;
+        if(st.showResult){
+          svg.appendChild(el('circle',{cx:''+(PAD+10),cy:''+ly,r:'5',fill:'#ff6b35'}));
+          svg.appendChild(txt('Query point',{x:''+(PAD+20),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('circle',{cx:''+(PAD+110),cy:''+ly,r:'5',fill:'#0a8f6a'}));
+          svg.appendChild(txt('Within radius',{x:''+(PAD+120),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('circle',{cx:''+(PAD+220),cy:''+ly,r:'5',fill:'#e74c3c'}));
+          svg.appendChild(txt('In cell, outside radius',{x:''+(PAD+230),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('rect',{x:''+(PAD+370),y:''+(ly-6),width:'12',height:'12',fill:'#f5f5f5',stroke:'var(--line)','stroke-width':'1'}));
+          svg.appendChild(txt('Pruned (not visited)',{x:''+(PAD+386),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+        } else if(st.showSearch){
+          svg.appendChild(el('circle',{cx:''+(PAD+10),cy:''+ly,r:'5',fill:'#ff6b35'}));
+          svg.appendChild(txt('Query point',{x:''+(PAD+20),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('rect',{x:''+(PAD+110),y:''+(ly-6),width:'12',height:'12',fill:'#2196f310',stroke:'#2196f3','stroke-width':'1.5'}));
+          svg.appendChild(txt('Cells intersecting search',{x:''+(PAD+126),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(el('circle',{cx:''+(PAD+290),cy:''+ly,r:'4',fill:'#f59e0b'}));
+          svg.appendChild(txt('Candidate businesses',{x:''+(PAD+300),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+        }
+      }
+
+      function drawInit(){
+        if(states.length>0) drawState(states[0]);
+        info.textContent='';out.textContent='Click "Step" to build and search the quadtree.';
+      }
+      drawInit();
+      var step=0;
+
+      document.getElementById('quadtree-step').addEventListener('click',function(){
+        if(step>=states.length) return;
+        var st=states[step];
+        drawState(st);
+        info.textContent=st.desc;
+        out.textContent='Step '+(step+1)+' of '+states.length+': '+(st.showResult?'Search results':st.showSearch?'Search traversal':step===states.length-3?'Tree complete':'Split #'+(step));
+        step++;
+      });
+
+      document.getElementById('quadtree-reset').addEventListener('click',function(){
+        step=0;states=buildStates();drawInit();
+      });
+    })();
+  })();
+  </script>
+</body>
+</html>

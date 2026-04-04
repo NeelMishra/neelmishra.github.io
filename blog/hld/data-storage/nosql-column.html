@@ -1,0 +1,1144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Column-Family Stores deep dive: Cassandra ring architecture, consistent hashing, gossip protocol, write/read paths, compaction strategies, tunable consistency, HBase, LSM Trees, CQL data modeling, and when to use wide-column databases.">
+  <title>Column-Family Stores (Cassandra, HBase) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <style>
+    .col-table{width:100%;border-collapse:collapse;margin:1.5em 0;font-size:.92rem}
+    .col-table th{text-align:left;padding:.6em .7em;border-bottom:2px solid var(--line);font-weight:700;background:rgba(10,143,106,.04)}
+    .col-table td{padding:.55em .7em;border-bottom:1px solid var(--line);vertical-align:top}
+    .col-table tr:last-child td{border-bottom:none}
+    .col-table code{font-size:.85em}
+    .metric-row{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}
+    .metric-box{flex:1;min-width:140px;border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;background:var(--card);text-align:center}
+    .metric-box .num{font-family:"Syne",sans-serif;font-size:1.5rem;font-weight:800;color:var(--brand)}
+    .metric-box .lbl{font-size:.78rem;color:var(--ink-muted);margin-top:.15rem}
+    .cql-block{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.2rem 1.4rem;margin:1.2rem 0;overflow-x:auto}
+    .cql-block pre{margin:0;font-size:.88rem;line-height:1.55}
+    .vs-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+    .vs-card{border:1px solid var(--line);border-radius:10px;padding:1rem;background:var(--card)}
+    .vs-card h4{margin:0 0 .5rem;font-family:"Syne",sans-serif;font-size:.95rem}
+    @media(max-width:640px){.vs-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series</a><span>&middot; Data Storage &middot; Part 4 of 70</span></div>
+
+      <h1>Column-Family Stores (Cassandra, HBase)</h1>
+      <p class="post-meta">April 2026 &middot; 20 min read</p>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 1: WIDE-COLUMN MODEL -->
+      <!-- ============================================================ -->
+      <h2 id="wide-column-model">The Wide-Column Data Model</h2>
+
+      <p>A <strong>column-family store</strong> (also called a <em>wide-column store</em>) organises data into rows and columns&mdash;but unlike a relational table, every row can have a <em>different set of columns</em>. There is no fixed schema enforced across all rows. Think of it as a two-dimensional key-value store: the first key identifies the <strong>row</strong> (partition key), the second key identifies the <strong>column</strong>, and together they point to a value.</p>
+
+      <p>The canonical mental model is a <strong>sorted map of sorted maps</strong>:</p>
+
+      <pre><code>Map&lt;PartitionKey, SortedMap&lt;ColumnKey, Value&gt;&gt;</code></pre>
+
+      <p>In practice, the inner map is further grouped into <strong>column families</strong>. A column family is a logical grouping of columns that are frequently accessed together&mdash;similar to tables in RDBMS, but far more flexible. Within a column family, data is stored sorted by the column key, enabling extremely efficient range scans within a single partition.</p>
+
+      <h3>Column Family vs. Row-Oriented Storage</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Dimension</th><th>Row-Oriented (MySQL, PostgreSQL)</th><th>Column-Family (Cassandra, HBase)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Schema</strong></td><td>Fixed schema; every row has the same columns</td><td>Flexible; each row can have different columns</td></tr>
+          <tr><td><strong>Storage layout</strong></td><td>Entire row stored contiguously on disk</td><td>Columns within a family stored together; different families on separate files</td></tr>
+          <tr><td><strong>Null handling</strong></td><td>NULL values consume space or require bitmap</td><td>Missing columns simply don&rsquo;t exist&mdash;zero storage cost</td></tr>
+          <tr><td><strong>Read pattern</strong></td><td>Efficient for SELECT * (all columns)</td><td>Efficient for reading specific column subsets or ranges</td></tr>
+          <tr><td><strong>Scaling</strong></td><td>Typically vertical; sharding is manual</td><td>Designed for horizontal scaling from day one</td></tr>
+          <tr><td><strong>Joins</strong></td><td>Native JOIN support</td><td>No joins; denormalization is the norm</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Conceptual Example</h3>
+
+      <p>Consider a user profile stored in a column family called <code>users</code>:</p>
+
+      <pre><code>Row Key: user_1001
+  ├── name: "Alice Chen"
+  ├── email: "alice@example.com"
+  ├── plan: "premium"
+  └── last_login: "2026-04-15T08:30:00Z"
+
+Row Key: user_1002
+  ├── name: "Bob Kumar"
+  ├── email: "bob@example.com"
+  └── phone: "+1-555-0199"        ← column that user_1001 doesn't have
+                                     (no plan, no last_login for this row)</code></pre>
+
+      <p>Notice that <code>user_1002</code> has a <code>phone</code> column that <code>user_1001</code> doesn&rsquo;t, and lacks <code>plan</code> and <code>last_login</code>. Neither scenario causes errors or wastes storage. This sparse data model is one of the core advantages of wide-column stores for datasets with highly variable attributes.</p>
+
+      <div class="callout">
+        <strong>Historical note:</strong> The wide-column model was introduced by Google&rsquo;s <strong>Bigtable</strong> paper (2006). The key insight was that real-world data at Google scale&mdash;web crawl data, Maps tiles, Gmail&mdash;was inherently sparse. Forcing it into rigid relational schemas was both wasteful and operationally painful. Bigtable directly inspired both <strong>HBase</strong> (open-source Bigtable clone on HDFS) and <strong>Cassandra</strong> (which combined Bigtable&rsquo;s data model with Amazon Dynamo&rsquo;s distribution architecture).
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 2: CASSANDRA ARCHITECTURE -->
+      <!-- ============================================================ -->
+      <h2 id="cassandra-architecture">Cassandra Deep Dive: Architecture</h2>
+
+      <p>Apache Cassandra is a masterclass in distributed systems design. It merges the column-family data model from Bigtable with the peer-to-peer, always-available architecture from Amazon&rsquo;s Dynamo. The result is a database that provides <strong>linear horizontal scalability</strong>, <strong>tunable consistency</strong>, and <strong>no single point of failure</strong>.</p>
+
+      <div class="metric-row">
+        <div class="metric-box"><div class="num">2M+</div><div class="lbl">Writes/sec per cluster (Netflix)</div></div>
+        <div class="metric-box"><div class="num">0</div><div class="lbl">Single points of failure</div></div>
+        <div class="metric-box"><div class="num">1000+</div><div class="lbl">Nodes in largest clusters (Apple)</div></div>
+        <div class="metric-box"><div class="num">PB</div><div class="lbl">Scale of data per cluster</div></div>
+      </div>
+
+      <h3 id="ring-architecture">Ring Architecture &amp; Consistent Hashing</h3>
+
+      <p>Cassandra organises its cluster as a <strong>ring</strong> (token ring). The ring represents the entire hash space&mdash;a continuous range from <code>-2<sup>63</sup></code> to <code>+2<sup>63</sup> - 1</code> using the <strong>Murmur3Partitioner</strong> (the default since Cassandra 1.2). Each node in the cluster is assigned one or more <strong>tokens</strong> that determine which portion of the hash space it owns.</p>
+
+      <p>When a write comes in for a partition key like <code>user_1001</code>, Cassandra computes <code>hash(user_1001)</code> to get a token value, then walks the ring clockwise to find the first node whose token is &ge; that value. That node becomes the <strong>primary replica</strong>. Depending on the replication factor (RF), additional copies are placed on subsequent nodes around the ring.</p>
+
+      <pre><code># How partition key maps to a node
+token = murmur3_hash("user_1001")  → e.g., 3,450,892,112,843
+# Walk ring clockwise:
+#   Node A owns tokens [-2^63, 1T]
+#   Node B owns tokens [1T, 3T]
+#   Node C owns tokens [3T, 5T]     ← token 3.45T lands here (primary)
+#   Node D owns tokens [5T, 7T]     ← replica 2 (RF=3)
+#   Node E owns tokens [7T, 2^63]   ← replica 3 (RF=3)</code></pre>
+
+      <p>With <strong>vnodes</strong> (virtual nodes, default: 256 per physical node since Cassandra 4.0 recommends 16), each physical node owns many small, non-contiguous token ranges rather than one large range. This dramatically improves data distribution balance, speeds up bootstrapping new nodes (they stream data from many peers in parallel), and handles heterogeneous hardware gracefully.</p>
+
+      <h3 id="gossip-protocol">Gossip Protocol</h3>
+
+      <p>Cassandra nodes discover and monitor each other using a <strong>gossip protocol</strong>&mdash;a peer-to-peer epidemic protocol inspired by how rumours spread in social networks. Every second, each node selects 1&ndash;3 random peers and exchanges state information (heartbeat counters, load data, token ownership, schema version).</p>
+
+      <p><strong>How gossip works in detail:</strong></p>
+      <ol>
+        <li><strong>SYN:</strong> Node A picks a random peer (Node B) and sends its digest&mdash;a compact summary of what it knows about every node (node ID + heartbeat generation + version number).</li>
+        <li><strong>ACK:</strong> Node B compares A&rsquo;s digest with its own state. It sends back (a) any state that A is missing and (b) a digest of state that B is missing from A.</li>
+        <li><strong>ACK2:</strong> Node A sends the state that B was missing. After this three-way handshake, both nodes have converged their views.</li>
+      </ol>
+
+      <p>Gossip converges exponentially: with <em>N</em> nodes, every node learns about a state change within <code>O(log N)</code> gossip rounds&mdash;meaning a 1,000-node cluster converges in roughly 10 seconds. The <strong>failure detector</strong> (Phi Accrual Failure Detector) uses gossip heartbeats to calculate a suspicion level for each peer. When the phi value exceeds the threshold (default: 8), the node is marked <code>DOWN</code>.</p>
+
+      <div class="callout">
+        <strong>Seed nodes:</strong> Cassandra requires at least one <strong>seed node</strong> configured in <code>cassandra.yaml</code>. Seeds serve as initial contact points for new nodes joining the cluster. They are not special at runtime&mdash;they simply help the gossip protocol bootstrap by providing a known starting peer. Best practice: designate 2&ndash;3 seeds per data centre.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 3: WRITE PATH -->
+      <!-- ============================================================ -->
+      <h2 id="write-path">Cassandra Write Path</h2>
+
+      <p>Cassandra&rsquo;s write path is optimised for <strong>sequential I/O</strong>, making writes extremely fast&mdash;typically under 1&nbsp;ms at the 99th percentile for local writes. Here is the complete journey of a write:</p>
+
+      <ol>
+        <li><strong>Client &rarr; Coordinator:</strong> The client connects to any node in the cluster (the <em>coordinator</em>). The coordinator determines which nodes hold replicas for the partition key using the token ring.</li>
+        <li><strong>Coordinator &rarr; Replica Nodes:</strong> The coordinator sends the write to all replica nodes simultaneously (not sequentially).</li>
+        <li><strong>Commit Log (sequential append):</strong> Each replica node first appends the mutation to the <strong>commit log</strong>&mdash;an append-only, durable WAL (Write-Ahead Log) on disk. This is sequential I/O, which SSDs and HDDs handle very efficiently. The commit log ensures durability: if the node crashes, replayed on restart.</li>
+        <li><strong>Memtable (in-memory write):</strong> Simultaneously, the mutation is written to the <strong>memtable</strong>&mdash;an in-memory sorted data structure (backed by a skip list or B-tree). Writes to the memtable are essentially at memory speed.</li>
+        <li><strong>Acknowledgement:</strong> Once the commit log and memtable writes complete, the replica node sends an ACK back to the coordinator. The coordinator waits for enough ACKs to satisfy the requested consistency level (e.g., QUORUM = RF/2 + 1) and then responds to the client.</li>
+        <li><strong>Memtable Flush &rarr; SSTable:</strong> When the memtable reaches a configurable size threshold (default ~64 MB), it is flushed to disk as an immutable <strong>SSTable</strong> (Sorted String Table). SSTables are never modified after creation&mdash;this is fundamental to the LSM Tree architecture.</li>
+      </ol>
+
+      <!-- Write Path Animation -->
+      <div class="anim-container" id="write-path-anim">
+        <h4>&#9654; Cassandra Write Path</h4>
+        <p style="margin:0 0 .5rem;font-size:.88rem;color:var(--ink-muted)">Step through each phase of a Cassandra write. Watch data flow from client to durable storage.</p>
+        <svg id="write-path-svg" width="700" height="340" viewBox="0 0 700 340"></svg>
+        <div id="write-path-info" style="margin-top:.4rem;font-family:Consolas,monospace;font-size:.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="wp-step">Step &rarr;</button>
+          <button class="anim-btn" id="wp-reset">Reset</button>
+          <span class="anim-output" id="wp-output"></span>
+        </div>
+      </div>
+
+      <h3>Write Path Performance Characteristics</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Stage</th><th>Medium</th><th>Latency</th><th>Durability</th></tr></thead>
+        <tbody>
+          <tr><td>Commit Log append</td><td>Disk (sequential)</td><td>~0.1&ndash;0.5 ms (SSD)</td><td>Durable immediately</td></tr>
+          <tr><td>Memtable insert</td><td>Memory</td><td>~0.01 ms</td><td>Volatile (backed by commit log)</td></tr>
+          <tr><td>SSTable flush</td><td>Disk (sequential)</td><td>Background; 50&ndash;200 ms per flush</td><td>Durable, immutable</td></tr>
+          <tr><td>End-to-end client write</td><td>Network + above</td><td>0.5&ndash;2 ms (p99, local DC)</td><td>Per consistency level</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Why writes are fast:</strong> Both the commit log and SSTable flush are <strong>sequential writes</strong>. There are zero random disk seeks on the write path. Compare this to a B-tree database (PostgreSQL, MySQL) where an INSERT may trigger random I/O to update index pages. This is why Cassandra consistently outperforms relational databases on write throughput by 5&ndash;10&times; at scale.
+      </div>
+
+      <h3>CQL Write Examples</h3>
+
+      <div class="cql-block"><pre><code>-- Create a keyspace with NetworkTopologyStrategy (production standard)
+CREATE KEYSPACE iot_data
+WITH replication = {
+  'class': 'NetworkTopologyStrategy',
+  'us-east': 3,
+  'eu-west': 3
+}
+AND durable_writes = true;
+
+-- Create a time-series table for sensor data
+CREATE TABLE iot_data.sensor_readings (
+  sensor_id    UUID,
+  reading_date DATE,
+  reading_time TIMESTAMP,
+  temperature  DOUBLE,
+  humidity     DOUBLE,
+  pressure     DOUBLE,
+  battery_pct  TINYINT,
+  PRIMARY KEY ((sensor_id, reading_date), reading_time)
+) WITH CLUSTERING ORDER BY (reading_time DESC)
+  AND compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'HOURS',
+    'compaction_window_size': 1
+  }
+  AND default_time_to_live = 7776000;  -- 90 days TTL
+
+-- Insert a reading (write path is triggered)
+INSERT INTO iot_data.sensor_readings
+  (sensor_id, reading_date, reading_time, temperature, humidity, pressure, battery_pct)
+VALUES
+  (550e8400-e29b-41d4-a716-446655440000, '2026-04-15', '2026-04-15T14:30:00Z', 23.5, 65.2, 1013.25, 87)
+USING TTL 7776000;</code></pre></div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 4: READ PATH -->
+      <!-- ============================================================ -->
+      <h2 id="read-path">Cassandra Read Path</h2>
+
+      <p>The read path in Cassandra is significantly more complex than the write path because data may reside across multiple SSTables and the memtable simultaneously. Cassandra employs several layers of caching and indexing to avoid unnecessary disk I/O.</p>
+
+      <p><strong>Complete read path, step by step:</strong></p>
+      <ol>
+        <li><strong>Memtable check:</strong> First, Cassandra checks the in-memory memtable. If the partition exists there, the data is returned immediately (merged with any SSTable data if needed).</li>
+        <li><strong>Bloom filter:</strong> For each SSTable on disk, Cassandra checks its <strong>Bloom filter</strong>&mdash;a space-efficient probabilistic data structure that answers &ldquo;Is this partition key <em>possibly</em> in this SSTable?&rdquo; A negative answer is <em>definitive</em> (the key is definitely not in this SSTable), avoiding a disk read. A positive answer might be a false positive (configurable; default ~1% FP rate with <code>bloom_filter_fp_chance = 0.01</code>).</li>
+        <li><strong>Key cache:</strong> If the Bloom filter says &ldquo;maybe,&rdquo; Cassandra checks the <strong>key cache</strong>&mdash;an in-memory LRU cache that maps partition keys to their byte offset in the SSTable index file. A key cache hit skips the next step entirely.</li>
+        <li><strong>Partition index:</strong> On a key cache miss, Cassandra performs a binary search on the <strong>partition index</strong> (stored in a separate file per SSTable, or in the <strong>trie-based index</strong> in Cassandra 4.0+). This gives the offset to the <strong>partition summary</strong>, which then points to the exact byte offset in the data file.</li>
+        <li><strong>Compression offset map:</strong> Cassandra data files are stored compressed in 64 KB chunks (configurable). The <strong>compression offset map</strong> (in memory) translates the partition&rsquo;s logical offset to the physical offset of the compressed chunk on disk.</li>
+        <li><strong>Disk read:</strong> Finally, the compressed chunk is read from disk, decompressed, and the requested columns are extracted.</li>
+        <li><strong>Merge:</strong> If data for this partition exists in multiple SSTables (due to updates), Cassandra merges the results using <strong>timestamp-based conflict resolution</strong>&mdash;the cell with the highest timestamp wins (Last Write Wins, LWW).</li>
+      </ol>
+
+      <!-- Read Path Animation -->
+      <div class="anim-container" id="read-path-anim">
+        <h4>&#9654; Cassandra Read Path</h4>
+        <p style="margin:0 0 .5rem;font-size:.88rem;color:var(--ink-muted)">Step through the read path layers. Green boxes are in-memory; blue boxes are on disk. Watch how each layer filters before hitting disk.</p>
+        <svg id="read-path-svg" width="700" height="380" viewBox="0 0 700 380"></svg>
+        <div id="read-path-info" style="margin-top:.4rem;font-family:Consolas,monospace;font-size:.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="rp-step">Step &rarr;</button>
+          <button class="anim-btn" id="rp-reset">Reset</button>
+          <span class="anim-output" id="rp-output"></span>
+        </div>
+      </div>
+
+      <h3>Read Path Optimisation Summary</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Layer</th><th>Type</th><th>Purpose</th><th>Hit = Skip To</th></tr></thead>
+        <tbody>
+          <tr><td>Memtable</td><td style="color:#16a34a;font-weight:700">Memory</td><td>Latest unflushed writes</td><td>Return data directly</td></tr>
+          <tr><td>Bloom Filter</td><td style="color:#16a34a;font-weight:700">Memory</td><td>Eliminate SSTables that definitely don&rsquo;t have the key</td><td>Skip entire SSTable</td></tr>
+          <tr><td>Key Cache</td><td style="color:#16a34a;font-weight:700">Memory</td><td>Cached partition key &rarr; data offset mapping</td><td>Jump to compression offset</td></tr>
+          <tr><td>Partition Index</td><td style="color:#2563eb;font-weight:700">Disk*</td><td>Binary search for partition offset</td><td>Compression offset</td></tr>
+          <tr><td>Compression Offset Map</td><td style="color:#16a34a;font-weight:700">Memory</td><td>Map logical offset to physical chunk</td><td>Disk read</td></tr>
+          <tr><td>SSTable Data File</td><td style="color:#2563eb;font-weight:700">Disk</td><td>Actual data (compressed chunks)</td><td>Decompress &amp; return</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:.82rem;color:var(--ink-muted)">*Partition index is memory-mapped; hot portions stay in OS page cache.</p>
+
+      <div class="callout">
+        <strong>Read amplification:</strong> In the worst case, reading a single partition might require checking Bloom filters on <em>every</em> SSTable, falling through to disk reads on multiple SSTables, and merging the results. This is <strong>read amplification</strong>&mdash;and it&rsquo;s the primary reason compaction exists. Compaction merges SSTables, reducing the number a read must consult.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 5: LSM TREE -->
+      <!-- ============================================================ -->
+      <h2 id="lsm-tree">The LSM Tree: Engine Behind the Scenes</h2>
+
+      <p>Both Cassandra and HBase are built on the <strong>Log-Structured Merge Tree (LSM Tree)</strong>, a data structure designed to transform random writes into sequential writes at the cost of more complex reads. Understanding the LSM Tree is fundamental to understanding <em>why</em> these databases behave the way they do.</p>
+
+      <h3>LSM Tree Architecture</h3>
+
+      <p>An LSM Tree organises data across multiple levels:</p>
+
+      <ol>
+        <li><strong>Level 0 &mdash; Memtable (in memory):</strong> All writes go here first. The memtable is a sorted, mutable data structure (typically a red-black tree, skip list, or B-tree). When it reaches a size threshold, it becomes <strong>immutable</strong> and a new memtable is created.</li>
+        <li><strong>Level 0 &mdash; Immutable memtables flushed to SSTables:</strong> The immutable memtable is written to disk as a <strong>Sorted String Table (SSTable)</strong>&mdash;a file containing key-value pairs sorted by key. This flush is a single sequential write&mdash;no seeking.</li>
+        <li><strong>Level 1&ndash;N &mdash; Compacted SSTables:</strong> Over time, SSTables accumulate at Level 0. <strong>Compaction</strong> merges overlapping SSTables into larger, non-overlapping SSTables at deeper levels. Each level is typically 10&times; the size of the previous level.</li>
+      </ol>
+
+      <pre><code>LSM Tree Structure:
+┌─────────────────────────────┐
+│  MEMTABLE (mutable, RAM)    │  ← All writes land here
+│  [sorted by key]            │
+├─────────────────────────────┤
+│  IMMUTABLE MEMTABLE (RAM)   │  ← Waiting to flush
+├─────────────────────────────┤
+│  L0: SST₁  SST₂  SST₃     │  ← Recently flushed, may overlap
+├─────────────────────────────┤
+│  L1: SST_A   SST_B         │  ← Compacted, non-overlapping
+├─────────────────────────────┤
+│  L2: SST_X  SST_Y  SST_Z   │  ← Larger, non-overlapping
+├─────────────────────────────┤
+│  ...more levels...          │
+└─────────────────────────────┘</code></pre>
+
+      <h3>Write, Space, and Read Amplification</h3>
+
+      <p>The LSM Tree introduces three types of amplification that are critical trade-offs:</p>
+
+      <table class="col-table">
+        <thead><tr><th>Amplification Type</th><th>Definition</th><th>LSM Tree Impact</th><th>B-Tree Comparison</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Write Amplification</strong></td>
+            <td>Ratio of total bytes written to disk vs. bytes written by the user</td>
+            <td>10&ndash;30&times; (data is re-written during each compaction level)</td>
+            <td>2&ndash;5&times; (WAL + page writes)</td>
+          </tr>
+          <tr>
+            <td><strong>Space Amplification</strong></td>
+            <td>Ratio of disk space used vs. actual data size</td>
+            <td>1.1&ndash;2&times; (temporary during compaction)</td>
+            <td>~1.5&times; (fragmentation in pages)</td>
+          </tr>
+          <tr>
+            <td><strong>Read Amplification</strong></td>
+            <td>Number of disk reads per logical read</td>
+            <td>1&ndash;5 (Bloom filters mitigate significantly)</td>
+            <td>1&ndash;3 (B-tree depth)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>The fundamental trade-off:</strong> LSM Trees sacrifice read performance and write amplification to gain <strong>dramatically better write throughput</strong>. For workloads that are 80%+ writes (which describes time-series, logging, and IoT perfectly), this trade-off is overwhelmingly favourable. A single Cassandra node can sustain <strong>100,000+ writes/sec</strong> where a comparable PostgreSQL instance might top out at 10,000&ndash;20,000.
+      </div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 6: COMPACTION -->
+      <!-- ============================================================ -->
+      <h2 id="compaction">Compaction Strategies</h2>
+
+      <p>Compaction is the most operationally important aspect of running Cassandra (and HBase). It directly controls read latency, write amplification, disk usage, and I/O patterns. Cassandra offers three compaction strategies, each optimised for different workloads.</p>
+
+      <h3 id="stcs">Size-Tiered Compaction Strategy (STCS)</h3>
+
+      <p>STCS is the <strong>default</strong> strategy. It groups SSTables of similar size into &ldquo;tiers&rdquo; and merges them when a tier reaches a threshold (default: 4 SSTables of similar size).</p>
+
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>SSTables accumulate at each size tier.</li>
+        <li>When 4 SSTables of similar size exist (<code>min_threshold</code>), they are compacted into one larger SSTable.</li>
+        <li>The larger SSTable moves to the next tier.</li>
+        <li>The process repeats at each tier level.</li>
+      </ol>
+
+      <pre><code>STCS Compaction Tiers:
+  Tier 1 (small):   [64MB] [64MB] [64MB] [64MB]  → compact → [256MB]
+  Tier 2 (medium):  [256MB] [256MB] [256MB] [256MB] → compact → [1GB]
+  Tier 3 (large):   [1GB] [1GB] [1GB] [1GB] → compact → [4GB]</code></pre>
+
+      <table class="col-table">
+        <thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+        <tbody>
+          <tr><td>Lowest write amplification (~5&times;)</td><td>Highest space amplification (up to 2&times; during major compaction)</td></tr>
+          <tr><td>Good write throughput</td><td>Worst read performance (many overlapping SSTables to check)</td></tr>
+          <tr><td>Simple to understand and tune</td><td>Obsolete data lingers in large SSTables</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Best for:</strong> Write-heavy, insert-only workloads (logging, event streams) where you rarely update or delete data.</p>
+
+      <h3 id="lcs">Leveled Compaction Strategy (LCS)</h3>
+
+      <p>LCS organises SSTables into levels where each level is 10&times; the size of the previous. Within each level, SSTables have <strong>non-overlapping key ranges</strong>&mdash;meaning a read only needs to check <em>one</em> SSTable per level.</p>
+
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>Level 0 contains freshly flushed SSTables (may overlap).</li>
+        <li>L0 SSTables are merged into Level 1 (non-overlapping, each SSTable &le; 160 MB by default).</li>
+        <li>When Level 1 exceeds 10 &times; <code>sstable_size_in_mb</code>, excess SSTables are compacted with overlapping SSTables in Level 2.</li>
+        <li>Each level is guaranteed non-overlapping &rArr; at most one SSTable per level is read for a given partition.</li>
+      </ol>
+
+      <pre><code>LCS Levels:
+  L0: [SST₁] [SST₂]                              ← may overlap
+  L1: [A-D] [E-H] [I-L] [M-P] [Q-T] [U-Z]       ← non-overlapping, ≤160MB each
+  L2: 10× more SSTables, non-overlapping           ← ~10× L1 total size
+  L3: 10× more than L2...                          ← ~10× L2 total size</code></pre>
+
+      <table class="col-table">
+        <thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+        <tbody>
+          <tr><td>Best read performance (typically 1&ndash;2 SSTables per read)</td><td>Highest write amplification (10&ndash;30&times;)</td></tr>
+          <tr><td>Lowest space amplification (~1.1&times;)</td><td>Heavy compaction I/O can starve writes</td></tr>
+          <tr><td>Efficient for read-heavy workloads with updates</td><td>Not suitable for pure write workloads</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Best for:</strong> Read-heavy workloads with frequent updates and deletes (user profiles, product catalogs, session stores).</p>
+
+      <h3 id="twcs">Time-Window Compaction Strategy (TWCS)</h3>
+
+      <p>TWCS is purpose-built for <strong>time-series data</strong>. It groups SSTables by time window and compacts within each window using STCS. Once a time window closes (all data for that period has been flushed), the resulting SSTable is <strong>never compacted again</strong>.</p>
+
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>Configure a time window (e.g., 1 hour).</li>
+        <li>Within the current window, SSTables are compacted using STCS.</li>
+        <li>When the window closes, the remaining SSTable(s) for that window are left untouched.</li>
+        <li>Old windows are dropped entirely when TTL expires (extremely efficient deletion&mdash;just delete the file).</li>
+      </ol>
+
+      <div class="cql-block"><pre><code>-- TWCS configuration for time-series
+ALTER TABLE iot_data.sensor_readings WITH compaction = {
+  'class': 'TimeWindowCompactionStrategy',
+  'compaction_window_unit': 'HOURS',
+  'compaction_window_size': 1,
+  'timestamp_resolution': 'MICROSECONDS',
+  'max_threshold': 32,
+  'min_threshold': 4
+};</code></pre></div>
+
+      <table class="col-table">
+        <thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+        <tbody>
+          <tr><td>Minimal write amplification (compaction only within windows)</td><td>Data must be written in approximately time order</td></tr>
+          <tr><td>Efficient TTL expiration (drop entire SSTable)</td><td>Terrible for out-of-order or late-arriving data</td></tr>
+          <tr><td>Predictable, bounded compaction I/O</td><td>Updates/deletes within past windows are very expensive</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>Best for:</strong> Time-series, IoT telemetry, metrics, logs&mdash;anything with a TTL and naturally time-ordered writes.</p>
+
+      <h3>Compaction Strategy Decision Matrix</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Workload</th><th>Strategy</th><th>Reason</th></tr></thead>
+        <tbody>
+          <tr><td>Time-series (IoT, metrics, logs)</td><td><strong>TWCS</strong></td><td>Time-ordered writes + TTL = efficient window drops</td></tr>
+          <tr><td>Write-heavy, append-only</td><td><strong>STCS</strong></td><td>Lowest write amplification</td></tr>
+          <tr><td>Read-heavy with updates</td><td><strong>LCS</strong></td><td>Guaranteed read performance, low space amp</td></tr>
+          <tr><td>Mixed read/write</td><td><strong>LCS</strong></td><td>Better read latency worth the write amp trade-off</td></tr>
+          <tr><td>Immutable data (CDC events)</td><td><strong>STCS</strong></td><td>No updates/deletes, so overlapping SSTables are fine</td></tr>
+        </tbody>
+      </table>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 7: CONSISTENCY -->
+      <!-- ============================================================ -->
+      <h2 id="consistency">Tunable Consistency</h2>
+
+      <p>Cassandra&rsquo;s killer feature for distributed systems is <strong>tunable consistency</strong>: you choose the consistency level <em>per query</em>, not per database. This lets you make different trade-offs for different operations within the same application.</p>
+
+      <h3>Consistency Levels Explained</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Level</th><th>Write Behaviour</th><th>Read Behaviour</th><th>Nodes Required</th></tr></thead>
+        <tbody>
+          <tr><td><code>ONE</code></td><td>Wait for 1 replica ACK</td><td>Read from 1 replica</td><td>1 of RF</td></tr>
+          <tr><td><code>TWO</code></td><td>Wait for 2 replica ACKs</td><td>Read from 2 replicas</td><td>2 of RF</td></tr>
+          <tr><td><code>THREE</code></td><td>Wait for 3 replica ACKs</td><td>Read from 3 replicas</td><td>3 of RF</td></tr>
+          <tr><td><code>QUORUM</code></td><td>Wait for ⌊RF/2⌋+1 ACKs</td><td>Read from ⌊RF/2⌋+1 replicas</td><td>Majority of RF</td></tr>
+          <tr><td><code>LOCAL_QUORUM</code></td><td>Quorum within the local data centre only</td><td>Quorum read from local DC only</td><td>Majority in local DC</td></tr>
+          <tr><td><code>EACH_QUORUM</code></td><td>Quorum in <em>every</em> data centre</td><td>Not supported for reads</td><td>Majority in each DC</td></tr>
+          <tr><td><code>ALL</code></td><td>Wait for all RF replicas</td><td>Read from all RF replicas</td><td>All RF nodes</td></tr>
+          <tr><td><code>ANY</code></td><td>Write succeeds if stored anywhere (even a hinted handoff)</td><td>Not supported for reads</td><td>1 (including hints)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Strong Consistency Formula</h3>
+
+      <p>Cassandra provides <strong>strong consistency</strong> (linearisable reads) when:</p>
+
+      <pre><code>  R + W > RF
+
+  Where:
+    R  = read consistency level (number of nodes read)
+    W  = write consistency level (number of nodes written)
+    RF = replication factor
+
+  Example (RF = 3):
+    QUORUM write (2) + QUORUM read (2) = 4 > 3  ✓ Strong consistency
+    ONE write (1) + ALL read (3) = 4 > 3         ✓ Strong consistency
+    ONE write (1) + ONE read (1) = 2 ≤ 3         ✗ Eventual consistency</code></pre>
+
+      <div class="callout">
+        <strong>Production pattern:</strong> Most Cassandra deployments use <code>LOCAL_QUORUM</code> for both reads and writes. This gives strong consistency within a data centre while keeping cross-DC latency off the critical path. With RF=3 per DC, LOCAL_QUORUM requires 2 of 3 local replicas&mdash;tolerating 1 node failure per DC without any read/write impact.
+      </div>
+
+      <div class="cql-block"><pre><code>-- Per-query consistency level in CQL
+CONSISTENCY LOCAL_QUORUM;
+SELECT * FROM users WHERE user_id = 'u1001';
+
+-- Or in application code (Java driver):
+// Statement stmt = SimpleStatement.newInstance("SELECT ...")
+//     .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
+
+-- High availability write (accepts hinted handoff)
+CONSISTENCY ANY;
+INSERT INTO events (id, ts, data) VALUES (uuid(), toTimestamp(now()), 'payload');
+
+-- Strongest possible read
+CONSISTENCY ALL;
+SELECT * FROM account_balances WHERE account_id = 'acc_5001';</code></pre></div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 8: DATA MODELING -->
+      <!-- ============================================================ -->
+      <h2 id="data-modeling">Data Modeling: Query-First Design</h2>
+
+      <p>Cassandra data modeling is the <strong>polar opposite</strong> of relational data modeling. In RDBMS, you normalise your data first and figure out queries later. In Cassandra, you <em>start with the queries</em> and design tables to serve each query optimally. This is called <strong>query-first design</strong> (or query-driven modeling).</p>
+
+      <h3>The Rules of Cassandra Data Modeling</h3>
+
+      <ol>
+        <li><strong>No joins.</strong> Denormalize everything. If a query needs data from what would be two relational tables, combine them into one Cassandra table.</li>
+        <li><strong>No aggregations.</strong> Pre-compute aggregates at write time (or use materialised views / Spark for batch aggregation).</li>
+        <li><strong>One table per query pattern.</strong> If you have 5 different query patterns, you likely need 5 tables, each with a different partition key.</li>
+        <li><strong>Minimise partitions read.</strong> The ideal query touches exactly <em>one</em> partition. Cross-partition queries (<code>IN</code> on partition key or <code>ALLOW FILTERING</code>) are anti-patterns.</li>
+        <li><strong>Even partition sizes.</strong> Aim for partitions &le; 100 MB and &le; 100,000 rows. Huge partitions (&ldquo;wide rows&rdquo;) cause hotspots and GC pressure.</li>
+      </ol>
+
+      <h3>Partition Keys vs. Clustering Keys</h3>
+
+      <p>The <code>PRIMARY KEY</code> in CQL has two parts:</p>
+
+      <pre><code>PRIMARY KEY ((partition_key_columns), clustering_key_columns)
+              ↑ double parens = composite partition key
+
+-- Example:
+PRIMARY KEY ((sensor_id, reading_date), reading_time)
+             ↑ partition key (2 cols)   ↑ clustering key</code></pre>
+
+      <table class="col-table">
+        <thead><tr><th>Key Type</th><th>Purpose</th><th>Determines</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Partition Key</strong></td>
+            <td>Determines which node stores the data</td>
+            <td>Data distribution (which node), data locality (what&rsquo;s stored together)</td>
+            <td><code>(sensor_id, reading_date)</code></td>
+          </tr>
+          <tr>
+            <td><strong>Clustering Key</strong></td>
+            <td>Determines sort order <em>within</em> a partition</td>
+            <td>On-disk sort order, range query capability</td>
+            <td><code>reading_time DESC</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Data Modeling Example: E-Commerce</h3>
+
+      <p>Consider an e-commerce platform with these query patterns:</p>
+
+      <div class="cql-block"><pre><code>-- Q1: Get all orders for a user, most recent first
+CREATE TABLE orders_by_user (
+  user_id       UUID,
+  order_date    TIMESTAMP,
+  order_id      UUID,
+  total_amount  DECIMAL,
+  status        TEXT,
+  items         FROZEN&lt;LIST&lt;FROZEN&lt;map&lt;TEXT, TEXT&gt;&gt;&gt;&gt;,
+  PRIMARY KEY ((user_id), order_date, order_id)
+) WITH CLUSTERING ORDER BY (order_date DESC, order_id ASC);
+
+-- Query: SELECT * FROM orders_by_user WHERE user_id = ?;
+-- Reads a single partition, ordered by date DESC. Perfect.
+
+-- Q2: Get order details by order_id (for order status page)
+CREATE TABLE orders_by_id (
+  order_id      UUID,
+  user_id       UUID,
+  order_date    TIMESTAMP,
+  total_amount  DECIMAL,
+  status        TEXT,
+  shipping_addr FROZEN&lt;map&lt;TEXT, TEXT&gt;&gt;,
+  items         FROZEN&lt;LIST&lt;FROZEN&lt;map&lt;TEXT, TEXT&gt;&gt;&gt;&gt;,
+  PRIMARY KEY ((order_id))
+);
+
+-- Query: SELECT * FROM orders_by_id WHERE order_id = ?;
+-- Single partition lookup. O(1).
+
+-- Q3: Get all orders with a specific status (for admin dashboard)
+CREATE TABLE orders_by_status (
+  status        TEXT,
+  order_date    TIMESTAMP,
+  order_id      UUID,
+  user_id       UUID,
+  total_amount  DECIMAL,
+  PRIMARY KEY ((status), order_date, order_id)
+) WITH CLUSTERING ORDER BY (order_date DESC, order_id ASC);
+
+-- Query: SELECT * FROM orders_by_status WHERE status = 'shipped'
+--        AND order_date > '2026-04-01';
+-- Partition by status + range on date. Efficient.
+
+-- ANTI-PATTERN (do NOT do this):
+-- SELECT * FROM orders_by_user WHERE status = 'shipped';
+-- This requires scanning ALL partitions → ALLOW FILTERING → full table scan!</code></pre></div>
+
+      <div class="callout">
+        <strong>Denormalization cost:</strong> Yes, this means storing order data in 3 tables. You write each order 3 times. With RF=3, that&rsquo;s 9 physical writes per order. This feels wasteful coming from an RDBMS mindset, but disk is cheap and Cassandra writes are essentially free (sub-millisecond). The trade-off is <strong>guaranteed sub-5ms reads at any scale</strong>. At companies like Netflix and Uber, this is an easy trade-off.
+      </div>
+
+      <h3>Time-Series Data Modeling Pattern</h3>
+
+      <div class="cql-block"><pre><code>-- Time-series with bucketed partitions
+-- Problem: If partition key is just sensor_id, the partition grows unbounded
+-- Solution: Add a time bucket to the partition key
+
+CREATE TABLE metrics (
+  metric_name  TEXT,
+  bucket       TEXT,           -- '2026-04-15-14' (hourly bucket)
+  ts           TIMESTAMP,
+  value        DOUBLE,
+  tags         MAP&lt;TEXT, TEXT&gt;,
+  PRIMARY KEY ((metric_name, bucket), ts)
+) WITH CLUSTERING ORDER BY (ts DESC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_unit': 'HOURS',
+                    'compaction_window_size': 1}
+  AND default_time_to_live = 2592000;  -- 30 day retention
+
+-- Query recent metrics:
+-- SELECT * FROM metrics
+--   WHERE metric_name = 'cpu_usage' AND bucket = '2026-04-15-14'
+--   LIMIT 100;
+
+-- Application code generates bucket from timestamp:
+-- bucket = timestamp.strftime('%Y-%m-%d-%H')</code></pre></div>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 9: HBASE -->
+      <!-- ============================================================ -->
+      <h2 id="hbase">HBase: The Hadoop Column Store</h2>
+
+      <p>Apache HBase is the other major column-family store. Where Cassandra chose availability and partition tolerance (AP in CAP theorem), HBase chose <strong>consistency and partition tolerance (CP)</strong>. HBase provides <strong>strong consistency</strong> (linearisable reads/writes) for every operation&mdash;no tunable consistency levels, no eventual consistency.</p>
+
+      <div class="vs-grid">
+        <div class="vs-card">
+          <h4>&#127919; Cassandra (AP)</h4>
+          <ul style="margin:0;padding-left:1.2rem;font-size:.9rem">
+            <li>Peer-to-peer, no master node</li>
+            <li>Tunable consistency (ONE to ALL)</li>
+            <li>Always available (even during partitions)</li>
+            <li>Multi-data centre replication built in</li>
+            <li>CQL query language (SQL-like)</li>
+            <li>Runs standalone (no dependencies)</li>
+          </ul>
+        </div>
+        <div class="vs-card">
+          <h4>&#128218; HBase (CP)</h4>
+          <ul style="margin:0;padding-left:1.2rem;font-size:.9rem">
+            <li>Master-slave architecture (HMaster + RegionServers)</li>
+            <li>Strong consistency (always linearisable)</li>
+            <li>Unavailable during master failover</li>
+            <li>Tight HDFS integration (Hadoop ecosystem)</li>
+            <li>Java API (no SQL-like language natively)</li>
+            <li>Requires HDFS + ZooKeeper</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>HBase Architecture</h3>
+
+      <p><strong>Key components:</strong></p>
+
+      <ul>
+        <li><strong>HMaster:</strong> The master server responsible for region assignment, DDL operations (create/delete tables), load balancing of regions across RegionServers, and monitoring. It does <em>not</em> handle data reads/writes&mdash;clients go directly to RegionServers.</li>
+        <li><strong>RegionServer:</strong> The workhorse. Each RegionServer hosts multiple <strong>regions</strong>. A region is a contiguous range of row keys for a table. Clients read/write directly to the RegionServer that hosts their region. The write path is nearly identical to Cassandra&rsquo;s: WAL &rarr; MemStore &rarr; HFile (SSTable equivalent).</li>
+        <li><strong>ZooKeeper:</strong> Provides distributed coordination. It tracks which RegionServer is alive, which RegionServer hosts which region, and manages HMaster election. ZooKeeper is the control plane; it never handles data.</li>
+        <li><strong>HDFS:</strong> The underlying distributed file system. HFiles (SSTables), WALs, and all persistent data are stored on HDFS. This gives HBase automatic 3&times; replication at the storage layer&mdash;data durability is delegated to HDFS.</li>
+      </ul>
+
+      <pre><code>HBase Architecture:
+┌───────────────┐
+│    Client      │
+└──────┬────────┘
+       │ (lookup region location via ZooKeeper + META table)
+       ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│ RegionServer 1│    │ RegionServer 2│    │ RegionServer 3│
+│  Region A     │    │  Region C     │    │  Region E     │
+│  Region B     │    │  Region D     │    │  Region F     │
+├───────────────┤    ├───────────────┤    ├───────────────┤
+│  WAL + MemStore    │  WAL + MemStore    │  WAL + MemStore
+└───────┬───────┘    └───────┬───────┘    └───────┬───────┘
+        │                    │                    │
+        └────────────────────┼────────────────────┘
+                             ▼
+                    ┌────────────────┐
+                    │     HDFS       │ (HFiles, WALs)
+                    │  (3x replicated) │
+                    └────────┬───────┘
+                             │
+                    ┌────────────────┐
+                    │   ZooKeeper    │ (coordination, META location)
+                    └────────────────┘
+                             │
+                    ┌────────────────┐
+                    │    HMaster     │ (DDL, region assignment, balancing)
+                    └────────────────┘</code></pre>
+
+      <h3>HBase Write Path</h3>
+
+      <ol>
+        <li>Client looks up the <code>hbase:meta</code> table (cached locally after first lookup) to find which RegionServer hosts the target region.</li>
+        <li>Client sends the write directly to the RegionServer.</li>
+        <li>RegionServer appends to the <strong>WAL</strong> (Write-Ahead Log) on HDFS for durability.</li>
+        <li>RegionServer writes to the <strong>MemStore</strong> (in-memory, sorted by row key).</li>
+        <li>ACK returned to client. The write is durable (WAL on HDFS) and visible (MemStore).</li>
+        <li>When MemStore reaches threshold (default 128 MB), it flushes to an <strong>HFile</strong> on HDFS.</li>
+        <li>Compaction merges HFiles (minor: merge small HFiles; major: merge all HFiles for a region).</li>
+      </ol>
+
+      <h3>HBase vs. Cassandra Comparison</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Dimension</th><th>Cassandra</th><th>HBase</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Consistency</strong></td><td>Tunable (eventual to strong)</td><td>Always strong (CP)</td></tr>
+          <tr><td><strong>Architecture</strong></td><td>Peer-to-peer (masterless)</td><td>Master-slave (HMaster)</td></tr>
+          <tr><td><strong>Dependencies</strong></td><td>None (standalone JVM)</td><td>HDFS + ZooKeeper + HMaster</td></tr>
+          <tr><td><strong>Write throughput</strong></td><td>Higher (no WAL replication overhead)</td><td>Good but lower (HDFS WAL 3&times; replication)</td></tr>
+          <tr><td><strong>Read latency</strong></td><td>Tunable (faster with CL=ONE)</td><td>Consistent (single RegionServer)</td></tr>
+          <tr><td><strong>Multi-DC</strong></td><td>First-class support</td><td>Via replication (HBase Replication, limited)</td></tr>
+          <tr><td><strong>Hadoop integration</strong></td><td>Via Spark connector</td><td>Native (sits on HDFS, MapReduce, Spark)</td></tr>
+          <tr><td><strong>Row-level transactions</strong></td><td>Lightweight transactions (LWT, Paxos-based)</td><td>Native atomic row operations (checkAndPut)</td></tr>
+          <tr><td><strong>Query language</strong></td><td>CQL (SQL-like, familiar)</td><td>Java API / Apache Phoenix (SQL layer)</td></tr>
+          <tr><td><strong>Ideal for</strong></td><td>High-availability, multi-DC, write-heavy</td><td>Strong consistency, Hadoop ecosystem, batch analytics</td></tr>
+        </tbody>
+      </table>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 10: USE CASES -->
+      <!-- ============================================================ -->
+      <h2 id="when-to-use">When to Use Column-Family Stores</h2>
+
+      <h3>Ideal Use Cases</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Use Case</th><th>Why Column-Family Excels</th><th>Real-World Example</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Time-series data</strong></td>
+            <td>Sequential writes, natural time-bucketed partitions, TTL for retention, TWCS compaction</td>
+            <td>Netflix: 2M+ writes/sec of viewing activity data in Cassandra</td>
+          </tr>
+          <tr>
+            <td><strong>IoT telemetry</strong></td>
+            <td>Millions of devices, each producing small frequent writes; reads are by device + time range</td>
+            <td>John Deere: billions of sensor readings from tractors and farm equipment</td>
+          </tr>
+          <tr>
+            <td><strong>Write-heavy workloads</strong></td>
+            <td>LSM Tree architecture makes writes O(1) sequential I/O; 100K+ writes/sec per node</td>
+            <td>Discord: billions of messages stored in Cassandra (later migrated to ScyllaDB)</td>
+          </tr>
+          <tr>
+            <td><strong>Event sourcing / CDC</strong></td>
+            <td>Immutable append-only events, natural fit for STCS compaction</td>
+            <td>Uber: trip events, driver location updates, pricing events</td>
+          </tr>
+          <tr>
+            <td><strong>User activity / personalisation</strong></td>
+            <td>Sparse data (each user has different activity patterns), fast lookups by user ID</td>
+            <td>Spotify: user listening history, recommendations, playlist metadata</td>
+          </tr>
+          <tr>
+            <td><strong>Messaging / chat</strong></td>
+            <td>Messages partitioned by conversation, clustered by timestamp for efficient scrollback</td>
+            <td>Apple iMessage: global scale messaging infrastructure</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>When NOT to Use Column-Family Stores</h3>
+
+      <table class="col-table">
+        <thead><tr><th>Scenario</th><th>Why Not</th><th>Better Alternative</th></tr></thead>
+        <tbody>
+          <tr><td>Complex joins and ad-hoc queries</td><td>No join support, query-first design limits flexibility</td><td>PostgreSQL, MySQL</td></tr>
+          <tr><td>ACID transactions across rows/tables</td><td>Only row-level atomicity; LWT is slow (Paxos round-trips)</td><td>PostgreSQL, CockroachDB, Spanner</td></tr>
+          <tr><td>Small datasets (&lt; 10 GB)</td><td>Operational overhead of a Cassandra cluster is unjustified for small data</td><td>PostgreSQL, SQLite</td></tr>
+          <tr><td>Strong consistency everywhere (finance, banking)</td><td>Tunable consistency adds complexity; HBase better if you need Hadoop; Spanner if you need SQL</td><td>Spanner, CockroachDB, HBase</td></tr>
+          <tr><td>Graph traversals</td><td>No relationship model; each hop requires a separate query</td><td>Neo4j, Amazon Neptune</td></tr>
+          <tr><td>Full-text search</td><td>No indexing for free-text queries</td><td>Elasticsearch, OpenSearch</td></tr>
+        </tbody>
+      </table>
+
+
+      <!-- ============================================================ -->
+      <!-- SECTION 11: INTERVIEW -->
+      <!-- ============================================================ -->
+      <h2 id="interview-questions">Common Interview Questions</h2>
+
+      <details class="spoiler">
+        <summary>How does Cassandra achieve zero single points of failure?</summary>
+        <div class="spoiler-content">
+          <p><strong>Answer:</strong> Cassandra uses a <strong>peer-to-peer (masterless) architecture</strong> where every node is identical. There is no &ldquo;master&rdquo; or &ldquo;leader&rdquo; node. Any node can serve any request for any partition (acting as a coordinator). The gossip protocol disseminates cluster topology to every node, so no central registry is needed. Data is replicated to RF nodes, so even if RF&minus;1 nodes go down, all data remains accessible (at appropriate consistency levels). Compare this to HBase, where the HMaster is a potential SPOF (mitigated by standby HMasters, but failover takes 10&ndash;30 seconds).</p>
+        </div>
+      </details>
+
+      <details class="spoiler">
+        <summary>Explain the difference between partition key and clustering key. Why does it matter?</summary>
+        <div class="spoiler-content">
+          <p>The <strong>partition key</strong> determines <em>where</em> data lives (which node, via consistent hashing). All rows with the same partition key are stored on the same node(s) and in the same SSTable partition. The <strong>clustering key</strong> determines the <em>sort order within</em> the partition on disk.</p>
+          <p>This matters because: (1) queries on the partition key are O(1) lookups, (2) range queries on the clustering key are efficient sequential reads within a single partition, and (3) a poorly chosen partition key creates hotspots (all traffic to one node) or unbounded partitions (single partition grows to gigabytes).</p>
+          <p><strong>Rule of thumb:</strong> Partition key = equality predicate in your WHERE clause. Clustering key = range/ordering predicate.</p>
+        </div>
+      </details>
+
+      <details class="spoiler">
+        <summary>You need to store 1 billion events/day with 90-day retention. Design the schema.</summary>
+        <div class="spoiler-content">
+          <p><strong>Calculation:</strong> 1B events/day = ~11,500 events/sec average, ~50K peak. Each event ~500 bytes = 500 GB/day raw, ~1.5 TB/day with RF=3.</p>
+          <p><strong>Schema:</strong></p>
+          <pre><code>CREATE TABLE events (
+  event_type TEXT,
+  day        DATE,
+  hour       TINYINT,
+  event_time TIMESTAMP,
+  event_id   TIMEUUID,
+  payload    BLOB,
+  PRIMARY KEY ((event_type, day, hour), event_time, event_id)
+) WITH CLUSTERING ORDER BY (event_time DESC, event_id ASC)
+  AND compaction = {'class': 'TimeWindowCompactionStrategy',
+                    'compaction_window_unit': 'HOURS',
+                    'compaction_window_size': 1}
+  AND default_time_to_live = 7776000;</code></pre>
+          <p><strong>Why this design:</strong> Partition key includes <code>hour</code> bucket to cap partition size (~21M events per event_type per hour). TWCS for time-window compaction. TTL of 90 days = automatic deletion. Cluster size: ~15&ndash;20 nodes with 2 TB NVMe SSDs each.</p>
+        </div>
+      </details>
+
+      <details class="spoiler">
+        <summary>When would you choose HBase over Cassandra?</summary>
+        <div class="spoiler-content">
+          <p>Choose HBase when:</p>
+          <ol>
+            <li><strong>You need strong consistency for every operation</strong> (e.g., financial ledger where you can&rsquo;t tolerate stale reads).</li>
+            <li><strong>You&rsquo;re already invested in the Hadoop ecosystem</strong> (HDFS, MapReduce, Hive, Spark) and want tight integration for batch analytics.</li>
+            <li><strong>You need atomic row-level operations</strong> (HBase&rsquo;s <code>checkAndPut</code> / <code>checkAndDelete</code> are native, not Paxos-based like Cassandra&rsquo;s LWT).</li>
+            <li><strong>You don&rsquo;t need multi-data centre replication</strong> (HBase&rsquo;s cross-DC replication is limited compared to Cassandra).</li>
+          </ol>
+          <p>Choose Cassandra when: multi-DC is required, availability &gt; consistency, or you want a simpler operational model (no HDFS/ZK dependency).</p>
+        </div>
+      </details>
+
+      <details class="spoiler">
+        <summary>What is a tombstone in Cassandra and why are they dangerous?</summary>
+        <div class="spoiler-content">
+          <p>Since SSTables are immutable, Cassandra cannot delete data in place. Instead, a <strong>delete</strong> writes a special marker called a <strong>tombstone</strong>&mdash;a record that says &ldquo;this cell/row was deleted at timestamp T.&rdquo; During reads, the tombstone suppresses the older value. Tombstones are removed during compaction after <code>gc_grace_seconds</code> (default: 10 days).</p>
+          <p><strong>Why dangerous:</strong> If you delete frequently (e.g., delete + reinsert pattern, or TTL expiring many cells), tombstones accumulate between compactions. Reads that scan many tombstones waste CPU and I/O, and if a single read encounters &gt; 100,000 tombstones (configurable), Cassandra aborts the query with <code>TombstoneOverwhelmingException</code>. Mitigation: choose the right compaction strategy (TWCS for TTL data), avoid deletes when possible, and monitor <code>nodetool tablestats</code> for tombstone counts.</p>
+        </div>
+      </details>
+
+
+      <!-- ============================================================ -->
+      <!-- NAV -->
+      <!-- ============================================================ -->
+      <nav class="post-nav">
+        <a class="prev" href="nosql-keyvalue.html"><span>Previous</span><span>&#8592; NoSQL: Key-Value Stores</span></a>
+        <a class="next" href="nosql-graph.html"><span>Next</span><span>NoSQL: Graph Databases &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script>
+  (function(){
+    /* ======= SHARED SVG HELPERS ======= */
+    function el(tag,attrs){
+      var e=document.createElementNS('http://www.w3.org/2000/svg',tag);
+      for(var k in attrs) e.setAttribute(k,attrs[k]);
+      return e;
+    }
+    function rect(x,y,w,h,r,fill,stroke,opacity){
+      var a={x:x,y:y,width:w,height:h,rx:r,fill:fill};
+      if(stroke&&stroke!=='none') a.stroke=stroke, a['stroke-width']='1.5';
+      if(opacity) a.opacity=opacity;
+      return el('rect',a);
+    }
+    function txt(str,attrs){
+      var t=el('text',attrs);
+      t.textContent=str;
+      return t;
+    }
+    function arrow(x1,y1,x2,y2,color,dashed){
+      var g=el('g',{});
+      var attrs={x1:x1,y1:y1,x2:x2,y2:y2,stroke:color||'var(--ink)','stroke-width':'2'};
+      if(dashed) attrs['stroke-dasharray']='6,3';
+      g.appendChild(el('line',attrs));
+      var angle=Math.atan2(y2-y1,x2-x1);
+      var hl=8;
+      var p1x=x2-hl*Math.cos(angle-Math.PI/6);
+      var p1y=y2-hl*Math.sin(angle-Math.PI/6);
+      var p2x=x2-hl*Math.cos(angle+Math.PI/6);
+      var p2y=y2-hl*Math.sin(angle+Math.PI/6);
+      g.appendChild(el('polygon',{points:x2+','+y2+' '+p1x+','+p1y+' '+p2x+','+p2y,fill:color||'var(--ink)'}));
+      return g;
+    }
+    function clearSvg(svg){while(svg.firstChild)svg.removeChild(svg.firstChild);}
+
+    /* ======= ANIMATION 1: WRITE PATH ======= */
+    (function(){
+      var svg=document.getElementById('write-path-svg');
+      var info=document.getElementById('write-path-info');
+      var out=document.getElementById('wp-output');
+
+      var boxDefs=[
+        {id:'client',  x:10,  y:145, w:80,  h:44, label:'Client',         fill:'#f3f4f6', border:'#6b7280',type:'mem'},
+        {id:'coord',   x:130, y:145, w:100, h:44, label:'Coordinator',    fill:'rgba(10,143,106,.12)', border:'#0a8f6a',type:'mem'},
+        {id:'clog',    x:280, y:60,  w:110, h:44, label:'Commit Log',     fill:'rgba(37,99,235,.10)', border:'#2563eb',type:'disk'},
+        {id:'mem',     x:280, y:145, w:110, h:44, label:'Memtable',       fill:'rgba(22,163,74,.10)',  border:'#16a34a',type:'mem'},
+        {id:'ack',     x:280, y:230, w:110, h:44, label:'ACK → Client',   fill:'rgba(234,179,8,.12)',  border:'#ca8a04',type:'mem'},
+        {id:'sst',     x:470, y:145, w:110, h:44, label:'SSTable (disk)', fill:'rgba(37,99,235,.10)',  border:'#2563eb',type:'disk'},
+        {id:'flush',   x:470, y:60,  w:110, h:44, label:'Flush (bg)',     fill:'rgba(168,85,247,.10)', border:'#9333ea',type:'disk'}
+      ];
+
+      var steps=[
+        {
+          desc:'Client sends write request to any node (the coordinator).',
+          highlight:['client','coord'],
+          arrows:[[90,167,130,167,'#0a8f6a',false]]
+        },
+        {
+          desc:'Coordinator identifies replica nodes via token ring, forwards mutation.',
+          highlight:['coord'],
+          arrows:[]
+        },
+        {
+          desc:'Replica appends to Commit Log (sequential disk write) for durability.',
+          highlight:['coord','clog'],
+          arrows:[[230,155,280,82,'#2563eb',false]]
+        },
+        {
+          desc:'Simultaneously, write is inserted into the Memtable (in-memory sorted structure).',
+          highlight:['coord','mem'],
+          arrows:[[230,167,280,167,'#16a34a',false]]
+        },
+        {
+          desc:'Replica ACKs the coordinator. Coordinator waits for CL-required ACKs, then responds to client.',
+          highlight:['ack','client'],
+          arrows:[[280,252,90,180,'#ca8a04',true]]
+        },
+        {
+          desc:'Later (background): when Memtable reaches ~64 MB, it flushes to an immutable SSTable on disk.',
+          highlight:['mem','flush','sst'],
+          arrows:[[390,167,470,167,'#9333ea',true],[470,104,470,145,'#9333ea',true]]
+        }
+      ];
+
+      function drawBase(stepIdx){
+        clearSvg(svg);
+        // legend
+        svg.appendChild(rect(10,310,12,12,3,'rgba(22,163,74,.25)','#16a34a'));
+        svg.appendChild(txt('In-memory',{x:'28',y:'321','font-size':'10','font-family':'Manrope,sans-serif',fill:'var(--ink-muted)'}));
+        svg.appendChild(rect(110,310,12,12,3,'rgba(37,99,235,.25)','#2563eb'));
+        svg.appendChild(txt('On disk',{x:'128',y:'321','font-size':'10','font-family':'Manrope,sans-serif',fill:'var(--ink-muted)'}));
+
+        var active=stepIdx>=0?steps[stepIdx].highlight:[];
+        for(var i=0;i<boxDefs.length;i++){
+          var b=boxDefs[i];
+          var isActive=active.indexOf(b.id)>=0;
+          var opacity=stepIdx<0?'1':(isActive?'1':'0.3');
+          var bx=rect(b.x,b.y,b.w,b.h,10,b.fill,b.border,opacity);
+          svg.appendChild(bx);
+          var labelParts=b.label.split(' ');
+          if(labelParts.length<=2){
+            svg.appendChild(txt(b.label,{x:''+(b.x+b.w/2),y:''+(b.y+b.h/2+5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'11','font-weight':'700',fill:'var(--ink)',opacity:opacity}));
+          } else {
+            svg.appendChild(txt(labelParts.slice(0,2).join(' '),{x:''+(b.x+b.w/2),y:''+(b.y+b.h/2-1),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'11','font-weight':'700',fill:'var(--ink)',opacity:opacity}));
+            svg.appendChild(txt(labelParts.slice(2).join(' '),{x:''+(b.x+b.w/2),y:''+(b.y+b.h/2+13),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'10','font-weight':'600',fill:'var(--ink)',opacity:opacity}));
+          }
+          // type badge
+          var badge=b.type==='mem'?'MEM':'DISK';
+          var badgeColor=b.type==='mem'?'#16a34a':'#2563eb';
+          svg.appendChild(txt(badge,{x:''+(b.x+b.w-8),y:''+(b.y-4),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'8','font-weight':'700',fill:badgeColor,opacity:opacity}));
+        }
+        if(stepIdx>=0){
+          var arrs=steps[stepIdx].arrows;
+          for(var j=0;j<arrs.length;j++){
+            svg.appendChild(arrow(arrs[j][0],arrs[j][1],arrs[j][2],arrs[j][3],arrs[j][4],arrs[j][5]));
+          }
+        }
+      }
+
+      var step=-1;
+      function reset(){
+        step=-1;
+        drawBase(-1);
+        info.textContent='Click "Step" to walk through the Cassandra write path.';
+        out.textContent='';
+      }
+      function doStep(){
+        step++;
+        if(step>=steps.length){info.textContent='✓ Write path complete! Click Reset to replay.';out.textContent='Done';return;}
+        drawBase(step);
+        info.textContent='Step '+(step+1)+'/'+steps.length+': '+steps[step].desc;
+        out.textContent=(step+1)+' / '+steps.length;
+      }
+      reset();
+      document.getElementById('wp-step').addEventListener('click',doStep);
+      document.getElementById('wp-reset').addEventListener('click',reset);
+    })();
+
+
+    /* ======= ANIMATION 2: READ PATH ======= */
+    (function(){
+      var svg=document.getElementById('read-path-svg');
+      var info=document.getElementById('read-path-info');
+      var out=document.getElementById('rp-output');
+
+      var layers=[
+        {id:'memtable',  label:'Memtable Check',        type:'mem',  y:20,  color:'#16a34a', bg:'rgba(22,163,74,.10)'},
+        {id:'bloom',     label:'Bloom Filter',           type:'mem',  y:75,  color:'#16a34a', bg:'rgba(22,163,74,.10)'},
+        {id:'keycache',  label:'Key Cache (LRU)',        type:'mem',  y:130, color:'#16a34a', bg:'rgba(22,163,74,.10)'},
+        {id:'partindex', label:'Partition Index',        type:'disk', y:185, color:'#2563eb', bg:'rgba(37,99,235,.10)'},
+        {id:'compoff',   label:'Compression Offset Map', type:'mem',  y:240, color:'#16a34a', bg:'rgba(22,163,74,.10)'},
+        {id:'sstdata',   label:'SSTable Data File',      type:'disk', y:295, color:'#2563eb', bg:'rgba(37,99,235,.10)'}
+      ];
+
+      var layerW=280, layerH=40, layerX=200;
+
+      var steps=[
+        {
+          desc:'Check the Memtable first (in-memory). If the partition is here, return immediately.',
+          active:0,
+          result:'HIT → return data (best case)',
+          resultColor:'#16a34a'
+        },
+        {
+          desc:'For each SSTable, check its Bloom filter. If it says NO → skip this SSTable entirely. (~1% false positive rate)',
+          active:1,
+          result:'NO → skip SSTable (avoid disk I/O)',
+          resultColor:'#dc2626'
+        },
+        {
+          desc:'Bloom filter said MAYBE. Check the Key Cache — an LRU mapping partition key → data offset.',
+          active:2,
+          result:'HIT → jump to compression offset (skip index lookup)',
+          resultColor:'#16a34a'
+        },
+        {
+          desc:'Key Cache miss. Binary-search the Partition Index (on disk, often page-cached) to find the data offset.',
+          active:3,
+          result:'Found offset → proceed to compression map',
+          resultColor:'#ca8a04'
+        },
+        {
+          desc:'Translate logical offset → physical compressed chunk location via the Compression Offset Map (in memory).',
+          active:4,
+          result:'Physical chunk offset resolved',
+          resultColor:'#16a34a'
+        },
+        {
+          desc:'Read the compressed chunk from the SSTable data file on disk. Decompress, extract columns, merge with other SSTables.',
+          active:5,
+          result:'Data returned to client ✓',
+          resultColor:'#2563eb'
+        }
+      ];
+
+      function drawBase(stepIdx){
+        clearSvg(svg);
+
+        // Legend
+        svg.appendChild(rect(10,350,12,12,3,'rgba(22,163,74,.25)','#16a34a'));
+        svg.appendChild(txt('In-memory',{x:'28',y:'361','font-size':'10','font-family':'Manrope,sans-serif',fill:'var(--ink-muted)'}));
+        svg.appendChild(rect(110,350,12,12,3,'rgba(37,99,235,.25)','#2563eb'));
+        svg.appendChild(txt('On disk',{x:'128',y:'361','font-size':'10','font-family':'Manrope,sans-serif',fill:'var(--ink-muted)'}));
+
+        // Step label on the left
+        for(var i=0;i<layers.length;i++){
+          var l=layers[i];
+          var isActive=stepIdx>=0&&steps[stepIdx].active===i;
+          var isPast=stepIdx>=0&&i<steps[stepIdx].active;
+          var opacity=stepIdx<0?'1':(isActive?'1':(isPast?'0.4':'0.25'));
+
+          // Layer box
+          svg.appendChild(rect(layerX,l.y,layerW,layerH,8,l.bg,l.color,opacity));
+          svg.appendChild(txt(l.label,{x:''+(layerX+layerW/2),y:''+(l.y+layerH/2+5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'12','font-weight':'700',fill:'var(--ink)',opacity:opacity}));
+
+          // Type badge
+          var badge=l.type==='mem'?'IN-MEMORY':'ON DISK';
+          var badgeColor=l.type==='mem'?'#16a34a':'#2563eb';
+          svg.appendChild(txt(badge,{x:''+(layerX-10),y:''+(l.y+layerH/2+4),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'9','font-weight':'700',fill:badgeColor,opacity:opacity}));
+
+          // Arrow to next layer
+          if(i<layers.length-1){
+            var nextY=layers[i+1].y;
+            var arrowOpacity=stepIdx<0?'0.4':(isPast||isActive?'0.8':'0.15');
+            var aLine=el('line',{x1:layerX+layerW/2,y1:l.y+layerH,x2:layerX+layerW/2,y2:nextY,stroke:'var(--ink)','stroke-width':'1.5','stroke-dasharray':'4,3',opacity:arrowOpacity});
+            svg.appendChild(aLine);
+          }
+        }
+
+        // Result text for active step
+        if(stepIdx>=0){
+          var al=layers[steps[stepIdx].active];
+          var resultX=layerX+layerW+15;
+          var resultY=al.y+layerH/2+5;
+          svg.appendChild(txt('→ '+steps[stepIdx].result,{x:''+resultX,y:''+resultY,'font-family':'Consolas,monospace','font-size':'10','font-weight':'600',fill:steps[stepIdx].resultColor}));
+        }
+      }
+
+      var step=-1;
+      function reset(){
+        step=-1;
+        drawBase(-1);
+        info.textContent='Click "Step" to walk through the Cassandra read path layers.';
+        out.textContent='';
+      }
+      function doStep(){
+        step++;
+        if(step>=steps.length){info.textContent='✓ Read path complete! Click Reset to replay.';out.textContent='Done';return;}
+        drawBase(step);
+        info.textContent='Step '+(step+1)+'/'+steps.length+': '+steps[step].desc;
+        out.textContent=(step+1)+' / '+steps.length;
+      }
+      reset();
+      document.getElementById('rp-step').addEventListener('click',doStep);
+      document.getElementById('rp-reset').addEventListener('click',reset);
+    })();
+  })();
+  </script>
+</body>
+</html>

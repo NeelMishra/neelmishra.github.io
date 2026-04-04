@@ -1,0 +1,1523 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design Google Drive / Dropbox: file chunking (4MB SHA-256), sync protocol with long-polling/WebSocket, conflict resolution (last-write-wins + conflict copies), deduplication, block storage on S3/GCS, metadata service, ACL-based sharing, version history, offline support, and cold storage for 500M users.">
+  <title>Design: Google Drive / Dropbox | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Post 52 of 70</span></div>
+
+      <h1>Design: Google Drive / Dropbox</h1>
+      <p class="post-meta">April 2026 &middot; 28 min read</p>
+
+      <p>Cloud file storage is deceptively simple on the surface — "just upload files and sync them" — but behind that simplicity lies one of the most complex distributed systems problems in modern engineering. Google Drive alone serves <strong>over 1 billion users</strong>, storing <strong>trillions of files</strong>, syncing changes across <strong>billions of devices</strong> in near real-time. Dropbox processes <strong>over 1.2 billion files per day</strong>.</p>
+
+      <p>The core challenge: how do you let hundreds of millions of users seamlessly upload, download, share, and collaboratively edit files across every device they own, while keeping storage costs manageable, latency low, and conflicts resolvable? The answer involves <strong>file chunking</strong>, <strong>content-addressable storage</strong>, <strong>chunk-level deduplication</strong>, <strong>delta sync</strong>, and a carefully orchestrated <strong>notification pipeline</strong>.</p>
+
+      <div class="callout">
+        <strong>Scope of this design:</strong> We focus on the <em>sync engine</em> — the hardest part. Not the WYSIWYG editor (Google Docs), not the spreadsheet engine, not real-time collaborative cursors. Those are separate systems layered on top. Our system handles <strong>file storage, sync, sharing, and versioning</strong> for arbitrary file types.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           1. REQUIREMENTS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="requirements">Requirements &amp; Scale</h2>
+
+      <h3 id="functional-requirements">Functional Requirements</h3>
+      <ul>
+        <li><strong>Upload &amp; download files</strong> — any file type, up to 15 GB per file</li>
+        <li><strong>Sync across devices</strong> — changes on one device appear on all others within seconds</li>
+        <li><strong>Share files &amp; folders</strong> — with specific users or via shareable links, with granular permissions</li>
+        <li><strong>Version history</strong> — view and restore previous versions of any file</li>
+        <li><strong>Offline support</strong> — queue changes locally, sync automatically when connectivity resumes</li>
+        <li><strong>Conflict resolution</strong> — handle simultaneous edits from multiple devices gracefully</li>
+      </ul>
+
+      <h3 id="non-functional-requirements">Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Scale:</strong> 500M registered users, 100M DAU</li>
+        <li><strong>Storage:</strong> Average 2 GB per user → 1 exabyte total</li>
+        <li><strong>Upload throughput:</strong> ~1 billion file operations per day</li>
+        <li><strong>Sync latency:</strong> Changes propagate to connected devices within 5 seconds</li>
+        <li><strong>Durability:</strong> 99.999999999% (11 nines) — zero data loss, ever</li>
+        <li><strong>Availability:</strong> 99.99% uptime</li>
+        <li><strong>Bandwidth efficiency:</strong> Minimize bytes transferred — don't re-upload unchanged data</li>
+      </ul>
+
+      <h3 id="back-of-envelope">Back-of-Envelope Estimates</h3>
+      <pre><code>Users:               500M registered, 100M DAU
+Files per user:      ~200 files average
+Total files:         100 billion files
+Average file size:   ~500 KB
+Total storage:       100B × 500KB = 50 PB (raw), ~150 PB with replication
+Daily uploads:       100M users × 3 file changes/day = 300M operations/day
+                     = ~3,500 ops/second average, ~10,000 ops/second peak
+Daily bandwidth:     300M × 500KB avg change = 150 TB/day upload
+Sync notifications:  ~1 billion notifications/day (multi-device fan-out)</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           2. HIGH-LEVEL ARCHITECTURE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system decomposes into six major components, each independently scalable:</p>
+
+      <pre><code>┌──────────────────────────────────────────────────────────────────────┐
+│                           CLIENT DEVICE                              │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐               │
+│  │ File Watcher │  │ Chunker /    │  │ Local DB      │               │
+│  │ (inotify /   │  │ Hasher       │  │ (SQLite)      │               │
+│  │  FSEvents /  │  │              │  │ chunk_hashes  │               │
+│  │  ReadDir)    │  │ 4MB chunks   │  │ sync_state    │               │
+│  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘               │
+│         │                 │                   │                       │
+│         └─────────┬───────┘───────────────────┘                       │
+│                   ▼                                                   │
+│           ┌───────────────┐                                           │
+│           │  Sync Engine  │ ← coordinates upload/download/conflict    │
+│           └───────┬───────┘                                           │
+└───────────────────┼──────────────────────────────────────────────────┘
+                    │ HTTPS / WebSocket
+                    ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         API GATEWAY / LB                             │
+└──────────────────────────┬───────────────────────────────────────────┘
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
+│  Upload      │  │  Metadata    │  │  Notification    │
+│  Service     │  │  Service     │  │  Service         │
+│              │  │              │  │  (WebSocket /    │
+│  chunk →     │  │  files,      │  │   long-polling)  │
+│  block store │  │  folders,    │  │                  │
+│              │  │  versions,   │  │  push changes    │
+│              │  │  ACLs        │  │  to devices      │
+└──────┬───────┘  └──────┬───────┘  └──────────────────┘
+       │                 │
+       ▼                 ▼
+┌──────────────┐  ┌──────────────┐
+│  Block Store │  │  Metadata DB │
+│  (S3 / GCS)  │  │  (MySQL /    │
+│              │  │   PostgreSQL)│
+│  content-    │  │              │
+│  addressable │  │  + Redis     │
+│              │  │    cache     │
+└──────────────┘  └──────────────┘</code></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> We separate <em>data</em> (file chunks — large, binary, immutable) from <em>metadata</em> (file names, folder structure, permissions, versions — small, relational, mutable). This separation is fundamental to every cloud storage system. Data goes to object storage (S3/GCS); metadata goes to a relational database.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           3. FILE CHUNKING
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="chunking">File Chunking — The Foundation</h2>
+
+      <p>Every file storage system at scale uses <strong>chunking</strong> — splitting files into fixed-size blocks. This single decision enables deduplication, resumable uploads, parallel transfers, and efficient delta sync. Without chunking, changing one byte of a 5 GB video would require re-uploading the entire file.</p>
+
+      <h3 id="chunk-size">Choosing the Chunk Size</h3>
+      <p>The chunk size is a critical engineering trade-off:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Chunk Size</th><th style="text-align:left; padding:0.5em;">Pros</th><th style="text-align:left; padding:0.5em;">Cons</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>1 MB</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Fine-grained dedup, small re-uploads</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Too many chunks per file → metadata overhead, S3 PUT cost</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>4 MB ✓</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Good balance: reasonable dedup, manageable chunk count</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Good for most file types</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>8 MB</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Fewer chunks, less metadata</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Coarser dedup; small edits waste more bandwidth</td></tr>
+          <tr><td style="padding:0.5em;"><strong>64 MB</strong></td><td style="padding:0.5em;">Minimal metadata (HDFS default)</td><td style="padding:0.5em;">Terrible for sync — one byte change re-uploads 64 MB</td></tr>
+        </tbody>
+      </table>
+
+      <p>We choose <strong>4 MB chunks</strong>. A 1 GB file becomes ~256 chunks. A 100 KB document is a single chunk. Dropbox uses 4 MB; Google Drive uses variable chunk sizes based on file type (4–8 MB for most).</p>
+
+      <h3 id="chunking-algorithm">The Chunking Algorithm</h3>
+      <pre><code>// Fixed-size chunking with SHA-256 hashing
+function chunkFile(filePath) {
+    const CHUNK_SIZE = 4 * 1024 * 1024;  // 4 MB
+    const file = openFile(filePath);
+    const chunks = [];
+    let offset = 0;
+    let index = 0;
+
+    while (offset < file.size) {
+        const end = Math.min(offset + CHUNK_SIZE, file.size);
+        const data = file.read(offset, end);
+
+        // SHA-256 hash of the raw chunk bytes
+        const hash = sha256(data);
+
+        chunks.push({
+            index: index,
+            offset: offset,
+            size: end - offset,
+            hash: hash,         // content-addressable key
+            data: data           // raw bytes (held in memory briefly)
+        });
+
+        offset = end;
+        index++;
+    }
+
+    return {
+        fileName: filePath,
+        fileSize: file.size,
+        totalChunks: chunks.length,
+        fileHash: sha256(chunks.map(c => c.hash).join('')),
+        chunks: chunks
+    };
+}
+
+// Example output for a 14 MB file:
+// {
+//   fileName: "presentation.pptx",
+//   fileSize: 14680064,
+//   totalChunks: 4,            // ceil(14MB / 4MB) = 4
+//   fileHash: "a3f2c1...",
+//   chunks: [
+//     { index: 0, offset: 0,        size: 4194304, hash: "e7b3a1..." },
+//     { index: 1, offset: 4194304,  size: 4194304, hash: "c2d4f9..." },
+//     { index: 2, offset: 8388608,  size: 4194304, hash: "91ab2e..." },
+//     { index: 3, offset: 12582912, size: 2097152, hash: "f8c7d3..." }
+//   ]
+// }</code></pre>
+
+      <div class="callout">
+        <strong>Why SHA-256?</strong> SHA-256 produces a 256-bit (32-byte) hash. Collision probability is astronomically low — approximately 2<sup>-128</sup> for birthday collisions, which is less than the probability of a random bit flip in RAM. It's fast enough for client-side computation (~400 MB/s on modern CPUs) and universally supported.
+      </div>
+
+      <h3 id="content-defined-chunking">Content-Defined Chunking (CDC) — Advanced</h3>
+      <p>Fixed-size chunking has a weakness: if you insert data at the <em>beginning</em> of a file, <strong>every</strong> chunk boundary shifts and all chunk hashes change. Content-Defined Chunking (Rabin fingerprinting) solves this by choosing chunk boundaries based on the <em>content</em>:</p>
+
+      <pre><code>// Content-Defined Chunking using Rabin fingerprinting
+function contentDefinedChunk(filePath) {
+    const MIN_CHUNK = 2 * 1024 * 1024;   // 2 MB minimum
+    const MAX_CHUNK = 8 * 1024 * 1024;   // 8 MB maximum
+    const TARGET    = 4 * 1024 * 1024;   // 4 MB target
+    const MASK      = 0x00FFFFF;          // ~4 MB average (22 bits)
+
+    const file = openFile(filePath);
+    const chunks = [];
+    let offset = 0;
+    let chunkStart = 0;
+
+    while (offset < file.size) {
+        const windowSize = 48;  // Rabin window
+        const fingerprint = rabinFingerprint(
+            file.read(offset, offset + windowSize)
+        );
+
+        const chunkLen = offset - chunkStart;
+
+        // Cut when fingerprint matches mask AND chunk >= minimum
+        // OR when chunk hits maximum size
+        if ((chunkLen >= MIN_CHUNK && (fingerprint & MASK) === 0)
+            || chunkLen >= MAX_CHUNK) {
+
+            const data = file.read(chunkStart, offset);
+            chunks.push({
+                offset: chunkStart,
+                size: chunkLen,
+                hash: sha256(data)
+            });
+            chunkStart = offset;
+        }
+
+        offset++;
+    }
+
+    // Flush remaining bytes as last chunk
+    if (chunkStart < file.size) {
+        const data = file.read(chunkStart, file.size);
+        chunks.push({
+            offset: chunkStart,
+            size: file.size - chunkStart,
+            hash: sha256(data)
+        });
+    }
+
+    return chunks;
+}
+
+// Advantage: Inserting 100 bytes at offset 0 only changes the FIRST chunk.
+// All subsequent chunk boundaries stay the same because they're
+// content-defined, not position-defined. Massive bandwidth savings!</code></pre>
+
+      <p>Dropbox switched from fixed-size to content-defined chunking in 2014, reducing sync bandwidth by <strong>~40%</strong> for files with insertions/deletions near the beginning.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           4. DEDUPLICATION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="deduplication">Deduplication — Store Once, Reference Many</h2>
+
+      <p>With content-addressable storage, each chunk is stored using its <strong>SHA-256 hash as the key</strong>. If two chunks have the same hash, they are (with overwhelming probability) identical. We store the data only <strong>once</strong> and add a reference.</p>
+
+      <h3 id="dedup-levels">Deduplication at Multiple Levels</h3>
+
+      <pre><code>// Level 1: Intra-file dedup
+// A 400 MB VM image with large zero-filled regions
+// Chunk "0000...0000" (4 MB of zeros) appears 50 times
+// → store 1 chunk, reference it 50 times
+// Savings: 196 MB
+
+// Level 2: Cross-file dedup (same user)
+// User copies presentation.pptx → presentation_v2.pptx
+// Makes a small edit → only 1 chunk changes
+// → 255 of 256 chunks already exist, upload only 1
+// Savings: ~1 GB for a 1 GB file copy
+
+// Level 3: Cross-user dedup
+// 10,000 users upload the same company_logo.png (800 KB)
+// → store 1 chunk, 10,000 references
+// Savings: ~8 GB
+
+// Upload flow with dedup:
+async function uploadWithDedup(fileChunks) {
+    // Step 1: Send all chunk hashes to server
+    const hashList = fileChunks.map(c => c.hash);
+    const serverResponse = await api.checkChunks(hashList);
+    // Response: { needed: ["e7b3a1...", "f8c7d3..."], existing: ["c2d4f9...", "91ab2e..."] }
+
+    // Step 2: Upload ONLY chunks the server doesn't have
+    const newChunks = fileChunks.filter(c => serverResponse.needed.includes(c.hash));
+    for (const chunk of newChunks) {
+        await api.uploadChunk(chunk.hash, chunk.data);
+        // Server stores: S3 key = "chunks/{hash}" → chunk data
+    }
+
+    // Step 3: Register file metadata (references existing + new chunks)
+    await api.registerFile({
+        path: "/documents/report.pdf",
+        chunks: hashList,    // ordered list of chunk hashes
+        fileHash: sha256(hashList.join(''))
+    });
+
+    // Result: only 2 of 4 chunks uploaded (50% bandwidth saved)
+}</code></pre>
+
+      <h3 id="dedup-numbers">Deduplication in Practice</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Scenario</th><th style="text-align:left; padding:0.5em;">Without Dedup</th><th style="text-align:left; padding:0.5em;">With Dedup</th><th style="text-align:left; padding:0.5em;">Savings</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Edit 1 page of a 100-page PDF</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Re-upload 50 MB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Upload 4 MB (1 chunk)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>92%</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Copy a 2 GB folder within Drive</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Upload 2 GB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Upload 0 bytes (metadata only)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>100%</strong></td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">10K users upload same installer</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">500 GB × 10K = 5 PB</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">500 GB (once)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>99.99%</strong></td></tr>
+          <tr><td style="padding:0.5em;">Overall platform (Dropbox 2019)</td><td style="padding:0.5em;">~500 PB</td><td style="padding:0.5em;">~120 PB (reported)</td><td style="padding:0.5em;"><strong>~76%</strong></td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           5. SYNC PROTOCOL
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="sync-protocol">Sync Protocol — The State Machine</h2>
+
+      <p>The sync engine on each device is a <strong>state machine</strong> that watches the local file system, detects changes, computes diffs at the chunk level, uploads only what's new, and downloads changes made by other devices. It is the most complex component in the entire system.</p>
+
+      <h3 id="sync-states">Sync Engine States</h3>
+      <pre><code>// Sync Engine State Machine
+//
+//  ┌────────────┐  file change   ┌────────────┐  chunks computed   ┌────────────┐
+//  │   IDLE     │ ─────────────→ │  INDEXING   │ ─────────────────→ │  DIFFING   │
+//  │            │                │            │                     │            │
+//  │  watching  │                │  reading   │                     │  comparing │
+//  │  for       │                │  file,     │                     │  local vs  │
+//  │  changes   │                │  chunking, │                     │  server    │
+//  │            │                │  hashing   │                     │  chunks    │
+//  └────────────┘                └────────────┘                     └──────┬─────┘
+//       ▲                                                                  │
+//       │                                                           has diff?
+//       │                                                          ┌───────┴───────┐
+//       │                                                     no   │               │ yes
+//       │                                                          ▼               ▼
+//       │                                                    ┌──────────┐   ┌──────────────┐
+//       │                                                    │ UP TO    │   │ UPLOADING    │
+//       │◄───────────────────────────────────────────────────│ DATE     │   │              │
+//       │                                                    └──────────┘   │ sending new  │
+//       │                                                                   │ chunks to    │
+//       │                                                                   │ block store  │
+//       │                                                                   └──────┬───────┘
+//       │                                                                          │
+//       │                                                                   all uploaded
+//       │                                                                          ▼
+//       │                                                                   ┌──────────────┐
+//       │                                                                   │ COMMITTING   │
+//       │◄──────────────────────────────────────────────────────────────────│              │
+//       │                                        done                       │ update       │
+//                                                                           │ metadata DB  │
+//                                                                           │ + notify     │
+//                                                                           └──────────────┘
+
+enum SyncState {
+    IDLE,        // Watching file system for changes
+    INDEXING,    // Reading changed file, computing chunks + hashes
+    DIFFING,     // Comparing local chunk list vs server chunk list
+    UPLOADING,   // Uploading new/changed chunks to block store
+    COMMITTING,  // Updating metadata DB with new file version
+    DOWNLOADING, // Fetching chunks changed by another device
+    CONFLICTED,  // Conflicting changes detected
+    ERROR        // Retryable error state (exponential backoff)
+}</code></pre>
+
+      <h3 id="change-detection">Change Detection</h3>
+      <p>The client watches the local file system using OS-level APIs:</p>
+
+      <pre><code>// Platform-specific file system watchers
+// Linux:   inotify (kernel-level, event-driven, ~8K watches default)
+// macOS:   FSEvents (coalesced events, efficient for large trees)
+// Windows: ReadDirectoryChangesW (per-directory, recursive option)
+
+class FileWatcher {
+    constructor(syncRoot) {
+        this.syncRoot = syncRoot;
+        this.debounceMs = 500;  // Coalesce rapid changes
+        this.pendingChanges = new Map();
+    }
+
+    onFileChange(event) {
+        // event: { type: CREATE|MODIFY|DELETE|RENAME, path: string }
+
+        // Debounce: wait 500ms after last change before processing
+        // (editors do save → delete → rename atomically)
+        clearTimeout(this.pendingChanges.get(event.path));
+        this.pendingChanges.set(event.path, setTimeout(() => {
+            this.pendingChanges.delete(event.path);
+            this.syncEngine.enqueue(event);
+        }, this.debounceMs));
+    }
+}
+
+// The debounce is critical: text editors often perform multi-step saves:
+// 1. Write to temp file (report.pdf.tmp)
+// 2. Delete original (report.pdf)
+// 3. Rename temp → original (report.pdf.tmp → report.pdf)
+// Without debouncing, we'd process each step as a separate change.</code></pre>
+
+      <h3 id="upload-protocol">Upload Protocol (Client → Server)</h3>
+      <pre><code>// Complete upload flow
+async function syncLocalChange(filePath) {
+    // 1. INDEXING: Chunk the file and compute hashes
+    const chunks = chunkFile(filePath);
+    const localHashes = chunks.map(c => c.hash);
+
+    // 2. DIFFING: Ask server which chunks it already has
+    const { needed, serverVersion } = await api.diffChunks({
+        filePath: filePath,
+        chunkHashes: localHashes
+    });
+    // Server compares against the latest version's chunk list
+    // Returns: needed = hashes not in block store
+
+    // 3. Check for conflicts (server version newer than our base version)
+    const localVersion = localDB.getVersion(filePath);
+    if (serverVersion > localVersion) {
+        return handleConflict(filePath, localVersion, serverVersion);
+    }
+
+    // 4. UPLOADING: Upload only the chunks the server needs
+    const uploadPromises = needed.map(hash => {
+        const chunk = chunks.find(c => c.hash === hash);
+        return uploadChunkWithRetry(chunk, {
+            maxRetries: 3,
+            backoff: 'exponential'
+        });
+    });
+    await Promise.all(uploadPromises);  // Parallel upload!
+
+    // 5. COMMITTING: Register new version with metadata service
+    const newVersion = await api.commitFileVersion({
+        filePath: filePath,
+        chunkHashes: localHashes,       // ordered chunk list
+        fileSize: chunks.reduce((s, c) => s + c.size, 0),
+        checksum: sha256(localHashes.join('')),
+        baseVersion: localVersion        // optimistic concurrency
+    });
+
+    // 6. Update local DB
+    localDB.setVersion(filePath, newVersion.version);
+    localDB.setChunkHashes(filePath, localHashes);
+}
+
+// Chunk upload with resumability
+async function uploadChunkWithRetry(chunk, opts) {
+    for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+        try {
+            // Use pre-signed S3 URL for direct upload (bypass our servers)
+            const { uploadUrl } = await api.getUploadUrl(chunk.hash);
+            await httpPut(uploadUrl, chunk.data, {
+                headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'Content-Length': chunk.size,
+                    'x-amz-content-sha256': chunk.hash
+                }
+            });
+            return;
+        } catch (err) {
+            if (attempt === opts.maxRetries) throw err;
+            const delay = Math.pow(2, attempt) * 1000;  // 1s, 2s, 4s
+            await sleep(delay);
+        }
+    }
+}</code></pre>
+
+      <h3 id="download-protocol">Download Protocol (Server → Client)</h3>
+      <pre><code>// When the notification service tells us another device changed a file:
+async function syncRemoteChange(notification) {
+    // notification: { filePath, newVersion, changedChunks, deletedChunks }
+
+    // 1. Get the new chunk list from metadata service
+    const newMeta = await api.getFileMetadata(notification.filePath, notification.newVersion);
+    // Returns: { chunkHashes: [...], fileSize: ..., modifiedAt: ... }
+
+    // 2. Compare with our local chunk list
+    const localHashes = localDB.getChunkHashes(notification.filePath);
+    const toDownload = newMeta.chunkHashes.filter(h => !localHashes.includes(h));
+    const toRemove = localHashes.filter(h => !newMeta.chunkHashes.includes(h));
+
+    // 3. Download new chunks (parallel, from S3 via CDN)
+    const downloadedChunks = await Promise.all(
+        toDownload.map(hash => downloadChunk(hash))
+    );
+
+    // 4. Reassemble the file from chunks
+    //    Local cache: keep recently used chunks in ~/.drive/cache/
+    const allChunks = newMeta.chunkHashes.map(hash => {
+        const downloaded = downloadedChunks.find(c => c.hash === hash);
+        if (downloaded) return downloaded.data;
+        return localChunkCache.get(hash);  // unchanged chunk from cache
+    });
+
+    // 5. Write to temp file, then atomic rename
+    const tempPath = filePath + '.drive-tmp';
+    writeFile(tempPath, concatenate(allChunks));
+    atomicRename(tempPath, filePath);
+
+    // 6. Update local state
+    localDB.setVersion(filePath, notification.newVersion);
+    localDB.setChunkHashes(filePath, newMeta.chunkHashes);
+}</code></pre>
+
+      <!-- ──────────────── ANIMATION 1: File Sync Flow ──────────────── -->
+      <h2 id="sync-flow-visual">File Sync Flow — Animated</h2>
+      <p>The following animation shows the complete sync flow when a user edits a file on Device A and the change propagates to Device B.</p>
+
+      <div class="anim-container" id="sync-anim">
+        <h4>&#9654; File Sync Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the flow: edit on Device A → chunk → diff → upload changed chunks → server metadata update → notify Device B → Device B downloads → synced.</p>
+        <svg id="sync-svg" width="700" height="400" viewBox="0 0 700 400"></svg>
+        <div id="sync-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="sync-step">Step &rarr;</button>
+          <button class="anim-btn" id="sync-reset">Reset</button>
+          <span class="anim-output" id="sync-output"></span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           6. NOTIFICATION SERVICE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="notification">Notification Service</h2>
+
+      <p>After a file version is committed, all other devices with access to that file must be notified. The notification service maintains <strong>persistent connections</strong> to all online clients:</p>
+
+      <h3 id="notification-approaches">Approaches Compared</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Method</th><th style="text-align:left; padding:0.5em;">Latency</th><th style="text-align:left; padding:0.5em;">Connections</th><th style="text-align:left; padding:0.5em;">Battery</th><th style="text-align:left; padding:0.5em;">Use Case</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Polling</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">High (interval)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Reconnects each time</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Bad</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Simple, rarely used at scale</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Long-polling ✓</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Low (~instant)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 persistent per device</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Good</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Desktop clients, reliable</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>WebSocket ✓</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Lowest</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 persistent, bidirectional</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Good</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Real-time sync, web clients</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Push (APNs/FCM)</strong></td><td style="padding:0.5em;">Medium</td><td style="padding:0.5em;">Managed by OS</td><td style="padding:0.5em;">Best</td><td style="padding:0.5em;">Mobile (when app is backgrounded)</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>// Notification Service Architecture
+class NotificationService {
+    // In-memory: userId → Set of connected WebSocket sessions
+    // Backed by Redis Pub/Sub for multi-server fan-out
+    connections = new Map();  // userId → [ws1, ws2, ...]
+
+    async notifyFileChange(fileId, changedByUserId, newVersion) {
+        // 1. Get all users who have access to this file
+        const accessList = await metadataDB.getFileAccessList(fileId);
+        // Returns: [{ userId, permission, deviceIds }]
+
+        // 2. Get all devices for those users
+        const devices = accessList.flatMap(u =>
+            u.deviceIds.map(d => ({ userId: u.userId, deviceId: d }))
+        ).filter(d =>
+            // Don't notify the device that made the change
+            d.deviceId !== changedByUserId
+        );
+
+        // 3. Publish to Redis Pub/Sub (fan-out to notification servers)
+        const notification = {
+            type: 'FILE_CHANGED',
+            fileId: fileId,
+            version: newVersion,
+            timestamp: Date.now()
+        };
+
+        for (const device of devices) {
+            await redis.publish(
+                `notifications:${device.userId}:${device.deviceId}`,
+                JSON.stringify(notification)
+            );
+        }
+    }
+
+    // Each notification server subscribes to channels for connected clients
+    onWebSocketConnect(userId, deviceId, ws) {
+        redis.subscribe(`notifications:${userId}:${deviceId}`, (msg) => {
+            ws.send(msg);
+        });
+    }
+}
+
+// Long-polling fallback (for clients behind strict firewalls):
+// Client: GET /api/changes?since=cursor_abc&timeout=60
+// Server: Hold request open for up to 60s. Return immediately if
+//         there are changes, or empty response on timeout.
+// Client: Immediately reconnect with new cursor.</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           7. CONFLICT RESOLUTION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="conflict-resolution">Conflict Resolution</h2>
+
+      <p>Conflicts occur when two devices edit the same file before either sync completes. This is unavoidable in a system with offline support. We need a strategy that <strong>never loses data</strong> while keeping the UX simple.</p>
+
+      <h3 id="conflict-detection">Detecting Conflicts</h3>
+      <pre><code>// Optimistic concurrency control with version vectors
+async function commitFileVersion(request) {
+    const { filePath, chunkHashes, baseVersion } = request;
+
+    // Atomic check: is the current server version what the client expects?
+    const currentVersion = await metadataDB.getCurrentVersion(filePath);
+
+    if (currentVersion !== baseVersion) {
+        // CONFLICT: someone else committed a new version while we were editing
+        throw new ConflictError({
+            clientBaseVersion: baseVersion,
+            serverCurrentVersion: currentVersion,
+            filePath: filePath
+        });
+    }
+
+    // No conflict: commit the new version
+    const newVersion = currentVersion + 1;
+    await metadataDB.insertVersion({
+        filePath: filePath,
+        version: newVersion,
+        chunkHashes: chunkHashes,
+        committedAt: Date.now()
+    });
+
+    return { version: newVersion };
+}</code></pre>
+
+      <h3 id="conflict-strategies">Resolution Strategies</h3>
+      <pre><code>// Strategy 1: Last-Write-Wins (LWW)
+// Simple but can lose data. Used for non-critical files.
+// The last device to commit "wins" and overwrites.
+// Pros: Simple, no user intervention
+// Cons: Silent data loss
+
+// Strategy 2: Conflict Copies (Dropbox approach) ✓
+// Create a "conflicted copy" with the losing version
+async function handleConflict(filePath, localChunks, serverVersion) {
+    // 1. Download the server's version (winner)
+    await syncRemoteChange({ filePath, newVersion: serverVersion });
+
+    // 2. Save our version as a conflict copy
+    const timestamp = formatDate(Date.now());
+    const deviceName = getDeviceName();
+    const ext = path.extname(filePath);
+    const base = path.basename(filePath, ext);
+
+    // "report.pdf" → "report (Neel's Laptop's conflicted copy 2026-04-15).pdf"
+    const conflictPath = `${path.dirname(filePath)}/${base} `
+        + `(${deviceName}'s conflicted copy ${timestamp})${ext}`;
+
+    await writeFile(conflictPath, assembleFromChunks(localChunks));
+
+    // 3. Notify the user
+    notifyUser({
+        type: 'CONFLICT',
+        message: `Conflicting changes detected for ${filePath}. `
+               + `Your changes saved as: ${conflictPath}`,
+        originalFile: filePath,
+        conflictCopy: conflictPath
+    });
+}
+
+// Strategy 3: Operational Transform / CRDT
+// Used by Google Docs for real-time collaborative editing
+// Too complex for file-level sync; only for document editors
+
+// Strategy 4: Three-Way Merge (Git-style)
+// Possible for text files: find common ancestor, merge changes
+// Complex, error-prone for binary files
+// Used by some advanced sync engines for code files</code></pre>
+
+      <div class="callout">
+        <strong>Dropbox's real-world approach:</strong> Dropbox uses conflict copies as the primary strategy. The server always has the authoritative version. If a client tries to commit based on a stale base version, its changes are saved as a conflict copy, and the user is notified. This ensures <strong>zero data loss</strong> at the cost of occasional manual resolution. In practice, conflicts are rare (~0.01% of syncs) because most files are single-user.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           8. BLOCK STORAGE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="block-storage">Block Storage — Content-Addressable Store</h2>
+
+      <p>Chunks are stored in object storage (S3 or GCS) using their SHA-256 hash as the key. This is called <strong>content-addressable storage (CAS)</strong> — the address <em>is</em> the content.</p>
+
+      <pre><code>// Block Store Schema (S3/GCS)
+// Key:   chunks/{sha256-hash}
+// Value: raw chunk bytes (up to 4 MB)
+//
+// Examples:
+// s3://drive-blocks/chunks/e7b3a1f2c4d6e8...
+// s3://drive-blocks/chunks/c2d4f91ab2e3f5...
+
+// Properties of content-addressable storage:
+// 1. Immutable: a chunk's content never changes (same hash = same data)
+// 2. Idempotent: uploading the same chunk twice is safe (PUT is idempotent)
+// 3. Naturally deduped: identical content = identical key
+// 4. Easy to verify: download and re-hash to confirm integrity
+
+// S3 Configuration
+{
+    "bucket": "drive-blocks-us-east-1",
+    "storageClass": "S3_STANDARD",        // hot data (recent files)
+    "replication": "CROSS_REGION",         // us-east-1 → eu-west-1
+    "encryption": "AES-256-SSE",           // server-side encryption
+    "lifecycle": {
+        // Move to cheaper storage after 90 days of no access
+        "transition": [
+            { "days": 90, "storageClass": "S3_INFREQUENT_ACCESS" },
+            { "days": 365, "storageClass": "S3_GLACIER" }
+        ]
+    }
+}
+
+// Reference counting for garbage collection:
+// Each chunk has a reference count in the metadata DB.
+// When a file version is deleted, decrement chunk ref counts.
+// When ref_count reaches 0, the chunk can be garbage collected.
+// Use a background job with delay (to handle race conditions):
+
+CREATE TABLE chunk_refs (
+    chunk_hash   CHAR(64) PRIMARY KEY,
+    ref_count    INT NOT NULL DEFAULT 1,
+    size_bytes   BIGINT NOT NULL,
+    created_at   TIMESTAMP DEFAULT NOW(),
+    last_ref_at  TIMESTAMP DEFAULT NOW()
+);
+
+-- When a new file references a chunk:
+INSERT INTO chunk_refs (chunk_hash, ref_count, size_bytes)
+VALUES ('e7b3a1...', 1, 4194304)
+ON CONFLICT (chunk_hash) DO UPDATE SET
+    ref_count = chunk_refs.ref_count + 1,
+    last_ref_at = NOW();
+
+-- When a file version is deleted:
+UPDATE chunk_refs SET ref_count = ref_count - 1
+WHERE chunk_hash = 'e7b3a1...';
+
+-- GC job (runs hourly):
+DELETE FROM chunk_refs WHERE ref_count <= 0 AND last_ref_at < NOW() - INTERVAL '7 days';
+-- Then delete from S3: aws s3 rm s3://drive-blocks/chunks/{hash}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           9. METADATA SERVICE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="metadata">Metadata Service — The Brain</h2>
+
+      <p>The metadata service is the <strong>source of truth</strong> for everything except raw file bytes. It manages file trees, sharing permissions, version history, and device sync state.</p>
+
+      <h3 id="metadata-schema">Database Schema</h3>
+      <pre><code>-- Core tables (PostgreSQL)
+
+-- Users
+CREATE TABLE users (
+    user_id       BIGINT PRIMARY KEY,
+    email         VARCHAR(255) UNIQUE NOT NULL,
+    display_name  VARCHAR(255),
+    quota_bytes   BIGINT DEFAULT 15 * 1024 * 1024 * 1024,  -- 15 GB free
+    used_bytes    BIGINT DEFAULT 0,
+    created_at    TIMESTAMP DEFAULT NOW()
+);
+
+-- Files and Folders (tree structure using materialized path)
+CREATE TABLE file_entries (
+    entry_id      BIGINT PRIMARY KEY,
+    owner_id      BIGINT REFERENCES users(user_id),
+    parent_id     BIGINT REFERENCES file_entries(entry_id),
+    name          VARCHAR(255) NOT NULL,
+    is_folder     BOOLEAN DEFAULT FALSE,
+    current_ver   INT DEFAULT 1,
+    size_bytes    BIGINT DEFAULT 0,
+    mime_type     VARCHAR(127),
+    created_at    TIMESTAMP DEFAULT NOW(),
+    modified_at   TIMESTAMP DEFAULT NOW(),
+    is_deleted    BOOLEAN DEFAULT FALSE,   -- soft delete (trash)
+    deleted_at    TIMESTAMP,
+
+    -- Materialized path for efficient subtree queries
+    -- e.g., "/user_123/Documents/Work/report.pdf"
+    path          TEXT NOT NULL,
+
+    UNIQUE(parent_id, name)   -- no duplicate names in same folder
+);
+
+CREATE INDEX idx_file_entries_owner ON file_entries(owner_id);
+CREATE INDEX idx_file_entries_parent ON file_entries(parent_id);
+CREATE INDEX idx_file_entries_path ON file_entries(path);
+
+-- File Versions (one row per version)
+CREATE TABLE file_versions (
+    entry_id      BIGINT REFERENCES file_entries(entry_id),
+    version       INT NOT NULL,
+    chunk_hashes  TEXT[] NOT NULL,        -- ordered array of SHA-256 hashes
+    size_bytes    BIGINT NOT NULL,
+    file_hash     CHAR(64) NOT NULL,      -- hash of the complete file
+    modified_by   BIGINT REFERENCES users(user_id),
+    device_id     VARCHAR(64),
+    created_at    TIMESTAMP DEFAULT NOW(),
+
+    PRIMARY KEY (entry_id, version)
+);
+
+-- Sharing / ACL
+CREATE TABLE sharing_permissions (
+    entry_id      BIGINT REFERENCES file_entries(entry_id),
+    user_id       BIGINT REFERENCES users(user_id),
+    permission    VARCHAR(20) NOT NULL,   -- 'owner', 'editor', 'viewer'
+    granted_by    BIGINT REFERENCES users(user_id),
+    granted_at    TIMESTAMP DEFAULT NOW(),
+
+    PRIMARY KEY (entry_id, user_id)
+);
+
+-- Shared Links
+CREATE TABLE shared_links (
+    link_id       VARCHAR(32) PRIMARY KEY,  -- random token
+    entry_id      BIGINT REFERENCES file_entries(entry_id),
+    permission    VARCHAR(20) DEFAULT 'viewer',
+    password_hash VARCHAR(255),    -- optional password protection
+    expires_at    TIMESTAMP,       -- optional expiry
+    created_by    BIGINT REFERENCES users(user_id),
+    created_at    TIMESTAMP DEFAULT NOW()
+);
+
+-- Device Sync State
+CREATE TABLE device_sync_state (
+    user_id       BIGINT REFERENCES users(user_id),
+    device_id     VARCHAR(64) NOT NULL,
+    device_name   VARCHAR(255),
+    last_cursor   VARCHAR(255),    -- opaque cursor for incremental sync
+    last_sync_at  TIMESTAMP,
+
+    PRIMARY KEY (user_id, device_id)
+);</code></pre>
+
+      <h3 id="metadata-sharding">Sharding Strategy</h3>
+      <p>With 500M users and 100B files, a single database won't cut it. We shard by <code>owner_id</code>:</p>
+
+      <pre><code>// Sharding by owner_id (consistent hashing)
+// - All of a user's files on the same shard
+// - Shared files: metadata on owner's shard, ACL lookup cross-shard
+// - 256 logical shards, each handling ~2M users
+
+function getShard(ownerId) {
+    return consistentHash(ownerId, NUM_SHARDS);
+}
+
+// Query routing:
+// "List my files"        → route to user's shard (single shard)
+// "Files shared with me" → scatter-gather across shards (expensive)
+//                          OR use a secondary index table (denormalized)
+
+// Denormalized "shared with me" index:
+CREATE TABLE shared_with_me (
+    user_id       BIGINT,
+    entry_id      BIGINT,
+    owner_id      BIGINT,
+    entry_name    VARCHAR(255),
+    permission    VARCHAR(20),
+    shared_at     TIMESTAMP,
+    PRIMARY KEY (user_id, entry_id)
+);
+-- Sharded by user_id → "shared with me" queries are single-shard</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           10. OFFLINE SUPPORT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="offline">Offline Support</h2>
+
+      <p>Cloud storage must work seamlessly when the user is disconnected — on a plane, in a subway, or in a building with no signal. The client maintains a <strong>local operation log</strong> that queues all changes.</p>
+
+      <pre><code>// Local SQLite database on the client device
+CREATE TABLE pending_ops (
+    op_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path    TEXT NOT NULL,
+    op_type      TEXT NOT NULL,   -- 'CREATE', 'MODIFY', 'DELETE', 'RENAME', 'MOVE'
+    chunk_hashes TEXT,            -- JSON array of chunk hashes (for CREATE/MODIFY)
+    old_path     TEXT,            -- for RENAME/MOVE
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status       TEXT DEFAULT 'pending',   -- 'pending', 'uploading', 'committed', 'failed'
+    retry_count  INTEGER DEFAULT 0
+);
+
+// Offline workflow:
+// 1. User edits file while disconnected
+// 2. Client detects change, chunks the file, stores chunks in local cache
+// 3. Inserts operation into pending_ops
+// 4. Displays "Waiting to sync" icon on the file
+
+// When connectivity resumes:
+class OfflineSyncManager {
+    async onConnectivityRestored() {
+        // Process pending ops in order (FIFO)
+        const ops = await localDB.query(
+            'SELECT * FROM pending_ops WHERE status = ? ORDER BY created_at',
+            ['pending']
+        );
+
+        for (const op of ops) {
+            try {
+                await localDB.update(op.op_id, { status: 'uploading' });
+
+                switch (op.op_type) {
+                    case 'CREATE':
+                    case 'MODIFY':
+                        await syncLocalChange(op.file_path);
+                        break;
+                    case 'DELETE':
+                        await api.deleteFile(op.file_path);
+                        break;
+                    case 'RENAME':
+                        await api.renameFile(op.old_path, op.file_path);
+                        break;
+                }
+
+                await localDB.update(op.op_id, { status: 'committed' });
+            } catch (err) {
+                if (err instanceof ConflictError) {
+                    await handleConflict(op.file_path);
+                    await localDB.update(op.op_id, { status: 'committed' });
+                } else {
+                    await localDB.update(op.op_id, {
+                        status: 'failed',
+                        retry_count: op.retry_count + 1
+                    });
+                }
+            }
+        }
+    }
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           11. SHARING & PERMISSIONS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="sharing">Sharing &amp; Permissions (ACL)</h2>
+
+      <p>Sharing is ACL-based (Access Control List). Every file/folder has a list of principals (users, groups) with their permission level.</p>
+
+      <pre><code>// Permission hierarchy:
+// Owner   → full control (delete, share, edit, view)
+// Editor  → edit and view (cannot delete or change sharing)
+// Viewer  → read-only (can download but not modify)
+
+// Permission inheritance:
+// Sharing a folder grants the same permission to ALL files/folders inside it
+// A file's effective permission = MAX(own permission, inherited from parent folders)
+
+function getEffectivePermission(userId, entryId) {
+    let maxPermission = null;
+
+    // Walk up the folder tree
+    let current = entryId;
+    while (current !== null) {
+        const perm = db.query(
+            'SELECT permission FROM sharing_permissions WHERE entry_id = ? AND user_id = ?',
+            [current, userId]
+        );
+
+        if (perm) {
+            maxPermission = maxOf(maxPermission, perm);
+        }
+
+        // Move to parent
+        current = db.query('SELECT parent_id FROM file_entries WHERE entry_id = ?', [current]);
+    }
+
+    return maxPermission;  // null = no access
+}
+
+// Shared link access:
+// GET /shared/{link_id}
+// Server validates: link exists, not expired, password matches (if set)
+// Returns file metadata + download URL (or folder listing)
+
+// Permission check middleware:
+async function checkPermission(req, res, next) {
+    const { userId } = req.auth;
+    const { entryId } = req.params;
+    const requiredLevel = req.method === 'GET' ? 'viewer' : 'editor';
+
+    const permission = await getEffectivePermission(userId, entryId);
+
+    if (!permission || permissionLevel(permission) < permissionLevel(requiredLevel)) {
+        return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    next();
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           12. VERSION HISTORY
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="versioning">Version History — Space-Efficient</h2>
+
+      <p>Every file change creates a new version. But because we store chunk <strong>references</strong> (not copies), version history is extremely space-efficient. Unchanged chunks are shared across versions.</p>
+
+      <pre><code>// Version storage: list of chunk hashes per version
+//
+// Version 1: [A, B, C, D, E]      (5 chunks, 20 MB)
+// Version 2: [A, B, C', D, E]     (1 chunk changed: C→C')
+// Version 3: [A, B, C', D, E, F]  (1 chunk added: F)
+//
+// Storage cost:
+//   Unique chunks: A, B, C, C', D, E, F = 7 chunks = 28 MB
+//   Without versioning: 20 + 20 + 24 = 64 MB
+//   With chunk-sharing: 28 MB (56% savings)
+//
+// For a file with 100 versions where each version changes 1 of 50 chunks:
+//   Naive: 100 × 200 MB = 20 GB
+//   Chunk-shared: 50 + 100 unique = ~600 MB (97% savings!)
+
+// Restoring a previous version:
+async function restoreVersion(entryId, targetVersion) {
+    // 1. Get the chunk list for the target version
+    const oldVersion = await db.query(
+        'SELECT chunk_hashes FROM file_versions WHERE entry_id = ? AND version = ?',
+        [entryId, targetVersion]
+    );
+
+    // 2. Create a new version with the old chunk list
+    const currentVersion = await db.query(
+        'SELECT MAX(version) FROM file_versions WHERE entry_id = ?',
+        [entryId]
+    );
+
+    await db.insert('file_versions', {
+        entry_id: entryId,
+        version: currentVersion + 1,
+        chunk_hashes: oldVersion.chunk_hashes,  // same chunks!
+        size_bytes: oldVersion.size_bytes,
+        modified_by: currentUserId
+    });
+
+    // No chunks need to be copied or moved!
+    // The restored version just references the same chunks.
+    // Cost: one metadata row (~200 bytes) regardless of file size.
+
+    // 3. Notify all devices of the new version
+    await notificationService.notifyFileChange(entryId);
+}</code></pre>
+
+      <h3 id="cold-storage">Cold Storage for Old Versions</h3>
+      <pre><code>// Version lifecycle:
+// Days 0-30:   All versions kept in S3 Standard (instant access)
+// Days 30-90:  Versions beyond the latest 10 moved to S3 IA (cheaper, 128KB minimum)
+// Days 90-365: Non-latest versions moved to S3 Glacier (cents/GB, minutes to retrieve)
+// Day 365+:    Versions beyond latest 5 permanently deleted (configurable per plan)
+
+// Cold storage migration job (runs nightly):
+async function migrateOldVersions() {
+    const files = await db.query(`
+        SELECT fv.entry_id, fv.version, fv.chunk_hashes, fv.created_at
+        FROM file_versions fv
+        JOIN file_entries fe ON fe.entry_id = fv.entry_id
+        WHERE fv.created_at < NOW() - INTERVAL '90 days'
+          AND fv.version < fe.current_ver - 5
+          AND fv.storage_class = 'STANDARD'
+    `);
+
+    for (const version of files) {
+        // Move each unique chunk to Glacier
+        for (const hash of version.chunk_hashes) {
+            const refCount = await getActiveRefCount(hash);
+            if (refCount.hotRefs === 0) {
+                // No hot version references this chunk — safe to move
+                await s3.copyObject({
+                    Bucket: 'drive-blocks',
+                    CopySource: `drive-blocks/chunks/${hash}`,
+                    Key: `chunks/${hash}`,
+                    StorageClass: 'GLACIER'
+                });
+            }
+        }
+
+        await db.update('file_versions', version, { storage_class: 'GLACIER' });
+    }
+}
+
+// Restoring a Glacier version:
+// 1. Initiate Glacier restore (takes 1-5 minutes for Expedited, 3-5 hours for Standard)
+// 2. Once restored, chunks are temporarily available in S3 for 24 hours
+// 3. Download and reassemble the file
+// 4. Cost: $0.03 per GB + $10 per 1000 requests (Expedited)</code></pre>
+
+      <!-- ──────────────── ANIMATION 2: Chunking & Dedup ──────────────── -->
+      <h2 id="chunk-dedup-visual">Chunking &amp; Deduplication — Animated</h2>
+      <p>This animation demonstrates how file chunking and deduplication work together. A large file is split into chunks, the user modifies part of the file, and only the changed chunk is uploaded.</p>
+
+      <div class="anim-container" id="chunk-anim">
+        <h4>&#9654; Chunking &amp; Dedup</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch a file get split into chunks, then see how only the modified chunk is re-uploaded after an edit — hash comparison saves bandwidth.</p>
+        <svg id="chunk-svg" width="700" height="420" viewBox="0 0 700 420"></svg>
+        <div id="chunk-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="chunk-step">Step &rarr;</button>
+          <button class="anim-btn" id="chunk-reset">Reset</button>
+          <span class="anim-output" id="chunk-output"></span>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           13. SECURITY & ENCRYPTION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="security">Security &amp; Encryption</h2>
+
+      <pre><code>// Encryption layers:
+//
+// 1. In-Transit: TLS 1.3 for all API calls and chunk transfers
+//    - Certificate pinning on mobile clients
+//    - HSTS headers on web
+//
+// 2. At-Rest: AES-256 server-side encryption (SSE-S3 or SSE-KMS)
+//    - Each chunk encrypted before writing to S3
+//    - Encryption keys managed by AWS KMS or Google Cloud KMS
+//    - Key rotation every 90 days
+//
+// 3. Client-Side Encryption (optional, enterprise feature):
+//    - User holds the key; server stores only ciphertext
+//    - Breaks server-side dedup (encrypted chunks of same content differ)
+//    - Used for compliance: HIPAA, SOX, GDPR
+
+// Chunk integrity verification:
+async function downloadAndVerify(chunkHash) {
+    const data = await s3.getObject(`chunks/${chunkHash}`);
+    const computedHash = sha256(data);
+
+    if (computedHash !== chunkHash) {
+        // Data corruption detected!
+        // Fetch from replica region
+        const replicaData = await s3Replica.getObject(`chunks/${chunkHash}`);
+        const replicaHash = sha256(replicaData);
+
+        if (replicaHash === chunkHash) {
+            // Repair primary from replica
+            await s3.putObject(`chunks/${chunkHash}`, replicaData);
+            return replicaData;
+        }
+
+        throw new DataCorruptionError(chunkHash);
+    }
+
+    return data;
+}</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           14. SCALABILITY DEEP DIVE
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="scalability">Scalability Deep Dive</h2>
+
+      <pre><code>// Component-level scaling:
+//
+// Upload Service:      Stateless, horizontally scaled behind ALB
+//                      Auto-scale: CPU > 60% → add instances
+//                      Each instance handles ~5K concurrent uploads
+//
+// Metadata Service:    Sharded PostgreSQL (256 shards, by owner_id)
+//                      Read replicas for heavy-read queries
+//                      Redis cache: file metadata (TTL 5 min)
+//                      Connection pooling: PgBouncer
+//
+// Notification Service: WebSocket servers behind sticky sessions (ALB)
+//                       Each server holds ~500K connections
+//                       200 servers → 100M concurrent connections
+//                       Redis Pub/Sub for cross-server notification fan-out
+//
+// Block Store (S3):    Virtually unlimited (managed by AWS/GCS)
+//                      Multi-region replication for durability
+//                      S3 handles ~5,500 PUT/s per prefix (partition by hash prefix)
+//
+// CDN:                 CloudFront / Cloud CDN for download acceleration
+//                      Popular shared files cached at edge locations
+//                      Pre-signed URLs with 1-hour expiry
+
+// Rate limiting:
+// Per user:  100 API calls/min, 50 uploads/min, 10 GB/hour upload
+// Per file:  10 versions/min (prevent rapid-fire saves from consuming resources)
+// Global:    Circuit breaker on S3 failures (fail fast, retry after cooldown)</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           15. REAL-WORLD COMPARISON
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="real-world">Real-World Implementations</h2>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Feature</th><th style="text-align:left; padding:0.5em;">Google Drive</th><th style="text-align:left; padding:0.5em;">Dropbox</th><th style="text-align:left; padding:0.5em;">OneDrive</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Chunk size</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4-8 MB (variable)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4 MB (CDC)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~10 MB</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Block store</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Colossus (GFS2)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Magic Pocket (custom)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Azure Blob Storage</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Metadata DB</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Spanner</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">MySQL (Edgestore)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Cosmos DB</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Notification</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">gRPC streaming</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Long-polling</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">WebSocket</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Sync protocol</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Delta sync (binary diff)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Chunk-level delta</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Differential sync</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Conflict handling</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Auto-merge (Docs), copies (Drive)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Conflict copies</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Conflict copies</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Dedup</strong></td><td style="padding:0.5em;">Cross-user (global)</td><td style="padding:0.5em;">Cross-user (global)</td><td style="padding:0.5em;">Per-user only</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Dropbox's "Magic Pocket":</strong> In 2016, Dropbox migrated from AWS S3 to their custom storage system called Magic Pocket. They manage <strong>exabytes</strong> of data across multiple data centers with custom hardware (low-cost, high-density storage nodes). This saved them an estimated <strong>$75M over two years</strong> vs S3 pricing. The system uses Reed-Solomon erasure coding (instead of full replication) to achieve 99.999999999% durability at ~1.5x storage overhead (vs 3x for triple replication).
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           16. KEY TAKEAWAYS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="takeaways">Key Takeaways</h2>
+      <ul>
+        <li><strong>Separate data from metadata.</strong> File chunks go to object storage (S3/GCS); file trees, permissions, and versions go to a relational DB. This separation enables independent scaling and optimization.</li>
+        <li><strong>Chunk everything.</strong> 4 MB fixed-size (or content-defined) chunks enable deduplication, resumable uploads, parallel transfers, and efficient delta sync. One byte change ≠ full file re-upload.</li>
+        <li><strong>Content-addressable storage</strong> (SHA-256 as key) gives you dedup, integrity verification, and immutability for free.</li>
+        <li><strong>The sync engine is a state machine</strong> — IDLE → INDEXING → DIFFING → UPLOADING → COMMITTING. Each state has well-defined transitions, error handling, and retry logic.</li>
+        <li><strong>Conflict resolution: prefer data preservation.</strong> Conflict copies (Dropbox-style) ensure zero data loss. LWW is simpler but lossy. Three-way merge is powerful but complex.</li>
+        <li><strong>Notification pipeline</strong> (WebSocket + long-polling + push) ensures all connected devices learn about changes within seconds.</li>
+        <li><strong>Offline-first:</strong> Queue changes locally in SQLite, replay when connectivity resumes. Treat the network as unreliable.</li>
+        <li><strong>Version history is cheap</strong> with chunk sharing — unchanged chunks are referenced, not copied. Storage overhead for 100 versions of a file that changes slightly each time is minimal.</li>
+        <li><strong>Cold storage tiering</strong> (Standard → IA → Glacier) keeps costs manageable for version history spanning months or years.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="youtube.html"><span>Previous</span><span>&#8592; YouTube</span></a>
+        <a class="next" href="news-feed.html"><span>Next</span><span>News Feed &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* ─── shared SVG helpers ─── */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,fill,rx,stroke){var a={x:''+x,y:''+y,width:''+w,height:''+h,fill:fill,rx:''+(rx||6)};if(stroke){a.stroke=stroke;a['stroke-width']='2';}return el('rect',a);}
+    function line(x1,y1,x2,y2,stroke,sw,dash){var a={x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:stroke,'stroke-width':''+(sw||2)};if(dash)a['stroke-dasharray']=dash;return el('line',a);}
+    function arrow(x1,y1,x2,y2,color){var g=el('g',{});g.appendChild(line(x1,y1,x2,y2,color,2));var a=Math.atan2(y2-y1,x2-x1),s=8;g.appendChild(el('polygon',{points:(x2-s*Math.cos(a-0.4))+','+(y2-s*Math.sin(a-0.4))+' '+x2+','+y2+' '+(x2-s*Math.cos(a+0.4))+','+(y2-s*Math.sin(a+0.4)),fill:color}));return g;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function box(svg,x,y,w,h,fill,label,sub,textColor){
+      svg.appendChild(rect(x,y,w,h,fill,8));
+      svg.appendChild(txt(label,{x:''+(x+w/2),y:''+(y+h/2-(sub?4:0)),'text-anchor':'middle','dominant-baseline':'central','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:textColor||'#fff'}));
+      if(sub)svg.appendChild(txt(sub,{x:''+(x+w/2),y:''+(y+h/2+12),'text-anchor':'middle','dominant-baseline':'central','font-family':'Consolas,monospace','font-size':'9',fill:textColor||'rgba(255,255,255,0.8)'}));
+    }
+
+    var COL={
+      devA:'#3b82f6',devB:'#8b5cf6',server:'#0a8f6a',s3:'#f59e0b',notify:'#e74c3c',
+      chunk:'#6366f1',changed:'#22c55e',unchanged:'#94a3b8',hash:'#f97316',
+      bg:'rgba(30,41,59,0.04)',line:'var(--line)',ink:'var(--ink)',muted:'var(--ink-muted)'
+    };
+
+    /* ═══════════════════════════════════════════════════════════════════
+       ANIMATION 1 — File Sync Flow
+       ═══════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('sync-svg');
+      var info=document.getElementById('sync-info');
+      var out=document.getElementById('sync-output');
+      var step=0,totalSteps=9;
+
+      function draw(){
+        clearSvg(svg);
+
+        /* background */
+        svg.appendChild(rect(0,0,700,400,'var(--surface)',12));
+
+        /* ── Device A (left) ── */
+        svg.appendChild(rect(10,20,160,110,COL.bg,10,step>=0?COL.devA:'#ccc'));
+        svg.appendChild(txt('Device A',{x:'90',y:'40','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.devA}));
+        svg.appendChild(txt('report.pdf',{x:'90',y:'60','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.ink}));
+
+        /* file icon + edit indicator */
+        svg.appendChild(rect(50,70,80,24,'rgba(59,130,246,0.1)',4,COL.devA));
+        svg.appendChild(txt(step>=1?'✏️ Editing...':'Idle',{x:'90',y:'86','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:step>=1?COL.devA:COL.muted}));
+
+        /* chunk boxes on device A */
+        if(step>=2){
+          var cx=15,cy=145;
+          svg.appendChild(txt('Chunks:',{x:''+cx,y:''+(cy-4),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.ink}));
+          var labels=['C1','C2','C3','C4','C5'];
+          for(var i=0;i<5;i++){
+            var isChanged=(i===2);
+            var color=isChanged?COL.changed:COL.unchanged;
+            svg.appendChild(rect(cx+i*32,cy,28,28,isChanged?'rgba(34,197,94,0.15)':'rgba(148,163,184,0.12)',4,color));
+            svg.appendChild(txt(labels[i],{x:''+(cx+i*32+14),y:''+(cy+14),'text-anchor':'middle','dominant-baseline':'central','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:color}));
+          }
+          if(step>=3){
+            svg.appendChild(txt('C3 changed!',{x:''+(cx+2*32+14),y:''+(cy+42),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'9',fill:COL.changed}));
+          }
+        }
+
+        /* ── Server (center) ── */
+        svg.appendChild(rect(250,20,200,70,COL.bg,10,step>=5?COL.server:'#ccc'));
+        svg.appendChild(txt('Server',{x:'350',y:'42','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.server}));
+        svg.appendChild(txt('Metadata + Block Store',{x:'350',y:'62','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:COL.muted}));
+
+        /* upload arrow (Device A → Server) */
+        if(step>=4){
+          svg.appendChild(arrow(170,75,250,55,COL.changed));
+          svg.appendChild(txt('Upload C3',{x:'210',y:'50','text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'9',fill:COL.changed}));
+        }
+
+        /* metadata update indicator */
+        if(step>=5){
+          svg.appendChild(rect(260,100,180,32,'rgba(10,143,106,0.1)',6,COL.server));
+          svg.appendChild(txt('✓ Metadata updated: v2',{x:'350',y:'120','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.server}));
+        }
+
+        /* ── Notification Service ── */
+        if(step>=6){
+          svg.appendChild(rect(280,150,140,36,COL.bg,8,COL.notify));
+          svg.appendChild(txt('📢 Notify Device B',{x:'350',y:'172','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:COL.notify}));
+          svg.appendChild(arrow(350,90,350,150,COL.notify));
+        }
+
+        /* ── Device B (right) ── */
+        svg.appendChild(rect(530,20,160,110,COL.bg,10,step>=7?COL.devB:'#ccc'));
+        svg.appendChild(txt('Device B',{x:'610',y:'40','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.devB}));
+        svg.appendChild(txt('report.pdf',{x:'610',y:'60','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.ink}));
+        svg.appendChild(rect(570,70,80,24,'rgba(139,92,246,0.1)',4,COL.devB));
+        svg.appendChild(txt(step>=8?'✅ Synced':'Waiting...',{x:'610',y:'86','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:step>=8?COL.changed:COL.muted}));
+
+        /* notification arrow → Device B */
+        if(step>=7){
+          svg.appendChild(arrow(420,168,530,65,COL.devB));
+          svg.appendChild(txt('Download C3',{x:'490',y:'100','text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'9',fill:COL.devB}));
+        }
+
+        /* chunks on Device B */
+        if(step>=7){
+          var bx=535,by=145;
+          svg.appendChild(txt('Chunks:',{x:''+bx,y:''+(by-4),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.ink}));
+          var blabels=['C1','C2','C3','C4','C5'];
+          for(var j=0;j<5;j++){
+            var bChanged=(j===2&&step>=8);
+            var bcolor=bChanged?COL.changed:COL.unchanged;
+            svg.appendChild(rect(bx+j*32,by,28,28,bChanged?'rgba(34,197,94,0.15)':'rgba(148,163,184,0.12)',4,bcolor));
+            svg.appendChild(txt(blabels[j],{x:''+(bx+j*32+14),y:''+(by+14),'text-anchor':'middle','dominant-baseline':'central','font-family':'Consolas,monospace','font-weight':'700','font-size':'10',fill:bcolor}));
+          }
+        }
+
+        /* ── Bottom summary ── */
+        if(step===8){
+          svg.appendChild(rect(130,210,440,55,'rgba(34,197,94,0.08)',10,COL.changed));
+          svg.appendChild(txt('✅ FILE SYNCED ACROSS DEVICES',{x:'350',y:'232','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'13',fill:COL.changed}));
+          svg.appendChild(txt('Only 1 of 5 chunks transferred — 80% bandwidth saved',{x:'350',y:'252','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:COL.ink}));
+        }
+
+        /* ── Timeline ── */
+        var timeY=290;
+        svg.appendChild(line(30,timeY,670,timeY,'var(--line)',1,'4,4'));
+        svg.appendChild(txt('Sync Timeline',{x:'350',y:''+(timeY-8),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.muted}));
+
+        var stages=['Edit','Chunk','Diff','Upload','Meta','Notify','Download','Reassemble','Done'];
+        var stageColors=[COL.devA,COL.chunk,COL.hash,COL.changed,COL.server,COL.notify,COL.devB,COL.devB,COL.changed];
+        for(var s=0;s<stages.length;s++){
+          var sx=40+s*73;
+          var active=s<=step;
+          svg.appendChild(el('circle',{cx:''+sx,cy:''+timeY,r:active?'8':'5',fill:active?stageColors[s]:'var(--line)'}));
+          svg.appendChild(txt(stages[s],{x:''+sx,y:''+(timeY+20),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':active?'700':'400','font-size':'9',fill:active?stageColors[s]:COL.muted}));
+        }
+
+        /* ── Bandwidth box ── */
+        if(step>=4){
+          var bwY=340;
+          svg.appendChild(rect(20,bwY,280,50,'rgba(34,197,94,0.06)',8,COL.changed));
+          svg.appendChild(txt('Bandwidth Analysis',{x:'30',y:''+(bwY+16),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:COL.changed}));
+          svg.appendChild(txt('Without chunking: 20 MB (full file)',{x:'30',y:''+(bwY+32),'font-family':'Consolas,monospace','font-size':'9',fill:COL.ink}));
+          svg.appendChild(txt('With chunking:     4 MB (1 chunk) → 80% saved',{x:'30',y:''+(bwY+44),'font-family':'Consolas,monospace','font-weight':'700','font-size':'9',fill:COL.changed}));
+        }
+
+        var infos=[
+          'Device A has report.pdf synced at version 1 with chunks [C1, C2, C3, C4, C5].',
+          'User edits report.pdf on Device A — modifies content in the middle of the file.',
+          'Sync engine chunks the modified file into 5 pieces (4 MB each) and computes SHA-256 hashes.',
+          'Diff: compare local chunk hashes with server\'s version 1. Only C3 has a different hash — it changed!',
+          'Upload only the changed chunk C3 (4 MB) to block storage via pre-signed S3 URL. 80% bandwidth saved!',
+          'Server updates metadata: report.pdf → version 2, chunk list = [C1, C2, C3\', C4, C5].',
+          'Notification service pushes FILE_CHANGED event to all other connected devices via WebSocket.',
+          'Device B receives notification, downloads only chunk C3\' (the changed chunk), and reassembles the file.',
+          'Sync complete! Both devices now have report.pdf v2. Total transfer: 4 MB instead of 20 MB.'
+        ];
+        info.textContent=infos[step];
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('sync-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('sync-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+
+    /* ═══════════════════════════════════════════════════════════════════
+       ANIMATION 2 — Chunking & Deduplication
+       ═══════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('chunk-svg');
+      var info=document.getElementById('chunk-info');
+      var out=document.getElementById('chunk-output');
+      var step=0,totalSteps=8;
+
+      var hashes=['a7f3c1','b2e4d9','c8ab1e','d3f7c2','e1b9a5'];
+      var hashesNew=['a7f3c1','b2e4d9','★ 4f2e8b','d3f7c2','e1b9a5'];
+
+      function draw(){
+        clearSvg(svg);
+        svg.appendChild(rect(0,0,700,420,'var(--surface)',12));
+
+        /* ── Original file bar ── */
+        var fy=30;
+        svg.appendChild(txt('Original File: presentation.pptx (20 MB)',{x:'20',y:''+(fy),'font-family':'Syne,sans-serif','font-weight':'800','font-size':'12',fill:COL.ink}));
+        svg.appendChild(rect(20,fy+8,560,30,'rgba(99,102,241,0.1)',6,COL.chunk));
+        svg.appendChild(txt('20 MB file content',{x:'300',y:''+(fy+27),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.chunk}));
+
+        /* ── Step 1+: Chunks ── */
+        if(step>=1){
+          var cy=fy+55;
+          svg.appendChild(txt('Split into 4 MB chunks:',{x:'20',y:''+(cy),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:COL.ink}));
+          var cw=104,gap=8;
+          for(var i=0;i<5;i++){
+            var cx=20+i*(cw+gap);
+            svg.appendChild(rect(cx,cy+8,cw,40,'rgba(99,102,241,0.12)',6,COL.chunk));
+            svg.appendChild(txt('C'+(i+1),{x:''+(cx+cw/2),y:''+(cy+24),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'12',fill:COL.chunk}));
+            svg.appendChild(txt('4 MB',{x:''+(cx+cw/2),y:''+(cy+40),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:COL.muted}));
+          }
+        }
+
+        /* ── Step 2+: Hash values ── */
+        if(step>=2){
+          var hy=fy+115;
+          svg.appendChild(txt('SHA-256 Hashes:',{x:'20',y:''+(hy),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:COL.hash}));
+          var cw2=104,gap2=8;
+          for(var j=0;j<5;j++){
+            var hx=20+j*(cw2+gap2);
+            svg.appendChild(rect(hx,hy+8,cw2,28,'rgba(249,115,22,0.08)',4,COL.hash));
+            svg.appendChild(txt(hashes[j],{x:''+(hx+cw2/2),y:''+(hy+26),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'600','font-size':'10',fill:COL.hash}));
+            /* arrow from chunk to hash */
+            svg.appendChild(arrow(hx+cw2/2,fy+55+8+40,hx+cw2/2,hy+8,COL.hash));
+          }
+        }
+
+        /* ── Step 3: Upload all to server ── */
+        if(step>=3&&step<4){
+          var sy=fy+165;
+          svg.appendChild(txt('→ All 5 chunks uploaded to server (first upload)',{x:'20',y:''+(sy),'font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:COL.server}));
+          svg.appendChild(rect(20,sy+8,560,30,'rgba(10,143,106,0.08)',6,COL.server));
+          svg.appendChild(txt('Server stores: [a7f3c1, b2e4d9, c8ab1e, d3f7c2, e1b9a5]',{x:'300',y:''+(sy+27),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:COL.server}));
+        }
+
+        /* ── Step 4+: User modifies file ── */
+        if(step>=4){
+          var my=fy+165;
+          svg.appendChild(rect(20,my,560,30,'rgba(245,158,11,0.1)',6,'#f59e0b'));
+          svg.appendChild(txt('✏️ User edits slide 3 — only the middle of the file changes',{x:'300',y:''+(my+19),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:'#f59e0b'}));
+        }
+
+        /* ── Step 5+: New chunks with highlighting ── */
+        if(step>=5){
+          var ny=fy+210;
+          svg.appendChild(txt('Re-chunk modified file:',{x:'20',y:''+(ny),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:COL.ink}));
+          var cw3=104,gap3=8;
+          for(var k=0;k<5;k++){
+            var nx=20+k*(cw3+gap3);
+            var isModified=(k===2);
+            var cColor=isModified?COL.changed:COL.unchanged;
+            var cFill=isModified?'rgba(34,197,94,0.15)':'rgba(148,163,184,0.08)';
+            svg.appendChild(rect(nx,ny+8,cw3,40,cFill,6,cColor));
+            svg.appendChild(txt('C'+(k+1)+(isModified?'\'':''),{x:''+(nx+cw3/2),y:''+(ny+24),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'12',fill:cColor}));
+            svg.appendChild(txt(isModified?'CHANGED':'same',{x:''+(nx+cw3/2),y:''+(ny+40),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'9',fill:cColor}));
+          }
+        }
+
+        /* ── Step 6+: Hash comparison ── */
+        if(step>=6){
+          var chy=fy+270;
+          svg.appendChild(txt('Compare hashes with server:',{x:'20',y:''+(chy),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:COL.hash}));
+          var cw4=104,gap4=8;
+          for(var m=0;m<5;m++){
+            var chx=20+m*(cw4+gap4);
+            var modified=(m===2);
+            var borderColor=modified?COL.changed:COL.unchanged;
+            var bgFill=modified?'rgba(34,197,94,0.12)':'rgba(148,163,184,0.06)';
+            svg.appendChild(rect(chx,chy+8,cw4,44,bgFill,4,borderColor));
+
+            /* old hash */
+            svg.appendChild(txt(hashes[m],{x:''+(chx+cw4/2),y:''+(chy+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:COL.muted}));
+
+            /* comparison symbol */
+            svg.appendChild(txt(modified?'≠':'=',{x:''+(chx+cw4/2),y:''+(chy+34),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'800','font-size':'12',fill:modified?COL.changed:COL.unchanged}));
+
+            /* new hash */
+            svg.appendChild(txt(modified?'4f2e8b':hashes[m],{x:''+(chx+cw4/2),y:''+(chy+46),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':modified?'800':'400','font-size':'9',fill:modified?COL.changed:COL.muted}));
+          }
+        }
+
+        /* ── Step 7: Upload only changed ── */
+        if(step>=7){
+          var uy=fy+340;
+          svg.appendChild(rect(20,uy,560,55,'rgba(34,197,94,0.06)',10,COL.changed));
+          svg.appendChild(txt('⬆ Upload ONLY chunk C3\' (1 of 5 chunks)',{x:'300',y:''+(uy+18),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'800','font-size':'12',fill:COL.changed}));
+          svg.appendChild(txt('Transfer: 4 MB instead of 20 MB — 80% bandwidth saved!',{x:'300',y:''+(uy+36),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:COL.ink}));
+          svg.appendChild(txt('Server version: [a7f3c1, b2e4d9, 4f2e8b, d3f7c2, e1b9a5]',{x:'300',y:''+(uy+50),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:COL.server}));
+        }
+
+        var infos=[
+          'We have a 20 MB file (presentation.pptx) that needs to be synced.',
+          'The file is split into 5 equal chunks of 4 MB each: C1, C2, C3, C4, C5.',
+          'Each chunk is hashed with SHA-256 to produce a unique fingerprint (shown truncated).',
+          'First upload: all 5 chunks are new, so all 5 are uploaded to the server block store.',
+          'The user edits slide 3 of the presentation — this modifies data in the middle of the file (chunk C3 region).',
+          'Re-chunking: C1, C2, C4, C5 are unchanged. C3 has new content → becomes C3\' with a different hash.',
+          'Hash comparison: server has [a7f3c1, b2e4d9, c8ab1e, d3f7c2, e1b9a5]. Client has [a7f3c1, b2e4d9, 4f2e8b, d3f7c2, e1b9a5]. Only C3 differs (c8ab1e ≠ 4f2e8b).',
+          'Only chunk C3\' is uploaded (4 MB). The other 4 chunks already exist on the server. 80% bandwidth saved through deduplication!'
+        ];
+        info.textContent=infos[step];
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('chunk-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('chunk-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+  })();
+  </script>
+</body>
+</html>

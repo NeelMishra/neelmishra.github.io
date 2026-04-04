@@ -1,0 +1,1121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Rate limiting and throttling deep dive: token bucket, leaky bucket, sliding window algorithms, distributed rate limiting with Redis, HTTP headers, and multi-level strategies.">
+  <title>Rate Limiting &amp; Throttling | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series</a><span>&middot; Building Blocks &middot; Part 4</span></div>
+
+      <h1>Rate Limiting &amp; Throttling</h1>
+      <p class="post-meta">April 2026 &middot; 20 min read</p>
+
+      <!-- ===== Section 1: Why Rate Limit? ===== -->
+      <h2 id="why-rate-limit">Why Rate Limit?</h2>
+      <p>Every public-facing API that doesn't enforce rate limits is an incident waiting to happen. Rate limiting is the practice of controlling the number of requests a client can make to a service within a given time window. It sits at the intersection of <strong>reliability engineering</strong>, <strong>security</strong>, and <strong>cost management</strong>.</p>
+
+      <h3>Core Motivations</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Goal</th><th style="text-align:left; padding:0.5em;">What It Prevents</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Prevent Abuse</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Malicious actors flooding your API with millions of requests, scraping data, or brute-forcing authentication endpoints.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Protect Resources</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">A single runaway client shouldn't saturate your database connections, exhaust thread pools, or crash downstream services.</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Ensure Fair Usage</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Without limits, one aggressive client can starve all other users of capacity (the "noisy neighbor" problem).</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>DDoS Mitigation</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Rate limiting is the first line of defense. While it can't stop a massive volumetric attack, it handles application-layer (L7) floods effectively.</td></tr>
+          <tr><td style="padding:0.5em;"><strong>Cost Control</strong></td><td style="padding:0.5em;">Cloud resources cost money. Unbounded traffic means unbounded bills. Rate limits cap the financial exposure.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Where to Rate Limit</h3>
+      <p>Rate limiting can be applied at multiple layers in your architecture, and in practice you should use <strong>multiple layers</strong>:</p>
+      <pre><code>Client → CDN/WAF (IP-level) → API Gateway (user-level) → Application (endpoint-level) → Database (connection pooling)
+         ↑ Cloudflare/AWS WAF    ↑ Kong/Envoy/nginx      ↑ Middleware/decorator      ↑ pg_bouncer/ProxySQL</code></pre>
+
+      <ul>
+        <li><strong>API Gateway / Reverse Proxy</strong> — The most common place. Catches abuse before it reaches your application code. Configure in Kong, Envoy, nginx, or AWS API Gateway.</li>
+        <li><strong>Application Level</strong> — Per-endpoint rate limits (e.g., login endpoint gets 5 req/min, search gets 100 req/min). Implemented as middleware or decorators.</li>
+        <li><strong>Per-User / Per-API-Key</strong> — Identify the caller via API key, JWT, or OAuth token. Essential for multi-tenant SaaS platforms.</li>
+        <li><strong>Per-IP</strong> — Simplest approach but problematic with NAT (thousands of users behind one IP). Good for anonymous endpoints.</li>
+        <li><strong>Global</strong> — Hard ceiling on total system throughput to prevent cascading failures.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Rate limiting ≠ throttling.</strong> Rate limiting <em>rejects</em> excess requests (HTTP 429). Throttling <em>slows them down</em> (queuing, delayed responses). In practice, the terms are used interchangeably, but the distinction matters when designing your system.
+      </div>
+
+      <!-- ===== Section 2: Token Bucket ===== -->
+      <h2 id="token-bucket">Token Bucket Algorithm</h2>
+      <p>The <strong>token bucket</strong> is the most widely used rate-limiting algorithm, adopted by AWS, Stripe, and most API gateways. It's elegant because it naturally allows <strong>bursts</strong> while enforcing a long-term average rate.</p>
+
+      <h3>How It Works</h3>
+      <ol>
+        <li>A bucket holds tokens. The bucket has a <strong>maximum capacity</strong> (e.g., 10 tokens).</li>
+        <li>Tokens are added at a <strong>fixed refill rate</strong> (e.g., 1 token per second).</li>
+        <li>Each incoming request must consume one token. If a token is available, the request proceeds. If not, the request is <strong>rejected</strong> (or queued).</li>
+        <li>If the bucket is full, new tokens are discarded (the bucket can't overflow).</li>
+      </ol>
+
+      <h3>Parameters</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Parameter</th><th style="text-align:left; padding:0.5em;">Description</th><th style="text-align:left; padding:0.5em;">Example</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);"><code>bucket_capacity</code></td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Maximum burst size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10</td></tr>
+          <tr><td style="padding:0.5em;"><code>refill_rate</code></td><td style="padding:0.5em;">Tokens added per second</td><td style="padding:0.5em;">2 tokens/sec</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Implementation</h3>
+      <pre><code>import time
+
+class TokenBucket:
+    def __init__(self, capacity: int, refill_rate: float):
+        self.capacity = capacity
+        self.tokens = capacity        # start full
+        self.refill_rate = refill_rate # tokens per second
+        self.last_refill = time.monotonic()
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        new_tokens = elapsed * self.refill_rate
+        self.tokens = min(self.capacity, self.tokens + new_tokens)
+        self.last_refill = now
+
+    def allow_request(self, tokens: int = 1) -> bool:
+        self._refill()
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
+
+# Usage: 10 requests max burst, 2 requests/sec sustained
+limiter = TokenBucket(capacity=10, refill_rate=2)
+
+for i in range(15):
+    if limiter.allow_request():
+        print(f"Request {i}: ✅ Allowed")
+    else:
+        print(f"Request {i}: ❌ Rate limited")
+</code></pre>
+
+      <div class="callout">
+        <strong>Why token bucket is dominant:</strong> It handles bursty traffic gracefully. A user who hasn't made requests for 5 seconds has accumulated tokens and can burst — which matches real user behavior (idle, then active). Fixed window counters penalize this pattern.
+      </div>
+
+      <!-- Animation 1: Token Bucket -->
+      <div class="anim-container" id="token-bucket-anim">
+        <h4>&#9654; Token Bucket Animation</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch tokens refill, get consumed by requests, and see what happens when the bucket is empty.</p>
+        <svg id="tb-svg" width="520" height="260" viewBox="0 0 520 260"></svg>
+        <div id="tb-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="tb-step">Step &rarr;</button>
+          <button class="anim-btn" id="tb-reset">Reset</button>
+          <span class="anim-output" id="tb-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== Section 3: Leaky Bucket ===== -->
+      <h2 id="leaky-bucket">Leaky Bucket Algorithm</h2>
+      <p>The <strong>leaky bucket</strong> is the dual of the token bucket. Instead of tokens controlling admission, a queue (the bucket) holds incoming requests, and they "leak" out at a fixed rate — like water dripping through a hole at the bottom of a bucket.</p>
+
+      <h3>How It Works</h3>
+      <ol>
+        <li>Incoming requests are added to a FIFO queue (the bucket).</li>
+        <li>The queue has a <strong>maximum size</strong>. If the queue is full, new requests are dropped.</li>
+        <li>Requests are processed (leaked) at a <strong>constant rate</strong>, regardless of how fast they arrive.</li>
+      </ol>
+
+      <h3>Key Difference from Token Bucket</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Aspect</th><th style="text-align:left; padding:0.5em;">Token Bucket</th><th style="text-align:left; padding:0.5em;">Leaky Bucket</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Burst handling</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Allows bursts (up to bucket capacity)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Smooths out bursts completely</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Output rate</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Variable (matches input up to limit)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Constant (always fixed rate)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">When bucket is full</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Reject immediately</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Drop from queue</td></tr>
+          <tr><td style="padding:0.5em;">Use case</td><td style="padding:0.5em;">API rate limiting (most common)</td><td style="padding:0.5em;">Traffic shaping, network QoS</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Implementation</h3>
+      <pre><code>import time
+from collections import deque
+
+class LeakyBucket:
+    def __init__(self, capacity: int, leak_rate: float):
+        self.capacity = capacity
+        self.leak_rate = leak_rate  # requests processed per second
+        self.queue = deque()
+        self.last_leak = time.monotonic()
+
+    def _leak(self):
+        now = time.monotonic()
+        elapsed = now - self.last_leak
+        leaked = int(elapsed * self.leak_rate)
+        for _ in range(min(leaked, len(self.queue))):
+            self.queue.popleft()
+        if leaked > 0:
+            self.last_leak = now
+
+    def allow_request(self, request_id: str) -> bool:
+        self._leak()
+        if len(self.queue) < self.capacity:
+            self.queue.append(request_id)
+            return True  # queued (will be processed at leak rate)
+        return False      # queue full, dropped
+
+# Queue up to 5 requests, process 2 per second
+limiter = LeakyBucket(capacity=5, leak_rate=2)
+</code></pre>
+
+      <div class="callout">
+        <strong>When to use leaky bucket:</strong> When you need a perfectly smooth output rate — e.g., sending emails (don't want bursts hitting SMTP servers), writing to databases with strict IOPS limits, or network traffic shaping at the packet level. For API rate limiting, token bucket is almost always preferred because users expect burst capability.
+      </div>
+
+      <!-- ===== Section 4: Fixed Window Counter ===== -->
+      <h2 id="fixed-window">Fixed Window Counter</h2>
+      <p>The simplest rate-limiting algorithm: divide time into fixed windows and count requests per window.</p>
+
+      <h3>How It Works</h3>
+      <ol>
+        <li>Time is divided into fixed windows (e.g., each minute: 12:00:00–12:00:59, 12:01:00–12:01:59).</li>
+        <li>Each window has a counter, starting at 0.</li>
+        <li>On each request, increment the counter for the current window.</li>
+        <li>If the counter exceeds the limit, reject the request.</li>
+        <li>When a new window starts, the counter resets to 0.</li>
+      </ol>
+
+      <h3>Implementation with Redis</h3>
+      <pre><code>import redis
+import time
+
+r = redis.Redis()
+
+def fixed_window_rate_limit(user_id: str, limit: int, window_seconds: int) -> bool:
+    """Returns True if request is allowed, False if rate limited."""
+    # Key includes the window timestamp
+    window = int(time.time() // window_seconds)
+    key = f"rate:{user_id}:{window}"
+
+    # Atomic increment
+    current = r.incr(key)
+
+    # Set expiry only on first request of the window
+    if current == 1:
+        r.expire(key, window_seconds + 1)  # +1 for clock skew
+
+    return current &lt;= limit
+
+# Allow 100 requests per minute
+allowed = fixed_window_rate_limit("user_123", limit=100, window_seconds=60)
+</code></pre>
+
+      <h3>The Boundary Problem</h3>
+      <p>Fixed windows have a critical flaw: a user can make <strong>2× the allowed requests</strong> in a short burst spanning the window boundary.</p>
+
+      <pre><code>Window 1: 12:00:00 ──────────────── 12:00:59 | Window 2: 12:01:00 ──────────────── 12:01:59
+                                               |
+                    ... idle ...     100 reqs  | 100 reqs    ... idle ...
+                                     ↑ 12:00:58-12:00:59    ↑ 12:01:00-12:01:01
+                                               |
+                             200 requests in ~2 seconds! (limit was 100/min)</code></pre>
+
+      <p>Both windows are individually within limits, but the user effectively sent 200 requests in 2 seconds. This is why fixed windows are rarely used in production for strict rate limiting.</p>
+
+      <div class="callout">
+        <strong>Fixed window is best for:</strong> Approximate limits where precision doesn't matter, internal service rate limits, or as a fast first-pass filter combined with a more accurate algorithm. Its simplicity (single Redis key per window) makes it the cheapest to run.
+      </div>
+
+      <!-- ===== Section 5: Sliding Window Log ===== -->
+      <h2 id="sliding-log">Sliding Window Log</h2>
+      <p>The sliding window log fixes the boundary problem by tracking <strong>every request timestamp</strong> and counting requests in a trailing window.</p>
+
+      <h3>How It Works</h3>
+      <ol>
+        <li>For each user, maintain a sorted set of request timestamps.</li>
+        <li>On each new request, remove timestamps older than <code>now - window_size</code>.</li>
+        <li>Count remaining entries. If count &lt; limit, allow the request and add its timestamp. Otherwise reject.</li>
+      </ol>
+
+      <h3>Redis Implementation</h3>
+      <pre><code>import redis
+import time
+import uuid
+
+r = redis.Redis()
+
+def sliding_window_log(user_id: str, limit: int, window_seconds: int) -> bool:
+    now = time.time()
+    key = f"rate:swl:{user_id}"
+    window_start = now - window_seconds
+
+    # Use a pipeline for atomicity
+    pipe = r.pipeline()
+
+    # Remove timestamps outside the window
+    pipe.zremrangebyscore(key, 0, window_start)
+
+    # Count remaining requests in the window
+    pipe.zcard(key)
+
+    # Add current request timestamp (score = timestamp, member = unique ID)
+    pipe.zadd(key, {str(uuid.uuid4()): now})
+
+    # Set TTL to auto-cleanup
+    pipe.expire(key, window_seconds + 1)
+
+    results = pipe.execute()
+    request_count = results[1]  # zcard result
+
+    if request_count >= limit:
+        # Remove the entry we just added
+        pipe = r.pipeline()
+        pipe.zpopmax(key)
+        pipe.execute()
+        return False
+
+    return True
+
+# 100 requests per 60-second sliding window
+allowed = sliding_window_log("user_123", limit=100, window_seconds=60)
+</code></pre>
+
+      <h3>Lua Script (Fully Atomic)</h3>
+      <pre><code>-- sliding_window_log.lua
+-- KEYS[1] = rate limit key
+-- ARGV[1] = window size in seconds
+-- ARGV[2] = max requests
+-- ARGV[3] = current timestamp
+-- ARGV[4] = unique request ID
+
+local key = KEYS[1]
+local window = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local req_id = ARGV[4]
+
+-- Remove expired entries
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+
+-- Count current entries
+local count = redis.call('ZCARD', key)
+
+if count &lt; limit then
+    -- Add new request
+    redis.call('ZADD', key, now, req_id)
+    redis.call('EXPIRE', key, window + 1)
+    return 1  -- allowed
+else
+    return 0  -- rejected
+end</code></pre>
+
+      <div class="callout">
+        <strong>Memory trade-off:</strong> If you allow 10,000 requests per hour, each user's sorted set holds up to 10,000 entries. For 1M users, that's 10 billion entries in Redis. This is why sliding window log is impractical at scale — use sliding window <em>counter</em> instead.
+      </div>
+
+      <!-- ===== Section 6: Sliding Window Counter ===== -->
+      <h2 id="sliding-counter">Sliding Window Counter</h2>
+      <p>The <strong>sliding window counter</strong> is the sweet spot: it combines the accuracy of sliding windows with the memory efficiency of fixed windows. This is the algorithm Cloudflare uses at scale.</p>
+
+      <h3>How It Works</h3>
+      <p>Instead of storing individual timestamps, use a <strong>weighted average</strong> of the current and previous window's counts:</p>
+
+      <pre><code>Effective count = (previous_window_count × overlap_percentage) + current_window_count
+
+Example:
+  Window size: 60 seconds
+  Current time: 12:01:15 (15 seconds into current window)
+  Previous window (12:00:00–12:00:59): 84 requests
+  Current window  (12:01:00–12:01:59): 36 requests
+
+  Overlap of previous window: (60 - 15) / 60 = 75%
+
+  Effective count = 84 × 0.75 + 36 = 63 + 36 = 99
+
+  If limit is 100 → this request is allowed (99 &lt; 100)
+</code></pre>
+
+      <h3>Implementation</h3>
+      <pre><code>import redis
+import time
+
+r = redis.Redis()
+
+def sliding_window_counter(
+    user_id: str, limit: int, window_seconds: int
+) -> bool:
+    now = time.time()
+    current_window = int(now // window_seconds)
+    previous_window = current_window - 1
+
+    current_key = f"rate:swc:{user_id}:{current_window}"
+    previous_key = f"rate:swc:{user_id}:{previous_window}"
+
+    # Get counts for both windows
+    pipe = r.pipeline()
+    pipe.get(current_key)
+    pipe.get(previous_key)
+    results = pipe.execute()
+
+    current_count = int(results[0] or 0)
+    previous_count = int(results[1] or 0)
+
+    # Calculate elapsed fraction of current window
+    elapsed = now - (current_window * window_seconds)
+    weight = 1 - (elapsed / window_seconds)
+
+    # Weighted count
+    effective_count = previous_count * weight + current_count
+
+    if effective_count >= limit:
+        return False
+
+    # Increment current window
+    pipe = r.pipeline()
+    pipe.incr(current_key)
+    pipe.expire(current_key, window_seconds * 2)
+    pipe.execute()
+
+    return True
+
+# 100 requests per minute, only 2 Redis keys per user
+allowed = sliding_window_counter("user_123", limit=100, window_seconds=60)
+</code></pre>
+
+      <h3>Why This Is the Best Trade-Off</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Algorithm</th><th style="text-align:left; padding:0.5em;">Memory per User</th><th style="text-align:left; padding:0.5em;">Accuracy</th><th style="text-align:left; padding:0.5em;">Burst Handling</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Fixed Window</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">8 bytes</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Poor (2× at boundary)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Allows boundary bursts</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Sliding Log</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">O(limit) entries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Perfect</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Precise</td></tr>
+          <tr style="background:rgba(10,143,106,0.06);"><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Sliding Counter</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>16 bytes</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>~99.7% accurate</strong></td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>Smooth</strong></td></tr>
+          <tr><td style="padding:0.5em;">Token Bucket</td><td style="padding:0.5em;">16 bytes</td><td style="padding:0.5em;">Good</td><td style="padding:0.5em;">Allows controlled bursts</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Animation 2: Sliding Window -->
+      <div class="anim-container" id="sliding-window-anim">
+        <h4>&#9654; Sliding Window Animation</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">See the boundary problem with fixed windows and how sliding windows solve it.</p>
+        <svg id="sw-svg" width="520" height="220" viewBox="0 0 520 220"></svg>
+        <div id="sw-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="sw-step">Step &rarr;</button>
+          <button class="anim-btn" id="sw-reset">Reset</button>
+          <span class="anim-output" id="sw-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== Section 7: Distributed Rate Limiting ===== -->
+      <h2 id="distributed">Distributed Rate Limiting</h2>
+      <p>In a single-server world, rate limiting is trivial — an in-memory counter works fine. But modern architectures run dozens or hundreds of API servers behind a load balancer. The fundamental challenge: <strong>how do all servers agree on the request count?</strong></p>
+
+      <h3>The Problem</h3>
+      <pre><code>                    ┌─────────────┐
+  Request ──────────▶│ API Server 1 │──── Local counter: 45
+                    └─────────────┘
+  Request ──────────▶│ API Server 2 │──── Local counter: 38
+                    └─────────────┘
+  Request ──────────▶│ API Server 3 │──── Local counter: 42
+                    └─────────────┘
+
+  Each server thinks the user made ~40 requests.
+  But the REAL total is 45 + 38 + 42 = 125!
+  If the limit is 100, we've allowed 25% over-limit.</code></pre>
+
+      <h3>Solution: Centralized Store (Redis)</h3>
+      <p>Use Redis as a shared counter that all API servers query atomically:</p>
+
+      <pre><code>                    ┌─────────────┐
+  Request ──────────▶│ API Server 1 │────┐
+                    └─────────────┘    │
+  Request ──────────▶│ API Server 2 │────┼──▶ Redis (single counter: 125)
+                    └─────────────┘    │
+  Request ──────────▶│ API Server 3 │────┘
+                    └─────────────┘</code></pre>
+
+      <h3>Atomic Rate Limiting with Lua</h3>
+      <p>The classic INCR + EXPIRE pattern has a race condition. If the server crashes between INCR and EXPIRE, the key lives forever. Use a Lua script for atomicity:</p>
+
+      <pre><code>-- rate_limit.lua — Atomic fixed-window rate limiter
+-- KEYS[1] = rate limit key
+-- ARGV[1] = max requests
+-- ARGV[2] = window size in seconds
+
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+
+local current = redis.call('INCR', key)
+
+if current == 1 then
+    -- First request: set the expiry
+    redis.call('EXPIRE', key, window)
+end
+
+if current > limit then
+    return 0  -- rejected
+else
+    return 1  -- allowed
+end</code></pre>
+
+      <pre><code># Python caller
+import redis
+import time
+
+r = redis.Redis()
+
+# Load the Lua script
+RATE_LIMIT_SCRIPT = r.register_script("""
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+if current > tonumber(ARGV[1]) then
+    return 0
+else
+    return 1
+end
+""")
+
+def is_allowed(user_id: str, limit: int = 100, window: int = 60) -> bool:
+    window_id = int(time.time() // window)
+    key = f"rl:{user_id}:{window_id}"
+    result = RATE_LIMIT_SCRIPT(keys=[key], args=[limit, window])
+    return result == 1
+</code></pre>
+
+      <h3>Token Bucket with Redis</h3>
+      <pre><code>-- token_bucket.lua — Distributed token bucket
+-- KEYS[1] = bucket key
+-- ARGV[1] = capacity
+-- ARGV[2] = refill rate (tokens/sec)
+-- ARGV[3] = current timestamp (seconds, float)
+-- ARGV[4] = tokens to consume
+
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+
+-- Get current state
+local bucket = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens = tonumber(bucket[1]) or capacity
+local last_refill = tonumber(bucket[2]) or now
+
+-- Refill tokens
+local elapsed = math.max(0, now - last_refill)
+tokens = math.min(capacity, tokens + elapsed * refill_rate)
+
+-- Try to consume
+if tokens >= requested then
+    tokens = tokens - requested
+    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+    redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 1)
+    return 1  -- allowed
+else
+    redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
+    redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 1)
+    return 0  -- rejected
+end</code></pre>
+
+      <h3>Race Conditions and Mitigations</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Race Condition</th><th style="text-align:left; padding:0.5em;">Cause</th><th style="text-align:left; padding:0.5em;">Solution</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">INCR without EXPIRE</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Crash between INCR and EXPIRE</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Lua script (atomic)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">GET-then-SET</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Two servers read same count, both allow</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">INCR (atomic) or Lua</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Clock skew</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Servers have different clocks</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Use Redis TIME, or NTP sync</td></tr>
+          <tr><td style="padding:0.5em;">Redis failover</td><td style="padding:0.5em;">Replica promoted, counters lost</td><td style="padding:0.5em;">Accept brief over-limit; use WAIT for sync</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Redis Cluster for scale:</strong> Partition rate-limit keys by user ID across Redis Cluster shards. Each user's counter lives on one shard. With consistent hashing, you get linear scalability. At Stripe's scale, a single Redis node handles 200K+ rate-limit checks per second.
+      </div>
+
+      <!-- Animation 3: Distributed Rate Limiter -->
+      <div class="anim-container" id="distributed-anim">
+        <h4>&#9654; Distributed Rate Limiter</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Multiple API servers share a Redis counter. Watch atomic INCR + EXPIRE and 429 rejection.</p>
+        <svg id="dist-svg" width="520" height="260" viewBox="0 0 520 260"></svg>
+        <div id="dist-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="dist-step">Step &rarr;</button>
+          <button class="anim-btn" id="dist-reset">Reset</button>
+          <span class="anim-output" id="dist-output"></span>
+        </div>
+      </div>
+
+      <!-- ===== Section 8: Rate Limiting in Practice ===== -->
+      <h2 id="in-practice">Rate Limiting in Practice</h2>
+
+      <h3>HTTP Response Headers</h3>
+      <p>The standard way to communicate rate-limit status to clients. These aren't in the HTTP spec (yet) but are a de facto standard adopted by GitHub, Stripe, Twitter, and others:</p>
+
+      <pre><code>HTTP/1.1 200 OK
+X-RateLimit-Limit: 100        ← Max requests per window
+X-RateLimit-Remaining: 42     ← Requests left in current window
+X-RateLimit-Reset: 1714435200 ← Unix timestamp when window resets
+</code></pre>
+
+      <h3>429 Too Many Requests</h3>
+      <pre><code>HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 30
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1714435200
+
+{
+    "error": {
+        "code": "rate_limit_exceeded",
+        "message": "Rate limit exceeded. Try again in 30 seconds.",
+        "retry_after": 30,
+        "limit": 100,
+        "remaining": 0,
+        "reset_at": "2026-04-30T12:00:00Z"
+    }
+}</code></pre>
+
+      <h3>Implementing in Express.js Middleware</h3>
+      <pre><code>const Redis = require('ioredis');
+const redis = new Redis();
+
+const RATE_LIMIT_LUA = `
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+if current > tonumber(ARGV[1]) then
+    return {0, current, tonumber(redis.call('TTL', KEYS[1]))}
+else
+    return {1, current, tonumber(redis.call('TTL', KEYS[1]))}
+end
+`;
+
+function rateLimit({ limit = 100, windowSeconds = 60 } = {}) {
+    return async (req, res, next) =&gt; {
+        const userId = req.user?.id || req.ip;
+        const window = Math.floor(Date.now() / 1000 / windowSeconds);
+        const key = `rl:${userId}:${window}`;
+
+        const [allowed, count, ttl] = await redis.eval(
+            RATE_LIMIT_LUA, 1, key, limit, windowSeconds
+        );
+
+        // Always set rate limit headers
+        res.set('X-RateLimit-Limit', String(limit));
+        res.set('X-RateLimit-Remaining', String(Math.max(0, limit - count)));
+        res.set('X-RateLimit-Reset', String(
+            Math.floor(Date.now() / 1000) + ttl
+        ));
+
+        if (!allowed) {
+            res.set('Retry-After', String(ttl));
+            return res.status(429).json({
+                error: {
+                    code: 'rate_limit_exceeded',
+                    message: `Rate limit exceeded. Try again in ${ttl}s.`,
+                    retry_after: ttl,
+                }
+            });
+        }
+
+        next();
+    };
+}
+
+// Usage
+app.use('/api/', rateLimit({ limit: 100, windowSeconds: 60 }));
+app.use('/api/login', rateLimit({ limit: 5, windowSeconds: 300 }));
+</code></pre>
+
+      <h3>Client-Side: Exponential Backoff with Jitter</h3>
+      <p>When you receive a 429, don't retry immediately — use exponential backoff with <strong>jitter</strong> to avoid the thundering herd problem:</p>
+
+      <pre><code>import time
+import random
+import requests
+
+def request_with_backoff(url: str, max_retries: int = 5) -&gt; requests.Response:
+    for attempt in range(max_retries):
+        response = requests.get(url)
+
+        if response.status_code != 429:
+            return response
+
+        # Prefer Retry-After header if present
+        retry_after = response.headers.get('Retry-After')
+        if retry_after:
+            wait = int(retry_after)
+        else:
+            # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+            base_wait = 2 ** attempt
+            # Add jitter: random value between 0 and base_wait
+            wait = base_wait + random.uniform(0, base_wait)
+
+        print(f"Rate limited. Retrying in {wait:.1f}s (attempt {attempt + 1})")
+        time.sleep(wait)
+
+    raise Exception(f"Failed after {max_retries} retries")
+</code></pre>
+
+      <pre><code>// JavaScript equivalent
+async function fetchWithBackoff(url, maxRetries = 5) {
+    for (let attempt = 0; attempt &lt; maxRetries; attempt++) {
+        const response = await fetch(url);
+
+        if (response.status !== 429) return response;
+
+        const retryAfter = response.headers.get('Retry-After');
+        const baseWait = retryAfter
+            ? parseInt(retryAfter, 10)
+            : Math.pow(2, attempt);
+        const jitter = Math.random() * baseWait;
+        const wait = baseWait + jitter;
+
+        console.log(`Rate limited. Retry in ${wait.toFixed(1)}s`);
+        await new Promise(r =&gt; setTimeout(r, wait * 1000));
+    }
+
+    throw new Error(`Failed after ${maxRetries} retries`);
+}
+</code></pre>
+
+      <div class="callout">
+        <strong>Why jitter matters:</strong> Without jitter, all rate-limited clients retry at exactly the same time (2<sup>n</sup> seconds), creating a "retry storm" that overwhelms the server again. Jitter spreads retries uniformly across time, preventing synchronized bursts.
+      </div>
+
+      <!-- ===== Section 9: Multi-Level Rate Limiting ===== -->
+      <h2 id="multi-level">Multi-Level Rate Limiting</h2>
+      <p>Production systems rarely use a single rate limit. Instead, they layer multiple limits at different granularities:</p>
+
+      <h3>Layered Limits</h3>
+      <pre><code>┌──────────────────────────────────────────────────────┐
+│ Layer 1: Global                                      │
+│   All traffic combined: 50,000 req/sec               │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ Layer 2: Per-IP                                  │ │
+│ │   Anonymous: 60 req/min per IP                   │ │
+│ │ ┌──────────────────────────────────────────────┐ │ │
+│ │ │ Layer 3: Per-User                            │ │ │
+│ │ │   Authenticated: 1,000 req/min per user      │ │ │
+│ │ │ ┌──────────────────────────────────────────┐ │ │ │
+│ │ │ │ Layer 4: Per-Endpoint                    │ │ │ │
+│ │ │ │   POST /login: 5 req/min                 │ │ │ │
+│ │ │ │   GET /search: 30 req/min                │ │ │ │
+│ │ │ │   GET /api/data: 1,000 req/min           │ │ │ │
+│ │ │ └──────────────────────────────────────────┘ │ │ │
+│ │ └──────────────────────────────────────────────┘ │ │
+│ └──────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+      <h3>API Tier Limits</h3>
+      <p>Most SaaS APIs offer tiered pricing with different rate limits:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Tier</th><th style="text-align:left; padding:0.5em;">Rate Limit</th><th style="text-align:left; padding:0.5em;">Burst</th><th style="text-align:left; padding:0.5em;">Daily Quota</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Free</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">60 req/min</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1,000</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Pro</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">600 req/min</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">100</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">50,000</td></tr>
+          <tr><td style="padding:0.5em;">Enterprise</td><td style="padding:0.5em;">6,000 req/min</td><td style="padding:0.5em;">1,000</td><td style="padding:0.5em;">Unlimited</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Implementation with Multiple Buckets</h3>
+      <pre><code>import redis
+import time
+
+r = redis.Redis()
+
+# Lua script that checks multiple rate limits atomically
+MULTI_LIMIT_LUA = """
+-- Check all limits; reject if ANY limit is exceeded
+for i = 1, #KEYS do
+    local current = redis.call('INCR', KEYS[i])
+    if current == 1 then
+        redis.call('EXPIRE', KEYS[i], ARGV[i * 2])
+    end
+    if current > tonumber(ARGV[i * 2 - 1]) then
+        return {0, i}  -- rejected, which limit was hit
+    end
+end
+return {1, 0}  -- all limits passed
+"""
+
+def multi_rate_limit(user_id: str, ip: str, endpoint: str, tier: str):
+    now = int(time.time())
+
+    # Define limits per tier
+    tier_limits = {
+        'free':       {'per_min': 60,   'per_hour': 1000},
+        'pro':        {'per_min': 600,  'per_hour': 50000},
+        'enterprise': {'per_min': 6000, 'per_hour': 500000},
+    }
+
+    limits = tier_limits.get(tier, tier_limits['free'])
+    minute_window = now // 60
+    hour_window = now // 3600
+
+    keys = [
+        f"rl:ip:{ip}:{minute_window}",           # Per-IP: 120/min
+        f"rl:user:{user_id}:{minute_window}",     # Per-user: tier limit/min
+        f"rl:user:{user_id}:h:{hour_window}",     # Per-user: tier limit/hour
+        f"rl:ep:{endpoint}:{user_id}:{minute_window}",  # Per-endpoint
+    ]
+
+    args = [
+        120, 60,                        # IP: 120 req, 60s window
+        limits['per_min'], 60,          # User per min
+        limits['per_hour'], 3600,       # User per hour
+        30, 60,                         # Endpoint: 30 req/min
+    ]
+
+    result = r.eval(MULTI_LIMIT_LUA, len(keys), *keys, *args)
+    return result[0] == 1  # True if all limits passed
+</code></pre>
+
+      <h3>API Gateway Configuration (Kong)</h3>
+      <pre><code># kong.yml — Rate limiting plugin configuration
+plugins:
+  - name: rate-limiting
+    config:
+      minute: 100
+      hour: 5000
+      policy: redis            # Use Redis for distributed counting
+      redis_host: redis.internal
+      redis_port: 6379
+      redis_timeout: 2000
+      redis_database: 0
+      limit_by: consumer       # Per API key / consumer
+      fault_tolerant: true     # Allow traffic if Redis is down
+      hide_client_headers: false
+
+  # Stricter limit for auth endpoints
+  - name: rate-limiting
+    route: login-route
+    config:
+      minute: 5
+      hour: 20
+      policy: redis
+      redis_host: redis.internal
+      limit_by: ip
+</code></pre>
+
+      <h3>Envoy Proxy Configuration</h3>
+      <pre><code># envoy.yaml — Rate limit filter
+http_filters:
+  - name: envoy.filters.http.ratelimit
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+      domain: my_api
+      rate_limit_service:
+        grpc_service:
+          envoy_grpc:
+            cluster_name: rate_limit_cluster
+        transport_api_version: V3
+
+# Rate limit service descriptor configuration
+domain: my_api
+descriptors:
+  - key: user_id
+    rate_limit:
+      unit: minute
+      requests_per_unit: 100
+  - key: user_id
+    value: free_tier
+    rate_limit:
+      unit: minute
+      requests_per_unit: 10
+</code></pre>
+
+      <div class="callout">
+        <strong>Graceful degradation:</strong> If Redis is down, should you block all traffic or allow all traffic? Most production systems choose <strong>fail-open</strong> (allow all) rather than fail-closed, because a few seconds of unthrottled traffic is better than a total outage. Kong's <code>fault_tolerant: true</code> does exactly this.
+      </div>
+
+      <!-- ===== Navigation ===== -->
+      <nav class="post-nav">
+        <a class="prev" href="replication.html"><span>Previous</span><span>&#8592; Replication</span></a>
+        <a class="next" href="service-discovery.html"><span>Next</span><span>Service Discovery &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* ── Shared SVG Helpers ── */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(svg){while(svg.firstChild)svg.removeChild(svg.firstChild);}
+
+    /* ════════════════════════════════════════════
+       ANIMATION 1 — Token Bucket
+       ════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('tb-svg');
+      var info=document.getElementById('tb-info');
+      var out=document.getElementById('tb-output');
+      if(!svg)return;
+
+      var CAPACITY=6, tokens=CAPACITY, stepIdx=0;
+      var steps=[
+        {type:'init',  desc:'Bucket starts full with '+CAPACITY+' tokens (capacity='+CAPACITY+', refill=1/step)'},
+        {type:'req',   n:1, desc:'1 request arrives → consumes 1 token → ✅ Allowed'},
+        {type:'req',   n:1, desc:'Another request → consumes 1 token → ✅ Allowed'},
+        {type:'refill',desc:'Time passes… 1 token refilled'},
+        {type:'burst', n:3, desc:'Burst! 3 requests at once → 3 tokens consumed → ✅ All allowed'},
+        {type:'req',   n:1, desc:'1 more request → consumes 1 token → ✅ Allowed'},
+        {type:'req',   n:1, desc:'Another request → last token consumed → ✅ Allowed'},
+        {type:'reject',desc:'Request arrives but 0 tokens → ❌ REJECTED (429)'},
+        {type:'refill',desc:'Time passes… 1 token refilled'},
+        {type:'req',   n:1, desc:'Request arrives → consumes refilled token → ✅ Allowed'},
+        {type:'reject',desc:'Another request, bucket empty again → ❌ REJECTED'}
+      ];
+
+      function draw(){
+        clearSvg(svg);
+        // Bucket outline
+        svg.appendChild(el('rect',{x:'160',y:'40',width:'200',height:'160',rx:'12',fill:'none',stroke:'var(--ink)',  'stroke-width':'2.5'}));
+        svg.appendChild(txt('Token Bucket (capacity: '+CAPACITY+')',{x:'260',y:'25','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+        // Tokens
+        for(var i=0;i<CAPACITY;i++){
+          var col=Math.floor(i/2), row=i%2;
+          var cx=200+col*50, cy=120+row*45;
+          if(i<tokens){
+            svg.appendChild(el('circle',{cx:''+cx,cy:''+cy,r:'16',fill:'#f59e0b',stroke:'#d97706','stroke-width':'2'}));
+            svg.appendChild(txt('T',{x:''+cx,y:''+(cy+5),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#fff'}));
+          } else {
+            svg.appendChild(el('circle',{cx:''+cx,cy:''+cy,r:'16',fill:'none',stroke:'#ddd','stroke-width':'1.5','stroke-dasharray':'4,3'}));
+          }
+        }
+        // Labels
+        svg.appendChild(txt('Tokens: '+tokens+' / '+CAPACITY,{x:'260',y:'225','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'13',fill:'var(--ink)'}));
+        // Request arrow area
+        svg.appendChild(txt('Requests →',{x:'60',y:'130','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+        svg.appendChild(el('line',{x1:'100',y1:'125',x2:'155',y2:'125',stroke:'var(--ink-muted)','stroke-width':'1.5','marker-end':''}));
+        // Output area
+        svg.appendChild(txt('→ Output',{x:'440',y:'130','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+      }
+
+      function reset(){stepIdx=0;tokens=CAPACITY;draw();info.textContent='Click "Step" to simulate token bucket.';out.textContent='';}
+
+      function step(){
+        if(stepIdx>=steps.length){info.textContent='✅ Simulation complete. Click Reset.';return;}
+        var s=steps[stepIdx];
+        if(s.type==='init'){tokens=CAPACITY;}
+        else if(s.type==='req'){tokens=Math.max(0,tokens-s.n);}
+        else if(s.type==='burst'){tokens=Math.max(0,tokens-s.n);}
+        else if(s.type==='refill'){tokens=Math.min(CAPACITY,tokens+1);}
+        else if(s.type==='reject'){/* no change */}
+        draw();
+        // Draw indicator
+        if(s.type==='reject'){
+          svg.appendChild(txt('❌',{x:'130',y:'100','font-size':'22','text-anchor':'middle'}));
+          svg.appendChild(txt('429',{x:'130',y:'118','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#e74c3c'}));
+        } else if(s.type==='req'||s.type==='burst'){
+          svg.appendChild(txt('✅',{x:'410',y:'100','font-size':'22','text-anchor':'middle'}));
+          svg.appendChild(txt('200',{x:'410',y:'118','text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#0a8f6a'}));
+        } else if(s.type==='refill'){
+          svg.appendChild(txt('+1',{x:'260',y:'55','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#0a8f6a'}));
+        }
+        info.textContent=s.desc;
+        out.textContent=(stepIdx+1)+' / '+steps.length;
+        stepIdx++;
+      }
+
+      reset();
+      document.getElementById('tb-step').addEventListener('click',step);
+      document.getElementById('tb-reset').addEventListener('click',reset);
+    })();
+
+    /* ════════════════════════════════════════════
+       ANIMATION 2 — Sliding Window
+       ════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('sw-svg');
+      var info=document.getElementById('sw-info');
+      var out=document.getElementById('sw-output');
+      if(!svg)return;
+
+      var stepIdx=0;
+      var steps=[
+        {id:'init',     desc:'Timeline: two 1-minute fixed windows. Limit = 5 requests per window.'},
+        {id:'fill-w1',  desc:'Window 1: 5 requests near the end (12:00:50–12:00:59). Within limit ✅'},
+        {id:'fill-w2',  desc:'Window 2: 5 requests at the start (12:01:00–12:01:09). Also within limit ✅'},
+        {id:'boundary', desc:'⚠ Boundary problem: 10 requests in ~19 seconds! The fixed window missed this burst.'},
+        {id:'sliding',  desc:'Sliding window: a 60s window ending NOW always counts ≤5 requests. No boundary exploit.'},
+        {id:'counter',  desc:'Sliding counter: weighted = prev × 0.83 + curr = 5×0.83+5 = 9.2 > limit 5 → ❌ Rejected'}
+      ];
+
+      var TL_X=40, TL_W=440, TL_Y=80, MID=TL_X+TL_W/2;
+
+      function drawTimeline(){
+        clearSvg(svg);
+        // Main timeline
+        svg.appendChild(el('line',{x1:''+TL_X,y1:''+TL_Y,x2:''+(TL_X+TL_W),y2:''+TL_Y,stroke:'var(--ink)','stroke-width':'2'}));
+        // Window boundary
+        svg.appendChild(el('line',{x1:''+MID,y1:''+(TL_Y-35),x2:''+MID,y2:''+(TL_Y+15),stroke:'var(--ink)','stroke-width':'2','stroke-dasharray':'4,3'}));
+        // Labels
+        svg.appendChild(txt('12:00:00',{x:''+TL_X,y:''+(TL_Y+30),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('12:01:00',{x:''+MID,y:''+(TL_Y+30),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+        svg.appendChild(txt('12:02:00',{x:''+(TL_X+TL_W),y:''+(TL_Y+30),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('Window 1',{x:''+(TL_X+TL_W/4),y:''+(TL_Y-45),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('Window 2',{x:''+(MID+TL_W/4),y:''+(TL_Y-45),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11','font-weight':'700',fill:'var(--ink-muted)'}));
+        svg.appendChild(txt('Limit: 5 req / window',{x:'260',y:'20','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+      }
+
+      function drawDots(positions,color){
+        positions.forEach(function(px){
+          svg.appendChild(el('circle',{cx:''+px,cy:''+TL_Y,r:'5',fill:color}));
+        });
+      }
+
+      var w1Dots=[], w2Dots=[];
+      for(var i=0;i<5;i++){w1Dots.push(MID-40+i*8);} // cluster near end of W1
+      for(var i=0;i<5;i++){w2Dots.push(MID+8+i*8);}   // cluster near start of W2
+
+      function reset(){stepIdx=0;drawTimeline();info.textContent='Click "Step" to see the boundary problem.';out.textContent='';}
+
+      function doStep(){
+        if(stepIdx>=steps.length){info.textContent='✅ Complete. Click Reset.';return;}
+        var s=steps[stepIdx];
+        drawTimeline();
+
+        if(s.id==='fill-w1'||s.id==='fill-w2'||s.id==='boundary'||s.id==='sliding'||s.id==='counter'){
+          if(s.id!=='init') drawDots(w1Dots,'#2196f3');
+        }
+        if(s.id==='fill-w2'||s.id==='boundary'||s.id==='sliding'||s.id==='counter'){
+          drawDots(w2Dots,'#e74c3c');
+        }
+        if(s.id==='boundary'){
+          // Highlight the danger zone
+          var bx1=w1Dots[0]-8, bx2=w2Dots[4]+8, bw=bx2-bx1;
+          svg.appendChild(el('rect',{x:''+bx1,y:''+(TL_Y-18),width:''+bw,height:'36',rx:'6',fill:'#e74c3c',opacity:'0.12'}));
+          svg.appendChild(txt('10 reqs in ~19s!',{x:''+(bx1+bw/2),y:''+(TL_Y+55),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:'#e74c3c'}));
+          svg.appendChild(el('line',{x1:''+(bx1+bw/2),y1:''+(TL_Y+44),x2:''+(bx1+bw/2),y2:''+(TL_Y+18),stroke:'#e74c3c','stroke-width':'1','marker-end':''}));
+        }
+        if(s.id==='sliding'){
+          // Draw sliding window rectangle
+          var swEnd=w2Dots[4]+12, swStart=swEnd-TL_W/2;
+          svg.appendChild(el('rect',{x:''+swStart,y:''+(TL_Y-22),width:''+(swEnd-swStart),height:'44',rx:'8',fill:'none',stroke:'#0a8f6a','stroke-width':'2.5','stroke-dasharray':'6,3'}));
+          svg.appendChild(txt('← 60s sliding window →',{x:''+(swStart+(swEnd-swStart)/2),y:''+(TL_Y+55),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'#0a8f6a'}));
+          svg.appendChild(txt('Counts ALL dots inside = 10 > 5 → ❌',{x:'260',y:''+(TL_Y+75),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'#0a8f6a','font-weight':'700'}));
+        }
+        if(s.id==='counter'){
+          svg.appendChild(txt('prev_count=5  curr_count=5  overlap=83%',{x:'260',y:''+(TL_Y+55),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:'var(--ink)'}));
+          svg.appendChild(txt('weighted = 5×0.83 + 5 = 9.2 > 5 → ❌ Rejected',{x:'260',y:''+(TL_Y+75),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'#e74c3c','font-weight':'700'}));
+        }
+
+        info.textContent=s.desc;
+        out.textContent=(stepIdx+1)+' / '+steps.length;
+        stepIdx++;
+      }
+
+      reset();
+      document.getElementById('sw-step').addEventListener('click',doStep);
+      document.getElementById('sw-reset').addEventListener('click',reset);
+    })();
+
+    /* ════════════════════════════════════════════
+       ANIMATION 3 — Distributed Rate Limiter
+       ════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('dist-svg');
+      var info=document.getElementById('dist-info');
+      var out=document.getElementById('dist-output');
+      if(!svg)return;
+
+      var stepIdx=0, counter=0, LIMIT=5;
+      var servers=[
+        {label:'API-1',x:40,y:50},
+        {label:'API-2',x:40,y:120},
+        {label:'API-3',x:40,y:190}
+      ];
+      var redisX=350, redisY=120, redisW=130, redisH=60;
+
+      var steps=[
+        {srv:0, desc:'Request hits API-1 → sends INCR to Redis',result:'allow'},
+        {srv:1, desc:'Request hits API-2 → sends INCR to Redis',result:'allow'},
+        {srv:2, desc:'Request hits API-3 → sends INCR to Redis',result:'allow'},
+        {srv:0, desc:'Another request on API-1 → INCR',result:'allow'},
+        {srv:1, desc:'Another request on API-2 → counter reaches limit',result:'allow'},
+        {srv:2, desc:'Request on API-3 → counter=6 > limit=5 → ❌ 429 Rejected!',result:'reject'},
+        {srv:0, desc:'Request on API-1 → still over limit → ❌ 429 Rejected!',result:'reject'}
+      ];
+
+      function drawBase(){
+        clearSvg(svg);
+        svg.appendChild(txt('Distributed Rate Limiting (limit: '+LIMIT+')',{x:'260',y:'20','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+        // Servers
+        servers.forEach(function(s){
+          svg.appendChild(el('rect',{x:''+s.x,y:''+s.y,width:'90',height:'36',rx:'6',fill:'#2196f3',opacity:'0.15',stroke:'#2196f3','stroke-width':'1.5'}));
+          svg.appendChild(txt(s.label,{x:''+(s.x+45),y:''+(s.y+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'12',fill:'#2196f3','font-weight':'700'}));
+        });
+        // Redis
+        svg.appendChild(el('rect',{x:''+redisX,y:''+redisY,width:''+redisW,height:''+redisH,rx:'8',fill:'#e74c3c',opacity:'0.12',stroke:'#e74c3c','stroke-width':'2'}));
+        svg.appendChild(txt('Redis',{x:''+(redisX+redisW/2),y:''+(redisY+22),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'#e74c3c'}));
+        svg.appendChild(txt('counter: '+counter+' / '+LIMIT,{x:''+(redisX+redisW/2),y:''+(redisY+42),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'11',fill:'var(--ink)'}));
+        // Connection lines
+        servers.forEach(function(s){
+          svg.appendChild(el('line',{x1:''+(s.x+90),y1:''+(s.y+18),x2:''+redisX,y2:''+(redisY+30),stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'4,3'}));
+        });
+      }
+
+      function reset(){stepIdx=0;counter=0;drawBase();info.textContent='Click "Step" to see distributed rate limiting.';out.textContent='';}
+
+      function doStep(){
+        if(stepIdx>=steps.length){info.textContent='✅ Complete. Click Reset.';return;}
+        var s=steps[stepIdx];
+        if(s.result==='allow') counter++;
+        else counter++;
+        drawBase();
+
+        var srv=servers[s.srv];
+        // Highlight active server
+        svg.appendChild(el('rect',{x:''+srv.x,y:''+srv.y,width:'90',height:'36',rx:'6',fill:s.result==='allow'?'#0a8f6a':'#e74c3c',opacity:'0.25'}));
+        // Arrow from server to Redis
+        svg.appendChild(el('line',{x1:''+(srv.x+90),y1:''+(srv.y+18),x2:''+redisX,y2:''+(redisY+30),stroke:s.result==='allow'?'#0a8f6a':'#e74c3c','stroke-width':'2.5'}));
+        // INCR label
+        svg.appendChild(txt('INCR →',{x:''+(srv.x+170),y:''+(Math.min(srv.y+18,redisY+30)-6),'font-family':'Consolas,monospace','font-size':'10',fill:s.result==='allow'?'#0a8f6a':'#e74c3c','font-weight':'700'}));
+        // Result
+        if(s.result==='allow'){
+          svg.appendChild(txt('✅ 200',{x:''+(redisX+redisW+15),y:''+(redisY+redisH+20),'font-family':'Consolas,monospace','font-size':'12',fill:'#0a8f6a','font-weight':'700'}));
+        } else {
+          svg.appendChild(txt('❌ 429',{x:''+(redisX+redisW+15),y:''+(redisY+redisH+20),'font-family':'Consolas,monospace','font-size':'14',fill:'#e74c3c','font-weight':'700'}));
+          svg.appendChild(txt('Retry-After: 30',{x:''+(redisX+redisW+15),y:''+(redisY+redisH+36),'font-family':'Consolas,monospace','font-size':'10',fill:'#e74c3c'}));
+        }
+
+        info.textContent=s.desc;
+        out.textContent=(stepIdx+1)+' / '+steps.length;
+        stepIdx++;
+      }
+
+      reset();
+      document.getElementById('dist-step').addEventListener('click',doStep);
+      document.getElementById('dist-reset').addEventListener('click',reset);
+    })();
+  })();
+  </script>
+</body>
+</html>

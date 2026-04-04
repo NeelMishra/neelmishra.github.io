@@ -1,0 +1,1107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design: Google Maps — Map tile serving, routing algorithms (Dijkstra, A*, Contraction Hierarchies), ETA prediction, live traffic, geocoding, and offline maps at planetary scale.">
+  <title>Design: Google Maps | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Part 56 of 70</span></div>
+
+      <h1>Design: Google Maps</h1>
+      <p class="post-meta">April 2026 &middot; 28 min read</p>
+
+      <!-- ================================================================ -->
+      <!--  1. REQUIREMENTS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="requirements">Requirements &amp; Scale</h2>
+      <p>Google Maps is one of the most complex consumer products ever built. It stitches together satellite imagery, street-level photography, real-time traffic telemetry, routing algorithms, and geospatial search into a seamless experience used by over <strong>1 billion monthly active users</strong>. Let's dissect its architecture.</p>
+
+      <h3>Functional Requirements</h3>
+      <ul>
+        <li><strong>Map Rendering</strong> — Display the world as an interactive, zoomable, pannable map with 22 zoom levels (0–21)</li>
+        <li><strong>Routing &amp; Navigation</strong> — Compute optimal routes between two or more points across driving, walking, cycling, and transit modes</li>
+        <li><strong>ETA Prediction</strong> — Estimate arrival time factoring in live traffic, historical patterns, and road conditions</li>
+        <li><strong>Live Traffic</strong> — Aggregate anonymous location data from billions of mobile devices to compute real-time road segment speeds</li>
+        <li><strong>Geocoding</strong> — Convert addresses to geographic coordinates (and vice versa)</li>
+        <li><strong>POI Search</strong> — Search for restaurants, gas stations, landmarks, and other points of interest near a location</li>
+        <li><strong>Offline Maps</strong> — Download map regions for use without network connectivity</li>
+      </ul>
+
+      <h3>Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Latency</strong> — Map tiles must load in &lt;100 ms; routes computed in &lt;1 s</li>
+        <li><strong>Availability</strong> — 99.99% uptime (navigation is safety-critical)</li>
+        <li><strong>Scale</strong> — 1B MAU, ~5 billion map tile requests/day, ~1 billion route requests/day</li>
+        <li><strong>Storage</strong> — Petabytes of imagery, vector data, and road graphs</li>
+        <li><strong>Freshness</strong> — Traffic data refreshed every 30–60 seconds; road closures reflected within minutes</li>
+      </ul>
+
+      <h3>Back-of-the-Envelope Estimates</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Estimate</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Monthly active users</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 billion</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Peak tile requests/sec</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~200K QPS</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Route requests/sec</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~30K QPS</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Road graph nodes (global)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~500 million intersections</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Road graph edges (global)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~1 billion road segments</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Total tile storage (all zoom levels)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~100 PB (raster); ~5 PB (vector)</td></tr>
+          <tr><td style="padding:0.5em;">Location pings (traffic data)</td><td style="padding:0.5em;">~100 million devices reporting every 1–3 seconds</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ================================================================ -->
+      <!--  2. MAP TILE SERVING                                             -->
+      <!-- ================================================================ -->
+      <h2 id="tile-serving">Map Tile Serving</h2>
+      <p>The core visual experience of Google Maps is powered by <strong>map tiles</strong> — small, square image or vector data chunks that are assembled client-side into a seamless map. Understanding the tile system is key to understanding how Maps scales.</p>
+
+      <h3>The Tile Pyramid</h3>
+      <p>The entire world map is organized as a <strong>tile pyramid</strong> (also called a quadtree tiling scheme). At zoom level 0, the entire world fits in a single 256×256 pixel tile. Each subsequent zoom level subdivides every tile into 4 children:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Zoom Level</th><th style="text-align:left; padding:0.5em;">Total Tiles</th><th style="text-align:left; padding:0.5em;">Formula</th><th style="text-align:left; padding:0.5em;">Ground Resolution (equator)</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">0</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4⁰</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">156,543 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">1</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4¹</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">78,271 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">2</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">16</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4²</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">39,136 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">5</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1,024</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4⁵</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4,891 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">10</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">1,048,576</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4¹⁰</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">153 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">15</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~1.07 billion</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4¹⁵</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4.77 m/px</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">18</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~68.7 billion</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">4¹⁸</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">0.60 m/px</td></tr>
+          <tr><td style="padding:0.5em;">21</td><td style="padding:0.5em;">~4.4 trillion</td><td style="padding:0.5em;">4²¹</td><td style="padding:0.5em;">0.075 m/px</td></tr>
+        </tbody>
+      </table>
+
+      <p>The total number of tiles at zoom level <em>z</em> is <strong>4<sup>z</sup></strong>, which equals <strong>2<sup>z</sup> × 2<sup>z</sup></strong> tiles in a grid. Equivalently, there are <strong>2<sup>z</sup></strong> columns and <strong>2<sup>z</sup></strong> rows at each level. The cumulative total across all levels 0 through <em>z</em> is:</p>
+
+      <pre><code>Total tiles = Σ(i=0 to z) 4^i = (4^(z+1) - 1) / 3
+
+For z=21: (4^22 - 1) / 3 ≈ 5.87 trillion tiles</code></pre>
+
+      <p>In practice, <strong>not all tiles are pre-rendered</strong>. The ocean covers ~71% of Earth's surface, and vast uninhabited areas (deserts, forests) don't need high-zoom tiles. Google selectively renders tiles only where there's meaningful content, reducing the actual count by 80–90% at high zoom levels.</p>
+
+      <h3>Tile Coordinates: z/x/y</h3>
+      <p>Every tile is uniquely identified by three integers: <strong>(z, x, y)</strong> where:</p>
+      <ul>
+        <li><strong>z</strong> — zoom level (0–21)</li>
+        <li><strong>x</strong> — column index (0 to 2<sup>z</sup>−1, left to right)</li>
+        <li><strong>y</strong> — row index (0 to 2<sup>z</sup>−1, top to bottom)</li>
+      </ul>
+
+      <p>To convert geographic coordinates (latitude, longitude) to a tile index at zoom level <em>z</em>:</p>
+      <pre><code>x_tile = floor((lon + 180) / 360 × 2^z)
+
+y_tile = floor((1 - ln(tan(lat_rad) + sec(lat_rad)) / π) / 2 × 2^z)
+
+where lat_rad = lat × π / 180</code></pre>
+
+      <p>This uses the <strong>Web Mercator projection</strong> (EPSG:3857), which projects the spherical Earth onto a flat square. The Mercator projection preserves angles (making it ideal for navigation) but distorts areas near the poles — which is why Greenland looks as large as Africa on most web maps.</p>
+
+      <div class="callout">
+        <strong>Tile URL pattern:</strong> Most tile servers use a simple REST endpoint: <code>GET /tiles/{z}/{x}/{y}.png</code> (raster) or <code>GET /tiles/{z}/{x}/{y}.pbf</code> (vector). This makes tiles trivially cacheable at every layer of the CDN.
+      </div>
+
+      <!-- Tile Pyramid Animation -->
+      <div class="anim-container" id="tile-anim">
+        <h4>&#9654; Tile Pyramid: Zoom Levels &amp; Tile Subdivision</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how each zoom level subdivides the world into 4× more tiles. Click "Zoom In" to drill into the tile pyramid.</p>
+        <svg id="tile-svg" width="700" height="370" viewBox="0 0 700 370"></svg>
+        <div id="tile-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="tile-zoom-in">Zoom In &rarr;</button>
+          <button class="anim-btn" id="tile-zoom-out">&larr; Zoom Out</button>
+          <button class="anim-btn" id="tile-reset">Reset</button>
+          <span class="anim-output" id="tile-output"></span>
+        </div>
+      </div>
+
+      <h3>Vector Tiles vs Raster Tiles</h3>
+      <p>Traditional map tiles are <strong>raster tiles</strong> — pre-rendered PNG/JPEG images at each zoom level. Modern systems increasingly use <strong>vector tiles</strong>, which transmit geometric data (points, lines, polygons) and let the client render them:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Property</th><th style="text-align:left; padding:0.5em;">Raster Tiles</th><th style="text-align:left; padding:0.5em;">Vector Tiles</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Data format</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">PNG/JPEG images (256×256 px)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Protobuf-encoded geometry (MVT)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">File size (typical)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">20–80 KB per tile</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">5–30 KB per tile</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Zoom behavior</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Pixelates between discrete levels</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Smooth continuous zoom</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Client rendering</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Trivial (just display image)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Requires GPU / WebGL</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Styling</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Baked in at render time</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Dynamic (dark mode, custom styles)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Rotation/tilt</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Labels rotate awkwardly</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Labels stay upright</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Storage savings</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~100 PB (all zoom levels)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~5 PB (all zoom levels)</td></tr>
+          <tr><td style="padding:0.5em;">Offline download size</td><td style="padding:0.5em;">Larger (~150 MB per city)</td><td style="padding:0.5em;">Smaller (~50 MB per city)</td></tr>
+        </tbody>
+      </table>
+
+      <p>Google Maps switched from raster to vector tiles on the web in 2017, following the mobile apps which had used vector tiles since 2013. The switch reduced bandwidth usage by <strong>~70%</strong> while enabling smooth zooming, 3D tilting, and dynamic styling (dark mode, color-coded terrain).</p>
+
+      <h3>CDN Architecture for Tiles</h3>
+      <p>Tile serving is essentially a <strong>static content delivery problem</strong> — each tile is an immutable blob identified by (z, x, y). This makes it perfect for a multi-tier caching strategy:</p>
+
+      <ol>
+        <li><strong>Client cache</strong> — Browser/app caches recently viewed tiles in memory and on disk. Tile URLs include version hashes, enabling aggressive <code>Cache-Control: immutable</code> headers.</li>
+        <li><strong>Edge CDN (PoPs)</strong> — Google's global edge network (200+ PoPs) caches hot tiles. Popular tiles (major cities at common zoom levels) stay warm. The CDN intercepts ~95% of tile requests.</li>
+        <li><strong>Regional tile servers</strong> — For cache misses, regional servers either serve from their local SSD cache or fetch from the tile storage backend.</li>
+        <li><strong>Tile rendering pipeline</strong> — Cold tiles are rendered on-demand from the canonical map data (vector geometry, labels, styling rules). The rendered tile is then pushed into all cache layers.</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Tile versioning:</strong> When map data is updated (new roads, changed buildings), Google re-renders affected tiles and bumps the version in the tile URL. CDN caches with the old URL are naturally invalidated as clients request the new URL. This avoids expensive cache purging.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  3. ROAD NETWORK AS GRAPH                                        -->
+      <!-- ================================================================ -->
+      <h2 id="road-graph">Road Network as a Graph</h2>
+      <p>For routing and navigation, the road network is modeled as a <strong>weighted directed graph</strong>:</p>
+
+      <ul>
+        <li><strong>Nodes (vertices)</strong> — Intersections, road endpoints, and decision points. The global graph has ~500 million nodes.</li>
+        <li><strong>Edges</strong> — Road segments connecting two adjacent nodes. ~1 billion edges globally. Each edge is directed (to model one-way streets) and carries multiple weights.</li>
+      </ul>
+
+      <h3>Edge Weights</h3>
+      <p>Each edge stores multiple weight attributes used by different routing modes:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Weight</th><th style="text-align:left; padding:0.5em;">Description</th><th style="text-align:left; padding:0.5em;">Used For</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Distance (meters)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Physical length of road segment</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Walking, cycling</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Free-flow time</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Traversal time with zero traffic (distance / speed limit)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Baseline driving</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Historical time</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Average traversal time by day-of-week and time-of-day</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">ETA prediction</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Live traffic time</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Current traversal time from real-time telemetry</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Navigation</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Road class</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Highway, arterial, residential, etc.</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hierarchy-based routing</td></tr>
+          <tr><td style="padding:0.5em;">Turn costs</td><td style="padding:0.5em;">Penalty for left turns, U-turns, traffic signals</td><td style="padding:0.5em;">Realistic routing</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Graph Storage</h3>
+      <p>The global road graph is too large for a single machine (~500M nodes × ~40 bytes + ~1B edges × ~60 bytes ≈ <strong>~80 GB</strong> raw). In practice, the graph is:</p>
+
+      <ul>
+        <li><strong>Partitioned by geographic region</strong> — Using spatial partitioning (e.g., rectangular bounding boxes or S2 cell hierarchies). Each partition fits in a single server's memory.</li>
+        <li><strong>Compressed using adjacency arrays</strong> — Instead of adjacency lists with pointers, nodes and edges are stored in contiguous arrays sorted by node ID. This enables cache-friendly traversal and reduces memory overhead by 50%+.</li>
+        <li><strong>Replicated for availability</strong> — Each partition is replicated across multiple servers and data centers.</li>
+        <li><strong>Augmented with preprocessed shortcuts</strong> — Contraction Hierarchies add ~2× more edges as "shortcut" edges (see routing section).</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Turn restrictions:</strong> Real routing must model complex turn restrictions ("No left turn Mon–Fri 7–9 AM"). These are stored as conditional constraints on edge pairs and evaluated during graph traversal. They dramatically complicate the routing graph but are essential for correct directions.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  4. ROUTING ALGORITHMS                                           -->
+      <!-- ================================================================ -->
+      <h2 id="routing">Routing Algorithms</h2>
+      <p>Finding the shortest path between two points on a graph with 500M+ nodes is one of the most studied problems in computer science. Let's walk through the evolution from naive to production-grade algorithms.</p>
+
+      <h3>Dijkstra's Algorithm</h3>
+      <p>The classic shortest-path algorithm. Starting from the source node, it explores outward in order of increasing distance, guaranteeing the shortest path to every node visited:</p>
+
+      <pre><code>function dijkstra(graph, source, target):
+    dist[source] = 0
+    pq = MinPriorityQueue()
+    pq.insert(source, 0)
+
+    while pq is not empty:
+        u = pq.extractMin()
+        if u == target:
+            return dist[target]    // found shortest path
+        for each edge (u, v, weight) in graph.neighbors(u):
+            alt = dist[u] + weight
+            if alt < dist[v]:
+                dist[v] = alt
+                prev[v] = u
+                pq.decreaseKey(v, alt)
+    return INFINITY    // no path exists</code></pre>
+
+      <p><strong>Time complexity:</strong> O((V + E) log V) with a binary heap. For the global graph, V = 500M, E = 1B. Dijkstra explores nodes in expanding circles from the source — it doesn't "know" where the target is. For a cross-country route, this could explore <strong>tens of millions of nodes</strong>, taking 10+ seconds on modern hardware. Far too slow for production.</p>
+
+      <h3>A* Algorithm</h3>
+      <p>A* improves Dijkstra by adding a <strong>heuristic function h(v)</strong> that estimates the remaining distance from node <em>v</em> to the target. The priority queue is ordered by <strong>f(v) = g(v) + h(v)</strong> where g(v) is the known distance from source to v:</p>
+
+      <pre><code>function aStar(graph, source, target):
+    gScore[source] = 0
+    fScore[source] = h(source, target)
+    openSet = MinPriorityQueue()
+    openSet.insert(source, fScore[source])
+
+    while openSet is not empty:
+        u = openSet.extractMin()
+        if u == target:
+            return reconstructPath(prev, target)
+        for each edge (u, v, weight) in graph.neighbors(u):
+            tentative_g = gScore[u] + weight
+            if tentative_g < gScore[v]:
+                prev[v] = u
+                gScore[v] = tentative_g
+                fScore[v] = tentative_g + h(v, target)
+                openSet.insertOrUpdate(v, fScore[v])
+    return NO_PATH</code></pre>
+
+      <p>For road networks, the <strong>haversine distance</strong> (great-circle distance) divided by the maximum road speed makes an excellent admissible heuristic. A* typically explores <strong>10–50× fewer nodes</strong> than Dijkstra for the same query, because it focuses the search toward the target instead of expanding uniformly.</p>
+
+      <p>However, even A* is too slow for global-scale routing. A cross-continent query (New York → Los Angeles) still explores millions of nodes. We need something fundamentally faster.</p>
+
+      <h3>Contraction Hierarchies (CH)</h3>
+      <p>Contraction Hierarchies is the breakthrough that makes real-time routing on planetary-scale graphs possible. The core insight: <strong>preprocess the graph once; answer queries in microseconds</strong>.</p>
+
+      <h4>Preprocessing Phase</h4>
+      <p>The algorithm assigns an "importance" level to each node and contracts nodes from least to most important:</p>
+
+      <ol>
+        <li><strong>Order nodes by importance</strong> — Highways intersections are more important than residential street endpoints. The ordering heuristic considers node degree, edge difference, spatial distribution, and road class.</li>
+        <li><strong>Contract each node</strong> — Remove node <em>v</em> from the graph. For every pair of neighbors (u, w) of <em>v</em>, check if the shortest path u→w goes through <em>v</em>. If so, add a <strong>shortcut edge</strong> u→w with weight = dist(u,v) + dist(v,w).</li>
+        <li><strong>Repeat</strong> — Continue contracting nodes in order of increasing importance. Each contraction may add shortcut edges that "jump over" contracted nodes.</li>
+      </ol>
+
+      <pre><code>// Preprocessing: contract nodes from least to most important
+for each node v in order of increasing importance:
+    for each incoming neighbor u of v:
+        for each outgoing neighbor w of v:
+            if shortestPath(u, w) goes through v:
+                add shortcut edge u → w
+                weight(u→w) = weight(u→v) + weight(v→w)
+    remove v from active graph</code></pre>
+
+      <p>After preprocessing, the graph is augmented with shortcut edges. A shortcut edge represents a shortest path between its endpoints, potentially spanning many original edges (e.g., a 200 km highway segment compressed into one edge).</p>
+
+      <h4>Query Phase</h4>
+      <p>The query algorithm runs a <strong>bidirectional search</strong>: one forward search from the source (only following edges to <em>higher</em>-importance nodes) and one backward search from the target (only following reverse edges to <em>higher</em>-importance nodes):</p>
+
+      <pre><code>function chQuery(source, target):
+    // Forward search: only go UP the hierarchy
+    forwardDist[source] = 0
+    forwardPQ.insert(source, 0)
+
+    // Backward search: only go UP the hierarchy
+    backwardDist[target] = 0
+    backwardPQ.insert(target, 0)
+
+    while forwardPQ or backwardPQ not empty:
+        // Expand forward
+        if forwardPQ not empty:
+            u = forwardPQ.extractMin()
+            for each edge (u, v) where importance(v) > importance(u):
+                relax(u, v)
+
+        // Expand backward
+        if backwardPQ not empty:
+            u = backwardPQ.extractMin()
+            for each reverse edge (u, v) where importance(v) > importance(u):
+                relax(u, v)
+
+        // Check for meeting point
+        update bestPath if forwardDist[v] + backwardDist[v] is minimal
+
+    return bestPath</code></pre>
+
+      <p>Because both searches only go "upward" in the hierarchy, they meet at some high-importance node (typically on a major highway). The <strong>search space is tiny</strong> — typically only <strong>500–2000 nodes</strong> even for cross-continent queries.</p>
+
+      <h4>Performance Comparison</h4>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Algorithm</th><th style="text-align:left; padding:0.5em;">Preprocessing</th><th style="text-align:left; padding:0.5em;">Query Time</th><th style="text-align:left; padding:0.5em;">Nodes Explored (US)</th><th style="text-align:left; padding:0.5em;">Space Overhead</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Dijkstra</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">None</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~3–10 s</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~10–50 million</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">None</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">A*</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">None</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~0.5–3 s</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~0.5–5 million</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">None</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Contraction Hierarchies</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~30 min (US)</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~0.1–1 ms</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~500–2000</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~2× edges</td></tr>
+          <tr><td style="padding:0.5em;">Highway Hierarchies</td><td style="padding:0.5em;">~15 min (US)</td><td style="padding:0.5em;">~0.5–2 ms</td><td style="padding:0.5em;">~1000–5000</td><td style="padding:0.5em;">~1.5× edges</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>OSRM &amp; Valhalla:</strong> The Open Source Routing Machine (OSRM) uses Contraction Hierarchies as its default algorithm, processing the entire planet's road network from OpenStreetMap. Valhalla (by Mapbox/Mapzen) uses a similar hierarchical approach. Google likely uses a proprietary variant combining CH with traffic-aware edge weights.
+      </div>
+
+      <h3>Highway Hierarchies</h3>
+      <p>An alternative to Contraction Hierarchies developed by Sanders &amp; Schultes. The idea: recursively identify "highway" edges that appear on shortest paths between distant nodes, then restrict search to highway edges early in the query. It provides similar speedups but with different preprocessing trade-offs. In practice, CH has won broader adoption due to simpler implementation and better worst-case performance.</p>
+
+      <h3>Handling Live Traffic in Routing</h3>
+      <p>Contraction Hierarchies assume <strong>static edge weights</strong>, but traffic changes constantly. Google's approach combines:</p>
+
+      <ul>
+        <li><strong>Customizable CH (CCH)</strong> — Preprocess the graph topology once, but allow edge weights to be swapped in real-time. The hierarchy structure (which shortcuts exist) stays fixed, but the shortcut weights are updated every 30–60 seconds based on current traffic conditions.</li>
+        <li><strong>Time-dependent routing</strong> — Edge weights are functions of time, not constants. The travel time on a highway at 8 AM is different from midnight. The routing algorithm evaluates edge weights at the <em>estimated arrival time</em> at each node.</li>
+        <li><strong>Rerouting</strong> — During active navigation, the server continuously re-evaluates the route with updated traffic data. If a faster alternative is found, the driver is prompted to reroute.</li>
+      </ul>
+
+      <!-- Route Computation Animation -->
+      <div class="anim-container" id="route-anim">
+        <h4>&#9654; Route Computation: A* vs Contraction Hierarchies</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through A* pathfinding on a road network graph. See how the algorithm explores nodes (blue frontier) to find the shortest path (green). Then see how Contraction Hierarchies dramatically reduce the search space.</p>
+        <svg id="route-svg" width="700" height="400" viewBox="0 0 700 400"></svg>
+        <div id="route-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="route-step">Step &rarr;</button>
+          <button class="anim-btn" id="route-ch">Show CH Speedup</button>
+          <button class="anim-btn" id="route-reset">Reset</button>
+          <span class="anim-output" id="route-output"></span>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  5. ETA PREDICTION                                               -->
+      <!-- ================================================================ -->
+      <h2 id="eta">ETA Prediction</h2>
+      <p>Estimating arrival time is far more than summing up edge traversal times. Google Maps' ETA system combines three data sources through a machine learning model:</p>
+
+      <h3>Data Sources</h3>
+      <ol>
+        <li><strong>Historical traffic data</strong> — Years of aggregated driving data, segmented by road, day-of-week, time-of-day, and even weather conditions. Stored as speed profiles: for each road segment, a 2D lookup table mapping (day, time) → expected speed. At 15-minute granularity, that's 7 days × 96 intervals = 672 speed values per road segment × 1B segments = ~2.7 TB of historical data.</li>
+        <li><strong>Real-time traffic</strong> — Current speeds on each road segment, computed from live device telemetry (see next section). This captures events not in the historical data: accidents, construction, special events.</li>
+        <li><strong>ML prediction model</strong> — A deep learning model (likely a Graph Neural Network or spatio-temporal transformer) that takes historical patterns + current traffic state and predicts traffic conditions for the next 30–60 minutes along the route. This is critical because conditions <em>at the time the driver reaches a future road segment</em> matter, not conditions right now.</li>
+      </ol>
+
+      <h3>ETA Computation Pipeline</h3>
+      <pre><code>1. Compute route segments: S1 → S2 → ... → Sn
+
+2. For each segment Si:
+   a. t_arrive_i = cumulative travel time from start
+   b. predicted_speed_i = ML_model(
+        segment=Si,
+        current_time + t_arrive_i,
+        current_traffic_state,
+        historical_profile[Si][day][time],
+        weather, events
+      )
+   c. segment_time_i = length(Si) / predicted_speed_i
+
+3. ETA = Σ segment_time_i + Σ turn_delays + Σ signal_delays
+
+4. Confidence interval: ETA ± uncertainty
+   (wider for longer trips and unpredictable routes)</code></pre>
+
+      <div class="callout">
+        <strong>DeepMind collaboration:</strong> In 2020, Google announced that DeepMind's Graph Neural Networks improved Google Maps' ETA accuracy by up to 50% in cities like Berlin, Jakarta, and São Paulo. The model captures complex traffic propagation patterns — how congestion on one road affects neighboring roads minutes later.
+      </div>
+
+      <h3>ETA Accuracy</h3>
+      <p>Google reports that ETA predictions are within <strong>±10%</strong> of actual travel time for most trips. The model is continuously retrained on fresh data. Key challenges include:</p>
+      <ul>
+        <li><strong>Incidents</strong> — Accidents are unpredictable but have massive impact. The model learns to add uncertainty buffers for accident-prone segments.</li>
+        <li><strong>Weather</strong> — Rain reduces average speeds by 10–25%, snow by 25–50%. Weather forecasts are integrated as model features.</li>
+        <li><strong>Events</strong> — Stadium traffic, concert dispersal, holiday patterns. Some are predictable (Super Bowl) and pre-modeled; others require real-time detection.</li>
+        <li><strong>Construction zones</strong> — Speed reductions and lane closures. Detected through repeated slowdowns at the same location and confirmed through map reports.</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  6. LIVE TRAFFIC                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="live-traffic">Live Traffic System</h2>
+      <p>The real-time traffic overlay is perhaps the most remarkable data engineering achievement in Google Maps. Here's how anonymous location data from hundreds of millions of devices becomes the green/yellow/red traffic overlay you see on the map.</p>
+
+      <h3>Data Collection</h3>
+      <p>When users opt in to location sharing (via Google Maps or Android location services), their devices periodically report:</p>
+      <ul>
+        <li><strong>GPS coordinates</strong> — Latitude/longitude, accurate to ~3–5 meters</li>
+        <li><strong>Timestamp</strong> — When the reading was taken</li>
+        <li><strong>Speed</strong> — From GPS Doppler or accelerometer</li>
+        <li><strong>Heading</strong> — Direction of travel</li>
+        <li><strong>Transport mode</strong> — Driving, walking, cycling (inferred by activity recognition)</li>
+      </ul>
+
+      <p>With ~100 million devices reporting every 1–3 seconds while in active navigation, this generates approximately <strong>~50–100 million location events per second</strong> — one of the highest-throughput data pipelines in existence.</p>
+
+      <h3>Map Matching</h3>
+      <p>Raw GPS points don't fall neatly on roads. <strong>Map matching</strong> is the process of snapping GPS traces to the road network:</p>
+
+      <ol>
+        <li><strong>Candidate generation</strong> — For each GPS point, find all road segments within a radius (typically 50 m). Use a spatial index (R-tree or S2 cells) for fast lookups.</li>
+        <li><strong>Hidden Markov Model (HMM)</strong> — Model the sequence of GPS points as observations from a hidden state sequence of road segments. The emission probability depends on GPS-to-road distance; the transition probability depends on route feasibility between consecutive road segments.</li>
+        <li><strong>Viterbi algorithm</strong> — Decode the most likely sequence of road segments the device traveled on. This handles tunnels (GPS dropout), urban canyons (multipath errors), and parallel roads elegantly.</li>
+      </ol>
+
+      <h3>Speed Aggregation Pipeline</h3>
+      <pre><code>GPS Traces (100M events/sec)
+    ↓
+Map Matching (HMM + Viterbi)
+    ↓
+Per-segment speed observations
+    ↓
+Stream Processing (Flink / Dataflow)
+  - Group by road segment ID
+  - Window: 30–60 seconds
+  - Aggregate: median speed, percentile speeds
+  - Outlier removal: discard speeds > 200 km/h or < 1 km/h
+    ↓
+Segment Speed Table
+  {segment_id → {speed, sample_count, confidence, timestamp}}
+    ↓
+Traffic Color Assignment:
+  - Green:  speed ≥ 80% of free-flow speed
+  - Yellow: speed 40–80% of free-flow speed
+  - Red:    speed 20–40% of free-flow speed
+  - Dark Red: speed < 20% of free-flow speed
+    ↓
+Tile Overlay Rendering → CDN</code></pre>
+
+      <h3>Privacy Protections</h3>
+      <p>Traffic data collection raises significant privacy concerns. Google implements several safeguards:</p>
+      <ul>
+        <li><strong>Anonymization</strong> — Location data is stripped of user identifiers before entering the speed aggregation pipeline. Individual traces cannot be reconstructed.</li>
+        <li><strong>Differential privacy</strong> — Noise is added to aggregate statistics to prevent deanonymization. A road segment's speed is only published if ≥5 distinct devices contributed observations.</li>
+        <li><strong>k-anonymity</strong> — Locations are generalized to prevent identification of individuals in sparse areas.</li>
+        <li><strong>Data retention</strong> — Raw location events are deleted within hours; only aggregate speeds are retained.</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  7. GEOCODING                                                    -->
+      <!-- ================================================================ -->
+      <h2 id="geocoding">Geocoding &amp; Reverse Geocoding</h2>
+      <p><strong>Geocoding</strong> converts a human-readable address ("1600 Amphitheatre Parkway, Mountain View, CA") into geographic coordinates (37.4220, -122.0841). <strong>Reverse geocoding</strong> does the opposite: given coordinates, return the nearest address.</p>
+
+      <h3>Geocoding Pipeline</h3>
+      <ol>
+        <li><strong>Address parsing</strong> — Decompose the input string into structured components: house number, street, city, state, country. NLP-based parsers handle variations like "St" vs "Street", abbreviations, and international formats.</li>
+        <li><strong>Candidate generation</strong> — Query the address database for matching street names in the likely city/region. Use fuzzy matching (edit distance, phonetic matching) to handle typos.</li>
+        <li><strong>Interpolation</strong> — If the exact house number isn't in the database, interpolate its position between known addresses on the same block. Most countries don't have per-building coordinate databases, so interpolation is essential.</li>
+        <li><strong>Scoring &amp; ranking</strong> — Rank candidates by match quality, considering exact match bonuses, partial match penalties, and geographic relevance (prefer results near the user).</li>
+      </ol>
+
+      <h3>Reverse Geocoding</h3>
+      <p>Given coordinates (lat, lng), find the nearest address:</p>
+      <ol>
+        <li>Use a <strong>spatial index</strong> (R-tree / S2 cells) to find nearby road segments</li>
+        <li>Project the point onto the nearest road segment to find the exact position along the road</li>
+        <li>Interpolate the address number based on the position between known address points</li>
+        <li>Compose the full address from the road name, interpolated number, and administrative boundary (city, state, zip)</li>
+      </ol>
+
+      <div class="callout">
+        <strong>S2 Geometry Library:</strong> Google's S2 library is the foundation for geospatial indexing in Maps. It maps the Earth's surface onto a space-filling Hilbert curve, converting 2D spatial queries into 1D range queries. S2 cells at 30 levels provide resolution from ~85 km² down to ~1 cm². This enables efficient spatial indexing, containment tests, and proximity queries.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  8. POI SEARCH                                                   -->
+      <!-- ================================================================ -->
+      <h2 id="poi-search">POI Search</h2>
+      <p>When a user searches "coffee shops near me," Maps must find relevant points of interest within a geographic region, ranked by relevance, distance, and quality.</p>
+
+      <h3>Geospatial Index</h3>
+      <p>The POI database (hundreds of millions of businesses, landmarks, and addresses) is indexed using geospatial data structures:</p>
+
+      <ul>
+        <li><strong>S2 cell index</strong> — Each POI is assigned to the finest-level S2 cell containing its coordinates. Nearby POI queries become range scans over contiguous cell ID ranges.</li>
+        <li><strong>Geohash prefix matching</strong> — Alternative approach where locations are encoded as hierarchical strings. "9q8yy" represents a ~4.9 km × 4.9 km area in San Francisco. Prefix matching finds all POIs in a region.</li>
+        <li><strong>R-tree</strong> — A balanced tree of bounding boxes used for range and nearest-neighbor queries. Each internal node stores the bounding box enclosing all children. Queries traverse only branches whose bounding boxes intersect the search area.</li>
+      </ul>
+
+      <h3>Ranking</h3>
+      <p>POI search results are ranked by a combination of:</p>
+      <ul>
+        <li><strong>Text relevance</strong> — How well the POI name/category matches the query (TF-IDF, BM25, or neural embeddings)</li>
+        <li><strong>Distance</strong> — Closer is better, with exponential decay</li>
+        <li><strong>Prominence</strong> — Based on review count, average rating, business size, and web presence</li>
+        <li><strong>Personalization</strong> — User's past searches, saved places, and preferences</li>
+        <li><strong>Recency</strong> — Newer, actively updated businesses rank higher</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  9. OFFLINE MAPS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="offline-maps">Offline Maps</h2>
+      <p>Users can download map regions for offline use — critical for areas with poor connectivity and for international travelers avoiding roaming charges.</p>
+
+      <h3>What Gets Downloaded</h3>
+      <ul>
+        <li><strong>Vector tiles</strong> — All tiles for the selected region at all zoom levels. For a city-sized region, this is typically 50–200 MB of vector tile data.</li>
+        <li><strong>Road graph</strong> — The routing graph (nodes, edges, weights) for the region, including precomputed Contraction Hierarchies shortcuts. ~20–50 MB for a metro area.</li>
+        <li><strong>POI data</strong> — Business names, addresses, categories, and review summaries. ~10–30 MB.</li>
+        <li><strong>Geocoding index</strong> — Address-to-coordinate mapping for the region. ~5–15 MB.</li>
+      </ul>
+
+      <h3>Download Packaging</h3>
+      <p>The total download for a metro area (e.g., San Francisco) is typically <strong>100–300 MB</strong>. Google uses aggressive compression:</p>
+      <ul>
+        <li><strong>Delta encoding</strong> — Only download tiles that have changed since the last sync</li>
+        <li><strong>Protobuf encoding</strong> — Vector tiles use Mapbox Vector Tile (MVT) format with protocol buffer serialization</li>
+        <li><strong>Graph compression</strong> — The routing graph uses variable-length integer encoding and removes attributes unnecessary for offline routing</li>
+      </ul>
+
+      <p>Offline maps auto-expire after ~30 days and prompt the user to re-download, ensuring data freshness. When a network connection becomes available, the app seamlessly switches back to online data, which includes live traffic and real-time search results.</p>
+
+      <!-- ================================================================ -->
+      <!--  10. SYSTEM ARCHITECTURE OVERVIEW                                -->
+      <!-- ================================================================ -->
+      <h2 id="architecture">System Architecture Overview</h2>
+      <p>Putting it all together, the major components and their interactions:</p>
+
+      <pre><code>┌──────────────────────────────────────────────────────────────┐
+│                        CLIENT (Mobile/Web)                    │
+│  ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌──────────────────┐  │
+│  │ Map     │ │ Route   │ │ Search   │ │ Location         │  │
+│  │ Renderer│ │ Display │ │ UI       │ │ Reporter (opt-in)│  │
+│  └────┬────┘ └────┬────┘ └────┬─────┘ └────────┬─────────┘  │
+└───────┼──────────┼─────────┼──────────────────┼──────────────┘
+        │          │         │                  │
+    ────┼──────────┼─────────┼──────────────────┼──── CDN Edge
+        │          │         │                  │
+┌───────▼──────────▼─────────▼──────────────────▼──────────────┐
+│                     BACKEND SERVICES                          │
+│                                                               │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────────────┐   │
+│  │ Tile       │  │ Routing    │  │ Traffic Aggregation  │   │
+│  │ Server     │  │ Engine     │  │ Pipeline             │   │
+│  │ (CDN-     │  │ (CH +      │  │ (Map Matching →      │   │
+│  │  backed)  │  │  CCH +     │  │  Speed Calc →        │   │
+│  │           │  │  live      │  │  Stream Agg)         │   │
+│  │           │  │  traffic)  │  │                      │   │
+│  └─────┬─────┘  └─────┬─────┘  └──────────┬───────────┘   │
+│        │              │                    │                 │
+│  ┌─────▼─────┐  ┌─────▼─────┐  ┌──────────▼───────────┐   │
+│  │ Tile      │  │ Road      │  │ Speed Table          │   │
+│  │ Storage   │  │ Graph     │  │ (per-segment live)   │   │
+│  │ (Bigtable)│  │ Store     │  │ + Historical Profiles│   │
+│  └───────────┘  └───────────┘  └──────────────────────┘   │
+│                                                               │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────────────┐   │
+│  │ Geocoding  │  │ POI Search │  │ ETA ML Model         │   │
+│  │ Service    │  │ (Geo Index │  │ (GNN / Transformer)  │   │
+│  │            │  │  + Ranking)│  │                      │   │
+│  └────────────┘  └────────────┘  └──────────────────────┘   │
+└───────────────────────────────────────────────────────────────┘</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  11. DEEP DIVE: TILE MATH                                        -->
+      <!-- ================================================================ -->
+      <h2 id="tile-math">Deep Dive: Tile Math</h2>
+      <p>Let's derive the exact formulas behind the tile coordinate system, which underpins all of map rendering.</p>
+
+      <h3>Web Mercator Projection</h3>
+      <p>The Mercator projection maps latitude <em>φ</em> and longitude <em>λ</em> to Cartesian coordinates (x, y) on a unit square [0, 1] × [0, 1]:</p>
+
+      <pre><code>x = (λ + 180°) / 360°
+
+y = (1 - ln(tan(φ) + sec(φ)) / π) / 2
+
+Inverse:
+λ = x × 360° - 180°
+φ = arctan(sinh(π(1 - 2y))) × 180° / π</code></pre>
+
+      <p>The Mercator projection clips latitude at ±85.0511° (where y would reach ±∞) to keep the map square. This excludes the polar regions, which is acceptable for a navigation-focused map.</p>
+
+      <h3>Pixel ↔ Tile Conversion</h3>
+      <p>At zoom level <em>z</em>, the map is <strong>256 × 2<sup>z</sup></strong> pixels wide and tall. The pixel coordinates of a geographic point are:</p>
+
+      <pre><code>pixelX = floor(x × 256 × 2^z)
+pixelY = floor(y × 256 × 2^z)
+
+tileX = floor(pixelX / 256) = floor(x × 2^z)
+tileY = floor(pixelY / 256) = floor(y × 2^z)
+
+// Position within tile (0-255):
+inTileX = pixelX mod 256
+inTileY = pixelY mod 256</code></pre>
+
+      <h3>Ground Resolution</h3>
+      <p>The ground resolution (meters per pixel) varies by latitude due to the Mercator projection:</p>
+
+      <pre><code>resolution(lat, z) = cos(lat × π/180) × 2π × 6378137 / (256 × 2^z)
+
+At the equator (lat=0):
+  z=0:  156,543 m/px  (entire world in 256 px)
+  z=10: 152.9 m/px    (city-level)
+  z=15: 4.78 m/px     (street-level)
+  z=21: 0.075 m/px    (individual features)
+
+At London (lat=51.5):
+  z=15: 2.98 m/px  (37% less than equator)</code></pre>
+
+      <h3>Tile Budget Per View</h3>
+      <p>A typical phone screen (412×892 pixels) at zoom level 15 needs approximately:</p>
+
+      <pre><code>horizontal tiles = ceil(412 / 256) + 1 = 3
+vertical tiles   = ceil(892 / 256) + 1 = 5
+total tiles      = 3 × 5 = 15 tiles per view
+
+With 256×256 px tiles, a pan/zoom session loads:
+  ~15 tiles for initial view
+  ~5-10 tiles per pan gesture
+  ~15 new tiles per zoom level change
+  ~50-100 tiles for a typical browsing session</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  12. DEEP DIVE: TRAFFIC DATA PROCESSING                         -->
+      <!-- ================================================================ -->
+      <h2 id="traffic-processing">Deep Dive: Traffic Data Processing</h2>
+      <p>Processing 50–100 million GPS events per second into accurate per-road-segment speeds is a formidable stream processing challenge.</p>
+
+      <h3>Map Matching: Hidden Markov Model</h3>
+      <p>The HMM-based map matching algorithm works as follows:</p>
+
+      <pre><code>States:   Road segments within 50m of each GPS point
+Observations: GPS points (lat, lng, timestamp)
+
+Emission probability:
+  P(obs | state) = (1/√(2πσ²)) × exp(-d² / (2σ²))
+  where d = distance from GPS point to road segment
+  and σ ≈ 10m (GPS noise standard deviation)
+
+Transition probability:
+  P(state_t | state_{t-1}) ∝ exp(-|d_route - d_great_circle| / β)
+  where d_route = shortest path distance between road segments
+  and d_great_circle = great-circle distance between GPS points
+  and β ≈ 5m (tuning parameter)
+
+The Viterbi algorithm finds the most likely road segment sequence
+in O(T × K²) time, where T = number of GPS points, K = avg candidates</code></pre>
+
+      <h3>Speed Computation per Segment</h3>
+      <pre><code>For each road segment in a 60-second window:
+  1. Collect all device traversals:
+     [{device_hash, entry_time, exit_time, distance}]
+
+  2. Compute per-device speeds:
+     speed_i = distance / (exit_time - entry_time)
+
+  3. Outlier removal:
+     - Remove if speed > speed_limit × 1.5 (GPS error)
+     - Remove if speed < 2 km/h and segment length > 100m (stopped/parking)
+
+  4. Aggregate:
+     - If sample_count ≥ 5: segment_speed = median(speeds)
+     - If sample_count < 5: blend with historical:
+       segment_speed = α × median(speeds) + (1-α) × historical_speed
+       where α = min(sample_count / 5, 1.0)
+
+  5. Confidence score:
+     confidence = min(sample_count / 20, 1.0)
+     (used to determine whether to show traffic color)</code></pre>
+
+      <h3>Incident Detection</h3>
+      <p>The traffic pipeline also detects incidents (accidents, road closures) through anomaly detection:</p>
+      <ul>
+        <li><strong>Sudden speed drops</strong> — If median speed drops below 20% of historical average for ≥2 consecutive windows → flag as incident</li>
+        <li><strong>Zero throughput</strong> — If a normally busy segment has zero observations for ≥5 minutes → potential road closure</li>
+        <li><strong>Corroboration</strong> — User reports ("accident ahead" button), Waze reports, and emergency service feeds are cross-referenced with telemetry-detected anomalies</li>
+        <li><strong>Propagation modeling</strong> — When an incident is confirmed, the system predicts downstream congestion propagation and pre-emptively adjusts ETAs for routes passing through the area</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  13. SUMMARY                                                     -->
+      <!-- ================================================================ -->
+      <h2 id="summary">Summary &amp; Key Takeaways</h2>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Component</th><th style="text-align:left; padding:0.5em;">Key Technology</th><th style="text-align:left; padding:0.5em;">Scale Challenge</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Map Tiles</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Tile pyramid (z/x/y), vector tiles, CDN</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~200K QPS, petabytes of storage</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Routing</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Contraction Hierarchies + live traffic</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">500M nodes, sub-millisecond queries</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">ETA</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">GNN/Transformer ML + historical + live</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">±10% accuracy, 30s freshness</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Live Traffic</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">HMM map matching + stream aggregation</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">100M events/sec, 1B road segments</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Geocoding</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">NLP parsing + address interpolation</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Global address coverage</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">POI Search</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">S2 geospatial index + ML ranking</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Hundreds of millions of POIs</td></tr>
+          <tr><td style="padding:0.5em;">Offline Maps</td><td style="padding:0.5em;">Compressed tiles + graph + POI bundle</td><td style="padding:0.5em;">100–300 MB per metro area</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Design lesson:</strong> Google Maps demonstrates that the most impactful systems aren't built on one breakthrough algorithm — they're built on the careful integration of dozens of specialized subsystems (tile rendering, graph routing, ML prediction, stream processing, geospatial indexing), each optimized for its specific problem domain, and connected through well-defined interfaces and data contracts.
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="nearby-friends.html"><span>Previous</span><span>&#8592; Nearby Friends</span></a>
+        <a class="next" href="uber.html"><span>Next</span><span>Uber &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+
+    /* ============================================================
+       ANIMATION 1 — Tile Pyramid: Zoom Levels & Tile Subdivision
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('tile-svg'),
+          info=document.getElementById('tile-info'),
+          out=document.getElementById('tile-output');
+      var currentZoom=0;
+      var maxZoom=4;
+
+      var zoomData=[
+        {z:0,cols:1,rows:1,total:1,label:'Zoom 0: Entire world in 1 tile',res:'156,543 m/px'},
+        {z:1,cols:2,rows:2,total:4,label:'Zoom 1: 4 tiles (2×2)',res:'78,271 m/px'},
+        {z:2,cols:4,rows:4,total:16,label:'Zoom 2: 16 tiles (4×4)',res:'39,136 m/px'},
+        {z:3,cols:8,rows:8,total:64,label:'Zoom 3: 64 tiles (8×8)',res:'19,568 m/px'},
+        {z:4,cols:16,rows:16,total:256,label:'Zoom 4: 256 tiles (16×16)',res:'9,784 m/px'}
+      ];
+
+      // Colors for visual variety
+      var landColors=['#b8d4a3','#a8c893','#c8d8b3','#98b878','#d4e4c0','#88a868','#c0d4a8','#a0c080'];
+      var waterColor='#a0c4e8';
+
+      // Simple world map mask (which cells are "land" vs "water") at 16×16 grid
+      // 1=land, 0=water — very rough approximation
+      var worldMask=[
+        [0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0],
+        [0,0,0,1,1,0,1,1,1,1,1,1,1,1,0,0],
+        [0,1,1,1,1,0,0,1,1,1,1,0,0,1,1,0],
+        [0,1,1,1,0,0,0,1,1,1,1,0,0,0,1,1],
+        [0,0,1,1,0,0,0,0,1,1,1,0,1,1,1,1],
+        [0,0,1,0,0,0,0,0,1,1,0,0,1,1,1,1],
+        [0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0],
+        [0,0,0,0,0,1,0,0,0,0,0,0,1,1,0,0],
+        [0,0,0,0,0,1,1,0,0,0,0,0,0,1,0,0],
+        [0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0],
+        [0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0]
+      ];
+
+      function isLand(col,row,cols,rows){
+        var mx=Math.floor(col/cols*16);
+        var my=Math.floor(row/rows*16);
+        if(mx>15)mx=15;if(my>15)my=15;
+        return worldMask[my][mx]===1;
+      }
+
+      // Highlighted tile (simulate user clicking)
+      var hlTile=null;
+
+      function drawZoom(z){
+        clearSvg(svg);
+        var d=zoomData[z];
+        var cols=d.cols,rows=d.rows;
+
+        // Calculate tile size to fit in SVG
+        var mapW=360,mapH=360;
+        var ox=(700-mapW)/2,oy=5;
+        var tw=mapW/cols,th=mapH/rows;
+
+        // Title
+        svg.appendChild(txt(d.label,{x:'350',y:oy+mapH+30,'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+        svg.appendChild(txt('Total tiles: '+d.total.toLocaleString()+' | Ground resolution: '+d.res,{x:'350',y:oy+mapH+48,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+
+        // Draw tiles
+        for(var r=0;r<rows;r++){
+          for(var c=0;c<cols;c++){
+            var x=ox+c*tw,y=oy+r*th;
+            var land=isLand(c,r,cols,rows);
+            var fill=land?landColors[(c+r*3)%landColors.length]:waterColor;
+            var isHl=hlTile&&hlTile[0]===c&&hlTile[1]===r;
+
+            svg.appendChild(el('rect',{
+              x:''+x,y:''+y,width:''+tw,height:''+th,
+              fill:fill,
+              stroke:isHl?'#e74c3c':'#fff',
+              'stroke-width':isHl?'3':(tw>20?'1.5':'0.5'),
+              rx:tw>40?'3':'0'
+            }));
+
+            // Show tile coordinates if tiles are big enough
+            if(tw>=40){
+              svg.appendChild(txt(c+','+r,{
+                x:''+(x+tw/2),y:''+(y+th/2+4),'text-anchor':'middle',
+                'font-family':'Consolas,monospace','font-size':tw>80?'11':'9',
+                fill:land?'#2d5a1e':'#3a6fa0',opacity:'0.8'
+              }));
+            }
+
+            // Highlight animation — "loading" effect
+            if(isHl){
+              var loadRect=el('rect',{x:''+x,y:''+y,width:''+tw,height:''+th,fill:'#e74c3c',opacity:'0.15',rx:tw>40?'3':'0'});
+              svg.appendChild(loadRect);
+              svg.appendChild(txt('z/'+z+'/'+c+'/'+r,{
+                x:''+(x+tw/2),y:''+(y+th/2+4),'text-anchor':'middle',
+                'font-family':'Consolas,monospace','font-size':'12','font-weight':'700',
+                fill:'#e74c3c'
+              }));
+            }
+          }
+        }
+
+        // Draw grid border
+        svg.appendChild(el('rect',{x:''+ox,y:''+oy,width:''+mapW,height:''+mapH,fill:'none',stroke:'var(--ink)','stroke-width':'2',rx:'4'}));
+
+        // Show CDN fetch arrow for highlighted tile
+        if(hlTile){
+          var tx=ox+hlTile[0]*tw+tw/2;
+          var ty=oy+hlTile[1]*th;
+          // Arrow from CDN label to tile
+          svg.appendChild(el('line',{x1:''+tx,y1:''+(oy-12),x2:''+tx,y2:''+(ty-2),stroke:'#e74c3c','stroke-width':'2','stroke-dasharray':'4,3'}));
+          svg.appendChild(txt('CDN → tile z/'+z+'/'+hlTile[0]+'/'+hlTile[1],{x:''+tx,y:''+(oy-18),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10','font-weight':'700',fill:'#e74c3c'}));
+        }
+
+        // Formula sidebar
+        var fx=ox+mapW+15,fy=oy+30;
+        svg.appendChild(txt('4^'+z+' = '+d.total,{x:''+fx,y:''+fy,'font-family':'Consolas,monospace','font-size':'13','font-weight':'700',fill:'var(--ink)'}));
+        svg.appendChild(txt(d.cols+'×'+d.rows+' grid',{x:''+fx,y:''+(fy+18),'font-family':'Manrope,sans-serif','font-size':'11',fill:'var(--ink-muted)'}));
+        if(z>0){
+          svg.appendChild(txt('4× prev level',{x:''+fx,y:''+(fy+36),'font-family':'Manrope,sans-serif','font-size':'11',fill:'#e74c3c'}));
+        }
+
+        info.textContent='Zoom '+z+': Each tile is '+(tw>1?(mapW/cols).toFixed(0)+'px wide in this view':'')+' | URL: /tiles/'+z+'/{x}/{y}.pbf';
+        out.textContent='Zoom level '+z+' of '+maxZoom;
+      }
+
+      // Simulate user zoom with random highlighted tile
+      function simulateClick(z){
+        var d=zoomData[z];
+        // Pick a "land" tile to highlight
+        var attempts=0;
+        do{
+          hlTile=[Math.floor(Math.random()*d.cols),Math.floor(Math.random()*d.rows)];
+          attempts++;
+        }while(!isLand(hlTile[0],hlTile[1],d.cols,d.rows)&&attempts<50);
+      }
+
+      drawZoom(0);
+
+      document.getElementById('tile-zoom-in').addEventListener('click',function(){
+        if(currentZoom>=maxZoom)return;
+        currentZoom++;
+        simulateClick(currentZoom);
+        drawZoom(currentZoom);
+      });
+
+      document.getElementById('tile-zoom-out').addEventListener('click',function(){
+        if(currentZoom<=0)return;
+        currentZoom--;
+        hlTile=null;
+        drawZoom(currentZoom);
+      });
+
+      document.getElementById('tile-reset').addEventListener('click',function(){
+        currentZoom=0;hlTile=null;drawZoom(0);
+      });
+    })();
+
+    /* ============================================================
+       ANIMATION 2 — Route Computation: A* vs Contraction Hierarchies
+       ============================================================ */
+    (function(){
+      var svg=document.getElementById('route-svg'),
+          info=document.getElementById('route-info'),
+          out=document.getElementById('route-output');
+
+      // Graph layout — nodes positioned as a road network
+      var nodes=[
+        {id:0,x:60, y:200,label:'S',imp:1},   // Start
+        {id:1,x:140,y:100,label:'A',imp:2},
+        {id:2,x:140,y:300,label:'B',imp:1},
+        {id:3,x:240,y:60, label:'C',imp:3},
+        {id:4,x:240,y:180,label:'D',imp:2},
+        {id:5,x:240,y:300,label:'E',imp:1},
+        {id:6,x:350,y:100,label:'F',imp:4},   // Highway node (high importance)
+        {id:7,x:350,y:250,label:'G',imp:2},
+        {id:8,x:460,y:60, label:'H',imp:3},
+        {id:9,x:460,y:180,label:'I',imp:4},   // Highway node
+        {id:10,x:460,y:300,label:'J',imp:1},
+        {id:11,x:560,y:100,label:'K',imp:2},
+        {id:12,x:560,y:280,label:'L',imp:1},
+        {id:13,x:640,y:200,label:'T',imp:1}   // Target
+      ];
+
+      var edges=[
+        {from:0,to:1,w:4},{from:0,to:2,w:3},
+        {from:1,to:3,w:3},{from:1,to:4,w:2},
+        {from:2,to:4,w:5},{from:2,to:5,w:2},
+        {from:3,to:6,w:3},{from:4,to:6,w:4},{from:4,to:7,w:3},
+        {from:5,to:7,w:4},
+        {from:6,to:8,w:2},{from:6,to:9,w:3},
+        {from:7,to:9,w:4},{from:7,to:10,w:3},
+        {from:8,to:11,w:3},{from:9,to:11,w:2},{from:9,to:12,w:4},
+        {from:10,to:12,w:2},
+        {from:11,to:13,w:4},{from:12,to:13,w:3}
+      ];
+
+      // A* exploration order (simulated step-by-step)
+      var astarSteps=[
+        {explored:[0],frontier:[1,2],current:0,
+         desc:'Start at S. Add neighbors A(4) and B(3) to frontier.'},
+        {explored:[0,2],frontier:[1,5],current:2,
+         desc:'Expand B (cost 3). Add E(5). Frontier: A(4), E(5).'},
+        {explored:[0,2,1],frontier:[3,4,5],current:1,
+         desc:'Expand A (cost 4). Add C(7), D(6). Frontier: E(5), D(6), C(7).'},
+        {explored:[0,2,1,5],frontier:[3,4,7],current:5,
+         desc:'Expand E (cost 5). Add G(9). Frontier: D(6), C(7), G(9).'},
+        {explored:[0,2,1,5,4],frontier:[3,6,7],current:4,
+         desc:'Expand D (cost 6). Add F(10), G(9). Frontier: C(7), G(9), F(10).'},
+        {explored:[0,2,1,5,4,3],frontier:[6,7],current:3,
+         desc:'Expand C (cost 7). Add F(10 — already known). Frontier: G(9), F(10).'},
+        {explored:[0,2,1,5,4,3,7],frontier:[6,9,10],current:7,
+         desc:'Expand G (cost 9). Add I(13), J(12). Frontier: F(10), J(12), I(13).'},
+        {explored:[0,2,1,5,4,3,7,6],frontier:[8,9,10],current:6,
+         desc:'Expand F (cost 10). Add H(12), I(13). Frontier: H(12), J(12), I(13).'},
+        {explored:[0,2,1,5,4,3,7,6,8],frontier:[9,10,11],current:8,
+         desc:'Expand H (cost 12). Add K(15). Frontier: J(12), I(13), K(15).'},
+        {explored:[0,2,1,5,4,3,7,6,8,10],frontier:[9,11,12],current:10,
+         desc:'Expand J (cost 12). Add L(14). Frontier: I(13), L(14), K(15).'},
+        {explored:[0,2,1,5,4,3,7,6,8,10,9],frontier:[11,12],current:9,
+         desc:'Expand I (cost 13). Add K(15), L(17). Frontier: L(14), K(15).'},
+        {explored:[0,2,1,5,4,3,7,6,8,10,9,12],frontier:[11,13],current:12,
+         desc:'Expand L (cost 14). Add T(17). Frontier: K(15), T(17).'},
+        {explored:[0,2,1,5,4,3,7,6,8,10,9,12,11],frontier:[13],current:11,
+         desc:'Expand K (cost 15). Add T(19 — already 17). Frontier: T(17).'},
+        {explored:[0,2,1,5,4,3,7,6,8,10,9,12,11,13],frontier:[],current:13,
+         desc:'Reached T! Shortest path: S→B→E→G→J→L→T = cost 17. Explored 14 nodes.'}
+      ];
+
+      // Shortest path
+      var shortestPath=[0,2,5,7,10,12,13];
+      // CH path (only high-importance nodes)
+      var chExplored=[0,6,9,13];
+      var chShortcutEdges=[{from:0,to:6,w:10},{from:6,to:9,w:3},{from:9,to:13,w:6}];
+
+      var step=0;
+      var showingCH=false;
+
+      function getNodeColor(id,explored,frontier,current,isPath){
+        if(isPath) return '#0a8f6a';
+        if(id===0) return '#2196f3';
+        if(id===13) return '#e74c3c';
+        if(id===current) return '#f59e0b';
+        if(explored&&explored.indexOf(id)!==-1) return '#90caf9';
+        if(frontier&&frontier.indexOf(id)!==-1) return '#fff3cd';
+        return '#f5f5f5';
+      }
+
+      function drawGraph(explored,frontier,current,pathNodes,chMode){
+        clearSvg(svg);
+
+        // Title
+        var title=chMode?'Contraction Hierarchies — Only 4 nodes explored!':'A* Pathfinding — Step-by-step frontier expansion';
+        svg.appendChild(txt(title,{x:'350',y:'22','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:'var(--ink)'}));
+
+        // Legend
+        var lx=20,ly=375;
+        var legendItems=chMode?[
+          {color:'#2196f3',label:'Start'},{color:'#e74c3c',label:'Target'},
+          {color:'#0a8f6a',label:'CH path'},{color:'#f59e0b',label:'Highway node'}
+        ]:[
+          {color:'#2196f3',label:'Start'},{color:'#e74c3c',label:'Target'},
+          {color:'#90caf9',label:'Explored'},{color:'#fff3cd',label:'Frontier'},
+          {color:'#0a8f6a',label:'Shortest path'}
+        ];
+        for(var li=0;li<legendItems.length;li++){
+          svg.appendChild(el('circle',{cx:''+(lx+li*130),cy:''+(ly),r:'6',fill:legendItems[li].color,stroke:'#666','stroke-width':'1'}));
+          svg.appendChild(txt(legendItems[li].label,{x:''+(lx+li*130+12),y:''+(ly+4),'font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink-muted)'}));
+        }
+
+        // Draw edges
+        var edgesToDraw=chMode?chShortcutEdges:edges;
+        for(var i=0;i<edgesToDraw.length;i++){
+          var e=edgesToDraw[i];
+          var n1=nodes[e.from],n2=nodes[e.to];
+          var isOnPath=false;
+          if(pathNodes){
+            for(var p=0;p<pathNodes.length-1;p++){
+              if((pathNodes[p]===e.from&&pathNodes[p+1]===e.to)||(pathNodes[p]===e.to&&pathNodes[p+1]===e.from)){
+                isOnPath=true;break;
+              }
+            }
+          }
+          var strokeColor=isOnPath?'#0a8f6a':(chMode?'#f59e0b':'#ccc');
+          var strokeW=isOnPath?'3.5':(chMode?'2.5':'1.5');
+          svg.appendChild(el('line',{
+            x1:''+n1.x,y1:''+n1.y,x2:''+n2.x,y2:''+n2.y,
+            stroke:strokeColor,'stroke-width':strokeW,
+            'stroke-dasharray':chMode&&!isOnPath?'6,3':'none'
+          }));
+          // Weight label
+          var mx=(n1.x+n2.x)/2,my=(n1.y+n2.y)/2;
+          var dx=n2.x-n1.x,dy=n2.y-n1.y;
+          var len=Math.sqrt(dx*dx+dy*dy);
+          var ox2=-dy/len*10,oy2=dx/len*10;
+          svg.appendChild(txt(''+e.w,{
+            x:''+(mx+ox2),y:''+(my+oy2+3),'text-anchor':'middle',
+            'font-family':'Consolas,monospace','font-size':'10','font-weight':'700',
+            fill:isOnPath?'#0a8f6a':'#999'
+          }));
+        }
+
+        // Draw nodes
+        for(var j=0;j<nodes.length;j++){
+          var n=nodes[j];
+          // In CH mode, only show relevant nodes prominently
+          if(chMode&&chExplored.indexOf(j)===-1){
+            svg.appendChild(el('circle',{cx:''+n.x,cy:''+n.y,r:'8',fill:'#eee',stroke:'#ccc','stroke-width':'1',opacity:'0.4'}));
+            svg.appendChild(txt(n.label,{x:''+n.x,y:''+(n.y+4),'text-anchor':'middle','font-family':'Syne,sans-serif','font-size':'9','font-weight':'600',fill:'#ccc'}));
+            continue;
+          }
+
+          var isOnPathN=pathNodes&&pathNodes.indexOf(j)!==-1;
+          var fill=getNodeColor(j,explored,frontier,current,isOnPathN);
+          var r=chMode?(chExplored.indexOf(j)!==-1?'18':'10'):(j===0||j===13?'18':'14');
+          svg.appendChild(el('circle',{
+            cx:''+n.x,cy:''+n.y,r:r,
+            fill:fill,stroke:isOnPathN?'#0a8f6a':(j===current?'#e65100':'#666'),
+            'stroke-width':isOnPathN||j===current?'3':'1.5'
+          }));
+          svg.appendChild(txt(n.label,{
+            x:''+n.x,y:''+(n.y+5),'text-anchor':'middle',
+            'font-family':'Syne,sans-serif','font-size':r>14?'13':'11','font-weight':'700',
+            fill:(fill==='#f5f5f5'||fill==='#fff3cd')?'#333':'#fff'
+          }));
+
+          // Show importance in CH mode
+          if(chMode&&chExplored.indexOf(j)!==-1){
+            svg.appendChild(txt('imp:'+n.imp,{x:''+n.x,y:''+(n.y+30),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:'#f59e0b'}));
+          }
+        }
+      }
+
+      function drawInit(){
+        step=0;showingCH=false;
+        drawGraph(null,null,null,null,false);
+        svg.appendChild(txt('Click "Step" to run A* from S to T',{x:'350',y:'360','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'12',fill:'var(--ink-muted)'}));
+        info.textContent='Graph has 14 nodes and 20 edges. Start=S, Target=T.';
+        out.textContent='';
+      }
+
+      drawInit();
+
+      document.getElementById('route-step').addEventListener('click',function(){
+        if(showingCH)return;
+        if(step>=astarSteps.length)return;
+        var s=astarSteps[step];
+        var pathN=(step===astarSteps.length-1)?shortestPath:null;
+        drawGraph(s.explored,s.frontier,s.current,pathN,false);
+        info.textContent=s.desc;
+        out.textContent='A* Step '+(step+1)+' of '+astarSteps.length;
+        step++;
+      });
+
+      document.getElementById('route-ch').addEventListener('click',function(){
+        showingCH=true;
+        var chPath=[0,6,9,13];
+        drawGraph(chExplored,[],null,chPath,true);
+        info.textContent='Contraction Hierarchies: Bidirectional search on hierarchy. S↑→F(imp:4)↑→I(imp:4)↓→T. Only 4 nodes explored! Shortcuts: S→F(10), F→I(3), I→T(6). Total=19.';
+        out.textContent='CH: 4 nodes explored vs A*: 14 nodes — 3.5× fewer!';
+      });
+
+      document.getElementById('route-reset').addEventListener('click',function(){
+        drawInit();
+      });
+    })();
+
+  })();
+  </script>
+</body>
+</html>

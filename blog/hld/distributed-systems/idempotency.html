@@ -1,0 +1,1384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Idempotency & Exactly-Once Semantics: idempotency keys, delivery guarantees, Stripe payment APIs, Kafka exactly-once producers, database upserts, and deduplication strategies for distributed systems.">
+  <title>Idempotency &amp; Exactly-Once Semantics | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../styles.css">
+  <link rel="stylesheet" href="../../blog.css">
+  <style>
+    .db-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .db-table th,.db-table td{border:1px solid var(--line);padding:0.5rem 0.7rem;text-align:left}
+    .db-table th{background:var(--card);font-weight:700;font-size:0.82rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--brand)}
+    .db-table tr:nth-child(even) td{background:rgba(10,143,106,0.03)}
+    .db-table code{font-size:0.82em}
+    .badge{display:inline-block;font-size:0.72rem;font-weight:700;padding:0.12rem 0.45rem;border-radius:4px;letter-spacing:0.03em}
+    .badge-safe{background:#d1fae5;color:#065f46}
+    .badge-danger{background:#fee2e2;color:#991b1b}
+    .badge-warn{background:#fef3c7;color:#92400e}
+    .badge-info{background:#dbeafe;color:#1e40af}
+    .guarantee-card{border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:0.75rem 0;position:relative;overflow:hidden}
+    .guarantee-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px}
+    .guarantee-card.amo::before{background:#f59e0b}
+    .guarantee-card.alo::before{background:#3b82f6}
+    .guarantee-card.eo::before{background:#10b981}
+    .interview-tip{background:linear-gradient(135deg,rgba(255,107,53,0.06),rgba(10,143,106,0.04));border-left:3px solid var(--brand-2);border-radius:0 10px 10px 0;padding:0.8rem 1rem;margin:1rem 0}
+    .interview-tip strong{color:var(--brand-2)}
+    .danger-box{background:rgba(239,68,68,0.06);border-left:3px solid #ef4444;border-radius:0 10px 10px 0;padding:0.8rem 1rem;margin:1rem 0}
+    .danger-box strong{color:#ef4444}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a href="../../blog.html" class="active">Blog</a><a href="../../index.html#contact">Contact</a></nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../blog.html">High Level Design Series &middot; Distributed Systems &middot; Part 8</a><span>&middot; Post 36 of 70</span></div>
+
+      <h1>Idempotency &amp; Exactly-Once Semantics</h1>
+      <p class="post-meta">April 2026 &middot; 16 min read</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           1. WHAT IS IDEMPOTENCY
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="what-is-idempotency">What Is Idempotency?</h2>
+      <p>An operation is <strong>idempotent</strong> if applying it multiple times produces the same result as applying it once. In mathematical notation:</p>
+      <pre><code>f(f(x)) = f(x)</code></pre>
+      <p>Or more precisely — no matter how many times you apply the function, the outcome is identical to applying it once:</p>
+      <pre><code>f(x) = f(f(x)) = f(f(f(x))) = ... = f^n(x)  for all n ≥ 1</code></pre>
+
+      <p>In software systems, this means: <strong>if a client sends the same request multiple times, the system processes it only once and returns the same result every time</strong>. The side effects occur exactly once, even if the request is received multiple times.</p>
+
+      <p>Simple real-world examples:</p>
+      <ul>
+        <li><strong>Setting a thermostat to 72°F</strong> — doing it once or ten times, the temperature is still 72°F. Idempotent. ✓</li>
+        <li><strong>Pressing an elevator button</strong> — pressing it once or five times, the elevator still comes once. Idempotent. ✓</li>
+        <li><strong>Adding $50 to a bank account</strong> — doing it twice adds $100, not $50. <strong>NOT</strong> idempotent. ✗</li>
+        <li><strong>Toggling a light switch</strong> — each press flips the state. NOT idempotent. ✗</li>
+      </ul>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           2. WHY IDEMPOTENCY MATTERS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="why-it-matters">Why Idempotency Matters in Distributed Systems</h2>
+      <p>In a perfect world, every network request succeeds exactly once. But distributed systems aren't perfect. Here's what actually happens:</p>
+
+      <h3 id="network-unreliability">The Network Is Unreliable</h3>
+      <table class="db-table">
+        <thead><tr><th>Failure Mode</th><th>What Happens</th><th>Client's Perspective</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Request lost</strong></td><td>Server never receives the request</td><td>Timeout → retry</td></tr>
+          <tr><td><strong>Response lost</strong></td><td>Server processed it, but the response never made it back</td><td>Timeout → retry (but server already did it!)</td></tr>
+          <tr><td><strong>Slow response</strong></td><td>Server is still processing, client times out</td><td>Timeout → retry (server may process twice!)</td></tr>
+          <tr><td><strong>Load balancer retry</strong></td><td>LB routes retry to a different server</td><td>Invisible — two servers may both process it</td></tr>
+          <tr><td><strong>TCP reset</strong></td><td>Connection drops mid-response</td><td>Unclear if server processed it</td></tr>
+        </tbody>
+      </table>
+
+      <div class="danger-box">
+        <strong>⚠ The Fundamental Problem:</strong> When a client gets a timeout, it <strong>cannot distinguish</strong> between "the server never received my request" and "the server processed my request but I never got the response." Without idempotency, retrying can cause <strong>double charges, duplicate orders, double shipments, or corrupted data</strong>.
+      </div>
+
+      <h3 id="retry-storms">Retry Storms &amp; Amplification</h3>
+      <p>Modern systems aggressively retry failed requests:</p>
+      <pre><code>// Typical client retry configuration
+const retryConfig = {
+  maxRetries: 3,
+  initialDelay: 100,    // ms
+  backoffMultiplier: 2, // exponential backoff
+  maxDelay: 5000,       // ms
+  retryOn: [408, 429, 500, 502, 503, 504]
+};
+
+// A single user action can generate up to 4 requests (1 + 3 retries)
+// 10,000 concurrent users × 4 = 40,000 requests hitting your payment API
+// Without idempotency: 40,000 charges instead of 10,000</code></pre>
+
+      <p>The problem compounds across layers: the mobile app retries, the API gateway retries, the internal service retries, the message queue redelivers. A single user action can trigger 10+ identical requests through the system.</p>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           3. NATURALLY IDEMPOTENT VS NON-IDEMPOTENT
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="idempotent-operations">Naturally Idempotent vs Non-Idempotent Operations</h2>
+      <p>Not all operations need special handling. Some are <em>naturally</em> idempotent — safe to retry without any additional mechanism.</p>
+
+      <h3 id="http-methods">HTTP Methods &amp; Idempotency</h3>
+      <table class="db-table">
+        <thead><tr><th>Method</th><th>Idempotent?</th><th>Safe?</th><th>Explanation</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET</code></td><td><span class="badge badge-safe">YES</span></td><td><span class="badge badge-safe">YES</span></td><td>Read-only, no side effects</td><td><code>GET /users/42</code> — returns same user every time</td></tr>
+          <tr><td><code>HEAD</code></td><td><span class="badge badge-safe">YES</span></td><td><span class="badge badge-safe">YES</span></td><td>Like GET but no response body</td><td><code>HEAD /users/42</code></td></tr>
+          <tr><td><code>OPTIONS</code></td><td><span class="badge badge-safe">YES</span></td><td><span class="badge badge-safe">YES</span></td><td>Returns allowed methods</td><td><code>OPTIONS /users</code></td></tr>
+          <tr><td><code>PUT</code></td><td><span class="badge badge-safe">YES</span></td><td><span class="badge badge-danger">NO</span></td><td>Sets resource to exact state — repeating = same state</td><td><code>PUT /users/42 {name: "Alice"}</code> — always sets name to Alice</td></tr>
+          <tr><td><code>DELETE</code></td><td><span class="badge badge-safe">YES</span></td><td><span class="badge badge-danger">NO</span></td><td>Deleting twice = resource still gone (second returns 404)</td><td><code>DELETE /users/42</code> — user stays deleted</td></tr>
+          <tr><td><code>POST</code></td><td><span class="badge badge-danger">NO</span></td><td><span class="badge badge-danger">NO</span></td><td>Creates new resource each time</td><td><code>POST /orders {item: "book"}</code> — creates duplicate orders!</td></tr>
+          <tr><td><code>PATCH</code></td><td><span class="badge badge-warn">DEPENDS</span></td><td><span class="badge badge-danger">NO</span></td><td>Depends on the patch operation</td><td><code>PATCH {op: "set", balance: 100}</code> ✓ vs <code>PATCH {op: "add", amount: 50}</code> ✗</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="db-operations">Database Operations</h3>
+      <pre><code>-- ✅ Naturally idempotent: absolute writes
+UPDATE users SET email = 'alice@example.com' WHERE id = 42;
+-- Run this 100 times → email is still alice@example.com
+
+DELETE FROM sessions WHERE user_id = 42;
+-- Run this 100 times → sessions still deleted
+
+INSERT INTO users (id, name) VALUES (42, 'Alice')
+  ON CONFLICT (id) DO UPDATE SET name = 'Alice';
+-- Run this 100 times → one row with name = Alice
+
+-- ❌ NOT idempotent: relative writes
+UPDATE accounts SET balance = balance + 50 WHERE id = 42;
+-- Run this 3 times → balance increased by $150, not $50!
+
+INSERT INTO orders (user_id, product_id, amount)
+  VALUES (42, 101, 29.99);
+-- Run this 3 times → 3 duplicate orders!
+
+UPDATE counters SET count = count + 1 WHERE page = '/home';
+-- Run this 3 times → count incremented by 3, not 1!</code></pre>
+
+      <div class="callout">
+        <strong>The Pattern:</strong> Operations that set a value to an <strong>absolute state</strong> (SET x = 5) are naturally idempotent. Operations that make <strong>relative changes</strong> (SET x = x + 5) are not. The key to making non-idempotent operations safe is <strong>idempotency keys</strong>.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           4. IDEMPOTENCY KEYS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="idempotency-keys">Idempotency Keys</h2>
+      <p>An <strong>idempotency key</strong> is a unique identifier that the client attaches to each operation. The server uses this key to detect duplicates and return the cached response instead of re-processing the request.</p>
+
+      <h3 id="how-keys-work">How Idempotency Keys Work</h3>
+      <p>The protocol is straightforward:</p>
+      <ol>
+        <li><strong>Client generates a unique key</strong> (typically a UUID) for each distinct operation</li>
+        <li><strong>Client sends the request</strong> with the key in a header: <code>Idempotency-Key: abc123</code></li>
+        <li><strong>Server checks</strong> its idempotency store for the key:
+          <ul>
+            <li><strong>Key not found:</strong> Process the request normally, store <code>key → response</code>, return response</li>
+            <li><strong>Key found, processing complete:</strong> Return the cached response without re-processing</li>
+            <li><strong>Key found, still processing:</strong> Return <code>409 Conflict</code> to prevent concurrent execution</li>
+          </ul>
+        </li>
+        <li><strong>Client retries</strong> (on timeout/failure) with the <strong>same key</strong> — server returns cached result</li>
+      </ol>
+
+      <!-- ─── ANIMATION 1: Idempotency Key Flow ─── -->
+      <div class="anim-container" id="idempotency-anim">
+        <h4>&#9654; Idempotency Key Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">See how idempotency keys prevent double-charging — and what happens without them.</p>
+        <svg id="idem-svg" width="700" height="340" viewBox="0 0 700 340"></svg>
+        <div id="idem-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="idem-step">Step &rarr;</button>
+          <button class="anim-btn" id="idem-reset">Reset</button>
+          <span class="anim-output" id="idem-output"></span>
+        </div>
+      </div>
+
+      <h3 id="key-generation">Key Generation Strategies</h3>
+      <pre><code>// Strategy 1: UUID v4 (most common)
+const idempotencyKey = crypto.randomUUID();
+// "550e8400-e29b-41d4-a716-446655440000"
+
+// Strategy 2: Deterministic from operation parameters
+// Same inputs → same key → automatic dedup even across clients
+const idempotencyKey = sha256(`${userId}:${orderId}:${amount}:${timestamp}`);
+// Useful when the operation itself defines uniqueness
+
+// Strategy 3: Client-generated sequence number
+// Each client tracks its own monotonic counter
+const idempotencyKey = `client-${clientId}-seq-${sequenceNum}`;
+
+// Strategy 4: Stripe-style — client generates, sends in header
+fetch('/v1/charges', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer sk_live_...',
+    'Idempotency-Key': 'order-12345-attempt-1',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    amount: 2000,
+    currency: 'usd',
+    source: 'tok_visa'
+  })
+});</code></pre>
+
+      <div class="interview-tip">
+        <strong>🎯 Interview Tip:</strong> When discussing idempotency key generation, mention that the key should be generated <em>client-side</em>, not server-side. If the server generated keys, the client would need to first ask for a key, then send the request — adding an extra round trip and the key-request itself could fail.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           5. SERVER-SIDE IMPLEMENTATION
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="implementation">Server-Side Implementation</h2>
+
+      <h3 id="redis-implementation">Redis-Based Idempotency Store</h3>
+      <p>Redis is the most common choice for idempotency stores due to its speed, built-in TTL, and atomic operations:</p>
+      <pre><code>import redis
+import json
+import uuid
+from functools import wraps
+from flask import request, jsonify
+
+r = redis.Redis(host='localhost', port=6379, db=0)
+
+IDEMPOTENCY_TTL = 86400  # 24 hours
+
+def idempotent(f):
+    """Decorator that makes an endpoint idempotent using Redis."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        idem_key = request.headers.get('Idempotency-Key')
+        if not idem_key:
+            return jsonify({'error': 'Idempotency-Key header required'}), 400
+
+        redis_key = f'idempotency:{idem_key}'
+
+        # Step 1: Try to acquire a lock (prevent concurrent execution)
+        lock_key = f'idempotency_lock:{idem_key}'
+        lock_acquired = r.set(lock_key, '1', nx=True, ex=60)
+
+        if not lock_acquired:
+            # Another request with same key is currently being processed
+            return jsonify({'error': 'Request in progress'}), 409
+
+        try:
+            # Step 2: Check if we already have a cached response
+            cached = r.get(redis_key)
+            if cached:
+                response_data = json.loads(cached)
+                return jsonify(response_data['body']), response_data['status']
+
+            # Step 3: Process the request
+            response = f(*args, **kwargs)
+            status_code = response[1] if isinstance(response, tuple) else 200
+            body = response[0] if isinstance(response, tuple) else response
+
+            # Step 4: Cache the response
+            r.setex(redis_key, IDEMPOTENCY_TTL, json.dumps({
+                'body': body,
+                'status': status_code,
+                'created_at': str(uuid.uuid4())
+            }))
+
+            return jsonify(body), status_code
+
+        finally:
+            # Step 5: Release the lock
+            r.delete(lock_key)
+
+    return wrapper
+
+# Usage:
+@app.route('/v1/charges', methods=['POST'])
+@idempotent
+def create_charge():
+    data = request.json
+    charge = payment_processor.charge(
+        amount=data['amount'],
+        currency=data['currency'],
+        source=data['source']
+    )
+    return {'id': charge.id, 'amount': charge.amount, 'status': 'succeeded'}, 201</code></pre>
+
+      <h3 id="db-implementation">Database-Based Idempotency Store</h3>
+      <p>When you need stronger durability guarantees, use a database table within the same transaction as the business operation:</p>
+      <pre><code>-- PostgreSQL idempotency table
+CREATE TABLE idempotency_keys (
+    key         VARCHAR(255) PRIMARY KEY,
+    request_path VARCHAR(500) NOT NULL,
+    request_body JSONB,
+    response_body JSONB,
+    response_code INTEGER,
+    locked_at    TIMESTAMP,      -- NULL = not locked
+    completed_at TIMESTAMP,      -- NULL = not yet completed
+    created_at   TIMESTAMP DEFAULT NOW(),
+    expires_at   TIMESTAMP DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+-- Index for cleanup job
+CREATE INDEX idx_idempotency_expires ON idempotency_keys (expires_at)
+  WHERE completed_at IS NOT NULL;
+
+-- Cleanup job: remove expired keys
+DELETE FROM idempotency_keys WHERE expires_at < NOW();</code></pre>
+
+      <p>The critical advantage: the idempotency check and the business operation share the same database transaction, providing atomicity:</p>
+      <pre><code>async function processPayment(idempotencyKey, chargeRequest) {
+  return await db.transaction(async (tx) => {
+    // Step 1: Try to insert or find existing key (atomic)
+    const existing = await tx.query(`
+      INSERT INTO idempotency_keys (key, request_path, request_body, locked_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (key) DO UPDATE SET key = idempotency_keys.key
+      RETURNING *
+    `, [idempotencyKey, '/v1/charges', chargeRequest]);
+
+    const record = existing.rows[0];
+
+    // Step 2: If completed, return cached response
+    if (record.completed_at) {
+      return { status: record.response_code, body: record.response_body };
+    }
+
+    // Step 3: If locked by another request, return conflict
+    if (record.locked_at && !existing.command.includes('INSERT')) {
+      throw new ConflictError('Request already in progress');
+    }
+
+    // Step 4: Process the charge (within same transaction!)
+    const charge = await tx.query(`
+      INSERT INTO charges (user_id, amount, currency, status)
+      VALUES ($1, $2, $3, 'succeeded')
+      RETURNING id, amount, currency, status
+    `, [chargeRequest.userId, chargeRequest.amount, chargeRequest.currency]);
+
+    // Step 5: Mark idempotency key as completed (same transaction!)
+    const response = { id: charge.rows[0].id, status: 'succeeded' };
+    await tx.query(`
+      UPDATE idempotency_keys
+      SET response_body = $1, response_code = 201, completed_at = NOW(), locked_at = NULL
+      WHERE key = $2
+    `, [response, idempotencyKey]);
+
+    // If the transaction commits → charge + idempotency record both persist
+    // If the transaction rolls back → neither persists → safe to retry
+    return { status: 201, body: response };
+  });
+}</code></pre>
+
+      <div class="callout">
+        <strong>Redis vs Database for Idempotency Store:</strong>
+        <table class="db-table" style="margin-top:0.5rem">
+          <thead><tr><th>Aspect</th><th>Redis</th><th>Database (Same TX)</th></tr></thead>
+          <tbody>
+            <tr><td>Latency</td><td><span class="badge badge-safe">~1ms</span></td><td><span class="badge badge-warn">~5-20ms</span></td></tr>
+            <tr><td>Durability</td><td><span class="badge badge-warn">May lose on crash</span></td><td><span class="badge badge-safe">ACID guaranteed</span></td></tr>
+            <tr><td>Atomicity with business logic</td><td><span class="badge badge-danger">Two-phase risk</span></td><td><span class="badge badge-safe">Same transaction</span></td></tr>
+            <tr><td>TTL / Cleanup</td><td><span class="badge badge-safe">Built-in EXPIRE</span></td><td><span class="badge badge-warn">Cron job needed</span></td></tr>
+            <tr><td>Best for</td><td>High-throughput, non-critical</td><td>Financial transactions, payments</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="ttl-cleanup">TTL &amp; Cleanup Strategies</h3>
+      <p>Idempotency keys should not be stored forever. Choose TTL based on your retry window:</p>
+      <pre><code># Redis: TTL is automatic
+r.setex(f'idempotency:{key}', 86400, response_json)  # 24h TTL
+
+# PostgreSQL: Background cleanup job
+-- Run every hour via pg_cron or application scheduler
+SELECT cron.schedule('cleanup-idempotency', '0 * * * *',
+  $$DELETE FROM idempotency_keys WHERE expires_at < NOW()$$
+);
+
+# Or with partitioning for high-volume systems:
+-- Partition by day, drop old partitions instead of deleting rows
+CREATE TABLE idempotency_keys (
+    key TEXT, created_at DATE, ...
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE idempotency_keys_20260401
+  PARTITION OF idempotency_keys
+  FOR VALUES FROM ('2026-04-01') TO ('2026-04-02');
+-- Simply DROP old partition tables instead of deleting millions of rows</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           6. DELIVERY GUARANTEES
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="delivery-guarantees">Delivery Guarantees</h2>
+      <p>In distributed messaging, there are three delivery semantics. Understanding these is critical because they determine your system's correctness and complexity.</p>
+
+      <div class="guarantee-card amo">
+        <h3 style="margin-top:0">At-Most-Once Delivery</h3>
+        <p><strong>Promise:</strong> Each message is delivered <strong>zero or one</strong> times. Messages <em>may be lost</em>, but never duplicated.</p>
+        <p><strong>How it works:</strong> Fire and forget. The sender sends the message and doesn't wait for acknowledgment. No retries.</p>
+        <pre><code>// At-most-once: send and forget
+producer.send(message);  // No ack, no retry
+// If the network drops it... 🤷 it's gone</code></pre>
+        <p><strong>Use when:</strong> Loss is acceptable — metrics, logging, analytics events, real-time sensor telemetry where the next reading is already coming.</p>
+        <p><strong>Trade-off:</strong> Simplest to implement, lowest latency, but you <em>will</em> lose messages under network failures.</p>
+      </div>
+
+      <div class="guarantee-card alo">
+        <h3 style="margin-top:0">At-Least-Once Delivery</h3>
+        <p><strong>Promise:</strong> Each message is delivered <strong>one or more</strong> times. No message is lost, but <em>duplicates are possible</em>.</p>
+        <p><strong>How it works:</strong> The sender waits for an ACK. If no ACK arrives within a timeout, the sender retries. The message might have been processed but the ACK was lost — resulting in a duplicate.</p>
+        <pre><code>// At-least-once: retry until acknowledged
+while (!acknowledged) {
+  producer.send(message);
+  acknowledged = waitForAck(timeout: 5000);
+  // ACK might be lost → we retry → consumer gets it TWICE
+}</code></pre>
+        <p><strong>Use when:</strong> Loss is unacceptable and you can handle duplicates — <em>most</em> systems. Pair with idempotent consumers for safety.</p>
+        <p><strong>Trade-off:</strong> Reliable delivery, but consumers must handle duplicates (this is where idempotency keys come in!).</p>
+      </div>
+
+      <div class="guarantee-card eo">
+        <h3 style="margin-top:0">Exactly-Once Delivery</h3>
+        <p><strong>Promise:</strong> Each message is delivered <strong>exactly one</strong> time. No loss, no duplicates.</p>
+        <p><strong>How it works:</strong> Technically, true exactly-once delivery over an unreliable network is <em>impossible</em> (Two Generals' Problem). What systems actually provide is <strong>exactly-once semantics</strong> — "effectively exactly-once" through at-least-once delivery + idempotent processing.</p>
+        <pre><code>// "Exactly-once" = at-least-once delivery + idempotent consumer
+// The message might be sent twice, but the EFFECT happens only once
+consumer.onMessage(async (msg) => {
+  const deduped = await idempotencyStore.checkAndLock(msg.id);
+  if (deduped) return ack(msg);  // Already processed, skip
+
+  await processMessage(msg);     // Process once
+  await idempotencyStore.markDone(msg.id);
+  ack(msg);
+});</code></pre>
+        <p><strong>Use when:</strong> Financial transactions, inventory management, anything where duplicates cause real damage.</p>
+        <p><strong>Trade-off:</strong> Most complex, highest latency, requires careful coordination between producer, broker, and consumer.</p>
+      </div>
+
+      <!-- ─── ANIMATION 2: Delivery Guarantees ─── -->
+      <div class="anim-container" id="delivery-anim">
+        <h4>&#9654; Delivery Guarantees Compared</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how each delivery guarantee behaves under network failures.</p>
+        <svg id="delivery-svg" width="700" height="320" viewBox="0 0 700 320"></svg>
+        <div id="delivery-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="delivery-step">Step &rarr;</button>
+          <button class="anim-btn" id="delivery-reset">Reset</button>
+          <span class="anim-output" id="delivery-output"></span>
+        </div>
+      </div>
+
+      <div class="interview-tip">
+        <strong>🎯 Interview Tip:</strong> When asked "How do you achieve exactly-once?", the answer is: <em>"You can't — not truly. What we implement is effectively-exactly-once through at-least-once delivery combined with idempotent consumers. The message may be delivered multiple times, but the side effect occurs exactly once."</em> This shows you understand the theoretical impossibility and the practical workaround.
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           7. KAFKA EXACTLY-ONCE SEMANTICS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="kafka-exactly-once">Kafka Exactly-Once Semantics (EOS)</h2>
+      <p>Apache Kafka achieves exactly-once semantics through two mechanisms that work together: <strong>idempotent producers</strong> and <strong>transactions</strong>.</p>
+
+      <h3 id="kafka-idempotent-producer">Idempotent Producer</h3>
+      <p>Without idempotency, a Kafka producer retrying a failed <code>send()</code> can write the same message twice to the same partition. The idempotent producer prevents this:</p>
+      <pre><code># Kafka producer configuration for idempotency
+producer_config = {
+    'bootstrap.servers': 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+
+    # Enable idempotent producer (prevents duplicate writes)
+    'enable.idempotence': True,
+
+    # Required settings when idempotence is enabled:
+    'acks': 'all',           # Wait for all replicas to acknowledge
+    'retries': 2147483647,   # Retry indefinitely (Integer.MAX_VALUE)
+    'max.in.flight.requests.per.connection': 5,  # Max 5 (Kafka 1.1+)
+
+    # How it works under the hood:
+    # 1. Producer gets a unique Producer ID (PID) from the broker on init
+    # 2. Each message gets a monotonic sequence number per partition
+    # 3. Broker tracks (PID, partition, sequence_number) tuples
+    # 4. If broker sees a duplicate sequence number → it deduplicates silently
+    # 5. If broker sees a gap in sequence numbers → it rejects (OutOfOrderSequence)
+}</code></pre>
+
+      <p>How the idempotent producer works internally:</p>
+      <pre><code>// Internal flow (simplified):
+Producer                              Broker (Partition Leader)
+   |                                        |
+   |-- PID=7, Seq=0, msg="order-1" -----→ |  ✓ Accept (new sequence)
+   |                                        |  Store: PID=7, maxSeq=0
+   |                                        |
+   |-- PID=7, Seq=1, msg="order-2" -----→ |  ✓ Accept (sequence incremented)
+   |                                        |  Store: PID=7, maxSeq=1
+   |                                        |
+   |-- PID=7, Seq=1, msg="order-2" -----→ |  ✗ Deduplicate! (seq=1 ≤ maxSeq=1)
+   |    (retry due to network timeout)      |  Return success but don't write
+   |                                        |
+   |-- PID=7, Seq=5, msg="order-6" -----→ |  ✗ Reject! OutOfOrderSequenceException
+   |    (gap: expected seq=2, got seq=5)    |  (sequence numbers must be contiguous)</code></pre>
+
+      <div class="callout">
+        <strong>Limitation:</strong> Idempotent producers only prevent duplicates within a <strong>single producer session</strong> and a <strong>single partition</strong>. If the producer restarts (new PID) or you need atomicity across multiple partitions/topics, you need <strong>Kafka transactions</strong>.
+      </div>
+
+      <h3 id="kafka-transactions">Kafka Transactions</h3>
+      <p>Transactions provide atomicity across multiple partitions and topics — either <em>all</em> messages in the transaction are committed, or <em>none</em> are:</p>
+      <pre><code># Transactional producer configuration
+producer_config = {
+    'bootstrap.servers': 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    'enable.idempotence': True,
+    'transactional.id': 'payment-processor-1',  # Unique per producer instance
+    # The transactional.id survives producer restarts:
+    # - Broker uses it to fence zombie producers (old instances with same ID)
+    # - New producer with same transactional.id aborts any pending transactions
+    #   from the old producer (zombie fencing)
+}
+
+# Python example with confluent-kafka
+from confluent_kafka import Producer
+
+producer = Producer(producer_config)
+producer.init_transactions()  # Register with transaction coordinator
+
+try:
+    producer.begin_transaction()
+
+    # All of these writes are atomic — all or nothing
+    producer.produce('orders', key='user-42', value='{"orderId": "ord-123"}')
+    producer.produce('inventory', key='sku-789', value='{"delta": -1}')
+    producer.produce('notifications', key='user-42', value='{"type": "order_confirmed"}')
+
+    producer.commit_transaction()  # Atomic commit across 3 topics
+
+except Exception as e:
+    producer.abort_transaction()   # Atomic rollback — none of the 3 messages appear
+    raise</code></pre>
+
+      <h3 id="kafka-consume-transform-produce">The consume-transform-produce Pattern</h3>
+      <p>The most powerful use of Kafka EOS is the <strong>consume-transform-produce</strong> pattern, where reading from an input topic, processing, and writing to an output topic are all part of one atomic transaction:</p>
+      <pre><code>// Java: Exactly-once consume-transform-produce
+Properties props = new Properties();
+props.put("bootstrap.servers", "kafka:9092");
+props.put("group.id", "payment-processor");
+props.put("isolation.level", "read_committed"); // Only read committed messages
+props.put("enable.auto.commit", false);          // Manual offset management
+
+KafkaConsumer&lt;String, String&gt; consumer = new KafkaConsumer&lt;&gt;(props);
+KafkaProducer&lt;String, String&gt; producer = new KafkaProducer&lt;&gt;(producerProps);
+producer.initTransactions();
+
+consumer.subscribe(List.of("raw-payments"));
+
+while (true) {
+    ConsumerRecords&lt;String, String&gt; records = consumer.poll(Duration.ofMillis(100));
+
+    producer.beginTransaction();
+    try {
+        for (ConsumerRecord&lt;String, String&gt; record : records) {
+            // Transform
+            String processed = processPayment(record.value());
+
+            // Produce to output topic (within transaction)
+            producer.send(new ProducerRecord&lt;&gt;("processed-payments",
+                record.key(), processed));
+        }
+
+        // Commit consumer offsets within the same transaction
+        // This is the key: offset commit + output writes are ATOMIC
+        producer.sendOffsetsToTransaction(
+            getOffsetsForTransaction(records),
+            consumer.groupMetadata()
+        );
+
+        producer.commitTransaction();
+        // If commit succeeds: output written + offsets advanced (atomically)
+        // If commit fails: nothing happened — consumer re-reads same messages
+    } catch (Exception e) {
+        producer.abortTransaction();
+        // Offsets not committed → consumer will re-read → no data loss
+    }
+}</code></pre>
+
+      <table class="db-table">
+        <thead><tr><th>Kafka EOS Component</th><th>What It Prevents</th><th>Scope</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Idempotent Producer</strong></td><td>Duplicate writes from retries</td><td>Single partition, single session</td></tr>
+          <tr><td><strong>Transactions</strong></td><td>Partial writes across partitions/topics</td><td>Multiple partitions, multiple topics</td></tr>
+          <tr><td><strong>Consumer <code>read_committed</code></strong></td><td>Reading uncommitted (aborted) messages</td><td>Consumer-side isolation</td></tr>
+          <tr><td><strong>sendOffsetsToTransaction</strong></td><td>Offset commit / output write mismatch</td><td>consume-transform-produce atomicity</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           8. STRIPE IDEMPOTENCY KEYS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="stripe-idempotency">Stripe's Idempotency Keys — A Production Case Study</h2>
+      <p>Stripe is the gold standard for idempotency in payment APIs. Their approach is so well-designed that it's become the industry pattern.</p>
+
+      <h3 id="stripe-api">Using Stripe's Idempotency API</h3>
+      <pre><code>import stripe
+stripe.api_key = "sk_live_..."
+
+# Create a charge with an idempotency key
+# If you retry with the same key, you get the same charge — not a double charge
+charge = stripe.Charge.create(
+    amount=2000,           # $20.00
+    currency="usd",
+    source="tok_visa",
+    description="Order #12345",
+    idempotency_key="order-12345-charge-v1"  # Client-generated unique key
+)
+# Returns: {"id": "ch_1abc...", "amount": 2000, "status": "succeeded"}
+
+# Retry with same key → same response, no new charge
+charge_retry = stripe.Charge.create(
+    amount=2000,
+    currency="usd",
+    source="tok_visa",
+    description="Order #12345",
+    idempotency_key="order-12345-charge-v1"  # Same key!
+)
+# Returns: {"id": "ch_1abc...", "amount": 2000, "status": "succeeded"}
+# Same charge ID! No duplicate.</code></pre>
+
+      <h3 id="stripe-behavior">Stripe's Idempotency Behavior in Detail</h3>
+      <table class="db-table">
+        <thead><tr><th>Scenario</th><th>Behavior</th><th>HTTP Response</th></tr></thead>
+        <tbody>
+          <tr><td>First request with key</td><td>Process normally, cache result</td><td><code>200 OK</code> (or appropriate status)</td></tr>
+          <tr><td>Retry with same key, same params</td><td>Return cached result</td><td>Same as original response</td></tr>
+          <tr><td>Same key, <em>different</em> params</td><td>Reject — key is already bound to original params</td><td><code>400 Bad Request</code></td></tr>
+          <tr><td>Original request failed (4xx)</td><td>Error is cached too — retrying returns same error</td><td>Same error response</td></tr>
+          <tr><td>Original request is still processing</td><td>Return conflict</td><td><code>409 Conflict</code></td></tr>
+          <tr><td>Key expires (after 24 hours)</td><td>Treated as a new request</td><td>Processed fresh</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="stripe-implementation">How Stripe Implements It Internally</h3>
+      <p>Based on Stripe's engineering blog posts, their implementation uses a state machine approach:</p>
+      <pre><code>// Stripe's internal idempotency flow (reconstructed from public engineering blog)
+// Reference: https://stripe.com/blog/idempotency
+
+enum IdempotencyKeyState {
+  STARTED,     // Key inserted, request being processed
+  FINISHED,    // Request completed, response cached
+}
+
+// The idempotency record
+{
+  "key": "order-12345-charge-v1",
+  "state": "FINISHED",
+  "request_method": "POST",
+  "request_path": "/v1/charges",
+  "request_params_hash": "sha256(...)", // Hash of request body
+  "response_code": 200,
+  "response_body": "{\"id\": \"ch_1abc...\", ...}",
+  "recovery_point": "charge_created",   // Last completed step
+  "created_at": "2026-04-01T10:30:00Z",
+  "locked_at": null
+}
+
+// Stripe uses "recovery points" for complex multi-step operations:
+// 1. started         → key created
+// 2. charge_created  → charge record inserted in DB
+// 3. fraud_checked   → fraud model approved
+// 4. settled         → funds captured from payment network
+// 5. finished        → response sent to client
+//
+// If the server crashes at step 3, a retry with the same key
+// resumes from step 3 (fraud_checked) instead of starting over.
+// This is IDEMPOTENT PROCESSING, not just idempotent responses.</code></pre>
+
+      <h3 id="stripe-edge-cases">Edge Cases Stripe Handles</h3>
+      <pre><code>// Edge case 1: Same key, different parameters → ERROR
+stripe.Charge.create(amount=2000, currency='usd',
+    idempotency_key='key-1')  # ✓ Processed
+
+stripe.Charge.create(amount=3000, currency='usd',  # Different amount!
+    idempotency_key='key-1')  # ✗ 400: Keys can only be reused with same parameters
+
+// Edge case 2: Non-retryable errors ARE cached
+stripe.Charge.create(amount=-100, currency='usd',
+    idempotency_key='key-2')  # ✗ 400: Invalid positive integer
+
+stripe.Charge.create(amount=-100, currency='usd',
+    idempotency_key='key-2')  # ✗ 400: Same cached error (not reprocessed)
+
+// Edge case 3: 500 errors are NOT cached (server-side failures are retryable)
+// If Stripe's server crashes during processing → key is cleaned up
+// → client can retry with same key → request is reprocessed
+
+// Edge case 4: Concurrent requests with same key
+// Request A: POST /charges, key='key-3' → processing...
+// Request B: POST /charges, key='key-3' → 409 Conflict (wait and retry)
+
+// Edge case 5: Network-level retries (transparent to client)
+// Stripe's client libraries handle this automatically:
+stripe.max_network_retries = 2  // Retry up to 2 times on network errors
+// Each retry uses the SAME idempotency key automatically</code></pre>
+
+      <div class="callout">
+        <strong>Stripe's Key Design Decisions:</strong>
+        <ul style="margin:0.5em 0 0;">
+          <li><strong>24-hour TTL</strong> — keys expire after 24 hours. Long enough for retries, short enough to not bloat storage.</li>
+          <li><strong>Parameter binding</strong> — same key must always have same parameters. Prevents accidental misuse.</li>
+          <li><strong>Separate from business IDs</strong> — the idempotency key is distinct from the charge ID. You can have multiple idempotency keys create the same logical operation over time.</li>
+          <li><strong>Client-side generation</strong> — Stripe never generates keys for you. The client controls uniqueness.</li>
+        </ul>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           9. DATABASE UPSERTS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="database-upserts">Database Upserts — INSERT ON CONFLICT</h2>
+      <p>Database upserts are a powerful tool for making write operations idempotent at the storage layer. Instead of checking for existence then inserting (which has race conditions), you do it atomically.</p>
+
+      <h3 id="postgres-upsert">PostgreSQL: INSERT ... ON CONFLICT</h3>
+      <pre><code>-- Basic upsert: insert or update if already exists
+INSERT INTO users (id, name, email, updated_at)
+VALUES (42, 'Alice', 'alice@example.com', NOW())
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  email = EXCLUDED.email,
+  updated_at = EXCLUDED.updated_at;
+
+-- Run this 100 times → exactly one row, always up-to-date. Idempotent!
+
+-- Upsert with conditional update (only update if data is newer)
+INSERT INTO events (event_id, user_id, payload, event_time)
+VALUES ('evt-123', 42, '{"action": "click"}', '2026-04-01 10:30:00')
+ON CONFLICT (event_id) DO UPDATE SET
+  payload = EXCLUDED.payload,
+  event_time = EXCLUDED.event_time
+WHERE events.event_time < EXCLUDED.event_time;
+-- Only updates if the incoming event is newer (last-write-wins with timestamp)
+
+-- Upsert for counters (idempotent increment using event deduplication)
+-- Instead of: UPDATE counters SET count = count + 1 (not idempotent!)
+-- Use: event-sourced approach with dedup
+INSERT INTO processed_events (event_id, counter_name, delta)
+VALUES ('evt-456', 'page_views', 1)
+ON CONFLICT (event_id) DO NOTHING;  -- Skip if already processed
+
+-- Then compute the count from events:
+SELECT SUM(delta) as total FROM processed_events WHERE counter_name = 'page_views';</code></pre>
+
+      <h3 id="mysql-upsert">MySQL: INSERT ... ON DUPLICATE KEY UPDATE</h3>
+      <pre><code>-- MySQL equivalent of PostgreSQL's ON CONFLICT
+INSERT INTO users (id, name, email, updated_at)
+VALUES (42, 'Alice', 'alice@example.com', NOW())
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  email = VALUES(email),
+  updated_at = VALUES(updated_at);
+
+-- REPLACE INTO (deletes + re-inserts): use with caution
+REPLACE INTO users (id, name, email)
+VALUES (42, 'Alice', 'alice@example.com');
+-- Warning: REPLACE deletes the old row first, which triggers
+-- DELETE + INSERT — not always what you want (cascading FKs, auto-inc)</code></pre>
+
+      <h3 id="dynamodb-upsert">DynamoDB: Conditional Writes</h3>
+      <pre><code>// DynamoDB conditional write — only succeeds if item doesn't exist
+const params = {
+  TableName: 'Orders',
+  Item: {
+    orderId: { S: 'order-12345' },
+    userId: { S: 'user-42' },
+    amount: { N: '2999' },
+    status: { S: 'created' },
+    processedAt: { S: new Date().toISOString() }
+  },
+  ConditionExpression: 'attribute_not_exists(orderId)',
+  // Fails with ConditionalCheckFailedException if order already exists
+};
+
+try {
+  await dynamoDb.putItem(params).promise();
+  console.log('Order created');
+} catch (err) {
+  if (err.code === 'ConditionalCheckFailedException') {
+    console.log('Order already exists — idempotent skip');
+  } else {
+    throw err;
+  }
+}</code></pre>
+
+      <h3 id="mongodb-upsert">MongoDB: Upsert with $setOnInsert</h3>
+      <pre><code>// MongoDB upsert — idempotent insert-or-update
+db.orders.updateOne(
+  { orderId: 'order-12345' },  // filter
+  {
+    $setOnInsert: {             // Only set these on INSERT (first time)
+      createdAt: new Date(),
+      status: 'created'
+    },
+    $set: {                     // Always set these (safe to repeat)
+      userId: 'user-42',
+      amount: 29.99,
+      updatedAt: new Date()
+    }
+  },
+  { upsert: true }             // Create if not exists
+);
+// Run 100 times: one document, createdAt never changes, updatedAt refreshes</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           10. DEDUPLICATION AT DIFFERENT LAYERS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="deduplication-layers">Deduplication at Different Layers</h2>
+      <p>Idempotency can be enforced at multiple layers of your system. The right choice depends on where duplicates originate and what guarantees you need.</p>
+
+      <table class="db-table">
+        <thead><tr><th>Layer</th><th>Mechanism</th><th>Scope</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><strong>API Gateway</strong></td><td>Idempotency key header check</td><td>All incoming requests</td><td>Kong/AWS API Gateway dedup plugin</td></tr>
+          <tr><td><strong>Application</strong></td><td>Redis/DB idempotency store</td><td>Per endpoint</td><td>Stripe-style idempotency middleware</td></tr>
+          <tr><td><strong>Message Broker</strong></td><td>Producer dedup (Kafka PID+Seq)</td><td>Per partition</td><td>Kafka idempotent producer</td></tr>
+          <tr><td><strong>Consumer</strong></td><td>Message ID tracking</td><td>Per consumer group</td><td>Store processed message IDs in DB</td></tr>
+          <tr><td><strong>Database</strong></td><td>Unique constraints + upserts</td><td>Per table</td><td><code>ON CONFLICT DO NOTHING</code></td></tr>
+          <tr><td><strong>Event Store</strong></td><td>Event ID deduplication</td><td>Per aggregate</td><td>EventStoreDB dedup by event ID</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="layered-approach">Defense in Depth — Layered Deduplication</h3>
+      <p>Production systems use multiple layers of deduplication because no single layer catches everything:</p>
+      <pre><code>// Layer 1: API Gateway — catch obvious duplicates early
+// Kong plugin or custom middleware
+if (await redis.exists(`gateway:dedup:${req.headers['idempotency-key']}`)) {
+  return cachedResponse;
+}
+
+// Layer 2: Application — idempotency store with full response caching
+@idempotent  // Our decorator from earlier
+async function createOrder(req) {
+  // Layer 3: Database — unique constraint as final safety net
+  try {
+    await db.query(`
+      INSERT INTO orders (order_id, user_id, amount)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (order_id) DO NOTHING
+      RETURNING *
+    `, [orderId, userId, amount]);
+  } catch (err) {
+    if (err.code === '23505') {  // Unique violation
+      return await db.query('SELECT * FROM orders WHERE order_id = $1', [orderId]);
+    }
+    throw err;
+  }
+}
+
+// Layer 4: Message consumer — dedup on message processing
+consumer.on('message', async (msg) => {
+  const messageId = msg.headers['message-id'];
+  const processed = await redis.set(
+    `consumer:dedup:${messageId}`, '1', 'NX', 'EX', 86400
+  );
+  if (!processed) return;  // Already processed this message
+  await handleMessage(msg);
+});</code></pre>
+
+      <h3 id="dedup-trade-offs">Trade-offs of Each Layer</h3>
+      <pre><code>// Gateway dedup
+// ✓ Catches duplicates before they hit your application
+// ✓ Reduces load on backend services
+// ✗ Can't access business logic (doesn't know if params match)
+// ✗ Adds latency to every request (Redis lookup)
+
+// Application dedup
+// ✓ Full control — can validate params, handle edge cases
+// ✓ Can cache rich responses (not just "already processed")
+// ✗ Added complexity per endpoint
+// ✗ Multiple services = multiple dedup stores
+
+// Database dedup (unique constraints)
+// ✓ Last line of defense — if everything else fails, DB catches it
+// ✓ Zero application complexity — the DB does the work
+// ✗ Only catches exact duplicate primary keys
+// ✗ Doesn't return cached responses (just prevents duplicate inserts)
+// ✗ Race conditions with read-then-write patterns (use upserts!)
+
+// Message broker dedup (Kafka)
+// ✓ Built into the protocol — transparent to application
+// ✓ Zero application code for producer-side dedup
+// ✗ Only covers producer→broker path (not broker→consumer)
+// ✗ Limited scope (per partition, per producer session)</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           11. REAL-WORLD PATTERNS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="real-world">Real-World Idempotency Patterns</h2>
+
+      <h3 id="pattern-outbox">The Outbox Pattern + Idempotency</h3>
+      <p>The transactional outbox pattern combined with idempotent consumers achieves effectively exactly-once across service boundaries:</p>
+      <pre><code>// Service A: Write to business table + outbox in ONE transaction
+BEGIN;
+  INSERT INTO orders (id, user_id, amount) VALUES ('ord-123', 42, 29.99);
+  INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+  VALUES (gen_random_uuid(), 'Order', 'ord-123', 'OrderCreated',
+          '{"orderId": "ord-123", "userId": 42, "amount": 29.99}');
+COMMIT;
+-- Both succeed or both fail — no "order created but event lost" scenario
+
+// CDC connector (Debezium) reads outbox table → publishes to Kafka
+// At-least-once delivery (Debezium may publish duplicates)
+
+// Service B: Idempotent consumer handles duplicates
+consumer.on('OrderCreated', async (event) => {
+  await db.query(`
+    INSERT INTO shipments (order_id, status, created_at)
+    VALUES ($1, 'pending', NOW())
+    ON CONFLICT (order_id) DO NOTHING
+  `, [event.orderId]);
+  // Duplicate events → no duplicate shipments!
+});</code></pre>
+
+      <h3 id="pattern-saga">Idempotency in Sagas</h3>
+      <p>In a distributed saga, each step and its compensation must be idempotent because the saga orchestrator may retry any step:</p>
+      <pre><code>// Saga: Place Order
+// Each step is idempotent — safe to retry on failure
+
+Step 1: Reserve Inventory
+  → INSERT INTO reservations (order_id, sku, qty)
+    ON CONFLICT (order_id, sku) DO NOTHING;
+  Compensation: DELETE FROM reservations WHERE order_id = $1;
+  (Deleting twice = still deleted. Idempotent.)
+
+Step 2: Charge Payment
+  → stripe.Charge.create(..., idempotency_key=f"order-{orderId}-charge")
+  Compensation: stripe.Refund.create(charge_id, idempotency_key=f"order-{orderId}-refund")
+  (Same idempotency key = same refund. Idempotent.)
+
+Step 3: Create Shipment
+  → INSERT INTO shipments (order_id, status)
+    ON CONFLICT (order_id) DO UPDATE SET status = 'pending';
+  Compensation: UPDATE shipments SET status = 'cancelled' WHERE order_id = $1;
+  (Setting status to 'cancelled' twice = still cancelled. Idempotent.)</code></pre>
+
+      <h3 id="pattern-state-machine">State Machine as Idempotency Guard</h3>
+      <pre><code>// Use state machine transitions to enforce idempotency
+// Only valid transitions are processed; invalid ones are no-ops
+
+const ORDER_TRANSITIONS = {
+  'created':    ['payment_pending'],
+  'payment_pending': ['paid', 'payment_failed'],
+  'paid':       ['shipped'],
+  'shipped':    ['delivered'],
+  'delivered':  [],  // terminal state
+  'payment_failed': ['payment_pending'],  // can retry payment
+};
+
+async function transitionOrder(orderId, fromState, toState) {
+  // Atomic state transition — only succeeds if current state matches
+  const result = await db.query(`
+    UPDATE orders SET status = $1, updated_at = NOW()
+    WHERE id = $2 AND status = $3
+    RETURNING *
+  `, [toState, orderId, fromState]);
+
+  if (result.rowCount === 0) {
+    // Either order doesn't exist, or it's already past this state
+    const current = await db.query('SELECT status FROM orders WHERE id = $1', [orderId]);
+    if (current.rows[0]?.status === toState) {
+      return { alreadyTransitioned: true };  // Idempotent — already in target state
+    }
+    throw new InvalidTransitionError(`Cannot transition from ${current.rows[0]?.status} to ${toState}`);
+  }
+
+  return result.rows[0];
+}
+
+// Usage: calling transitionOrder('ord-123', 'paid', 'shipped') twice
+// → First call: updates status to 'shipped'
+// → Second call: returns { alreadyTransitioned: true } — no-op, idempotent!</code></pre>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           12. COMMON PITFALLS
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="pitfalls">Common Pitfalls</h2>
+
+      <table class="db-table">
+        <thead><tr><th>Pitfall</th><th>Problem</th><th>Solution</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Generate key server-side</strong></td><td>Client can't retry with same key if first request times out</td><td>Always generate idempotency keys client-side</td></tr>
+          <tr><td><strong>No TTL on keys</strong></td><td>Idempotency store grows unbounded → OOM</td><td>Always set TTL (24h is standard)</td></tr>
+          <tr><td><strong>Read-then-write check</strong></td><td>Race condition: two requests both read "not exists", both write</td><td>Use atomic upserts or distributed locks</td></tr>
+          <tr><td><strong>Caching errors</strong></td><td>Client can't retry after transient server failures</td><td>Only cache successful responses + client errors (4xx), not server errors (5xx)</td></tr>
+          <tr><td><strong>Ignoring parameter binding</strong></td><td>Same key, different parameters could execute a different operation</td><td>Hash request params and verify on retry (like Stripe)</td></tr>
+          <tr><td><strong>Using timestamps as keys</strong></td><td>Two requests in the same millisecond get the same key</td><td>Use UUIDs or crypto-random strings</td></tr>
+          <tr><td><strong>Single-layer dedup only</strong></td><td>Duplicates can enter at different layers (API, queue, DB)</td><td>Defense in depth — dedup at multiple layers</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ═══════════════════════════════════════════════════════════════════════
+           13. SUMMARY
+           ═══════════════════════════════════════════════════════════════════════ -->
+      <h2 id="summary">Summary</h2>
+      <ul>
+        <li><strong>Idempotency</strong> means an operation can be applied multiple times without changing the result beyond the first application: <code>f(f(x)) = f(x)</code>.</li>
+        <li><strong>Networks are unreliable.</strong> Retries are inevitable. Without idempotency, retries cause duplicate charges, orders, and data corruption.</li>
+        <li><strong>Naturally idempotent</strong> operations (GET, PUT, DELETE, absolute writes) need no special handling. <strong>Non-idempotent</strong> operations (POST, increments, relative writes) need idempotency keys.</li>
+        <li><strong>Idempotency keys</strong> are client-generated unique identifiers. The server stores <code>key → response</code> and returns the cached response on retries.</li>
+        <li><strong>Implementation</strong>: Use Redis for speed or a database table (same transaction) for ACID guarantees. Always set a TTL for cleanup.</li>
+        <li><strong>Delivery guarantees</strong>: at-most-once (may lose), at-least-once (may duplicate), exactly-once (= at-least-once + idempotent consumer).</li>
+        <li><strong>Kafka EOS</strong>: idempotent producer (PID + sequence numbers) + transactions (atomic multi-partition writes) + <code>read_committed</code> consumers.</li>
+        <li><strong>Stripe</strong>: the gold standard — 24h TTL, parameter binding, recovery points for complex operations.</li>
+        <li><strong>Database upserts</strong> (<code>ON CONFLICT</code>) provide idempotency at the storage layer.</li>
+        <li><strong>Defense in depth</strong>: dedup at API gateway, application, message broker, consumer, and database layers.</li>
+      </ul>
+
+      <p>In the next post, we'll shift gears to <strong>Architecture Patterns</strong> and explore <strong>Microservices</strong> — how to decompose a monolith into independently deployable services, and the distributed systems challenges (including idempotency!) that come with it.</p>
+
+      <nav class="post-nav">
+        <a class="prev" href="leader-election.html"><span>Previous</span><span>&#8592; Leader Election</span></a>
+        <a class="next" href="../architecture-patterns/microservices.html"><span>Next</span><span>Microservices &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../script.js"></script>
+  <script src="../../blog.js"></script>
+  <script src="../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function clearSvg(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    function multiline(parent,lines,attrs){
+      var base=Object.assign({},attrs);
+      var startY=parseFloat(base.y)||0;
+      var lineH=parseFloat(base['line-height'])||16;
+      delete base['line-height'];
+      for(var i=0;i<lines.length;i++){
+        var a=Object.assign({},base);
+        a.y=''+(startY+i*lineH);
+        parent.appendChild(txt(lines[i],a));
+      }
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+       ANIMATION 1 — Idempotency Key Flow
+       ════════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('idem-svg'),info=document.getElementById('idem-info'),out=document.getElementById('idem-output');
+      var step=0,totalSteps=7;
+      var brandGreen='#0a8f6a',dangerRed='#e74c3c',warnAmber='#f59e0b',blue='#3b82f6',mutedGray='#94a3b8';
+
+      function arrow(x1,y1,x2,y2,color,dashed){
+        var g=el('g',{});
+        var attrs={x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color||brandGreen,'stroke-width':'2','marker-end':'url(#arrow-'+color.replace('#','')+')'};
+        if(dashed)attrs['stroke-dasharray']='6,4';
+        g.appendChild(el('line',attrs));
+        return g;
+      }
+      function addArrowMarker(svgEl,color){
+        var defs=svgEl.querySelector('defs');
+        if(!defs){defs=el('defs',{});svgEl.insertBefore(defs,svgEl.firstChild);}
+        var id='arrow-'+color.replace('#','');
+        if(document.getElementById(id))return;
+        var m=el('marker',{id:id,viewBox:'0 0 10 7',refX:'10',refY:'3.5',markerWidth:'8',markerHeight:'6',orient:'auto-start-reverse'});
+        m.appendChild(el('polygon',{points:'0 0, 10 3.5, 0 7',fill:color}));
+        defs.appendChild(m);
+      }
+      function box(x,y,w,h,fill,stroke,rx){
+        return el('rect',{x:''+x,y:''+y,width:''+w,height:''+h,rx:''+(rx||8),fill:fill||'none',stroke:stroke||'var(--line)','stroke-width':'1.5'});
+      }
+      function labelBox(x,y,w,h,label,fill,textColor){
+        var g=el('g',{});
+        g.appendChild(box(x,y,w,h,fill||'rgba(10,143,106,0.08)',brandGreen));
+        g.appendChild(txt(label,{x:''+(x+w/2),y:''+(y+h/2+4),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:textColor||brandGreen}));
+        return g;
+      }
+
+      function draw(){
+        clearSvg(svg);
+        addArrowMarker(svg,brandGreen);
+        addArrowMarker(svg,dangerRed);
+        addArrowMarker(svg,blue);
+        addArrowMarker(svg,mutedGray);
+        addArrowMarker(svg,warnAmber);
+
+        var clientX=40,serverX=300,storeX=540;
+        var headerY=20;
+
+        // Entities
+        svg.appendChild(labelBox(clientX,headerY,100,30,'CLIENT','rgba(59,130,246,0.1)',blue));
+        svg.appendChild(labelBox(serverX,headerY,120,30,'SERVER','rgba(10,143,106,0.1)',brandGreen));
+        svg.appendChild(labelBox(storeX,headerY,130,30,'IDEM STORE','rgba(245,158,11,0.1)',warnAmber));
+
+        // Lifelines
+        var lifeTop=60,lifeBot=320;
+        svg.appendChild(el('line',{x1:''+(clientX+50),y1:''+lifeTop,x2:''+(clientX+50),y2:''+lifeBot,stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'4,4'}));
+        svg.appendChild(el('line',{x1:''+(serverX+60),y1:''+lifeTop,x2:''+(serverX+60),y2:''+lifeBot,stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'4,4'}));
+        svg.appendChild(el('line',{x1:''+(storeX+65),y1:''+lifeTop,x2:''+(storeX+65),y2:''+lifeBot,stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'4,4'}));
+
+        if(step>=0){
+          // Step 0: Title
+          svg.appendChild(txt('WITH Idempotency Keys',{x:'350',y:'75','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:brandGreen}));
+          info.textContent='Step through to see how idempotency keys prevent double-charging.';
+        }
+        if(step>=1){
+          // Step 1: Client sends POST with key
+          var y=95;
+          svg.appendChild(arrow(clientX+50,y,serverX+60,y+15,blue,false));
+          svg.appendChild(txt('POST /charge',{x:'175',y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:blue}));
+          svg.appendChild(txt('Key: abc123',{x:'175',y:''+(y+7),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:mutedGray}));
+          info.textContent='1. Client sends POST /charge with Idempotency-Key: abc123';
+        }
+        if(step>=2){
+          // Step 2: Server checks store → not found → processes → stores
+          var y=125;
+          svg.appendChild(arrow(serverX+60,y,storeX+65,y+5,warnAmber,false));
+          svg.appendChild(txt('LOOKUP abc123',{x:''+(serverX+60+(storeX+65-serverX-60)/2),y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:warnAmber}));
+
+          var y2=145;
+          svg.appendChild(arrow(storeX+65,y2,serverX+60,y2+5,warnAmber,true));
+          svg.appendChild(txt('NOT FOUND',{x:''+(serverX+60+(storeX+65-serverX-60)/2),y:''+(y2-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:warnAmber}));
+
+          // Process + store
+          var y3=168;
+          svg.appendChild(el('rect',{x:''+(serverX+30),y:''+y3,width:'60',height:'18',rx:'3',fill:'rgba(10,143,106,0.15)',stroke:brandGreen,'stroke-width':'1'}));
+          svg.appendChild(txt('Process',{x:''+(serverX+60),y:''+(y3+13),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:brandGreen}));
+
+          var y4=192;
+          svg.appendChild(arrow(serverX+60,y4,storeX+65,y4+5,brandGreen,false));
+          svg.appendChild(txt('STORE abc123 → {charged: $20}',{x:''+(serverX+60+(storeX+65-serverX-60)/2),y:''+(y4-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:brandGreen}));
+
+          info.textContent='2. Server checks store → not found → processes charge → caches response with key.';
+        }
+        if(step>=3){
+          // Step 3: Response back to client but TIMEOUT
+          var y=215;
+          svg.appendChild(arrow(serverX+60,y,clientX+100,y+10,dangerRed,true));
+          svg.appendChild(txt('200 OK {charged: $20}',{x:'175',y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:mutedGray}));
+          // X mark for timeout
+          svg.appendChild(txt('✗ TIMEOUT',{x:'175',y:''+(y+20),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'11',fill:dangerRed}));
+          info.textContent='3. Server sends 200 OK, but response is LOST (network timeout). Client never sees it!';
+        }
+        if(step>=4){
+          // Step 4: Client retries with same key
+          var y=250;
+          svg.appendChild(arrow(clientX+50,y,serverX+60,y+10,blue,false));
+          svg.appendChild(txt('RETRY: POST /charge',{x:'175',y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'10',fill:blue}));
+          svg.appendChild(txt('Key: abc123 (same!)',{x:'175',y:''+(y+7),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:blue}));
+          info.textContent='4. Client retries the SAME request with the SAME idempotency key: abc123.';
+        }
+        if(step>=5){
+          // Step 5: Server finds cached response
+          var y=275;
+          svg.appendChild(arrow(serverX+60,y,storeX+65,y+5,warnAmber,false));
+          svg.appendChild(txt('LOOKUP abc123',{x:''+(serverX+60+(storeX+65-serverX-60)/2),y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:warnAmber}));
+
+          var y2=290;
+          svg.appendChild(arrow(storeX+65,y2,serverX+60,y2+5,brandGreen,false));
+          svg.appendChild(txt('FOUND → {charged: $20}',{x:''+(serverX+60+(storeX+65-serverX-60)/2),y:''+(y2-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:brandGreen}));
+          info.textContent='5. Server finds cached response for abc123 → returns it WITHOUT re-processing.';
+        }
+        if(step>=6){
+          // Step 6: Cached response sent back
+          var y=308;
+          svg.appendChild(arrow(serverX+60,y,clientX+50,y+5,brandGreen,false));
+          svg.appendChild(txt('200 OK {charged: $20} ← cached!',{x:'175',y:''+(y-5),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'9',fill:brandGreen}));
+
+          // Success badge
+          svg.appendChild(el('rect',{x:'130',y:'318',width:'210',height:'18',rx:'4',fill:'rgba(10,143,106,0.15)'}));
+          svg.appendChild(txt('✓ Customer charged ONCE — $20 total',{x:'235',y:'331','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:brandGreen}));
+          info.textContent='6. Client receives cached response. Customer charged only ONCE ($20). Idempotency saved the day!';
+        }
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('idem-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('idem-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+
+    /* ════════════════════════════════════════════════════════════════════════
+       ANIMATION 2 — Delivery Guarantees Comparison
+       ════════════════════════════════════════════════════════════════════════ */
+    (function(){
+      var svg=document.getElementById('delivery-svg'),info=document.getElementById('delivery-info'),out=document.getElementById('delivery-output');
+      var step=0,totalSteps=5;
+      var amber='#f59e0b',blue='#3b82f6',green='#10b981',red='#e74c3c',gray='#94a3b8';
+
+      function addDefs(){
+        var defs=el('defs',{});
+        var colors={'g':green,'b':blue,'a':amber,'r':red,'gr':gray};
+        for(var id in colors){
+          var m=el('marker',{id:'da-'+id,viewBox:'0 0 10 7',refX:'10',refY:'3.5',markerWidth:'7',markerHeight:'5',orient:'auto-start-reverse'});
+          m.appendChild(el('polygon',{points:'0 0, 10 3.5, 0 7',fill:colors[id]}));
+          defs.appendChild(m);
+        }
+        svg.appendChild(defs);
+      }
+
+      function msgArrow(x1,y1,x2,y2,color,markerKey,dashed,label){
+        var g=el('g',{});
+        var attrs={x1:''+x1,y1:''+y1,x2:''+x2,y2:''+y2,stroke:color,'stroke-width':'2','marker-end':'url(#da-'+markerKey+')'};
+        if(dashed)attrs['stroke-dasharray']='5,3';
+        g.appendChild(el('line',attrs));
+        if(label){
+          var mx=(x1+x2)/2,my=(y1+y2)/2-6;
+          g.appendChild(txt(label,{x:''+mx,y:''+my,'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:color}));
+        }
+        return g;
+      }
+
+      function colTitle(x,title,color){
+        svg.appendChild(el('rect',{x:''+(x-4),y:'18',width:'210',height:'24',rx:'6',fill:color,opacity:'0.12'}));
+        svg.appendChild(txt(title,{x:''+(x+100),y:'35','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:color}));
+      }
+
+      function entityLabels(x,py,cy){
+        svg.appendChild(txt('Producer',{x:''+(x+10),y:''+(py-5),'font-family':'Manrope,sans-serif','font-weight':'700','font-size':'9',fill:'var(--ink)'}));
+        svg.appendChild(txt('Consumer',{x:''+(x+145),y:''+(cy-5),'font-family':'Manrope,sans-serif','font-weight':'700','font-size':'9',fill:'var(--ink)'}));
+        svg.appendChild(el('circle',{cx:''+(x+20),cy:''+py,r:'6',fill:'var(--ink)',opacity:'0.2'}));
+        svg.appendChild(el('circle',{cx:''+(x+180),cy:''+cy,r:'6',fill:'var(--ink)',opacity:'0.2'}));
+        svg.appendChild(el('line',{x1:''+(x+20),y1:''+(py+8),x2:''+(x+20),y2:'300',stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'3,3'}));
+        svg.appendChild(el('line',{x1:''+(x+180),y1:''+(cy+8),x2:''+(x+180),y2:'300',stroke:'var(--line)','stroke-width':'1','stroke-dasharray':'3,3'}));
+      }
+
+      function draw(){
+        clearSvg(svg);
+        addDefs();
+
+        // Three columns
+        var col1=10,col2=240,col3=470;
+        var py=65,cy=65;
+
+        if(step===0){
+          svg.appendChild(txt('Three Delivery Guarantees',{x:'350',y:'30','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'15',fill:'var(--ink)'}));
+          svg.appendChild(txt('Step through to see how each handles network failures.',{x:'350',y:'50','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'11',fill:gray}));
+
+          // Draw 3 cards
+          var labels=['At-Most-Once','At-Least-Once','Exactly-Once'];
+          var colors=[amber,blue,green];
+          var descs=['May lose messages','May duplicate messages','Perfect (but hard!)'];
+          for(var i=0;i<3;i++){
+            var cx=75+i*210,cy2=140;
+            svg.appendChild(el('rect',{x:''+(cx-60),y:''+(cy2-30),width:'160',height:'80',rx:'10',fill:colors[i],opacity:'0.1',stroke:colors[i],'stroke-width':'2'}));
+            svg.appendChild(txt(labels[i],{x:''+cx,y:''+(cy2),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'13',fill:colors[i]}));
+            svg.appendChild(txt(descs[i],{x:''+cx,y:''+(cy2+18),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:gray}));
+          }
+          svg.appendChild(txt('Guarantee strength →',{x:'350',y:'250','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'11',fill:gray}));
+          svg.appendChild(el('line',{x1:'120',y1:'260',x2:'580',y2:'260',stroke:gray,'stroke-width':'2','marker-end':'url(#da-gr)'}));
+          svg.appendChild(txt('Complexity / Cost →',{x:'350',y:'278','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:gray}));
+          info.textContent='Three delivery semantics: at-most-once, at-least-once, exactly-once.';
+        }
+        else if(step===1){
+          // At-most-once
+          colTitle(col1,'At-Most-Once (fire & forget)',amber);
+          entityLabels(col1,py,cy);
+
+          var y=90;
+          svg.appendChild(msgArrow(col1+20,y,col1+180,y+12,amber,'a',false,'msg "A"'));
+          svg.appendChild(txt('✓ delivered',{x:''+(col1+180),y:''+(y+25),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'8',fill:green}));
+
+          var y2=135;
+          svg.appendChild(msgArrow(col1+20,y2,col1+100,y2+6,red,'r',false,'msg "B"'));
+          svg.appendChild(txt('✗',{x:''+(col1+110),y:''+(y2+2),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:red}));
+          svg.appendChild(txt('LOST!',{x:''+(col1+110),y:''+(y2+15),'text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'10',fill:red}));
+
+          var y3=175;
+          svg.appendChild(msgArrow(col1+20,y3,col1+180,y3+12,amber,'a',false,'msg "C"'));
+          svg.appendChild(txt('✓ delivered',{x:''+(col1+180),y:''+(y3+25),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'8',fill:green}));
+
+          // Result
+          svg.appendChild(el('rect',{x:''+(col1),y:'230',width:'205',height:'45',rx:'8',fill:'rgba(245,158,11,0.08)',stroke:amber,'stroke-width':'1'}));
+          svg.appendChild(txt('Result: Consumer got A, C',{x:''+(col1+102),y:'250','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:amber}));
+          svg.appendChild(txt('B was lost — no retry!',{x:''+(col1+102),y:'265','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:red}));
+
+          info.textContent='At-Most-Once: Producer sends and forgets. Message B is lost — no retry, no duplicate.';
+        }
+        else if(step===2){
+          // At-least-once
+          colTitle(col1,'At-Least-Once (retry until ACK)',blue);
+          entityLabels(col1,py,cy);
+
+          var y=90;
+          svg.appendChild(msgArrow(col1+20,y,col1+180,y+12,blue,'b',false,'msg "A"'));
+          svg.appendChild(msgArrow(col1+180,y+20,col1+20,y+30,green,'g',true,'ACK'));
+
+          var y2=140;
+          svg.appendChild(msgArrow(col1+20,y2,col1+180,y2+12,blue,'b',false,'msg "B"'));
+          svg.appendChild(txt('✓ processed',{x:''+(col1+180),y:''+(y2+25),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'8',fill:green}));
+          // ACK lost
+          svg.appendChild(msgArrow(col1+180,y2+22,col1+100,y2+28,red,'r',true,'ACK'));
+          svg.appendChild(txt('✗ ACK lost',{x:''+(col1+100),y:''+(y2+25),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:red}));
+
+          var y3=195;
+          svg.appendChild(msgArrow(col1+20,y3,col1+180,y3+12,blue,'b',false,'RETRY msg "B"'));
+          svg.appendChild(txt('⚠ processed AGAIN',{x:''+(col1+180),y:''+(y3+25),'text-anchor':'end','font-family':'Consolas,monospace','font-size':'8',fill:amber}));
+          svg.appendChild(msgArrow(col1+180,y3+22,col1+20,y3+30,green,'g',true,'ACK'));
+
+          svg.appendChild(el('rect',{x:''+(col1),y:'255',width:'205',height:'45',rx:'8',fill:'rgba(59,130,246,0.08)',stroke:blue,'stroke-width':'1'}));
+          svg.appendChild(txt('Result: Consumer got A, B, B',{x:''+(col1+102),y:'275','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:blue}));
+          svg.appendChild(txt('B processed TWICE — duplicate!',{x:''+(col1+102),y:'290','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:red}));
+
+          info.textContent='At-Least-Once: ACK for B was lost → producer retried → consumer processed B twice!';
+        }
+        else if(step===3){
+          // Exactly-once
+          colTitle(col1,'Exactly-Once (at-least-once + dedup)',green);
+          entityLabels(col1,py,cy);
+
+          var y=90;
+          svg.appendChild(msgArrow(col1+20,y,col1+180,y+12,green,'g',false,'msg "A" id=1'));
+          svg.appendChild(msgArrow(col1+180,y+20,col1+20,y+30,green,'g',true,'ACK'));
+
+          var y2=140;
+          svg.appendChild(msgArrow(col1+20,y2,col1+180,y2+12,green,'g',false,'msg "B" id=2'));
+          svg.appendChild(txt('✓ processed (id=2 new)',{x:''+(col1+182),y:''+(y2+25),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'7',fill:green}));
+          svg.appendChild(msgArrow(col1+180,y2+22,col1+100,y2+28,red,'r',true,'ACK'));
+          svg.appendChild(txt('✗ lost',{x:''+(col1+98),y:''+(y2+22),'text-anchor':'middle','font-family':'Consolas,monospace','font-size':'8',fill:red}));
+
+          var y3=195;
+          svg.appendChild(msgArrow(col1+20,y3,col1+180,y3+12,blue,'b',false,'RETRY msg "B" id=2'));
+          svg.appendChild(txt('id=2 seen → SKIP',{x:''+(col1+182),y:''+(y3+25),'text-anchor':'start','font-family':'Consolas,monospace','font-size':'7',fill:amber}));
+          svg.appendChild(msgArrow(col1+180,y3+22,col1+20,y3+30,green,'g',true,'ACK'));
+
+          svg.appendChild(el('rect',{x:''+(col1),y:'255',width:'205',height:'45',rx:'8',fill:'rgba(16,185,129,0.08)',stroke:green,'stroke-width':'1'}));
+          svg.appendChild(txt('Result: Consumer got A, B',{x:''+(col1+102),y:'275','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:green}));
+          svg.appendChild(txt('Retry detected by id=2 → no dup!',{x:''+(col1+102),y:'290','text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'9',fill:green}));
+
+          info.textContent='Exactly-Once: Retry of B detected via message id → consumer skips duplicate. Perfect delivery!';
+        }
+        else if(step===4){
+          // Summary comparison
+          svg.appendChild(txt('Delivery Guarantees — Summary',{x:'350',y:'30','text-anchor':'middle','font-family':'Syne,sans-serif','font-weight':'700','font-size':'14',fill:'var(--ink)'}));
+
+          var rows=[
+            {label:'At-Most-Once',color:amber,lost:'YES',dup:'NO',complex:'Low',use:'Metrics, logs'},
+            {label:'At-Least-Once',color:blue,lost:'NO',dup:'YES',complex:'Medium',use:'Most systems'},
+            {label:'Exactly-Once',color:green,lost:'NO',dup:'NO',complex:'High',use:'Payments, finance'}
+          ];
+          // Header
+          var hx=[50,200,290,370,450,560],hy=60;
+          var headers=['Guarantee','Lost?','Duplicates?','Complexity','Best For'];
+          for(var h=0;h<headers.length;h++){
+            svg.appendChild(txt(headers[h],{x:''+hx[h+1],y:''+hy,'text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:'var(--ink)'}));
+          }
+          svg.appendChild(el('line',{x1:'50',y1:'68',x2:'660',y2:'68',stroke:'var(--line)','stroke-width':'1'}));
+
+          for(var r=0;r<rows.length;r++){
+            var ry=90+r*55;
+            svg.appendChild(el('rect',{x:'50',y:''+(ry-12),width:'610',height:'45',rx:'6',fill:rows[r].color,opacity:'0.06'}));
+            svg.appendChild(txt(rows[r].label,{x:''+hx[0],y:''+(ry+5),'font-family':'Syne,sans-serif','font-weight':'700','font-size':'12',fill:rows[r].color}));
+            svg.appendChild(txt(rows[r].lost,{x:''+hx[1],y:''+(ry+5),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'11',fill:rows[r].lost==='YES'?red:green}));
+            svg.appendChild(txt(rows[r].dup,{x:''+hx[2],y:''+(ry+5),'text-anchor':'middle','font-family':'Consolas,monospace','font-weight':'700','font-size':'11',fill:rows[r].dup==='YES'?red:green}));
+            svg.appendChild(txt(rows[r].complex,{x:''+hx[3],y:''+(ry+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+            svg.appendChild(txt(rows[r].use,{x:''+hx[4],y:''+(ry+5),'text-anchor':'middle','font-family':'Manrope,sans-serif','font-size':'10',fill:'var(--ink)'}));
+
+            // Sub-text
+            var sub=r===0?'Fire & forget — simple, fast, lossy':r===1?'Retry until ACK — reliable but may duplicate':'At-least-once + idempotent consumer';
+            svg.appendChild(txt(sub,{x:''+hx[0],y:''+(ry+20),'font-family':'Manrope,sans-serif','font-size':'9',fill:gray}));
+          }
+
+          svg.appendChild(el('rect',{x:'100',y:'265',width:'500',height:'30',rx:'8',fill:'rgba(16,185,129,0.1)',stroke:green,'stroke-width':'1.5'}));
+          svg.appendChild(txt('Exactly-once = at-least-once delivery + idempotent consumer (the practical approach)',{x:'350',y:'284','text-anchor':'middle','font-family':'Manrope,sans-serif','font-weight':'700','font-size':'10',fill:green}));
+
+          info.textContent='Summary: Most systems use at-least-once delivery + idempotent consumers for "effectively exactly-once."';
+        }
+
+        out.textContent=(step+1)+' of '+totalSteps;
+      }
+
+      draw();
+      document.getElementById('delivery-step').addEventListener('click',function(){if(step<totalSteps-1){step++;draw();}});
+      document.getElementById('delivery-reset').addEventListener('click',function(){step=0;draw();});
+    })();
+  })();
+  </script>
+</body>
+</html>

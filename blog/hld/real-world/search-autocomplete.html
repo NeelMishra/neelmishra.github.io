@@ -1,0 +1,1270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Design Search Autocomplete: Trie-based prefix matching, top-K optimization, MapReduce data pipeline, caching strategies, and scaling for 10 billion queries per day.">
+  <title>Design: Search Autocomplete | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../blog.html">High Level Design Series &middot; Real-World Designs</a><span>&middot; Part 50 of 70</span></div>
+
+      <h1>Design: Search Autocomplete</h1>
+      <p class="post-meta">April 2026 &middot; 26 min read</p>
+
+      <!-- ================================================================ -->
+      <!--  1. PROBLEM STATEMENT                                            -->
+      <!-- ================================================================ -->
+      <h2 id="problem">Problem Statement</h2>
+      <p>When a user starts typing a query into a search box, the system should return the <strong>top 5 most relevant suggestions</strong> almost instantaneously. This feature — search autocomplete (also called typeahead) — is one of the most visible and latency-sensitive components in any search engine.</p>
+
+      <p>Think about typing "how to" in Google. Before you finish typing the third character, five completions appear. Those suggestions are drawn from <strong>billions of historical queries</strong>, ranked by frequency (and personalization), and delivered in <strong>under 100 milliseconds</strong>.</p>
+
+      <p>The challenge: how do we build a system that indexes billions of queries and returns prefix-matched results in sub-100ms — at the scale of <strong>10 billion queries per day</strong>?</p>
+
+      <!-- ================================================================ -->
+      <!--  2. REQUIREMENTS                                                 -->
+      <!-- ================================================================ -->
+      <h2 id="requirements">Requirements</h2>
+
+      <h3>Functional Requirements</h3>
+      <ul>
+        <li>Given a prefix string typed by the user, return the <strong>top 5 most frequently searched completions</strong></li>
+        <li>Suggestions must update with <strong>each keystroke</strong> (character-by-character)</li>
+        <li>Support English language initially (multi-language as extension)</li>
+        <li>Only suggest queries that have appeared with sufficient frequency (no one-off typos)</li>
+      </ul>
+
+      <h3>Non-Functional Requirements</h3>
+      <ul>
+        <li><strong>Latency:</strong> &lt; 100ms end-to-end for suggestion retrieval</li>
+        <li><strong>Scale:</strong> Handle ~10 billion search queries per day (≈ 115,000 QPS average, ~400K QPS peak)</li>
+        <li><strong>Availability:</strong> 99.99% uptime — degraded autocomplete is better than no autocomplete</li>
+        <li><strong>Freshness:</strong> Incorporate trending queries within hours, not days</li>
+      </ul>
+
+      <h3>Back-of-the-Envelope Estimation</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Metric</th><th style="text-align:left; padding:0.5em;">Estimate</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Daily queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">10 billion</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Unique queries</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~1 billion (high duplication)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Average QPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~115K</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Peak QPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~400K (3.5× average)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Autocomplete requests per query</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~4 (avg 4 chars typed before selection)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Autocomplete QPS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~460K avg, ~1.6M peak</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Avg query length</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~20 characters (4-5 words)</td></tr>
+          <tr><td style="padding:0.5em;">Storage for unique queries</td><td style="padding:0.5em;">~20 GB (1B × 20 bytes avg)</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Key insight:</strong> The autocomplete request volume is a <em>multiple</em> of the search volume because each search generates multiple prefix requests. But the good news is that prefix queries are <strong>extremely cacheable</strong> — millions of users type the same prefixes.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  3. HIGH-LEVEL ARCHITECTURE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="architecture">High-Level Architecture</h2>
+      <p>The system naturally splits into two major subsystems:</p>
+      <ol>
+        <li><strong>Data Collection &amp; Aggregation Service</strong> — collects raw search queries, aggregates frequencies, and builds the suggestion index offline</li>
+        <li><strong>Serving Service</strong> — receives a prefix from the user and returns top-5 suggestions in real time using a precomputed trie</li>
+      </ol>
+
+      <pre><code>┌──────────────┐     ┌───────────────────┐     ┌──────────────────┐
+│  User types  │────▶│  API Gateway /    │────▶│  Autocomplete    │
+│  "tre..."    │     │  Load Balancer    │     │  Service (Trie)  │
+└──────────────┘     └───────────────────┘     └──────────────────┘
+                                                        │
+                                                        ▼
+                                               ┌──────────────────┐
+                                               │  Trie Cluster    │
+                                               │  (in-memory)     │
+                                               └──────────────────┘
+
+┌──────────────┐     ┌───────────────────┐     ┌──────────────────┐
+│  Search Logs │────▶│  Aggregation      │────▶│  Trie Builder    │
+│  (raw)       │     │  (MapReduce/Spark)│     │  (offline)       │
+└──────────────┘     └───────────────────┘     └──────────────────┘</code></pre>
+
+      <p>The key design principle: <strong>separate the read path from the write path</strong>. The serving layer is optimized for ultra-fast reads. The data pipeline updates the trie periodically (not in real-time) to avoid the complexity and latency of online updates.</p>
+
+      <!-- ================================================================ -->
+      <!--  4. THE TRIE DATA STRUCTURE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="trie">The Trie Data Structure</h2>
+      <p>A <strong>trie</strong> (prefix tree) is the foundational data structure for autocomplete. Each node represents a character, and paths from root to leaf (or marked internal node) represent complete strings. Crucially, all strings sharing a common prefix share the same path in the trie.</p>
+
+      <h3>Basic Trie Structure</h3>
+      <pre><code>class TrieNode:
+    def __init__(self):
+        self.children = {}          # char → TrieNode
+        self.is_end_of_word = False
+        self.frequency = 0          # search frequency (only at word-end nodes)
+
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def insert(self, word: str, freq: int):
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
+        node.frequency = freq
+
+    def search_prefix(self, prefix: str) -> TrieNode:
+        """Navigate to the node representing the prefix."""
+        node = self.root
+        for char in prefix:
+            if char not in node.children:
+                return None
+            node = node.children[char]
+        return node</code></pre>
+
+      <h3>Problem with Naive Trie Search</h3>
+      <p>To find the top-5 suggestions for prefix "tre", the naive approach traverses to node <code>t → r → e</code>, then performs a <strong>DFS of the entire subtree</strong> to collect all complete words and sort by frequency. This is <strong>O(n)</strong> where <em>n</em> is the number of strings with that prefix — potentially millions for popular prefixes.</p>
+
+      <pre><code>def naive_top_k(self, prefix: str, k: int = 5):
+    """O(n) approach — TOO SLOW for production."""
+    node = self.search_prefix(prefix)
+    if not node:
+        return []
+    results = []
+    self._dfs_collect(node, prefix, results)
+    results.sort(key=lambda x: -x[1])  # Sort by frequency desc
+    return results[:k]
+
+def _dfs_collect(self, node, current, results):
+    if node.is_end_of_word:
+        results.append((current, node.frequency))
+    for char, child in node.children.items():
+        self._dfs_collect(child, current + char, results)</code></pre>
+
+      <div class="callout">
+        <strong>Why naive search fails:</strong> The prefix "th" could match millions of queries (the, that, this, then, there, ...). We cannot afford to traverse millions of nodes on every keystroke at &lt;100ms latency.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  5. TOP-K OPTIMIZATION                                           -->
+      <!-- ================================================================ -->
+      <h2 id="topk">Top-K Optimization</h2>
+      <p>The critical optimization: <strong>precompute and cache the top-K results at every trie node</strong>. Instead of traversing the subtree at query time, each node stores a sorted list of the K most frequent completions reachable from that node.</p>
+
+      <h3>Enhanced Trie Node</h3>
+      <pre><code>class OptimizedTrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end_of_word = False
+        self.frequency = 0
+        self.top_k = []  # List of (query_string, frequency) — precomputed!
+
+class OptimizedTrie:
+    K = 5  # top-K suggestions
+
+    def build_top_k(self, node, current_prefix=""):
+        """
+        Bottom-up: collect top-K from all children,
+        merge with self (if end-of-word), keep top K.
+        """
+        candidates = []
+
+        # If this node marks a complete query, include it
+        if node.is_end_of_word:
+            candidates.append((current_prefix, node.frequency))
+
+        # Collect top-K from each child subtree
+        for char, child in node.children.items():
+            self.build_top_k(child, current_prefix + char)
+            candidates.extend(child.top_k)
+
+        # Sort by frequency (descending) and keep top K
+        candidates.sort(key=lambda x: -x[1])
+        node.top_k = candidates[:self.K]
+
+    def autocomplete(self, prefix: str):
+        """O(L) lookup where L = prefix length. Constant time after navigation!"""
+        node = self.root
+        for char in prefix:
+            if char not in node.children:
+                return []
+            node = node.children[char]
+        return node.top_k  # Already precomputed!</code></pre>
+
+      <h3>Time Complexity Comparison</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Approach</th><th style="text-align:left; padding:0.5em;">Query Time</th><th style="text-align:left; padding:0.5em;">Space</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Naive DFS</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">O(L + n log n) where n = subtree size</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">O(total chars)</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">Precomputed Top-K</td><td style="padding:0.5em; border-bottom:1px solid var(--line);"><strong>O(L)</strong> where L = prefix length</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">O(total chars × K)</td></tr>
+          <tr><td style="padding:0.5em;">Precomputed + Cache</td><td style="padding:0.5em;"><strong>O(1)</strong> — cache hit</td><td style="padding:0.5em;">O(total chars × K + cache)</td></tr>
+        </tbody>
+      </table>
+
+      <p>The space increase is modest. Each node stores K pointers (or short strings). For K=5, that's 5 extra references per node. The query speedup — from potentially millions of nodes traversed to just following L character edges — is the difference between 500ms and 0.5ms.</p>
+
+      <!-- ================================================================ -->
+      <!--  ANIMATION 1: TRIE TRAVERSAL                                     -->
+      <!-- ================================================================ -->
+      <div class="anim-container" id="trie-anim">
+        <h4>&#9654; Trie Traversal: Prefix Search with Top-K</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch the trie traversal as the user types "tre" — each keystroke navigates one level deeper, and the top-5 suggestions are shown from the precomputed list at each node.</p>
+        <svg id="trie-svg" width="720" height="410" viewBox="0 0 720 410"></svg>
+        <div id="trie-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="trie-step">Step &rarr;</button>
+          <button class="anim-btn" id="trie-reset">Reset</button>
+          <span class="anim-output" id="trie-output"></span>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  6. TRIE STORAGE & SERIALIZATION                                 -->
+      <!-- ================================================================ -->
+      <h2 id="storage">Trie Storage &amp; Serialization</h2>
+      <p>For production, we need to persist the trie so it can be loaded into memory on server startup, replicated across nodes, and backed up. There are several strategies:</p>
+
+      <h3>Option 1: Serialize to Binary File</h3>
+      <p>Flatten the trie into a compact binary format using level-order (BFS) or pre-order (DFS) traversal. Each node is stored as:</p>
+      <pre><code>struct SerializedNode {
+    char character;        // 1 byte
+    uint8_t num_children;  // 1 byte
+    bool is_end;           // 1 bit (packed)
+    uint32_t frequency;    // 4 bytes (if is_end)
+    TopK top_k[5];         // 5 × (string_offset + frequency) = 5 × 8 = 40 bytes
+}
+// Total per node: ~46 bytes + variable-length top-K strings</code></pre>
+
+      <p>For 1 billion unique queries with average length 20, the trie has roughly <strong>5–10 billion nodes</strong> (due to shared prefixes). At ~50 bytes/node, that's <strong>250–500 GB</strong> — too large for a single machine's memory.</p>
+
+      <h3>Option 2: Key-Value Store (Distributed)</h3>
+      <p>Each trie node is serialized and stored in a distributed key-value store (e.g., Redis, DynamoDB). The key is the prefix string; the value is the top-K list for that prefix:</p>
+      <pre><code># Key-Value Store Schema
+Key: prefix string (e.g., "tre")
+Value: JSON array of top-K suggestions
+
+Example entries:
+"t"   → [("the", 980M), ("to", 720M), ("this", 650M), ("that", 600M), ("time", 450M)]
+"tr"  → [("trump", 85M), ("translate", 70M), ("tree", 60M), ("trend", 55M), ("travel", 50M)]
+"tre" → [("tree", 60M), ("trend", 55M), ("trek", 18M), ("treasure", 12M), ("tremendous", 8M)]</code></pre>
+
+      <div class="callout">
+        <strong>Practical insight:</strong> We don't actually store the full trie in a KV store — we precompute the result for <em>every possible prefix</em> (up to some max length) and store it as a flat lookup table. This is essentially "unrolling" the trie into a hash map. For short prefixes (1–3 chars), this is a small number of keys. For longer prefixes, most are pruned because they have too few queries.
+      </div>
+
+      <h3>Option 3: Compact Trie Representations</h3>
+      <p>Several compressed trie variants reduce memory dramatically:</p>
+      <ul>
+        <li><strong>Patricia Trie (Radix Tree):</strong> Merge chains of single-child nodes into single edges. "t-r-e-e" becomes one edge "tree". Reduces node count by 50–80%.</li>
+        <li><strong>Double-Array Trie:</strong> Two parallel arrays (base[] and check[]) encode the trie compactly. Used in many production systems (e.g., <code>libdatrie</code>).</li>
+        <li><strong>Succinct Trie (LOUDS):</strong> Encode the trie structure in ~2 bits per node using the Level-Order Unary Degree Sequence. Extremely space-efficient.</li>
+      </ul>
+
+      <pre><code># Patricia Trie: Merging single-child chains
+# Before (standard trie):
+#   root → t → r → e → e (4 nodes for "tree")
+#                    → n → d (5 nodes for "trend")
+#
+# After (Patricia trie):
+#   root → "tr" → "ee" (leaf: "tree")
+#                → "end" (leaf: "trend")
+#
+# Node count: 4 vs 7 — nearly 50% reduction
+
+class PatriciaNode:
+    def __init__(self):
+        self.edge_label = ""        # compressed edge (multiple chars)
+        self.children = {}          # first char of edge → PatriciaNode
+        self.is_end = False
+        self.frequency = 0
+        self.top_k = []</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  7. DATA COLLECTION SERVICE                                      -->
+      <!-- ================================================================ -->
+      <h2 id="data-collection">Data Collection Service</h2>
+      <p>The data collection service is the offline pipeline that transforms raw search logs into the trie structure served in production.</p>
+
+      <h3>Step 1: Log Collection</h3>
+      <p>Every search query is logged with metadata:</p>
+      <pre><code>{
+  "query": "tree traversal algorithm",
+  "timestamp": "2026-04-15T14:32:01Z",
+  "user_id": "u_abc123",        // for personalization (optional)
+  "locale": "en-US",
+  "device": "mobile",
+  "result_clicked": true         // did user click a result?
+}</code></pre>
+
+      <p>Logs are written to a distributed log store (Kafka, Kinesis) in real-time. Daily volume: ~10 billion events × ~200 bytes = <strong>~2 TB/day of raw logs</strong>.</p>
+
+      <h3>Step 2: Cleaning &amp; Normalization</h3>
+      <ul>
+        <li><strong>Lowercase:</strong> "Tree" → "tree"</li>
+        <li><strong>Strip special characters:</strong> Remove non-alphanumeric except spaces</li>
+        <li><strong>Deduplicate:</strong> Same user searching "tree" 50 times in a session counts as 1</li>
+        <li><strong>Filter:</strong> Remove queries with < N occurrences (noise/typos)</li>
+        <li><strong>Filter offensive content:</strong> Blocklist + ML classifier</li>
+      </ul>
+
+      <h3>Step 3: Frequency Aggregation (MapReduce)</h3>
+      <p>The core aggregation job counts query frequencies over a time window. Here's the MapReduce design:</p>
+
+      <pre><code># === MapReduce Job: Query Frequency Aggregation ===
+
+# MAPPER: Emit (query, 1) for each valid search log
+def mapper(log_line):
+    record = parse_json(log_line)
+    query = normalize(record["query"])
+
+    # Filter: skip if query is too short, offensive, or a bot
+    if len(query) < 2 or is_offensive(query) or is_bot(record["user_id"]):
+        return
+
+    # Deduplicate per (user, query, hour) — same user same query counts once per hour
+    dedup_key = f"{record['user_id']}:{query}:{record['timestamp'][:13]}"
+    emit(query, dedup_key)  # emit query as key
+
+# COMBINER (local aggregation on mapper node):
+def combiner(query, dedup_keys):
+    unique_keys = set(dedup_keys)
+    emit(query, len(unique_keys))
+
+# REDUCER: Sum frequencies across all mappers
+def reducer(query, counts):
+    total = sum(counts)
+    if total >= MIN_FREQUENCY_THRESHOLD:  # e.g., 100
+        emit(query, total)</code></pre>
+
+      <h3>Time-Weighted Aggregation</h3>
+      <p>Queries from last week matter more than queries from last year. We use exponential decay weighting:</p>
+      <pre><code># Time-weighted frequency with exponential decay
+#
+# weight(age_in_weeks) = decay_factor ^ age_in_weeks
+#
+# Example with decay_factor = 0.85:
+#   This week:  weight = 0.85^0 = 1.00
+#   Last week:  weight = 0.85^1 = 0.85
+#   2 weeks ago: weight = 0.85^2 = 0.72
+#   4 weeks ago: weight = 0.85^4 = 0.52
+#   8 weeks ago: weight = 0.85^8 = 0.27
+#
+# weighted_freq(query) = Σ count_per_week × weight(age)
+
+def compute_weighted_frequency(query, weekly_counts):
+    """weekly_counts: [(week_offset, count), ...]"""
+    DECAY = 0.85
+    total = 0.0
+    for week_offset, count in weekly_counts:
+        weight = DECAY ** week_offset
+        total += count * weight
+    return total</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  8. TRIE BUILD PIPELINE                                          -->
+      <!-- ================================================================ -->
+      <h2 id="pipeline">Trie Build Pipeline</h2>
+      <p>The complete offline pipeline transforms raw search logs into a production-ready trie. This pipeline runs on a schedule — typically <strong>weekly for a full rebuild</strong>, with <strong>daily incremental updates</strong> for trending queries.</p>
+
+      <h3>Pipeline Stages</h3>
+      <pre><code>Stage 1: Raw Logs (Kafka/S3)
+    ↓
+Stage 2: Clean & Normalize (Spark job)
+    ↓
+Stage 3: Aggregate Frequencies (MapReduce/Spark)
+    ↓
+Stage 4: Merge with Historical Data (weighted)
+    ↓
+Stage 5: Build Trie + Precompute Top-K
+    ↓
+Stage 6: Serialize & Upload to Blob Store (S3)
+    ↓
+Stage 7: Deploy to Serving Cluster (rolling update)</code></pre>
+
+      <h3>Stage 5: Trie Construction in Detail</h3>
+      <pre><code># Build the optimized trie from frequency data
+def build_trie(query_frequencies: Dict[str, float]) -> OptimizedTrie:
+    """
+    Input: {"tree": 60_000_000, "trend": 55_000_000, ...}
+    Output: Trie with precomputed top-K at every node
+    """
+    trie = OptimizedTrie()
+
+    # Step 1: Insert all queries
+    for query, freq in query_frequencies.items():
+        node = trie.root
+        for char in query:
+            if char not in node.children:
+                node.children[char] = OptimizedTrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
+        node.frequency = freq
+
+    # Step 2: Bottom-up pass to compute top-K at every node
+    trie.build_top_k(trie.root, "")
+
+    return trie
+
+# Build top-K bottom-up (post-order DFS)
+def build_top_k(node, prefix, K=5):
+    candidates = []
+
+    if node.is_end_of_word:
+        candidates.append((prefix, node.frequency))
+
+    for char, child in sorted(node.children.items()):
+        build_top_k(child, prefix + char, K)
+        candidates.extend(child.top_k)
+
+    # Keep only top K by frequency
+    candidates.sort(key=lambda x: -x[1])
+    node.top_k = candidates[:K]</code></pre>
+
+      <h3>Stage 6–7: Deployment Strategy</h3>
+      <p>The new trie is serialized and uploaded to a blob store (S3). Serving nodes perform a <strong>rolling update</strong>:</p>
+      <ol>
+        <li>A new trie version is uploaded to S3 with a version identifier</li>
+        <li>A control plane signals serving nodes to download the new version</li>
+        <li>Each serving node downloads the trie in the background into a shadow buffer</li>
+        <li>Once loaded, the node atomically swaps the trie pointer (old → new)</li>
+        <li>No downtime: the old trie serves traffic until the swap completes</li>
+      </ol>
+
+      <pre><code># Atomic trie swap on serving node
+class AutocompleteServer:
+    def __init__(self):
+        self.current_trie = None       # Active trie
+        self.loading_trie = None       # Being loaded in background
+
+    def load_new_trie(self, s3_path):
+        """Background thread loads new trie."""
+        self.loading_trie = deserialize_trie(download(s3_path))
+
+        # Atomic swap
+        old = self.current_trie
+        self.current_trie = self.loading_trie
+        self.loading_trie = None
+        del old  # Free memory
+
+    def query(self, prefix):
+        """Reads from current_trie — never blocked by loading."""
+        return self.current_trie.autocomplete(prefix)</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  ANIMATION 2: DATA PIPELINE                                      -->
+      <!-- ================================================================ -->
+      <div class="anim-container" id="pipeline-anim">
+        <h4>&#9654; Data Pipeline: From Search Logs to Serving</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the offline data pipeline that transforms raw search logs into a production trie serving autocomplete suggestions.</p>
+        <svg id="pipeline-svg" width="720" height="200" viewBox="0 0 720 200"></svg>
+        <div id="pipeline-info" style="margin-top:0.5rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.5rem;line-height:1.5"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="pipeline-step">Step &rarr;</button>
+          <button class="anim-btn" id="pipeline-reset">Reset</button>
+          <span class="anim-output" id="pipeline-output"></span>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  9. CACHING STRATEGY                                             -->
+      <!-- ================================================================ -->
+      <h2 id="caching">Caching Strategy</h2>
+      <p>Caching is the <strong>single most important optimization</strong> in the autocomplete system. Prefix queries are extraordinarily cacheable: millions of users type the same prefixes (especially short ones like "wh", "ho", "the").</p>
+
+      <h3>Layer 1: Browser Cache (Most Important)</h3>
+      <p>Use aggressive HTTP caching headers to avoid even hitting the network for repeated prefixes:</p>
+      <pre><code># HTTP Response Headers for autocomplete API
+Cache-Control: public, max-age=3600        # Cache for 1 hour
+ETag: "trie-v2026041500"                   # Version-based ETag
+Vary: Accept-Encoding
+
+# Example API request and response:
+# GET /api/autocomplete?q=tre
+# Response:
+# {
+#   "suggestions": [
+#     {"text": "tree", "score": 60000000},
+#     {"text": "trend", "score": 55000000},
+#     {"text": "trek", "score": 18000000},
+#     {"text": "treasure", "score": 12000000},
+#     {"text": "tremendous", "score": 8000000}
+#   ]
+# }</code></pre>
+
+      <p>With 1-hour TTL, a user who types "tre" and then re-searches something starting with "tre" later will get an instant cache hit. Even across page refreshes, the browser cache serves results in <strong>0ms</strong>.</p>
+
+      <h3>Layer 2: CDN Cache</h3>
+      <p>Place a CDN (CloudFront, Fastly) in front of the autocomplete API. Short prefixes (1–3 characters) have <strong>extremely high cache hit rates</strong> because they're shared by virtually all users:</p>
+
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Prefix Length</th><th style="text-align:left; padding:0.5em;">Unique Prefixes</th><th style="text-align:left; padding:0.5em;">CDN Hit Rate</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">1 character</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">26</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~99.9%</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">2 characters</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~676</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~99%</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">3 characters</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~17,576</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~95%</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">4 characters</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~100K active</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">~80%</td></tr>
+          <tr><td style="padding:0.5em;">5+ characters</td><td style="padding:0.5em;">~1M+ active</td><td style="padding:0.5em;">~50-70%</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Cache math:</strong> With an average 85% CDN hit rate, the 1.6M peak QPS to the autocomplete API becomes only ~240K QPS reaching the actual serving cluster. The CDN absorbs the vast majority of traffic.
+      </div>
+
+      <h3>Layer 3: Application-Level Cache</h3>
+      <p>On the serving nodes themselves, an in-memory LRU cache stores recently-queried prefixes to avoid repeated trie traversal:</p>
+      <pre><code>class CachedAutocompleteServer:
+    def __init__(self, trie):
+        self.trie = trie
+        self.cache = LRUCache(capacity=1_000_000)  # ~1M entries
+
+    def query(self, prefix):
+        # L1: Check application cache
+        cached = self.cache.get(prefix)
+        if cached is not None:
+            return cached
+
+        # L2: Traverse trie
+        result = self.trie.autocomplete(prefix)
+        self.cache.put(prefix, result)
+        return result</code></pre>
+
+      <h3>Client-Side Optimization: Debouncing &amp; Prefetching</h3>
+      <p>The client (browser/mobile) further reduces requests:</p>
+      <ul>
+        <li><strong>Debounce:</strong> Wait 50–100ms after the last keystroke before sending the request. Fast typists generate fewer requests.</li>
+        <li><strong>Local prefix filtering:</strong> If the user types "tr" and receives ["tree", "trend", "trek", "treasure", "tremendous"], the client can filter these locally when the user types "tre" — no network request needed.</li>
+        <li><strong>Prefetch:</strong> When results for "tr" arrive, speculatively prefetch "tra", "tre", "tri" etc. in the background.</li>
+      </ul>
+
+      <pre><code>// Client-side: local filtering from cached results
+class AutocompleteClient {
+    constructor() {
+        this.cache = new Map(); // prefix → suggestions
+    }
+
+    async getSuggestions(prefix) {
+        // Try to filter from a shorter cached prefix
+        for (let i = prefix.length - 1; i >= 1; i--) {
+            const shorter = prefix.substring(0, i);
+            const cached = this.cache.get(shorter);
+            if (cached) {
+                const filtered = cached.filter(s =>
+                    s.text.startsWith(prefix)
+                );
+                if (filtered.length >= 5) {
+                    return filtered.slice(0, 5); // No network call!
+                }
+            }
+        }
+
+        // Cache miss — fetch from server
+        const response = await fetch(`/api/autocomplete?q=${prefix}`);
+        const data = await response.json();
+        this.cache.set(prefix, data.suggestions);
+        return data.suggestions.slice(0, 5);
+    }
+}</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  10. SCALING THE SERVING LAYER                                   -->
+      <!-- ================================================================ -->
+      <h2 id="scaling">Scaling the Serving Layer</h2>
+      <p>At 10 billion queries/day, the serving infrastructure must be horizontally scalable. The primary strategy is <strong>trie sharding</strong> combined with <strong>read replication</strong>.</p>
+
+      <h3>Sharding Strategy: By First Character(s)</h3>
+      <p>Partition the trie by the first one or two characters of the prefix:</p>
+      <pre><code># Shard by first character (26 shards for a-z)
+Shard 0 (a): handles prefixes "a", "ab", "abc", ...
+Shard 1 (b): handles prefixes "b", "ba", "bar", ...
+...
+Shard 25 (z): handles prefixes "z", "za", "zoo", ...
+
+# Problem: Shards are very unbalanced!
+# "t" shard handles: the, this, that, to, time, they, than, ...
+# "x" shard handles: xbox, xray, xml, ... (tiny)
+
+# Better: Shard by first TWO characters (676 shards)
+Shard "th": handles "th", "the", "this", "that", "then", "there", ...
+Shard "tr": handles "tr", "tree", "trend", "travel", ...
+
+# Even better: Consistent hashing on 2-char prefixes → N shards
+# Automatically balances hot and cold prefixes across machines</code></pre>
+
+      <h3>Dealing with Hot Shards</h3>
+      <p>Even with 2-character sharding, some shards are much hotter. The prefix "th" generates vastly more queries than "zx". Solutions:</p>
+      <ul>
+        <li><strong>Unequal shard sizing:</strong> Hot prefixes get their own shard; cold prefixes are grouped (e.g., "xa" through "xz" share one shard)</li>
+        <li><strong>Read replicas:</strong> Hot shards get more replicas. The "th" shard might have 10 replicas while "zx" has 2</li>
+        <li><strong>Load balancer routes based on prefix:</strong> A routing table maps prefix → shard → replica set</li>
+      </ul>
+
+      <pre><code># Shard routing table
+{
+  "th": {"shard_id": 42, "replicas": ["node-42a", "node-42b", ..., "node-42j"]},
+  "tr": {"shard_id": 43, "replicas": ["node-43a", "node-43b", "node-43c"]},
+  "zx": {"shard_id": 200, "replicas": ["node-200a", "node-200b"]},
+  ...
+}
+
+# Each serving node holds ONE shard of the trie in memory
+# Load balancer routes requests based on prefix → shard → round-robin replica</code></pre>
+
+      <h3>Replication for Reads</h3>
+      <p>Since the trie is read-only (it's rebuilt offline and swapped atomically), replication is straightforward:</p>
+      <ol>
+        <li>The trie build pipeline produces one serialized trie per shard</li>
+        <li>Each shard blob is uploaded to S3</li>
+        <li>All replicas for that shard download and load the new blob</li>
+        <li>No write conflicts, no consensus protocols, no leader election</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Architecture beauty:</strong> Because the trie is immutable (rebuilt, not mutated), we get the simplicity of a read-only replicated cache with the consistency of a batch pipeline. There's no need for distributed locks, version vectors, or conflict resolution.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  11. FILTERING OFFENSIVE SUGGESTIONS                             -->
+      <!-- ================================================================ -->
+      <h2 id="filtering">Filtering Offensive Suggestions</h2>
+      <p>An autocomplete system that suggests offensive, dangerous, or inappropriate content is a <strong>reputational catastrophe</strong>. Filtering must be multi-layered:</p>
+
+      <h3>Layer 1: Blocklist (Offline)</h3>
+      <p>Maintain a curated blocklist of terms that must never appear in suggestions. This list is applied during the trie build pipeline:</p>
+      <pre><code>BLOCKLIST = load_blocklist("s3://safety/blocklist.txt")  # ~100K terms
+
+def is_safe(query):
+    """Check query against blocklist and pattern rules."""
+    normalized = query.lower().strip()
+
+    # Exact match
+    if normalized in BLOCKLIST:
+        return False
+
+    # Substring match (catch variations)
+    for blocked_term in BLOCKLIST_SUBSTRINGS:
+        if blocked_term in normalized:
+            return False
+
+    return True
+
+# Applied during trie construction:
+for query, freq in query_frequencies.items():
+    if is_safe(query):
+        trie.insert(query, freq)</code></pre>
+
+      <h3>Layer 2: ML Classifier (Offline)</h3>
+      <p>A trained classifier scores queries for toxicity, NSFW content, and violence. Queries scoring above a threshold are excluded:</p>
+      <pre><code># During the aggregation pipeline
+toxicity_model = load_model("toxicity-classifier-v3")
+
+for query, freq in query_frequencies.items():
+    score = toxicity_model.predict(query)
+    if score > TOXICITY_THRESHOLD:  # e.g., 0.7
+        mark_for_review(query)
+    elif score > HARD_BLOCK_THRESHOLD:  # e.g., 0.95
+        block(query)</code></pre>
+
+      <h3>Layer 3: Real-Time Override (Online)</h3>
+      <p>For emergencies (e.g., a breaking news event makes a previously-safe query offensive), a <strong>real-time override service</strong> can instantly suppress specific suggestions without waiting for a trie rebuild:</p>
+      <pre><code>class AutocompleteWithOverrides:
+    def query(self, prefix):
+        suggestions = self.trie.autocomplete(prefix)
+
+        # Apply real-time overrides (loaded from a fast config service)
+        blocked = self.override_service.get_blocked_queries()
+        filtered = [s for s in suggestions if s.text not in blocked]
+
+        return filtered[:5]</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  12. TRENDING QUERIES                                            -->
+      <!-- ================================================================ -->
+      <h2 id="trending">Trending Queries</h2>
+      <p>A purely frequency-based system would always show the same historical top queries. But when a major event happens (e.g., a new product launch, breaking news), users want to see those emerging queries immediately.</p>
+
+      <h3>Detecting Trends</h3>
+      <p>A query is "trending" if its recent frequency significantly exceeds its historical baseline:</p>
+      <pre><code># Trend detection formula
+trending_score(query) = recent_freq / (historical_avg_freq + epsilon)
+
+# Example:
+# "eclipse 2026": historical avg = 500/day, today = 50,000/day
+# trending_score = 50000 / (500 + 1) = 99.8 (very trending!)
+#
+# "weather today": historical avg = 200,000/day, today = 220,000/day
+# trending_score = 220000 / (200000 + 1) = 1.1 (not trending)</code></pre>
+
+      <h3>Architecture for Trending</h3>
+      <pre><code>┌─────────────────┐     ┌──────────────────────┐
+│  Real-time log  │────▶│  Stream processor     │
+│  (Kafka)        │     │  (Flink / Spark       │
+└─────────────────┘     │   Streaming)          │
+                        └──────────┬───────────┘
+                                   │ trending queries
+                                   ▼
+                        ┌──────────────────────┐
+                        │  Trending cache       │
+                        │  (Redis / Memcached)  │
+                        └──────────┬───────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    │  Autocomplete serving node   │
+                    │  trie.query() + trending_mix │
+                    └─────────────────────────────┘</code></pre>
+
+      <p>The serving node merges results from the precomputed trie and the trending cache:</p>
+      <pre><code>def query_with_trending(self, prefix, k=5):
+    # Get standard top-K from trie
+    trie_results = self.trie.autocomplete(prefix)
+
+    # Get trending queries matching this prefix
+    trending = self.trending_cache.get_matching(prefix)
+
+    # Merge: trending queries get a boost
+    TRENDING_BOOST = 2.0
+    merged = []
+    for q, score in trie_results:
+        merged.append((q, score))
+    for q, trend_score in trending:
+        if q.startswith(prefix):
+            merged.append((q, trend_score * TRENDING_BOOST))
+
+    # Deduplicate and sort
+    seen = set()
+    unique = []
+    for q, score in sorted(merged, key=lambda x: -x[1]):
+        if q not in seen:
+            seen.add(q)
+            unique.append((q, score))
+    return unique[:k]</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  13. PERSONALIZATION                                             -->
+      <!-- ================================================================ -->
+      <h2 id="personalization">Personalization</h2>
+      <p>Different users searching the same prefix should see different suggestions based on their search history. A developer typing "py" probably wants "python" while a finance analyst wants "pypl stock".</p>
+
+      <h3>User Profile Model</h3>
+      <pre><code># Per-user search history (stored in user profile service)
+{
+  "user_id": "u_abc123",
+  "recent_queries": [
+    {"query": "python async await", "timestamp": "2026-04-15T14:00:00Z"},
+    {"query": "python fastapi tutorial", "timestamp": "2026-04-15T13:30:00Z"},
+    {"query": "python type hints", "timestamp": "2026-04-14T10:00:00Z"}
+  ],
+  "topic_affinities": {
+    "programming": 0.85,
+    "python": 0.72,
+    "finance": 0.05,
+    "sports": 0.15
+  }
+}</code></pre>
+
+      <h3>Personalized Ranking</h3>
+      <pre><code>def personalized_query(self, prefix, user_id, k=5):
+    # Get global top-K
+    global_results = self.trie.autocomplete(prefix)
+
+    # Get user's recent queries matching this prefix
+    user_history = self.user_service.get_recent_queries(user_id)
+    personal = [(q, freq) for q, freq in user_history
+                if q.startswith(prefix)]
+
+    # Combine: user history gets a significant boost
+    PERSONAL_BOOST = 5.0
+    combined = {}
+    for q, score in global_results:
+        combined[q] = score
+    for q, freq in personal:
+        combined[q] = combined.get(q, 0) + freq * PERSONAL_BOOST
+
+    sorted_results = sorted(combined.items(), key=lambda x: -x[1])
+    return sorted_results[:k]</code></pre>
+
+      <div class="callout">
+        <strong>Privacy consideration:</strong> Personalization requires storing user search history. This must be opt-in, with clear data retention policies. Many users prefer to search without their history influencing suggestions. Always provide a way to disable personalization.
+      </div>
+
+      <!-- ================================================================ -->
+      <!--  14. MULTI-LANGUAGE SUPPORT                                      -->
+      <!-- ================================================================ -->
+      <h2 id="multi-language">Multi-Language Support</h2>
+      <p>Supporting multiple languages introduces challenges beyond just character encoding:</p>
+
+      <h3>Character Set Differences</h3>
+      <ul>
+        <li><strong>English:</strong> 26 letters — trie nodes have max 26 children</li>
+        <li><strong>Chinese:</strong> ~50,000 common characters — trie branching factor is enormous</li>
+        <li><strong>Japanese:</strong> Mix of hiragana, katakana, kanji — multiple input methods</li>
+        <li><strong>Arabic/Hebrew:</strong> Right-to-left scripts with complex ligatures</li>
+      </ul>
+
+      <h3>Architecture for Multi-Language</h3>
+      <pre><code># Separate trie per language/locale
+tries = {
+    "en": load_trie("s3://tries/en/latest.bin"),
+    "es": load_trie("s3://tries/es/latest.bin"),
+    "zh": load_trie("s3://tries/zh/latest.bin"),
+    "ja": load_trie("s3://tries/ja/latest.bin"),
+    # ...
+}
+
+def query(prefix, locale="en"):
+    trie = tries.get(locale, tries["en"])
+    return trie.autocomplete(prefix)</code></pre>
+
+      <p>For CJK languages (Chinese, Japanese, Korean), the trie approach is less effective because words aren't space-delimited. Alternative approaches include:</p>
+      <ul>
+        <li><strong>n-gram indexing:</strong> Index all substrings of length n</li>
+        <li><strong>Pinyin-based trie:</strong> For Chinese, build a trie on pinyin (romanized) input and map to Chinese characters</li>
+        <li><strong>Inverted index with prefix matching:</strong> More flexible for ideographic scripts</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  15. API DESIGN                                                  -->
+      <!-- ================================================================ -->
+      <h2 id="api">API Design</h2>
+
+      <pre><code># REST API
+GET /v1/autocomplete?q={prefix}&locale={locale}&limit={k}
+
+# Request:
+GET /v1/autocomplete?q=tre&locale=en&limit=5
+
+# Response:
+{
+  "prefix": "tre",
+  "suggestions": [
+    {"text": "tree", "score": 60000000},
+    {"text": "trend", "score": 55000000},
+    {"text": "trek", "score": 18000000},
+    {"text": "treasure", "score": 12000000},
+    {"text": "tremendous", "score": 8000000}
+  ],
+  "cached": true,
+  "version": "2026041500"
+}
+
+# Headers:
+# Cache-Control: public, max-age=3600
+# X-Trie-Version: 2026041500</code></pre>
+
+      <h3>Error Handling &amp; Graceful Degradation</h3>
+      <ul>
+        <li>If the trie service is down, return an <strong>empty suggestions list</strong> (never block the search bar)</li>
+        <li>If latency exceeds 100ms, return whatever results are available (even partial)</li>
+        <li>Rate limit per IP/user to prevent abuse (but generous — autocomplete is expected to be fast &amp; frequent)</li>
+      </ul>
+
+      <!-- ================================================================ -->
+      <!--  16. COMPLETE SYSTEM DIAGRAM                                     -->
+      <!-- ================================================================ -->
+      <h2 id="system-diagram">Complete System Diagram</h2>
+      <pre><code>┌─────────────────────────────────────────────────────────────────────────┐
+│                          CLIENT (Browser/App)                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐             │
+│  │ Debounce │→│ Local     │→│ HTTP Request              │             │
+│  │ (50ms)   │  │ Filter   │  │ GET /autocomplete?q=tre  │             │
+│  └──────────┘  └──────────┘  └────────────┬─────────────┘             │
+└───────────────────────────────────────────┼───────────────────────────┘
+                                            │
+                            ┌───────────────▼───────────────┐
+                            │           CDN                  │
+                            │  (CloudFront / Fastly)         │
+                            │  Cache hit rate: ~85%          │
+                            └───────────────┬───────────────┘
+                                            │ cache miss
+                            ┌───────────────▼───────────────┐
+                            │       Load Balancer            │
+                            │  (prefix → shard routing)      │
+                            └───────────────┬───────────────┘
+                                            │
+                    ┌───────────────┬───────┴───────┬───────────────┐
+                    ▼               ▼               ▼               ▼
+            ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+            │ Shard:   │    │ Shard:   │    │ Shard:   │    │ Shard:   │
+            │ "a"-"f"  │    │ "g"-"m"  │    │ "n"-"s"  │    │ "t"-"z"  │
+            │ (×3 repl)│    │ (×3 repl)│    │ (×3 repl)│    │ (×5 repl)│
+            └──────────┘    └──────────┘    └──────────┘    └──────────┘
+                    │               │               │               │
+                    └───────────────┴───────┬───────┴───────────────┘
+                                            │
+                            ┌───────────────▼───────────────┐
+                            │       Trending Cache           │
+                            │       (Redis Cluster)          │
+                            └───────────────────────────────┘
+
+═══════════════════════ OFFLINE PIPELINE ═══════════════════════════════
+
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Search   │────▶│ Spark    │────▶│ Trie     │────▶│ S3       │
+│ Logs     │     │ Aggregate│     │ Builder  │     │ (deploy) │
+│ (Kafka)  │     │ Job      │     │          │     │          │
+└──────────┘     └──────────┘     └──────────┘     └──────────┘</code></pre>
+
+      <!-- ================================================================ -->
+      <!--  17. INTERVIEW TIPS                                              -->
+      <!-- ================================================================ -->
+      <h2 id="interview">Interview Tips</h2>
+      <h3>Key Points to Emphasize</h3>
+      <ol>
+        <li><strong>Trie + precomputed top-K</strong> is the core insight — O(L) query time vs O(n) for naive</li>
+        <li><strong>Read/write separation:</strong> The serving layer is read-only; updates happen offline via a batch pipeline</li>
+        <li><strong>Multi-layer caching</strong> (browser → CDN → application → trie) reduces effective QPS by 85–95%</li>
+        <li><strong>Sharding by prefix</strong> allows horizontal scaling; hot prefixes get more replicas</li>
+        <li><strong>Safety filtering</strong> is non-negotiable — always mention it proactively</li>
+        <li><strong>Trending injection</strong> adds freshness without compromising the batch pipeline's simplicity</li>
+      </ol>
+
+      <h3>Common Follow-Up Questions</h3>
+      <table style="width:100%; border-collapse:collapse; margin:1.5em 0;">
+        <thead><tr style="border-bottom:2px solid var(--line);"><th style="text-align:left; padding:0.5em;">Question</th><th style="text-align:left; padding:0.5em;">Answer Direction</th></tr></thead>
+        <tbody>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">How do you handle typos?</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Spell correction layer before trie lookup; or store common misspellings as aliases</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">What if the trie doesn't fit in memory?</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Shard the trie across machines; or use a Patricia trie / succinct representation</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">How fresh are suggestions?</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Full rebuild weekly; trending layer adds hourly freshness; real-time overrides for emergencies</td></tr>
+          <tr><td style="padding:0.5em; border-bottom:1px solid var(--line);">What about mobile?</td><td style="padding:0.5em; border-bottom:1px solid var(--line);">Same API; client-side debouncing is more aggressive on mobile (200ms) to save battery/bandwidth</td></tr>
+          <tr><td style="padding:0.5em;">How do you test this system?</td><td style="padding:0.5em;">A/B test suggestion quality via click-through rate on suggestions; shadow traffic for new trie versions</td></tr>
+        </tbody>
+      </table>
+
+      <details class="spoiler">
+        <summary>Bonus: Space Estimation for Production Trie</summary>
+        <div style="padding:0.8rem 1rem;">
+          <p>Let's estimate the memory footprint of a production trie:</p>
+          <pre><code># Assumptions:
+# - 1 billion unique queries
+# - Average query length: 20 characters
+# - Patricia trie compression: ~60% node reduction
+# - Each node: 50 bytes (char + pointers + top-5 array)
+
+Total characters:   1B × 20 = 20B characters
+Trie nodes (naive): ~5B (shared prefixes reduce total)
+Patricia nodes:     ~2B (after compression)
+
+Memory per node:    ~50 bytes
+  - edge_label:     8 bytes (pointer to string)
+  - children map:   16 bytes (small map avg 2 entries)
+  - is_end + freq:  5 bytes
+  - top_k array:    5 × 4 = 20 bytes (5 pointers)
+  - overhead:       ~1 byte
+
+Total memory: 2B × 50 bytes = ~100 GB
+Per shard (26 shards): ~4 GB — fits in a single machine!
+Per shard (676 shards): ~150 MB — very comfortable</code></pre>
+          <p>With 676 two-character shards, each shard holds ~150 MB. A machine with 64 GB RAM can easily hold multiple shards plus the application cache.</p>
+        </div>
+      </details>
+
+      <nav class="post-nav">
+        <a class="prev" href="chat-system.html"><span>Previous</span><span>&#8592; Chat System</span></a>
+        <a class="next" href="youtube.html"><span>Next</span><span>YouTube &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    /* === Shared SVG helpers === */
+    var NS='http://www.w3.org/2000/svg';
+    function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;}
+    function txt(str,attrs){var t=el('text',attrs);t.textContent=str;return t;}
+    function rect(x,y,w,h,rx,fill,stroke){return el('rect',{x:x,y:y,width:w,height:h,rx:rx||4,fill:fill||'#e8f5ee',stroke:stroke||'var(--line)','stroke-width':'1.5'});}
+    function line(x1,y1,x2,y2,color){var l=el('line',{x1:x1,y1:y1,x2:x2,y2:y2,stroke:color||'var(--line)','stroke-width':'2'});return l;}
+
+    /* ============================================================= */
+    /*  ANIMATION 1: TRIE TRAVERSAL                                   */
+    /* ============================================================= */
+    (function(){
+      var svg=document.getElementById('trie-svg');
+      var info=document.getElementById('trie-info');
+      var out=document.getElementById('trie-output');
+      if(!svg)return;
+
+      /* Trie structure for words: tree, trend, trek, treasure, tremendous, trap, trial, truck */
+      var nodeData=[
+        {id:'root', label:'root', x:360, y:30, children:['t']},
+        {id:'t',    label:'t',    x:360, y:90, children:['tr']},
+        {id:'tr',   label:'r',    x:360, y:150,children:['tre','tra','tri','tru']},
+        {id:'tre',  label:'e',    x:220, y:220,children:['tree','tren','trek','treas','tremen']},
+        {id:'tra',  label:'a',    x:400, y:220,children:['trap_n']},
+        {id:'tri',  label:'i',    x:500, y:220,children:['trial_n']},
+        {id:'tru',  label:'u',    x:600, y:220,children:['truck_n']},
+        {id:'tree', label:'e',    x:80,  y:300, word:'tree',    freq:'60M'},
+        {id:'tren', label:'n',    x:160, y:300, children:['trend_n']},
+        {id:'trek', label:'k',    x:240, y:300, word:'trek',    freq:'18M'},
+        {id:'treas',label:'a',    x:300, y:300, word:'treasure',freq:'12M'},
+        {id:'tremen',label:'m',   x:370, y:300, word:'tremendous',freq:'8M'},
+        {id:'trend_n',label:'d',  x:160, y:365, word:'trend',  freq:'55M'},
+        {id:'trap_n', label:'p',  x:400, y:300, word:'trap',   freq:'6M'},
+        {id:'trial_n',label:'al', x:500, y:300, word:'trial',  freq:'5M'},
+        {id:'truck_n',label:'ck', x:600, y:300, word:'truck',  freq:'4M'}
+      ];
+
+      var nodeMap={};
+      nodeData.forEach(function(n){nodeMap[n.id]=n;});
+
+      var edgeList=[];
+      nodeData.forEach(function(n){
+        if(n.children){
+          n.children.forEach(function(cid){
+            edgeList.push({from:n.id,to:cid});
+          });
+        }
+      });
+
+      /* Top-K at key nodes */
+      var topKData={
+        'root':['the (980M)','to (720M)','this (650M)','that (600M)','time (450M)'],
+        't':   ['the (980M)','to (720M)','this (650M)','that (600M)','time (450M)'],
+        'tr':  ['tree (60M)','trend (55M)','trek (18M)','treasure (12M)','tremendous (8M)'],
+        'tre': ['tree (60M)','trend (55M)','trek (18M)','treasure (12M)','tremendous (8M)'],
+        'tree':['tree (60M)'],
+        'tren':['trend (55M)'],
+        'trek':['trek (18M)']
+      };
+
+      var highlightPath={
+        0:[], /* initial: nothing highlighted */
+        1:['root','t'],             /* typed 't' */
+        2:['root','t','tr'],        /* typed 'tr' */
+        3:['root','t','tr','tre'],  /* typed 'tre' */
+        4:['root','t','tr','tre']   /* show results */
+      };
+
+      var stepLabels=[
+        {desc:'Trie loaded with 8 words starting with "t". Each node stores precomputed top-5 suggestions. Click Step to begin typing.', typed:'', node:'root'},
+        {desc:'User types "t" → traverse root → t. Top-5 at node "t": the, to, this, that, time', typed:'t', node:'t'},
+        {desc:'User types "r" → traverse t → r. Top-5 at node "tr": tree, trend, trek, treasure, tremendous', typed:'tr', node:'tr'},
+        {desc:'User types "e" → traverse r → e. Top-5 at node "tre": tree, trend, trek, treasure, tremendous', typed:'tre', node:'tre'},
+        {desc:'Results returned in O(3) steps — just follow the prefix path! No subtree traversal needed.', typed:'tre', node:'tre'}
+      ];
+
+      var RADIUS=20;
+      var step=0;
+
+      function draw(currentStep){
+        while(svg.firstChild)svg.removeChild(svg.firstChild);
+
+        var hlSet={};
+        var path=highlightPath[currentStep]||[];
+        path.forEach(function(id){hlSet[id]=true;});
+
+        /* Draw edges */
+        edgeList.forEach(function(e){
+          var from=nodeMap[e.from], to=nodeMap[e.to];
+          var hl=hlSet[e.from]&&hlSet[e.to];
+          var l=line(from.x, from.y+RADIUS, to.x, to.y-RADIUS, hl?'#0a8f6a':'#ccc');
+          l.setAttribute('stroke-width', hl?'3':'1.5');
+          if(hl){l.setAttribute('stroke-dasharray','none');}
+          svg.appendChild(l);
+        });
+
+        /* Draw nodes */
+        nodeData.forEach(function(n){
+          var hl=hlSet[n.id];
+          var isTarget=(stepLabels[currentStep]&&stepLabels[currentStep].node===n.id);
+          var fillColor=isTarget?'#0a8f6a':(hl?'#b2e0d0':'#f0f0f0');
+          var textColor=isTarget?'#fff':(hl?'#064e3b':'#333');
+          var strokeColor=isTarget?'#064e3b':(hl?'#0a8f6a':'#ccc');
+
+          var c=el('circle',{cx:n.x, cy:n.y, r:RADIUS, fill:fillColor, stroke:strokeColor, 'stroke-width':hl?'2.5':'1.5'});
+          svg.appendChild(c);
+
+          svg.appendChild(txt(n.label,{x:n.x, y:n.y+5, 'text-anchor':'middle', 'font-family':'Consolas, monospace', 'font-size':'13', 'font-weight':'700', fill:textColor}));
+
+          /* Show word + freq for leaf nodes */
+          if(n.word){
+            svg.appendChild(txt(n.word+' ('+n.freq+')',{x:n.x, y:n.y+RADIUS+16, 'text-anchor':'middle', 'font-family':'Manrope, sans-serif', 'font-size':'10', fill:'var(--ink-muted)'}));
+          }
+        });
+
+        /* Draw search box */
+        var boxY=385;
+        svg.appendChild(rect(10, boxY-3, 150, 26, 6, '#fff', 'var(--line)'));
+        svg.appendChild(txt('Search: ',{x:18, y:boxY+14, 'font-family':'Manrope,sans-serif', 'font-size':'12', fill:'var(--ink-muted)'}));
+        var typed=stepLabels[currentStep]?stepLabels[currentStep].typed:'';
+        svg.appendChild(txt(typed+'|',{x:72, y:boxY+14, 'font-family':'Consolas,monospace', 'font-size':'13', 'font-weight':'700', fill:'#0a8f6a'}));
+
+        /* Draw top-K suggestion box */
+        var targetNode=stepLabels[currentStep]?stepLabels[currentStep].node:'root';
+        var suggestions=topKData[targetNode]||[];
+        if(currentStep>0 && suggestions.length>0){
+          var bx=180, by=boxY-30, bw=210, itemH=18;
+          var bh=24+suggestions.length*itemH;
+          svg.appendChild(rect(bx, by, bw, bh, 8, '#fffdf9', '#0a8f6a'));
+          svg.appendChild(txt('Top-5 Suggestions:',{x:bx+8, y:by+16, 'font-family':'Manrope,sans-serif', 'font-size':'11', 'font-weight':'700', fill:'#0a8f6a'}));
+          suggestions.forEach(function(s,i){
+            var isBold=(i===0);
+            svg.appendChild(txt((i+1)+'. '+s,{x:bx+12, y:by+32+i*itemH, 'font-family':'Consolas,monospace', 'font-size':'11', 'font-weight':isBold?'700':'400', fill:isBold?'#064e3b':'#333'}));
+          });
+        }
+      }
+
+      function reset(){
+        step=0;
+        draw(0);
+        info.textContent=stepLabels[0].desc;
+        out.textContent='';
+      }
+
+      reset();
+
+      document.getElementById('trie-step').addEventListener('click',function(){
+        if(step>=stepLabels.length-1){out.textContent='Done! Click Reset to restart.';return;}
+        step++;
+        draw(step);
+        info.textContent=stepLabels[step].desc;
+        out.textContent='Step '+step+' of '+(stepLabels.length-1);
+      });
+
+      document.getElementById('trie-reset').addEventListener('click',reset);
+    })();
+
+    /* ============================================================= */
+    /*  ANIMATION 2: DATA PIPELINE                                    */
+    /* ============================================================= */
+    (function(){
+      var svg=document.getElementById('pipeline-svg');
+      var info=document.getElementById('pipeline-info');
+      var out=document.getElementById('pipeline-output');
+      if(!svg)return;
+
+      var stages=[
+        {id:'logs',     label:'Search\nLogs',       x:30,  y:60, w:100, h:60},
+        {id:'agg',      label:'Aggregation\n(Spark)',x:175, y:60, w:110, h:60},
+        {id:'builder',  label:'Trie\nBuilder',       x:330, y:60, w:100, h:60},
+        {id:'store',    label:'Blob Store\n(S3)',     x:475, y:60, w:100, h:60},
+        {id:'serve',    label:'Serving\nCluster',     x:620, y:60, w:90,  h:60}
+      ];
+
+      var arrows=[
+        {from:'logs',to:'agg'},
+        {from:'agg',to:'builder'},
+        {from:'builder',to:'store'},
+        {from:'store',to:'serve'}
+      ];
+
+      var stageMap={};
+      stages.forEach(function(s){stageMap[s.id]=s;});
+
+      var pipeSteps=[
+        {active:[],desc:'The offline data pipeline runs periodically (weekly full rebuild, daily incremental). Click Step to trace data flow.', highlight:[]},
+        {active:['logs'],desc:'Stage 1: Raw search logs are collected in Kafka/S3. ~10B queries/day, ~2 TB of raw log data. Each log contains query text, timestamp, user ID.', highlight:['logs']},
+        {active:['logs','agg'],desc:'Stage 2: Spark/MapReduce job reads logs, normalizes queries (lowercase, dedup per user), and aggregates frequencies. Output: {query → weighted_count} pairs.', highlight:['agg'], arrow:0},
+        {active:['logs','agg','builder'],desc:'Stage 3: Trie Builder reads aggregated frequencies, constructs a Patricia trie, then runs bottom-up pass to precompute top-K at every node.', highlight:['builder'], arrow:1},
+        {active:['logs','agg','builder','store'],desc:'Stage 4: Serialized trie shards are uploaded to S3. Each shard is a binary blob (~150 MB) keyed by prefix range.', highlight:['store'], arrow:2},
+        {active:['logs','agg','builder','store','serve'],desc:'Stage 5: Serving nodes perform rolling update — download new trie shard, load into memory, atomically swap pointer. Zero downtime.', highlight:['serve'], arrow:3}
+      ];
+
+      var step=0;
+
+      function draw(currentStep){
+        while(svg.firstChild)svg.removeChild(svg.firstChild);
+        addArrowMarker(svg,'pipe-arrow','#0a8f6a');
+
+        var ps=pipeSteps[currentStep];
+        var hlSet={};
+        (ps.highlight||[]).forEach(function(id){hlSet[id]=true;});
+        var activeSet={};
+        (ps.active||[]).forEach(function(id){activeSet[id]=true;});
+
+        /* Draw arrows */
+        arrows.forEach(function(a,idx){
+          var from=stageMap[a.from], to=stageMap[a.to];
+          var x1=from.x+from.w, y1=from.y+from.h/2;
+          var x2=to.x, y2=to.y+to.h/2;
+          var active=(ps.arrow!==undefined && idx<=ps.arrow);
+          var arrowLine=el('line',{x1:x1+4,y1:y1,x2:x2-4,y2:y2,stroke:active?'#0a8f6a':'#ddd','stroke-width':active?'3':'2','marker-end':active?'url(#pipe-arrow)':'none'});
+          if(active){
+            arrowLine.style.transition='all 0.3s';
+          }
+          svg.appendChild(arrowLine);
+        });
+
+        /* Draw stage boxes */
+        stages.forEach(function(s){
+          var isHl=hlSet[s.id];
+          var isActive=activeSet[s.id];
+          var fillColor=isHl?'#0a8f6a':(isActive?'#d1fae5':'#f5f5f5');
+          var strokeColor=isHl?'#064e3b':(isActive?'#0a8f6a':'#ccc');
+          var textFill=isHl?'#fff':(isActive?'#064e3b':'#666');
+
+          var r=el('rect',{x:s.x, y:s.y, width:s.w, height:s.h, rx:'10', fill:fillColor, stroke:strokeColor, 'stroke-width':isHl?'2.5':'1.5'});
+          r.style.transition='all 0.3s';
+          svg.appendChild(r);
+
+          /* Multi-line text */
+          var lines=s.label.split('\n');
+          var lineH=15;
+          var startY=s.y+s.h/2-(lines.length-1)*lineH/2+4;
+          lines.forEach(function(ln,i){
+            svg.appendChild(txt(ln,{x:s.x+s.w/2, y:startY+i*lineH, 'text-anchor':'middle', 'font-family':'Manrope,sans-serif', 'font-size':'12', 'font-weight':'600', fill:textFill}));
+          });
+        });
+
+        /* Data flow label */
+        if(currentStep>0){
+          svg.appendChild(txt('Data flows left → right (offline batch pipeline)',{x:360, y:150, 'text-anchor':'middle', 'font-family':'Manrope,sans-serif', 'font-size':'11', fill:'var(--ink-muted)'}));
+        }
+
+        /* Timing info */
+        if(currentStep>=5){
+          var timings=[
+            {x:80,  label:'~2 TB/day'},
+            {x:230, label:'~1 hour'},
+            {x:380, label:'~30 min'},
+            {x:525, label:'~5 min'},
+            {x:665, label:'~10 min'}
+          ];
+          timings.forEach(function(t){
+            svg.appendChild(txt(t.label,{x:t.x, y:180, 'text-anchor':'middle', 'font-family':'Consolas,monospace', 'font-size':'10', fill:'#0a8f6a'}));
+          });
+        }
+      }
+
+      function reset(){
+        step=0;
+        draw(0);
+        info.textContent=pipeSteps[0].desc;
+        out.textContent='';
+      }
+
+      reset();
+
+      document.getElementById('pipeline-step').addEventListener('click',function(){
+        if(step>=pipeSteps.length-1){out.textContent='Done! Click Reset to restart.';return;}
+        step++;
+        draw(step);
+        info.textContent=pipeSteps[step].desc;
+        out.textContent='Step '+step+' of '+(pipeSteps.length-1);
+      });
+
+      document.getElementById('pipeline-reset').addEventListener('click',reset);
+    })();
+
+  })();
+  </script>
+</body>
+</html>
