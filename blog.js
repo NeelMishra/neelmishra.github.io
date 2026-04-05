@@ -672,7 +672,6 @@ var BLOG_TREE = [
               { title: 'Overview', file: 'dsa/graphs/bridges-articulation-points/index.html' },
               { title: "Tarjan's Bridge Detection", file: 'dsa/graphs/bridges-articulation-points/bridges-algorithm.html' },
               { title: 'Finding Articulation Points', file: 'dsa/graphs/bridges-articulation-points/articulation-points.html' },
-              { title: 'Bridges vs APs Compared', file: 'dsa/graphs/bridges-articulation-points/comparison.html' },
               { title: 'Applications', file: 'dsa/graphs/bridges-articulation-points/applications.html' }
             ]
           },
