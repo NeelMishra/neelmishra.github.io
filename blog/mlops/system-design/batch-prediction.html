@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="System design deep-dive: building a batch prediction pipeline — scheduling, parallelism, output storage, and monitoring.">
+  <title>Design: Batch Prediction Pipeline | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#scheduling">Scheduling &amp; Orchestration</a></li>
+          <li><a href="#parallelism">Parallelism Strategies</a></li>
+          <li><a href="#output-storage">Output Storage</a></li>
+          <li><a href="#monitoring">Monitoring &amp; Validation</a></li>
+          <li><a href="#architecture">System Architecture</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+
+      <div class="blog-post-header">
+        <h1>Design: Batch Prediction Pipeline</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">ML System Design</span>
+        </div>
+      </div>
+
+      <!-- § 1 -->
+      <section id="requirements">
+        <h2>Requirements &amp; Scope</h2>
+        <p>
+          Not every prediction needs to be real-time. Batch prediction
+          pre-computes scores for all entities — ideal for recommendations,
+          credit scoring, and churn prediction.
+        </p>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h4 style="color:#0a8f6a;margin-top:0">Functional</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Score 100 M+ entities daily</li>
+              <li>Write results to serving store</li>
+              <li>Automated data validation</li>
+              <li>Backfill and re-run support</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h4 style="color:#ff6b35;margin-top:0">Non-Functional</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Complete within 4-hour SLA</li>
+              <li>Idempotent — safe to re-run</li>
+              <li>Cost-efficient (spot instances)</li>
+              <li>Fault-tolerant (checkpoint &amp; resume)</li>
+            </ul>
+          </div>
+        </div>
+
+        <svg id="sd-batch-overview" viewBox="0 0 720 170" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%;max-width:720px;margin:1rem auto;display:block"
+             aria-label="Batch prediction pipeline overview">
+          <rect x="5" y="60" width="110" height="50" rx="10" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="60" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Data Lake</text>
+          <line x1="115" y1="85" x2="155" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="155" y="60" width="120" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="215" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Feature Build</text>
+          <line x1="275" y1="85" x2="315" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="315" y="60" width="120" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="375" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Prediction</text>
+          <line x1="435" y1="85" x2="475" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="475" y="60" width="110" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="530" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Validation</text>
+          <line x1="585" y1="85" x2="620" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="620" y="60" width="95" height="50" rx="10" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="667" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Serving DB</text>
+
+          <defs>
+            <marker id="sd-bp-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#ccc"/>
+            </marker>
+          </defs>
+        </svg>
+      </section>
+
+      <!-- § 2 -->
+      <section id="scheduling">
+        <h2>Scheduling &amp; Orchestration</h2>
+        <p>
+          Batch prediction pipelines run on a schedule (daily / hourly) or
+          triggered by upstream data availability.
+        </p>
+
+        <h3>DAG-Based Orchestration</h3>
+        <p>
+          Tools like Airflow, Prefect, or Dagster define the pipeline as a
+          directed acyclic graph (DAG) of tasks: data validation → feature
+          build → prediction → output validation → publish.
+        </p>
+
+<pre class="pseudo-code"><span class="cm"># Airflow DAG for batch prediction</span>
+<span class="kw">from</span> airflow <span class="kw">import</span> DAG
+<span class="kw">from</span> airflow.operators.python <span class="kw">import</span> PythonOperator
+<span class="kw">from</span> datetime <span class="kw">import</span> datetime
+
+dag = <span class="fn">DAG</span>("batch_predictions", schedule_interval="@daily",
+         start_date=datetime(2024, 1, 1))
+
+validate_data = <span class="fn">PythonOperator</span>(task_id="validate_data", python_callable=<span class="fn">validate</span>, dag=dag)
+build_features = <span class="fn">PythonOperator</span>(task_id="build_features", python_callable=<span class="fn">build_feat</span>, dag=dag)
+run_predictions = <span class="fn">PythonOperator</span>(task_id="run_predictions", python_callable=<span class="fn">predict</span>, dag=dag)
+validate_output = <span class="fn">PythonOperator</span>(task_id="validate_output", python_callable=<span class="fn">validate_out</span>, dag=dag)
+publish_results = <span class="fn">PythonOperator</span>(task_id="publish", python_callable=<span class="fn">publish</span>, dag=dag)
+
+validate_data >> build_features >> run_predictions >> validate_output >> publish_results</pre>
+
+        <div class="callout">
+          <strong>Idempotency:</strong> Every task should be safe to re-run.
+          Use date-partitioned output paths and overwrite-on-rerun semantics.
+        </div>
+      </section>
+
+      <!-- § 3 -->
+      <section id="parallelism">
+        <h2>Parallelism Strategies</h2>
+        <p>
+          Scoring 100 M entities sequentially would take hours. Parallelism
+          strategies make it feasible within the SLA.
+        </p>
+
+        <h3>Data Parallelism with Spark</h3>
+        <p>
+          Partition the entity table across Spark executors. Each executor
+          loads the model and scores its partition independently.
+        </p>
+
+<pre class="pseudo-code"><span class="cm"># Spark UDF for batch prediction</span>
+<span class="kw">from</span> pyspark.sql <span class="kw">import</span> functions <span class="kw">as</span> F
+<span class="kw">from</span> pyspark.sql.types <span class="kw">import</span> FloatType
+
+<span class="kw">def</span> <span class="fn">predict_udf</span>(features):
+    <span class="cm"># Model is broadcast to all executors</span>
+    <span class="kw">return</span> <span class="fn">float</span>(model_broadcast.value.<span class="fn">predict</span>([features])[0])
+
+predict = F.<span class="fn">udf</span>(predict_udf, FloatType())
+scored_df = features_df.<span class="fn">withColumn</span>("score", predict("feature_vector"))</pre>
+
+        <h3>GPU Batch Inference</h3>
+        <p>
+          For deep models, run inference on GPU instances with large batch
+          sizes (512–4096). Use Spark + GPU (RAPIDS) or Ray for orchestration.
+        </p>
+
+        <svg id="sd-batch-parallel" viewBox="0 0 500 150" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%;max-width:500px;margin:1rem auto;display:block"
+             aria-label="Data parallelism with Spark">
+          <rect x="170" y="5" width="160" height="35" rx="8" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.2"/>
+          <text x="250" y="27" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Entity Table (100M)</text>
+          <line x1="200" y1="40" x2="80" y2="70" stroke="#ccc" stroke-width="1.2"/>
+          <line x1="250" y1="40" x2="250" y2="70" stroke="#ccc" stroke-width="1.2"/>
+          <line x1="300" y1="40" x2="420" y2="70" stroke="#ccc" stroke-width="1.2"/>
+          <rect x="20" y="70" width="120" height="35" rx="6" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="80" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" font-weight="600" fill="#1a1a2e">Partition 1 (GPU)</text>
+          <rect x="190" y="70" width="120" height="35" rx="6" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="250" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" font-weight="600" fill="#1a1a2e">Partition 2 (GPU)</text>
+          <rect x="360" y="70" width="120" height="35" rx="6" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="420" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" font-weight="600" fill="#1a1a2e">Partition N (GPU)</text>
+          <line x1="80" y1="105" x2="200" y2="130" stroke="#ccc" stroke-width="1.2"/>
+          <line x1="250" y1="105" x2="250" y2="130" stroke="#ccc" stroke-width="1.2"/>
+          <line x1="420" y1="105" x2="300" y2="130" stroke="#ccc" stroke-width="1.2"/>
+          <rect x="170" y="125" width="160" height="25" rx="6" fill="#fff7ed" stroke="#ff6b35" stroke-width="1"/>
+          <text x="250" y="142" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" font-weight="600" fill="#ff6b35">Merged Output</text>
+        </svg>
+
+        <div class="callout warn">
+          <strong>Spot instance handling:</strong> Use checkpointing to resume
+          from the last completed partition if a spot instance is reclaimed.
+        </div>
+      </section>
+
+      <!-- § 4 -->
+      <section id="output-storage">
+        <h2>Output Storage</h2>
+        <p>
+          Batch predictions are written to a serving store where they can be
+          looked up at request time with sub-millisecond latency.
+        </p>
+
+        <h3>Storage Options</h3>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h4 style="margin-top:0">Key-Value (Redis / DynamoDB)</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Sub-millisecond lookup</li>
+              <li>Simple entity → score mapping</li>
+              <li>Higher cost at scale</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h4 style="margin-top:0">Columnar (Parquet on S3)</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Cheap at scale</li>
+              <li>Good for analytics / debugging</li>
+              <li>Higher latency (not for serving)</li>
+            </ul>
+          </div>
+        </div>
+
+<pre class="pseudo-code"><span class="cm"># Atomic swap for safe publishing</span>
+<span class="kw">def</span> <span class="fn">publish_predictions</span>(scored_df, redis_client):
+    <span class="cm"># Write to a staging key prefix</span>
+    pipe = redis_client.<span class="fn">pipeline</span>()
+    <span class="kw">for</span> row <span class="kw">in</span> scored_df.<span class="fn">collect</span>():
+        pipe.<span class="fn">set</span>(f"pred:staging:{row.entity_id}", row.score)
+    pipe.<span class="fn">execute</span>()
+
+    <span class="cm"># Atomic rename from staging to production</span>
+    <span class="fn">swap_prefix</span>(redis_client, "pred:staging:", "pred:prod:")</pre>
+      </section>
+
+      <!-- § 5 -->
+      <section id="monitoring">
+        <h2>Monitoring &amp; Validation</h2>
+        <p>
+          Batch pipelines fail silently — wrong predictions are served for
+          hours before anyone notices. Automated validation catches issues
+          before publication.
+        </p>
+
+        <h3>Data Quality Checks</h3>
+<pre class="pseudo-code"><span class="cm"># Output validation</span>
+<span class="kw">def</span> <span class="fn">validate_predictions</span>(scored_df, prev_df):
+    checks = {
+        "row_count":    scored_df.<span class="fn">count</span>() > prev_df.<span class="fn">count</span>() * 0.95,
+        "null_scores":  scored_df.<span class="fn">filter</span>("score IS NULL").<span class="fn">count</span>() == 0,
+        "score_range":  scored_df.<span class="fn">filter</span>("score &lt; 0 OR score > 1").<span class="fn">count</span>() == 0,
+        "distribution": <span class="fn">ks_test</span>(scored_df.score, prev_df.score) > 0.05,
+    }
+    <span class="kw">if not</span> <span class="fn">all</span>(checks.<span class="fn">values</span>()):
+        <span class="kw">raise</span> <span class="fn">ValidationError</span>(f"Failed checks: {checks}")
+    <span class="kw">return</span> True</pre>
+
+        <div class="callout">
+          <strong>Score distribution drift:</strong> Compare today's score
+          histogram to yesterday's using a KS test. A shift indicates a data
+          or model problem.
+        </div>
+      </section>
+
+      <!-- § 6 -->
+      <section id="architecture">
+        <h2>System Architecture</h2>
+
+        <svg id="sd-batch-full" viewBox="0 0 700 260" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%;max-width:700px;margin:1rem auto;display:block"
+             aria-label="Full batch prediction architecture">
+          <rect x="10" y="10" width="130" height="40" rx="8" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.2"/>
+          <text x="75" y="35" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Scheduler (Airflow)</text>
+          <line x1="140" y1="30" x2="180" y2="30" stroke="#ccc" stroke-width="1.2" marker-end="url(#sd-bp-arrow)"/>
+
+          <rect x="180" y="10" width="140" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="250" y="35" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Data Validation</text>
+          <line x1="320" y1="30" x2="360" y2="30" stroke="#ccc" stroke-width="1.2" marker-end="url(#sd-bp-arrow)"/>
+
+          <rect x="360" y="10" width="140" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="430" y="35" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Feature Pipeline</text>
+
+          <line x1="430" y1="50" x2="430" y2="85" stroke="#ccc" stroke-width="1.2" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="360" y="85" width="140" height="40" rx="8" fill="#f0f0ff" stroke="#6b5bff" stroke-width="1.2"/>
+          <text x="430" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#6b5bff">Spark Predict Job</text>
+
+          <line x1="430" y1="125" x2="430" y2="160" stroke="#ccc" stroke-width="1.2" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="360" y="160" width="140" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="430" y="185" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Output Validation</text>
+
+          <line x1="430" y1="200" x2="430" y2="230" stroke="#ccc" stroke-width="1.2" marker-end="url(#sd-bp-arrow)"/>
+          <rect x="360" y="230" width="140" height="25" rx="6" fill="#fff7ed" stroke="#ff6b35" stroke-width="1"/>
+          <text x="430" y="247" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" font-weight="600" fill="#ff6b35">Publish to Redis</text>
+
+          <!-- Side stores -->
+          <rect x="560" y="85" width="120" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="620" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#1a1a2e">Model Registry</text>
+          <line x1="500" y1="105" x2="560" y2="105" stroke="#ccc" stroke-width="1" stroke-dasharray="4,3"/>
+
+          <rect x="560" y="160" width="120" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="620" y="185" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#1a1a2e">Monitoring</text>
+          <line x1="500" y1="180" x2="560" y2="180" stroke="#ccc" stroke-width="1" stroke-dasharray="4,3"/>
+        </svg>
+
+        <p>
+          The pipeline is fully orchestrated by Airflow, with each stage
+          independently retryable. Failed stages alert the on-call team
+          and do not publish stale predictions.
+        </p>
+      </section>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

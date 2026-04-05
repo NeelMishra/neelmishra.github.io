@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into LLM inference mechanics: prefill vs decode phases, KV cache fundamentals, compute-bound vs memory-bound operations, and autoregressive token generation.">
+  <title>LLM Inference: Prefill, Decode, and KV Cache | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#autoregressive-generation">Autoregressive Generation</a></li>
+        <li><a href="#prefill-phase">The Prefill Phase</a></li>
+        <li><a href="#decode-phase">The Decode Phase</a></li>
+        <li><a href="#kv-cache-intro">KV Cache: Avoiding Redundant Compute</a></li>
+        <li><a href="#interactive-walkthrough">Interactive Token Generation</a></li>
+        <li><a href="#arithmetic-intensity">Arithmetic Intensity Analysis</a></li>
+        <li><a href="#practical-implications">Practical Implications</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>LLM Inference: Prefill, Decode, and KV Cache</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="autoregressive-generation">Autoregressive Generation</h2>
+      <p>Large Language Models generate text one token at a time. Each new token is conditioned on <em>all</em> preceding tokens—the prompt plus every token generated so far. For a model like LLaMA-2 70B with a 4096-token context window, this means that generating a 512-token response to a 512-token prompt requires 512 sequential forward passes through a 70-billion-parameter network.</p>
+      <p>This autoregressive loop creates a fundamental tension: the prompt can be processed in parallel (all tokens are known), but generation is inherently sequential. This asymmetry splits inference into two distinct phases with radically different computational profiles.</p>
+
+      <svg id="li-autoregressive-diagram" viewBox="0 0 700 180" style="width:100%;max-width:700px;margin:1.2rem auto;display:block">
+        <defs>
+          <marker id="li-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+        </defs>
+        <rect x="10" y="30" width="120" height="40" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="70" y="55" text-anchor="middle" font-size="12" font-family="Manrope" fill="#333">Prompt Tokens</text>
+        <text x="70" y="15" text-anchor="middle" font-size="10" font-family="Manrope" fill="#666">"The cat sat"</text>
+        <line x1="135" y1="50" x2="175" y2="50" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-arr)"/>
+        <rect x="180" y="30" width="90" height="40" rx="8" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="225" y="55" text-anchor="middle" font-size="12" font-family="Manrope" fill="#333">Model</text>
+        <line x1="275" y1="50" x2="315" y2="50" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-arr)"/>
+        <rect x="320" y="30" width="60" height="40" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+        <text x="350" y="55" text-anchor="middle" font-size="12" font-family="Manrope" fill="#333">"on"</text>
+        <path d="M350,75 Q350,120 225,120 Q100,120 100,75" fill="none" stroke="#999" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="225" y="115" text-anchor="middle" font-size="10" font-family="Manrope" fill="#999">append &amp; repeat</text>
+        <rect x="420" y="30" width="270" height="40" rx="8" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+        <text x="555" y="48" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Generated sequence grows:</text>
+        <text x="555" y="63" text-anchor="middle" font-size="10" font-family="Consolas" fill="#7b1fa2">"The cat sat on the warm ..."</text>
+      </svg>
+
+      <!-- Section 2 -->
+      <h2 id="prefill-phase">The Prefill Phase</h2>
+      <p>During prefill, the model processes the entire input prompt in a single forward pass. All <em>n</em> prompt tokens are fed through the transformer stack simultaneously, allowing full parallelism across the sequence dimension. This phase is <strong>compute-bound</strong>—the GPU's FLOPS are the bottleneck, not memory bandwidth.</p>
+      <p>For a transformer with <em>L</em> layers, hidden dimension <em>d</em>, and prompt length <em>n</em>, the prefill FLOPs scale as:</p>
+      <pre class="pseudo-code"><span class="cm"># Approximate FLOPs for prefill (attention + FFN per layer)</span>
+<span class="cm"># Each layer: 4 projections (Q,K,V,O) + attention matmul + 2 FFN layers</span>
+prefill_flops = L × (
+    4 × n × d²           <span class="cm"># Q, K, V, O projections</span>
+  + 2 × n² × d           <span class="cm"># attention: QK^T and attn×V</span>
+  + 2 × n × d × 4d       <span class="cm"># FFN (up + down projections, 4× expansion)</span>
+)
+
+<span class="cm"># For LLaMA-2 70B: L=80, d=8192, prompt n=2048</span>
+<span class="cm"># ≈ 80 × (4×2048×8192² + 2×2048²×8192 + 2×2048×8192×32768)</span>
+<span class="cm"># ≈ 80 × (5.5e11 + 6.9e10 + 1.1e12) ≈ 1.3e14 FLOPs</span></pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Prefill processes all prompt tokens in parallel. On an A100 (312 TFLOPS FP16), a 2048-token prompt through LLaMA-2 70B takes roughly 130 TFLOPS / 312 TFLOPS ≈ 0.4 seconds—limited by compute, not memory. The quadratic attention term (2n²d per layer) starts dominating only at very long sequences (>8K tokens).
+      </div>
+
+      <p>The critical output of prefill is not just the first token's logits—it's the <strong>KV cache</strong>. Each layer computes key and value tensors for every prompt token, and these are stored in GPU memory for reuse during decode.</p>
+
+      <!-- Section 3 -->
+      <h2 id="decode-phase">The Decode Phase</h2>
+      <p>Once the first token is generated, inference enters the decode phase. Each step processes exactly <strong>one new token</strong>—the token just generated. The model computes Q, K, V only for this single token, then attends over the entire KV cache (all previous keys and values).</p>
+      <p>This creates a fundamentally different computational profile. Each decode step performs a tiny matrix-vector multiplication (not matrix-matrix), making it <strong>memory-bandwidth-bound</strong>:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Decode step FLOPs (single token, n_past = past context length)</span>
+decode_flops_per_step = L × (
+    4 × 1 × d²           <span class="cm"># Q, K, V, O projections (same weights, 1 token)</span>
+  + 2 × 1 × n_past × d   <span class="cm"># attention over cached keys/values</span>
+  + 2 × 1 × d × 4d       <span class="cm"># FFN</span>
+)
+
+<span class="cm"># For LLaMA-2 70B decode step with n_past=2048:</span>
+<span class="cm"># ≈ 80 × (2.7e8 + 3.4e7 + 5.4e8) ≈ 6.7e10 FLOPs per token</span>
+<span class="cm"># That's ~2000× fewer FLOPs than prefill!</span>
+
+<span class="cm"># But: must still load all 70B parameters from HBM → compute units</span>
+<span class="cm"># 140 GB (FP16) / 2 TB/s (A100 HBM) ≈ 70 ms per token minimum</span></pre>
+
+      <div class="callout warn">
+        <strong>The decode bottleneck:</strong> Each decode step only does ~67 GFLOPs of compute but must read 140 GB of model weights from HBM. On an A100, this means you're using roughly 67 GFLOPS / 312 TFLOPS = 0.02% of peak compute. The GPU is almost entirely idle, waiting for data.
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>⚡ Prefill Phase</h3>
+          <ul>
+            <li><strong>Input:</strong> All prompt tokens (n tokens)</li>
+            <li><strong>Operations:</strong> Matrix × Matrix (GEMM)</li>
+            <li><strong>Bottleneck:</strong> Compute-bound (GPU FLOPS)</li>
+            <li><strong>Parallelism:</strong> High (all tokens in parallel)</li>
+            <li><strong>Arithmetic Intensity:</strong> ~100–1000 FLOPs/byte</li>
+            <li><strong>GPU Utilization:</strong> 60–80% of peak FLOPS</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>🐢 Decode Phase</h3>
+          <ul>
+            <li><strong>Input:</strong> Single new token</li>
+            <li><strong>Operations:</strong> Matrix × Vector (GEMV)</li>
+            <li><strong>Bottleneck:</strong> Memory-bandwidth-bound</li>
+            <li><strong>Parallelism:</strong> None across time steps</li>
+            <li><strong>Arithmetic Intensity:</strong> ~1–2 FLOPs/byte</li>
+            <li><strong>GPU Utilization:</strong> &lt;5% of peak FLOPS</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="kv-cache-intro">KV Cache: Avoiding Redundant Compute</h2>
+      <p>Without caching, generating token <em>t</em> requires recomputing K and V for all tokens 1..t−1 at every layer. This means O(n²) total compute across all decode steps. The KV cache stores these intermediate activations so each decode step only computes K and V for the <em>new</em> token, reducing total decode compute from O(n²) per step to O(n).</p>
+
+      <svg id="li-kvcache-structure" viewBox="0 0 700 220" style="width:100%;max-width:700px;margin:1.2rem auto;display:block">
+        <text x="350" y="18" text-anchor="middle" font-size="13" font-weight="700" font-family="Manrope" fill="#333">KV Cache: Stored Per Layer</text>
+        <!-- Layer boxes -->
+        <rect x="30" y="35" width="200" height="170" rx="10" fill="none" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="130" y="52" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">Layer 0</text>
+        <rect x="45" y="60" width="170" height="30" rx="6" fill="#e8f5e9"/>
+        <text x="130" y="80" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">K: [n_heads, seq, head_d]</text>
+        <rect x="45" y="95" width="170" height="30" rx="6" fill="#e3f2fd"/>
+        <text x="130" y="115" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">V: [n_heads, seq, head_d]</text>
+        <text x="130" y="145" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">New token appends 1 row</text>
+        <text x="130" y="158" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">to K and V each step</text>
+        <rect x="55" y="168" width="150" height="25" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="130" y="185" text-anchor="middle" font-size="9" font-family="Consolas" fill="#ff6b35">seq grows: 1→2→3→...→n</text>
+
+        <text x="280" y="120" text-anchor="middle" font-size="24" fill="#999">…</text>
+
+        <rect x="320" y="35" width="200" height="170" rx="10" fill="none" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="420" y="52" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">Layer L−1</text>
+        <rect x="335" y="60" width="170" height="30" rx="6" fill="#e8f5e9"/>
+        <text x="420" y="80" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">K: [n_heads, seq, head_d]</text>
+        <rect x="335" y="95" width="170" height="30" rx="6" fill="#e3f2fd"/>
+        <text x="420" y="115" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">V: [n_heads, seq, head_d]</text>
+        <text x="420" y="145" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Same structure replicated</text>
+        <text x="420" y="158" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">across all L layers</text>
+        <rect x="345" y="168" width="150" height="25" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="420" y="185" text-anchor="middle" font-size="9" font-family="Consolas" fill="#ff6b35">80 layers for LLaMA-70B</text>
+
+        <rect x="560" y="50" width="120" height="140" rx="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+        <text x="620" y="72" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#7b1fa2">Memory Cost</text>
+        <text x="620" y="95" text-anchor="middle" font-size="9" font-family="Consolas" fill="#333">2 × L × n_h</text>
+        <text x="620" y="110" text-anchor="middle" font-size="9" font-family="Consolas" fill="#333">× d_h × seq</text>
+        <text x="620" y="125" text-anchor="middle" font-size="9" font-family="Consolas" fill="#333">× batch × bytes</text>
+        <text x="620" y="150" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">LLaMA-70B, seq=4096</text>
+        <text x="620" y="165" text-anchor="middle" font-size="11" font-weight="700" font-family="Manrope" fill="#7b1fa2">≈ 5.2 GB / seq</text>
+        <text x="620" y="180" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">(FP16, batch=1)</text>
+      </svg>
+
+      <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">generate_with_kv_cache</span>(model, prompt_ids, max_new_tokens):
+    <span class="cm"># Phase 1: Prefill — process full prompt, initialize KV cache</span>
+    logits, kv_cache = model.<span class="fn">forward</span>(prompt_ids, kv_cache=<span class="kw">None</span>)
+    next_token = <span class="fn">sample</span>(logits[:, -1, :])   <span class="cm"># sample from last position</span>
+    output = [next_token]
+
+    <span class="cm"># Phase 2: Decode — one token at a time, reuse KV cache</span>
+    <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(max_new_tokens - 1):
+        <span class="cm"># Only feed the NEW token; KV cache has all history</span>
+        logits, kv_cache = model.<span class="fn">forward</span>(
+            next_token.unsqueeze(0),          <span class="cm"># shape: [1, 1]</span>
+            kv_cache=kv_cache                 <span class="cm"># reuse cached K, V</span>
+        )
+        next_token = <span class="fn">sample</span>(logits[:, -1, :])
+        output.<span class="fn">append</span>(next_token)
+        <span class="kw">if</span> next_token == eos_token:
+            <span class="kw">break</span>
+    <span class="kw">return</span> output</pre>
+
+      <!-- Section 5: Interactive walkthrough -->
+      <h2 id="interactive-walkthrough">Interactive Token Generation Walkthrough</h2>
+      <p>Step through the autoregressive generation process below. Watch how the KV cache grows with each decode step and how the model attends over all cached positions.</p>
+
+      <svg id="li-inference-anim" viewBox="0 0 720 300" style="width:100%;max-width:720px;margin:1rem auto;display:block;border:1px solid #e0e0e0;border-radius:12px;background:#fafafa">
+        <!-- Prompt tokens row -->
+        <text x="20" y="25" font-size="11" font-weight="600" font-family="Manrope" fill="#333">Token Sequence</text>
+        <rect id="li-tok0" x="20" y="35" width="60" height="32" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text id="li-tok0-t" x="50" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">The</text>
+        <rect id="li-tok1" x="90" y="35" width="60" height="32" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text id="li-tok1-t" x="120" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">cat</text>
+        <rect id="li-tok2" x="160" y="35" width="60" height="32" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text id="li-tok2-t" x="190" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#333">sat</text>
+        <rect id="li-tok3" x="230" y="35" width="60" height="32" rx="6" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-tok3-t" x="260" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#999" opacity="0.3">on</text>
+        <rect id="li-tok4" x="300" y="35" width="60" height="32" rx="6" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-tok4-t" x="330" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#999" opacity="0.3">the</text>
+        <rect id="li-tok5" x="370" y="35" width="60" height="32" rx="6" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-tok5-t" x="400" y="56" text-anchor="middle" font-size="10" font-family="Consolas" fill="#999" opacity="0.3">mat</text>
+
+        <!-- KV Cache visualization -->
+        <text x="20" y="100" font-size="11" font-weight="600" font-family="Manrope" fill="#333">KV Cache (per layer)</text>
+        <rect id="li-kv-bg" x="20" y="110" width="0" height="50" rx="6" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+        <text id="li-kv-label" x="25" y="140" font-size="10" font-family="Consolas" fill="#1976d2"></text>
+
+        <!-- Model box -->
+        <rect x="500" y="80" width="120" height="80" rx="10" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="560" y="110" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#ff6b35">Transformer</text>
+        <text x="560" y="128" text-anchor="middle" font-size="10" font-family="Manrope" fill="#666">Forward Pass</text>
+        <text id="li-model-input" x="560" y="148" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">input: [...]</text>
+
+        <!-- Phase indicator -->
+        <rect id="li-phase-bg" x="500" y="25" width="120" height="30" rx="8" fill="#e8f5e9"/>
+        <text id="li-phase-text" x="560" y="45" text-anchor="middle" font-size="11" font-weight="700" font-family="Manrope" fill="#0a8f6a">PREFILL</text>
+
+        <!-- Stats -->
+        <text x="20" y="195" font-size="11" font-weight="600" font-family="Manrope" fill="#333">Stats</text>
+        <text id="li-stat-flops" x="20" y="215" font-size="10" font-family="Consolas" fill="#666">FLOPs: —</text>
+        <text id="li-stat-mem" x="20" y="232" font-size="10" font-family="Consolas" fill="#666">KV Memory: —</text>
+        <text id="li-stat-bw" x="20" y="249" font-size="10" font-family="Consolas" fill="#666">Bottleneck: —</text>
+
+        <!-- Attention arrows region -->
+        <text id="li-attn-label" x="20" y="280" font-size="9" font-family="Manrope" fill="#999"></text>
+      </svg>
+
+      <div class="step-controls">
+        <button id="li-inf-prev">← Prev</button>
+        <button id="li-inf-next">Next →</button>
+        <span class="step-label" id="li-inf-label">Step 1 / 5</span>
+      </div>
+      <div class="step-controls">
+        <div class="step-desc" id="li-inf-desc">Click Next to step through token generation.</div>
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="arithmetic-intensity">Arithmetic Intensity Analysis</h2>
+      <p>The roofline model explains why prefill and decode behave so differently. <strong>Arithmetic intensity</strong> = FLOPs / bytes transferred. When intensity exceeds the machine's compute-to-bandwidth ratio, you're compute-bound; below it, you're memory-bound.</p>
+
+      <pre class="pseudo-code"><span class="cm"># A100 80GB SXM specs</span>
+peak_flops   = 312e12    <span class="cm"># 312 TFLOPS FP16</span>
+hbm_bandwidth = 2.0e12   <span class="cm"># 2 TB/s</span>
+ridge_point  = 312 / 2.0 <span class="cm"># = 156 FLOPs/byte</span>
+
+<span class="cm"># Prefill: matrix-matrix multiply, intensity ≈ d/2 ≈ 4096 FLOPs/byte</span>
+<span class="cm"># → 4096 >> 156, so COMPUTE-BOUND ✓</span>
+
+<span class="cm"># Decode: matrix-vector multiply, intensity ≈ 2 FLOPs/byte</span>
+<span class="cm"># → 2 << 156, so MEMORY-BOUND ✓</span>
+
+<span class="cm"># This is why decode generates ~14 tokens/sec on A100 for 70B models</span>
+<span class="cm"># while prefill can process ~5000 tokens/sec</span></pre>
+
+      <div class="callout">
+        <strong>The roofline gap:</strong> During decode, a 70B model in FP16 needs 140 GB of weight reads per token. At 2 TB/s bandwidth, that's a minimum 70ms per token (~14 tok/s). No amount of extra FLOPS helps—you need more bandwidth (e.g., H100's 3.35 TB/s gives ~24 tok/s) or fewer bytes (quantization).
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="practical-implications">Practical Implications</h2>
+      <p>Understanding the prefill/decode split drives every major optimization in LLM serving:</p>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Optimizing Prefill</h3>
+          <ul>
+            <li><strong>Flash Attention:</strong> Fuses attention into one kernel, reducing HBM reads from O(n²) to O(n)</li>
+            <li><strong>Tensor Parallelism:</strong> Splits weight matrices across GPUs to increase aggregate FLOPS</li>
+            <li><strong>Chunked Prefill:</strong> Breaks long prompts into chunks to overlap with decode requests</li>
+            <li><strong>Prefix Caching:</strong> Reuses KV cache from common system prompts across requests</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Optimizing Decode</h3>
+          <ul>
+            <li><strong>Quantization:</strong> INT8/INT4 weights reduce bytes read per token by 2–4×</li>
+            <li><strong>Batching:</strong> Amortize weight reads across B sequences (B tokens computed per weight read)</li>
+            <li><strong>Speculative Decoding:</strong> Draft model proposes N tokens, verified in parallel by large model</li>
+            <li><strong>KV Cache Compression:</strong> Quantize or evict cache entries to reduce memory pressure</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>The single most impactful optimization for decode throughput is <strong>batching</strong>. If you batch 32 sequences together, each weight read from HBM is amortized over 32 tokens, increasing arithmetic intensity by 32×. This is why serving systems like vLLM, TensorRT-LLM, and TGI focus heavily on maximizing batch size through techniques like continuous batching and PagedAttention.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Impact of batching on decode throughput</span>
+<span class="cm"># Without batching (batch=1):</span>
+weight_read = 140e9         <span class="cm"># 140 GB for 70B model in FP16</span>
+tokens_per_read = 1
+intensity = 2               <span class="cm"># FLOPs/byte → memory-bound</span>
+throughput = 14              <span class="cm"># tokens/sec</span>
+
+<span class="cm"># With batching (batch=32):</span>
+weight_read = 140e9         <span class="cm"># same weights read once</span>
+tokens_per_read = 32        <span class="cm"># but 32 tokens computed</span>
+intensity = 64              <span class="cm"># 32× improvement</span>
+throughput = 448             <span class="cm"># tokens/sec total (14 tok/s per seq)</span>
+
+<span class="cm"># With batch=128: intensity=256 → approaching compute-bound!</span>
+<span class="cm"># But: KV cache memory = 128 × 5.2 GB = 665 GB → needs multiple GPUs</span></pre>
+
+      <div class="callout warn">
+        <strong>The memory wall:</strong> Batching improves throughput but KV cache memory grows linearly with batch size. For LLaMA-70B at 4096 context length, each sequence's KV cache is ~5.2 GB in FP16. A batch of 128 sequences needs 665 GB just for the cache—more than 8× A100 80GB GPUs. This is why PagedAttention and KV cache quantization are critical.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script>
+  (function(){
+    var steps = [
+      {
+        phase:'PREFILL', phaseColor:'#0a8f6a', phaseBg:'#e8f5e9',
+        toks:[1,1,1,0,0,0], kvWidth:210, kvText:'K,V cached for "The cat sat"',
+        input:'input: ["The","cat","sat"]',
+        flops:'FLOPs: ~130 TFLOPs (full prompt)', mem:'KV Memory: 3 positions cached', bw:'Bottleneck: COMPUTE-BOUND',
+        attn:'All 3 prompt tokens processed in parallel via GEMM',
+        desc:'<strong>Prefill:</strong> The entire prompt ("The cat sat") is fed through the model in one forward pass. This is a matrix-matrix multiply — compute-bound. K and V tensors are computed and cached for all 3 positions across all 80 layers.'
+      },
+      {
+        phase:'DECODE 1', phaseColor:'#1976d2', phaseBg:'#e3f2fd',
+        toks:[1,1,1,1,0,0], kvWidth:280, kvText:'K,V: "The cat sat on"',
+        input:'input: ["on"]',
+        flops:'FLOPs: ~67 GFLOPs (1 token)', mem:'KV Memory: 4 positions cached', bw:'Bottleneck: MEMORY-BOUND',
+        attn:'New token "on" attends over 3 cached positions → output token',
+        desc:'<strong>Decode step 1:</strong> Only the new token "on" is fed to the model. Q is computed for "on", then it attends over the cached K,V (3 positions). New K,V for "on" appended to cache. This is matrix-vector — memory-bound. 2000× fewer FLOPs than prefill.'
+      },
+      {
+        phase:'DECODE 2', phaseColor:'#1976d2', phaseBg:'#e3f2fd',
+        toks:[1,1,1,1,1,0], kvWidth:350, kvText:'K,V: "The cat sat on the"',
+        input:'input: ["the"]',
+        flops:'FLOPs: ~67 GFLOPs (1 token)', mem:'KV Memory: 5 positions cached', bw:'Bottleneck: MEMORY-BOUND',
+        attn:'New token "the" attends over 4 cached positions',
+        desc:'<strong>Decode step 2:</strong> Token "the" is generated. Attention spans 4 cached positions. KV cache grows by one row per layer. Memory consumption increases linearly with each token. GPU compute utilization remains very low (<5%).'
+      },
+      {
+        phase:'DECODE 3', phaseColor:'#1976d2', phaseBg:'#e3f2fd',
+        toks:[1,1,1,1,1,1], kvWidth:420, kvText:'K,V: "The cat sat on the mat"',
+        input:'input: ["mat"]',
+        flops:'FLOPs: ~67 GFLOPs (1 token)', mem:'KV Memory: 6 positions cached', bw:'Bottleneck: MEMORY-BOUND',
+        attn:'New token "mat" attends over 5 cached positions',
+        desc:'<strong>Decode step 3:</strong> "mat" is generated. The KV cache now holds 6 positions. Each decode step reads all 140 GB of model weights for just 1 token of output — this is why batching is so important for throughput.'
+      },
+      {
+        phase:'COMPLETE', phaseColor:'#7b1fa2', phaseBg:'#f3e5f5',
+        toks:[1,1,1,1,1,1], kvWidth:420, kvText:'K,V: 6 positions × 80 layers',
+        input:'output: 3 new tokens',
+        flops:'Total: ~130T + 3×67G FLOPs', mem:'KV Memory: 6 × 80 layers × 2 tensors', bw:'Bottleneck: Decode dominated wall time',
+        attn:'Generation complete. Prefill: ~0.4s, Decode: 3×70ms = 0.21s',
+        desc:'<strong>Summary:</strong> Prefill processed 3 tokens in parallel (~0.4s). Decode generated 3 tokens sequentially (~0.21s total). Despite 2000× fewer FLOPs per step, decode is slow because every step must read all model weights from HBM. The KV cache prevented recomputing K,V for past tokens, saving ~6000× redundant compute.'
+      }
+    ];
+    var cur = 0;
+    var svg = document.getElementById('li-inference-anim');
+    var prevBtn = document.getElementById('li-inf-prev');
+    var nextBtn = document.getElementById('li-inf-next');
+    var label = document.getElementById('li-inf-label');
+    var descEl = document.getElementById('li-inf-desc');
+    var tokRects = [svg.querySelector('#li-tok0'),svg.querySelector('#li-tok1'),svg.querySelector('#li-tok2'),svg.querySelector('#li-tok3'),svg.querySelector('#li-tok4'),svg.querySelector('#li-tok5')];
+    var tokTexts = [svg.querySelector('#li-tok0-t'),svg.querySelector('#li-tok1-t'),svg.querySelector('#li-tok2-t'),svg.querySelector('#li-tok3-t'),svg.querySelector('#li-tok4-t'),svg.querySelector('#li-tok5-t')];
+
+    function render(){
+      var s = steps[cur];
+      label.textContent = 'Step '+(cur+1)+' / '+steps.length;
+      descEl.innerHTML = s.desc;
+      document.getElementById('li-phase-text').textContent = s.phase;
+      document.getElementById('li-phase-text').setAttribute('fill', s.phaseColor);
+      document.getElementById('li-phase-bg').setAttribute('fill', s.phaseBg);
+      document.getElementById('li-model-input').textContent = s.input;
+      document.getElementById('li-kv-bg').setAttribute('width', s.kvWidth);
+      document.getElementById('li-kv-label').textContent = s.kvText;
+      document.getElementById('li-stat-flops').textContent = s.flops;
+      document.getElementById('li-stat-mem').textContent = s.mem;
+      document.getElementById('li-stat-bw').textContent = s.bw;
+      document.getElementById('li-attn-label').textContent = s.attn;
+      for(var i=0;i<6;i++){
+        if(s.toks[i]){
+          tokRects[i].setAttribute('fill','#e8f5e9');
+          tokRects[i].setAttribute('stroke','#0a8f6a');
+          tokRects[i].setAttribute('opacity','1');
+          tokTexts[i].setAttribute('fill','#333');
+          tokTexts[i].setAttribute('opacity','1');
+        } else {
+          tokRects[i].setAttribute('fill','#fff');
+          tokRects[i].setAttribute('stroke','#ccc');
+          tokRects[i].setAttribute('opacity','0.3');
+          tokTexts[i].setAttribute('fill','#999');
+          tokTexts[i].setAttribute('opacity','0.3');
+        }
+      }
+    }
+    prevBtn.onclick = function(){ if(cur>0){cur--;render();} };
+    nextBtn.onclick = function(){ if(cur<steps.length-1){cur++;render();} };
+    render();
+  })();
+  </script>
+</body>
+</html>

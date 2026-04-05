@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="ZeRO optimizer state, gradient, and parameter partitioning with interactive visualization">
+  <title>DeepSpeed: ZeRO Stages 1–3 | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#zero-overview">ZeRO Overview</a></li>
+        <li><a href="#zero-stage1">Stage 1: Optimizer Partitioning</a></li>
+        <li><a href="#zero-stage2">Stage 2: Gradient Partitioning</a></li>
+        <li><a href="#zero-stage3">Stage 3: Parameter Partitioning</a></li>
+        <li><a href="#interactive-viz">Interactive Visualization</a></li>
+        <li><a href="#configuration">DeepSpeed Configuration</a></li>
+        <li><a href="#zero-offload">ZeRO-Offload &amp; Infinity</a></li>
+        <li><a href="#benchmarks">Performance Benchmarks</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>DeepSpeed: ZeRO Stages 1–3</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="zero-overview">ZeRO Overview</h2>
+      <p><strong>ZeRO</strong> (Zero Redundancy Optimizer) eliminates the memory redundancy inherent in standard data parallelism. In DDP, every GPU holds a complete copy of model parameters, gradients, and optimizer states. For a model with &Psi; parameters trained with Adam in mixed precision, each GPU stores:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Memory per GPU in standard DDP (mixed precision + Adam)</span>
+FP16 parameters:    2&Psi; bytes
+FP16 gradients:     2&Psi; bytes
+FP32 master weights: 4&Psi; bytes  <span class="cm"># optimizer maintains FP32 copy</span>
+FP32 momentum:      4&Psi; bytes  <span class="cm"># Adam first moment</span>
+FP32 variance:      4&Psi; bytes  <span class="cm"># Adam second moment</span>
+<span class="cm">─────────────────────────────────</span>
+Total:              16&Psi; bytes  <span class="cm"># per GPU — ALL identical!</span>
+
+<span class="cm"># For 7B params: 16 × 7B = 112 GB per GPU</span>
+<span class="cm"># With 64 GPUs: 64 × 112 GB = 7,168 GB total — 63 copies are redundant!</span></pre>
+
+      <p>ZeRO partitions these redundant states across GPUs. Each stage eliminates more redundancy at the cost of additional communication.</p>
+
+      <div class="callout">
+        <strong>Key Insight:</strong> ZeRO doesn't change the mathematical semantics of training. It produces identical results to DDP — the same gradients, the same parameter updates. It only changes <em>where</em> data is stored and <em>when</em> it is communicated.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="zero-stage1">ZeRO Stage 1: Optimizer State Partitioning</h2>
+      <p>Stage 1 partitions only the <strong>optimizer states</strong> (master weights, momentum, variance) across <em>N</em> GPUs. Each GPU stores 1/N of the optimizer states. Parameters and gradients remain replicated.</p>
+
+      <h3>Memory Savings</h3>
+      <pre class="pseudo-code"><span class="cm"># ZeRO Stage 1 memory per GPU</span>
+FP16 parameters:     2&Psi; bytes     <span class="cm"># still replicated</span>
+FP16 gradients:      2&Psi; bytes     <span class="cm"># still replicated</span>
+FP32 optimizer:      12&Psi; / N bytes <span class="cm"># partitioned!</span>
+<span class="cm">─────────────────────────────────</span>
+Total:               4&Psi; + 12&Psi;/N bytes
+
+<span class="cm"># For 7B params, N=64 GPUs:</span>
+<span class="cm"># Standard DDP: 112 GB</span>
+<span class="cm"># ZeRO-1: 4×7B + 12×7B/64 = 28 GB + 1.3 GB ≈ 29.3 GB  (3.8× reduction!)</span></pre>
+
+      <h3>Communication</h3>
+      <p>After the backward pass computes gradients, an <strong>AllReduce</strong> averages gradients across GPUs (same as DDP). Then each GPU updates only its 1/N partition of optimizer states and parameters. Finally, an <strong>AllGather</strong> broadcasts the updated parameters so every GPU has the full model for the next forward pass.</p>
+
+      <div class="callout">
+        <strong>Communication overhead vs DDP:</strong> ZeRO-1 adds one AllGather (for updated parameters) compared to standard DDP. The AllReduce for gradients is the same. Total communication ≈ 1.5× DDP.
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="zero-stage2">ZeRO Stage 2: Gradient Partitioning</h2>
+      <p>Stage 2 partitions both <strong>optimizer states and gradients</strong>. Instead of AllReduce (which leaves a full copy of gradients on each GPU), ZeRO-2 uses <strong>ReduceScatter</strong> — each GPU only keeps 1/N of the reduced gradients (the partition it's responsible for).</p>
+
+      <h3>Memory Savings</h3>
+      <pre class="pseudo-code"><span class="cm"># ZeRO Stage 2 memory per GPU</span>
+FP16 parameters:     2&Psi; bytes     <span class="cm"># still replicated</span>
+FP16 gradients:      2&Psi; / N bytes <span class="cm"># partitioned!</span>
+FP32 optimizer:      12&Psi; / N bytes <span class="cm"># partitioned</span>
+<span class="cm">─────────────────────────────────</span>
+Total:               2&Psi; + 14&Psi;/N bytes
+
+<span class="cm"># For 7B params, N=64 GPUs:</span>
+<span class="cm"># ZeRO-2: 2×7B + 14×7B/64 = 14 GB + 1.53 GB ≈ 15.5 GB</span>
+<span class="cm"># vs DDP: 112 GB → 7.2× reduction!</span></pre>
+
+      <h3>Communication Pattern</h3>
+      <p>The key change: <strong>ReduceScatter</strong> replaces AllReduce for gradients. This has the same communication volume as AllReduce (both are 2(N-1)/N × tensor_size) but each GPU retains only its partition. After the optimizer step, an AllGather broadcasts updated parameters.</p>
+
+      <pre class="pseudo-code"><span class="cm"># ZeRO-2 training step</span>
+<span class="kw">for</span> micro_batch <span class="kw">in</span> micro_batches:
+    loss = <span class="fn">forward</span>(micro_batch)
+    loss.<span class="fn">backward</span>()                     <span class="cm"># compute local gradients</span>
+
+<span class="cm"># ReduceScatter: each GPU gets 1/N of averaged gradients</span>
+<span class="fn">reduce_scatter</span>(gradients)               <span class="cm"># replaces AllReduce</span>
+
+<span class="cm"># Each GPU updates only its partition</span>
+<span class="fn">optimizer_step</span>(local_grad_partition)     <span class="cm"># update 1/N params</span>
+
+<span class="cm"># AllGather: broadcast updated params to all GPUs</span>
+<span class="fn">all_gather</span>(parameters)</pre>
+
+      <!-- Section 4 -->
+      <h2 id="zero-stage3">ZeRO Stage 3: Parameter Partitioning</h2>
+      <p>Stage 3 partitions <strong>everything</strong> — parameters, gradients, and optimizer states. No GPU holds a full copy of the model. Parameters are gathered on-demand before each forward/backward computation and discarded immediately after.</p>
+
+      <h3>Memory Savings</h3>
+      <pre class="pseudo-code"><span class="cm"># ZeRO Stage 3 memory per GPU</span>
+FP16 parameters:     2&Psi; / N bytes <span class="cm"># partitioned!</span>
+FP16 gradients:      2&Psi; / N bytes <span class="cm"># partitioned</span>
+FP32 optimizer:      12&Psi; / N bytes <span class="cm"># partitioned</span>
+<span class="cm">─────────────────────────────────</span>
+Total:               16&Psi; / N bytes
+
+<span class="cm"># For 7B params, N=64 GPUs:</span>
+<span class="cm"># ZeRO-3: 16×7B/64 = 1.75 GB per GPU</span>
+<span class="cm"># vs DDP: 112 GB → 64× reduction!</span>
+<span class="cm"># This enables training models that are 64× larger on the same hardware!</span></pre>
+
+      <h3>Communication Pattern</h3>
+      <p>ZeRO-3 requires <strong>AllGather before each forward and backward</strong> layer computation to reconstruct full parameters temporarily, plus ReduceScatter after backward. Total communication volume is 3× DDP.</p>
+
+      <pre class="pseudo-code"><span class="cm"># ZeRO-3 forward/backward for one layer</span>
+<span class="kw">def</span> <span class="fn">zero3_layer_forward</span>(layer, x, group):
+    <span class="cm"># Gather full params from all GPUs (temporary)</span>
+    full_weight = <span class="fn">all_gather</span>(layer.weight_partition, group=group)
+    output = torch.nn.functional.<span class="fn">linear</span>(x, full_weight)
+    <span class="kw">del</span> full_weight  <span class="cm"># free immediately — don't keep!</span>
+    <span class="kw">return</span> output
+
+<span class="kw">def</span> <span class="fn">zero3_layer_backward</span>(layer, grad_output, group):
+    <span class="cm"># Gather params again for gradient computation</span>
+    full_weight = <span class="fn">all_gather</span>(layer.weight_partition, group=group)
+    grad_input = grad_output @ full_weight
+    grad_weight = grad_output.T @ input_activation
+    <span class="kw">del</span> full_weight  <span class="cm"># free immediately</span>
+    <span class="cm"># ReduceScatter gradients — each GPU keeps its partition</span>
+    local_grad = <span class="fn">reduce_scatter</span>(grad_weight, group=group)
+    <span class="kw">return</span> grad_input, local_grad</pre>
+
+      <div class="callout warn">
+        <strong>Communication Cost:</strong> ZeRO-3 has 1.5× the communication volume of DDP per layer (AllGather forward + AllGather backward + ReduceScatter). However, this is overlapped with computation using prefetching — the AllGather for layer <em>k+1</em> starts while layer <em>k</em> computes. In practice, the overhead is 10–20% on high-bandwidth clusters.
+      </div>
+
+      <!-- Section 5: Interactive Visualization -->
+      <h2 id="interactive-viz">Interactive Visualization</h2>
+      <p>Step through the ZeRO stages to see how memory is distributed across 4 GPUs. Each step shows what each GPU stores.</p>
+
+      <div class="step-controls" id="ti-zero-controls">
+        <button onclick="tiZeroPrev()">← Prev</button>
+        <button onclick="tiZeroNext()">Next →</button>
+        <span class="step-label" id="ti-zero-step-label">Step 0 / 3</span>
+      </div>
+      <div class="step-controls">
+        <span class="step-desc" id="ti-zero-step-desc"><strong>Baseline DDP:</strong> Every GPU stores a full copy of parameters (P), gradients (G), and optimizer states (OS). Total memory per GPU = 16&Psi; bytes.</span>
+      </div>
+
+      <svg id="ti-zero-svg" viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:680px;margin:0.5rem auto;display:block;border:1px solid var(--line);border-radius:12px;background:#fafafa;padding:0.5rem">
+        <text x="340" y="24" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="13" fill="#333" id="ti-zero-title">Baseline DDP — All Replicated</text>
+        <!-- GPU 0 -->
+        <rect id="ti-gpu0-bg" x="20" y="40" width="150" height="200" rx="8" fill="#fff" stroke="#ccc" stroke-width="1.2"/>
+        <text x="95" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#333">GPU 0</text>
+        <rect id="ti-gpu0-p" x="30" y="65" width="130" height="40" rx="5" fill="#4CAF50" opacity="0.7"/>
+        <text id="ti-gpu0-p-text" x="95" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">P (2Ψ)</text>
+        <rect id="ti-gpu0-g" x="30" y="112" width="130" height="40" rx="5" fill="#FF9800" opacity="0.7"/>
+        <text id="ti-gpu0-g-text" x="95" y="137" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">G (2Ψ)</text>
+        <rect id="ti-gpu0-os" x="30" y="159" width="130" height="70" rx="5" fill="#2196F3" opacity="0.7"/>
+        <text id="ti-gpu0-os-text" x="95" y="199" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">OS (12Ψ)</text>
+        <!-- GPU 1 -->
+        <rect id="ti-gpu1-bg" x="185" y="40" width="150" height="200" rx="8" fill="#fff" stroke="#ccc" stroke-width="1.2"/>
+        <text x="260" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#333">GPU 1</text>
+        <rect id="ti-gpu1-p" x="195" y="65" width="130" height="40" rx="5" fill="#4CAF50" opacity="0.7"/>
+        <text id="ti-gpu1-p-text" x="260" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">P (2Ψ)</text>
+        <rect id="ti-gpu1-g" x="195" y="112" width="130" height="40" rx="5" fill="#FF9800" opacity="0.7"/>
+        <text id="ti-gpu1-g-text" x="260" y="137" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">G (2Ψ)</text>
+        <rect id="ti-gpu1-os" x="195" y="159" width="130" height="70" rx="5" fill="#2196F3" opacity="0.7"/>
+        <text id="ti-gpu1-os-text" x="260" y="199" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">OS (12Ψ)</text>
+        <!-- GPU 2 -->
+        <rect id="ti-gpu2-bg" x="350" y="40" width="150" height="200" rx="8" fill="#fff" stroke="#ccc" stroke-width="1.2"/>
+        <text x="425" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#333">GPU 2</text>
+        <rect id="ti-gpu2-p" x="360" y="65" width="130" height="40" rx="5" fill="#4CAF50" opacity="0.7"/>
+        <text id="ti-gpu2-p-text" x="425" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">P (2Ψ)</text>
+        <rect id="ti-gpu2-g" x="360" y="112" width="130" height="40" rx="5" fill="#FF9800" opacity="0.7"/>
+        <text id="ti-gpu2-g-text" x="425" y="137" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">G (2Ψ)</text>
+        <rect id="ti-gpu2-os" x="360" y="159" width="130" height="70" rx="5" fill="#2196F3" opacity="0.7"/>
+        <text id="ti-gpu2-os-text" x="425" y="199" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">OS (12Ψ)</text>
+        <!-- GPU 3 -->
+        <rect id="ti-gpu3-bg" x="515" y="40" width="150" height="200" rx="8" fill="#fff" stroke="#ccc" stroke-width="1.2"/>
+        <text x="590" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#333">GPU 3</text>
+        <rect id="ti-gpu3-p" x="525" y="65" width="130" height="40" rx="5" fill="#4CAF50" opacity="0.7"/>
+        <text id="ti-gpu3-p-text" x="590" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">P (2Ψ)</text>
+        <rect id="ti-gpu3-g" x="525" y="112" width="130" height="40" rx="5" fill="#FF9800" opacity="0.7"/>
+        <text id="ti-gpu3-g-text" x="590" y="137" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">G (2Ψ)</text>
+        <rect id="ti-gpu3-os" x="525" y="159" width="130" height="70" rx="5" fill="#2196F3" opacity="0.7"/>
+        <text id="ti-gpu3-os-text" x="590" y="199" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">OS (12Ψ)</text>
+      </svg>
+
+      <script>
+      (function(){
+        var step = 0;
+        var maxStep = 3;
+        var gpuXs = [
+          {p:30,g:30,os:30, pw:130,gw:130,osw:130, px:95,gx:95,osx:95},
+          {p:195,g:195,os:195, pw:130,gw:130,osw:130, px:260,gx:260,osx:260},
+          {p:360,g:360,os:360, pw:130,gw:130,osw:130, px:425,gx:425,osx:425},
+          {p:525,g:525,os:525, pw:130,gw:130,osw:130, px:590,gx:590,osx:590}
+        ];
+        var steps = [
+          {
+            title:"Baseline DDP — All Replicated",
+            desc:"<strong>Baseline DDP:</strong> Every GPU stores a full copy of parameters (P), gradients (G), and optimizer states (OS). Total memory per GPU = 16Ψ bytes.",
+            p:{h:40,label:"P (2Ψ)",opacity:0.7},
+            g:{h:40,label:"G (2Ψ)",opacity:0.7},
+            os:{h:70,label:"OS (12Ψ)",opacity:0.7}
+          },
+          {
+            title:"ZeRO Stage 1 — Optimizer States Partitioned",
+            desc:"<strong>ZeRO-1:</strong> Optimizer states are partitioned — each GPU stores only 1/4 of OS. Parameters and gradients remain fully replicated. Memory per GPU = 4Ψ + 12Ψ/N.",
+            p:{h:40,label:"P (2Ψ)",opacity:0.7},
+            g:{h:40,label:"G (2Ψ)",opacity:0.7},
+            os:{h:22,label:"OS (3Ψ)",opacity:0.85}
+          },
+          {
+            title:"ZeRO Stage 2 — Gradients + OS Partitioned",
+            desc:"<strong>ZeRO-2:</strong> Both gradients and optimizer states are partitioned. Each GPU holds 1/4 of G and 1/4 of OS. Only parameters remain replicated. Memory per GPU = 2Ψ + 14Ψ/N.",
+            p:{h:40,label:"P (2Ψ)",opacity:0.7},
+            g:{h:14,label:"G (Ψ/2)",opacity:0.85},
+            os:{h:22,label:"OS (3Ψ)",opacity:0.85}
+          },
+          {
+            title:"ZeRO Stage 3 — Everything Partitioned",
+            desc:"<strong>ZeRO-3:</strong> Parameters, gradients, and optimizer states are all partitioned. Each GPU stores only 1/N of everything. Memory per GPU = 16Ψ/N. AllGather reconstructs params on-the-fly.",
+            p:{h:14,label:"P (Ψ/2)",opacity:0.85},
+            g:{h:14,label:"G (Ψ/2)",opacity:0.85},
+            os:{h:22,label:"OS (3Ψ)",opacity:0.85}
+          }
+        ];
+
+        function render(){
+          var s = steps[step];
+          document.getElementById("ti-zero-title").textContent = s.title;
+          document.getElementById("ti-zero-step-label").textContent = "Step "+step+" / "+maxStep;
+          document.getElementById("ti-zero-step-desc").innerHTML = s.desc;
+          for(var i=0;i<4;i++){
+            var pRect = document.getElementById("ti-gpu"+i+"-p");
+            var gRect = document.getElementById("ti-gpu"+i+"-g");
+            var osRect = document.getElementById("ti-gpu"+i+"-os");
+            var pText = document.getElementById("ti-gpu"+i+"-p-text");
+            var gText = document.getElementById("ti-gpu"+i+"-g-text");
+            var osText = document.getElementById("ti-gpu"+i+"-os-text");
+            pRect.setAttribute("height",s.p.h);
+            pRect.setAttribute("opacity",s.p.opacity);
+            pText.textContent = s.p.label;
+            pText.setAttribute("y", 65 + s.p.h/2 + 4);
+            var gY = 65 + s.p.h + 7;
+            gRect.setAttribute("y", gY);
+            gRect.setAttribute("height", s.g.h);
+            gRect.setAttribute("opacity", s.g.opacity);
+            gText.textContent = s.g.label;
+            gText.setAttribute("y", gY + s.g.h/2 + 4);
+            var osY = gY + s.g.h + 7;
+            osRect.setAttribute("y", osY);
+            osRect.setAttribute("height", s.os.h);
+            osRect.setAttribute("opacity", s.os.opacity);
+            osText.textContent = s.os.label;
+            osText.setAttribute("y", osY + s.os.h/2 + 4);
+          }
+        }
+
+        window.tiZeroPrev = function(){ if(step>0){step--;render();} };
+        window.tiZeroNext = function(){ if(step<maxStep){step++;render();} };
+        render();
+      })();
+      </script>
+
+      <!-- Section 6 -->
+      <h2 id="configuration">DeepSpeed Configuration</h2>
+      <p>DeepSpeed is configured via a JSON file. Here are the key configurations for each ZeRO stage:</p>
+
+      <h3>ZeRO Stage 2 Config (Most Common)</h3>
+      <pre class="pseudo-code"><span class="cm">// ds_config.json — ZeRO Stage 2</span>
+{
+  "train_batch_size": 256,
+  "train_micro_batch_size_per_gpu": 4,
+  "gradient_accumulation_steps": 8,
+
+  "zero_optimization": {
+    "stage": 2,
+    "allgather_partitions": <span class="kw">true</span>,
+    "allgather_bucket_size": 5e8,
+    "overlap_comm": <span class="kw">true</span>,          <span class="cm">// overlap communication with compute</span>
+    "reduce_scatter": <span class="kw">true</span>,
+    "reduce_bucket_size": 5e8,
+    "contiguous_gradients": <span class="kw">true</span>
+  },
+
+  "fp16": {
+    "enabled": <span class="kw">true</span>,
+    "loss_scale": 0,              <span class="cm">// dynamic loss scaling</span>
+    "initial_scale_power": 16
+  },
+
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 3e-4,
+      "betas": [0.9, 0.999],
+      "weight_decay": 0.01
+    }
+  }
+}</pre>
+
+      <h3>ZeRO Stage 3 Config</h3>
+      <pre class="pseudo-code"><span class="cm">// ds_config.json — ZeRO Stage 3 with offloading</span>
+{
+  "zero_optimization": {
+    "stage": 3,
+    "offload_optimizer": {
+      "device": "cpu",           <span class="cm">// offload optimizer to CPU RAM</span>
+      "pin_memory": <span class="kw">true</span>
+    },
+    "offload_param": {
+      "device": "cpu",           <span class="cm">// offload params to CPU (ZeRO-Infinity)</span>
+      "pin_memory": <span class="kw">true</span>
+    },
+    "overlap_comm": <span class="kw">true</span>,
+    "contiguous_gradients": <span class="kw">true</span>,
+    "sub_group_size": 1e9,
+    "reduce_bucket_size": "auto",
+    "stage3_prefetch_bucket_size": "auto",
+    "stage3_param_persistence_threshold": "auto",
+    "stage3_max_live_parameters": 1e9,
+    "stage3_max_reuse_distance": 1e9,
+    "stage3_gather_16bit_weights_on_model_save": <span class="kw">true</span>
+  }
+}</pre>
+
+      <h3>Training Script Integration</h3>
+      <pre class="pseudo-code"><span class="kw">import</span> deepspeed
+
+<span class="cm"># Initialize DeepSpeed engine</span>
+model_engine, optimizer, _, scheduler = deepspeed.<span class="fn">initialize</span>(
+    model=model,
+    model_parameters=model.<span class="fn">parameters</span>(),
+    config="ds_config.json"
+)
+
+<span class="cm"># Training loop — DeepSpeed handles all ZeRO mechanics</span>
+<span class="kw">for</span> batch <span class="kw">in</span> dataloader:
+    loss = model_engine(batch)
+    model_engine.<span class="fn">backward</span>(loss)      <span class="cm"># handles gradient partitioning</span>
+    model_engine.<span class="fn">step</span>()             <span class="cm"># handles optimizer partitioning + AllGather</span></pre>
+
+      <div class="callout">
+        <strong>Pro Tip:</strong> Set <code>"overlap_comm": true</code> to overlap AllGather/ReduceScatter with computation. This can hide 50–80% of communication overhead on high-bandwidth interconnects.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="zero-offload">ZeRO-Offload &amp; ZeRO-Infinity</h2>
+      <p>When even ZeRO-3 isn't enough, DeepSpeed can offload state to CPU RAM or NVMe storage.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4 style="color:#0a8f6a;margin-top:0">ZeRO-Offload (CPU)</h4>
+          <ul>
+            <li>Offloads optimizer states + gradients to CPU RAM</li>
+            <li>Adam step computed on CPU (with DeepSpeed CPU Adam)</li>
+            <li>Enables 10× larger models on a single GPU</li>
+            <li>Throughput: ~60–70% of GPU-only ZeRO-2</li>
+            <li>Best for: single-GPU or small cluster training</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4 style="color:#ff6b35;margin-top:0">ZeRO-Infinity (NVMe)</h4>
+          <ul>
+            <li>Offloads everything to NVMe SSD via CPU</li>
+            <li>Theoretically unlimited model size</li>
+            <li>Uses memory-mapped files + async I/O</li>
+            <li>Throughput: ~30–40% of GPU-only ZeRO-3</li>
+            <li>Best for: research on models that don't fit in GPU+CPU memory</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Offloading Communication Flow</h3>
+      <pre class="pseudo-code"><span class="cm"># ZeRO-Offload data flow per training step</span>
+<span class="cm">#</span>
+<span class="cm"># 1. GPU: Forward pass (params gathered via AllGather)</span>
+<span class="cm"># 2. GPU: Backward pass (compute gradients)</span>
+<span class="cm"># 3. GPU → CPU: Transfer gradients to CPU (PCIe)</span>
+<span class="cm"># 4. CPU: Adam optimizer step (DeepSpeedCPUAdam, AVX-optimized)</span>
+<span class="cm"># 5. CPU → GPU: Transfer updated params back (PCIe)</span>
+<span class="cm">#</span>
+<span class="cm"># PCIe bandwidth: ~32 GB/s (PCIe 4.0 x16)</span>
+<span class="cm"># For 7B model: 14 GB of data transferred each way → ~0.44s per step</span>
+<span class="cm"># Overlapped with GPU computation for next micro-batch</span></pre>
+
+      <div class="callout warn">
+        <strong>When NOT to Offload:</strong> If you have enough GPUs to fit the model with ZeRO-3, don't offload. CPU/NVMe offloading introduces PCIe bottlenecks that reduce throughput by 30–70%. Only offload when you literally cannot fit the model in aggregate GPU memory.
+      </div>
+
+      <!-- Section 8 -->
+      <h2 id="benchmarks">Performance Benchmarks</h2>
+      <p>Below are representative throughput numbers for a 7B parameter model on 8× A100-80GB GPUs with NVLink + InfiniBand.</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead>
+          <tr style="border-bottom:2px solid var(--line)">
+            <th style="text-align:left;padding:0.5rem">Configuration</th>
+            <th style="text-align:center;padding:0.5rem">Memory/GPU</th>
+            <th style="text-align:center;padding:0.5rem">Throughput</th>
+            <th style="text-align:center;padding:0.5rem">Comm Overhead</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">DDP (baseline)</td>
+            <td style="text-align:center;padding:0.5rem">~72 GB</td>
+            <td style="text-align:center;padding:0.5rem">100% (reference)</td>
+            <td style="text-align:center;padding:0.5rem">1.0×</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">ZeRO Stage 1</td>
+            <td style="text-align:center;padding:0.5rem">~25 GB</td>
+            <td style="text-align:center;padding:0.5rem">~97%</td>
+            <td style="text-align:center;padding:0.5rem">1.1×</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">ZeRO Stage 2</td>
+            <td style="text-align:center;padding:0.5rem">~15 GB</td>
+            <td style="text-align:center;padding:0.5rem">~95%</td>
+            <td style="text-align:center;padding:0.5rem">1.2×</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">ZeRO Stage 3</td>
+            <td style="text-align:center;padding:0.5rem">~4 GB</td>
+            <td style="text-align:center;padding:0.5rem">~85%</td>
+            <td style="text-align:center;padding:0.5rem">1.5×</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem">ZeRO-3 + CPU Offload</td>
+            <td style="text-align:center;padding:0.5rem">~2 GB</td>
+            <td style="text-align:center;padding:0.5rem">~65%</td>
+            <td style="text-align:center;padding:0.5rem">2.0× + PCIe</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem">ZeRO-Infinity (NVMe)</td>
+            <td style="text-align:center;padding:0.5rem">~1 GB</td>
+            <td style="text-align:center;padding:0.5rem">~35%</td>
+            <td style="text-align:center;padding:0.5rem">3.0× + PCIe + NVMe</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Interview Recommendation:</strong> "Start with ZeRO Stage 2 — it gives the best memory-to-throughput ratio. Move to Stage 3 only when the model doesn't fit with Stage 2. Use offloading as a last resort when aggregate GPU memory isn't sufficient. Always enable <code>overlap_comm</code> to hide communication latency."
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into serving long-context LLMs: ring attention, chunked prefill, KV cache memory challenges with 128K+ tokens, sliding window attention, and practical deployment strategies.">
+  <title>Serving Long-Context LLMs | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#kv-cache-math">KV Cache Memory Math</a></li>
+          <li><a href="#chunked-prefill">Chunked Prefill</a></li>
+          <li><a href="#ring-attention">Ring Attention</a></li>
+          <li><a href="#sliding-sparse">Sliding Window &amp; Sparse Attention</a></li>
+          <li><a href="#memory-efficient">Memory-Efficient Attention</a></li>
+          <li><a href="#deployment-strategies">Deployment Strategies</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Serving Long-Context LLMs</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <p>Long-context models like Llama-3.1 (128K), Claude (200K), and Gemini (1M+) have transformed what LLMs can process. But serving these models in production is an entirely different beast — the KV cache alone for a 128K-token request on a 70B model can exceed 160 GB. This post dives into the systems-level techniques that make long-context serving feasible: chunked prefill, ring attention, sparse attention, and practical memory management.</p>
+
+      <!-- ================================================================ -->
+      <h2 id="kv-cache-math">KV Cache Memory Math</h2>
+
+      <p>Every transformer layer stores key and value tensors for each token that has been processed. For a model with <strong>L</strong> layers, <strong>H</strong> attention heads, and head dimension <strong>d</strong>, the KV cache per token is:</p>
+
+      <pre class="pseudo-code"><span class="cm">## KV cache size calculation</span>
+<span class="fn">kv_bytes_per_token</span> = 2 × L × H_kv × d × bytes_per_param
+
+<span class="cm">## Llama-2 70B: L=80, H_kv=8 (GQA), d=128, FP16 (2 bytes)</span>
+kv_per_token = 2 × 80 × 8 × 128 × 2 = <span class="fn">327,680 bytes ≈ 320 KB</span>
+
+<span class="cm">## For 128K tokens:</span>
+total_kv = 320 KB × 131,072 = <span class="fn">~40 GB per request</span>
+
+<span class="cm">## With 4 concurrent requests:</span>
+total_kv_4req = 40 GB × 4 = <span class="fn">160 GB just for KV cache</span>
+
+<span class="cm">## Compare: model weights (FP16) ≈ 140 GB</span>
+<span class="cm">## KV cache can exceed the model itself!</span></pre>
+
+      <div class="callout warn">
+        <strong>Critical insight:</strong> At 128K context length, the KV cache for a single Llama-70B request (40 GB in FP16) approaches 30% of the model weights themselves. With just 4 concurrent users, KV cache alone requires more memory than the model. This is why naive long-context serving is impossible on current hardware without optimization.
+      </div>
+
+      <p>Key parameters that determine KV cache size:</p>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Model Architecture</h3>
+          <ul>
+            <li><strong>GQA ratio:</strong> Llama-2 70B uses 8 KV heads vs 64 query heads (8× reduction)</li>
+            <li><strong>MQA:</strong> Falcon uses 1 KV head (64× reduction) but lower quality</li>
+            <li><strong>Layer count:</strong> 80 layers in 70B vs 32 in 7B</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Quantization</h3>
+          <ul>
+            <li><strong>FP16 → FP8:</strong> 2× reduction, minimal quality loss</li>
+            <li><strong>FP16 → INT4:</strong> 4× reduction, noticeable degradation past 32K tokens</li>
+            <li><strong>KV cache quantization</strong> is independent of weight quantization</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="chunked-prefill">Chunked Prefill</h2>
+
+      <p>The prefill phase processes the entire prompt in one forward pass. For a 128K-token prompt, this single forward pass can take 30+ seconds on a single GPU, during which <strong>no other requests can be served</strong>. Chunked prefill breaks the prompt into smaller chunks (e.g., 2048 or 4096 tokens) and processes them across multiple iterations, interleaving decode steps for other requests.</p>
+
+      <!-- SVG: Chunked Prefill Timeline -->
+      <svg id="li-chunked-prefill-svg" viewBox="0 0 750 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:750px;margin:1.2rem auto;display:block" role="img" aria-label="Chunked prefill timeline showing interleaved processing">
+        <defs>
+          <linearGradient id="li-prefill-grad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#0a8f6a"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.7"/>
+          </linearGradient>
+          <linearGradient id="li-decode-grad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#ff6b35"/>
+            <stop offset="100%" stop-color="#ff6b35" stop-opacity="0.7"/>
+          </linearGradient>
+        </defs>
+
+        <text x="375" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="13" fill="#1a1a2e">Chunked Prefill: Interleaving Long Prompt with Active Decodes</text>
+
+        <!-- Naive approach -->
+        <text x="15" y="58" font-family="Manrope,sans-serif" font-weight="600" font-size="11" fill="#555">Naive (blocking):</text>
+        <rect x="140" y="44" width="500" height="26" rx="5" fill="url(#li-prefill-grad)" opacity="0.9"/>
+        <text x="390" y="61" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Prefill 128K tokens (30s) — GPU fully occupied</text>
+        <rect x="642" y="44" width="40" height="26" rx="5" fill="url(#li-decode-grad)"/>
+        <text x="662" y="61" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#fff">Dec</text>
+
+        <!-- Blocked requests -->
+        <text x="15" y="100" font-family="Manrope,sans-serif" font-weight="600" font-size="11" fill="#d32f2f">Other requests:</text>
+        <rect x="140" y="86" width="500" height="22" rx="4" fill="#ffcdd2" stroke="#d32f2f" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="390" y="101" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#d32f2f">⏳ Blocked — waiting for prefill to finish</text>
+
+        <line x1="30" y1="130" x2="720" y2="130" stroke="#ddd" stroke-width="1"/>
+
+        <!-- Chunked approach -->
+        <text x="15" y="158" font-family="Manrope,sans-serif" font-weight="600" font-size="11" fill="#555">Chunked prefill:</text>
+        <!-- Chunk 1 -->
+        <rect x="140" y="144" width="80" height="26" rx="5" fill="url(#li-prefill-grad)" opacity="0.85"/>
+        <text x="180" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#fff">Chunk 1</text>
+        <!-- Decode slot -->
+        <rect x="222" y="144" width="30" height="26" rx="5" fill="url(#li-decode-grad)"/>
+        <text x="237" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#fff">D</text>
+        <!-- Chunk 2 -->
+        <rect x="254" y="144" width="80" height="26" rx="5" fill="url(#li-prefill-grad)" opacity="0.85"/>
+        <text x="294" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#fff">Chunk 2</text>
+        <!-- Decode slot -->
+        <rect x="336" y="144" width="30" height="26" rx="5" fill="url(#li-decode-grad)"/>
+        <text x="351" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#fff">D</text>
+        <!-- Chunk 3 -->
+        <rect x="368" y="144" width="80" height="26" rx="5" fill="url(#li-prefill-grad)" opacity="0.85"/>
+        <text x="408" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#fff">Chunk 3</text>
+        <!-- Decode slot -->
+        <rect x="450" y="144" width="30" height="26" rx="5" fill="url(#li-decode-grad)"/>
+        <text x="465" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#fff">D</text>
+        <!-- ... more -->
+        <text x="495" y="161" font-family="Consolas,monospace" font-size="11" fill="#888">···</text>
+        <rect x="520" y="144" width="80" height="26" rx="5" fill="url(#li-prefill-grad)" opacity="0.85"/>
+        <text x="560" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#fff">Chunk N</text>
+
+        <!-- Other requests interleaved -->
+        <text x="15" y="200" font-family="Manrope,sans-serif" font-weight="600" font-size="11" fill="#0a8f6a">Other requests:</text>
+        <rect x="222" y="186" width="30" height="22" rx="4" fill="#c8e6c9"/>
+        <text x="237" y="201" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#2e7d32">✓</text>
+        <rect x="336" y="186" width="30" height="22" rx="4" fill="#c8e6c9"/>
+        <text x="351" y="201" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#2e7d32">✓</text>
+        <rect x="450" y="186" width="30" height="22" rx="4" fill="#c8e6c9"/>
+        <text x="465" y="201" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#2e7d32">✓</text>
+
+        <!-- Legend -->
+        <rect x="180" y="240" width="16" height="12" rx="3" fill="url(#li-prefill-grad)"/>
+        <text x="200" y="250" font-family="Manrope,sans-serif" font-size="10" fill="#555">Prefill chunk (e.g., 4096 tokens)</text>
+        <rect x="420" y="240" width="16" height="12" rx="3" fill="url(#li-decode-grad)"/>
+        <text x="440" y="250" font-family="Manrope,sans-serif" font-size="10" fill="#555">Decode steps for active requests</text>
+
+        <!-- Metrics -->
+        <text x="375" y="285" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">Chunked prefill: TTFT for ongoing requests stays ~50ms vs 30s+ with naive approach</text>
+        <text x="375" y="305" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">Trade-off: total prefill time increases ~10-15% due to scheduling overhead</text>
+      </svg>
+
+      <pre class="pseudo-code"><span class="cm">## vLLM chunked prefill configuration</span>
+<span class="kw">from</span> vllm <span class="kw">import</span> LLM, SamplingParams
+
+llm = LLM(
+    model=<span class="fn">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+    tensor_parallel_size=4,
+    <span class="cm"># Enable chunked prefill</span>
+    enable_chunked_prefill=<span class="kw">True</span>,
+    <span class="cm"># Max tokens per prefill chunk — smaller = better latency for others</span>
+    max_num_batched_tokens=4096,
+    <span class="cm"># Max number of sequences in a batch</span>
+    max_num_seqs=128,
+    <span class="cm"># KV cache dtype — FP8 halves memory</span>
+    kv_cache_dtype=<span class="fn">"fp8_e5m2"</span>,
+)
+
+<span class="cm">## Chunk size trade-offs:</span>
+<span class="cm">## 2048: Best ITL for concurrent decodes, slower total prefill</span>
+<span class="cm">## 4096: Good balance (vLLM default)</span>
+<span class="cm">## 8192: Faster prefill, higher ITL variance</span></pre>
+
+      <div class="callout">
+        <strong>Why chunked prefill matters:</strong> Without it, a single 128K-token request monopolizes the GPU for the entire prefill duration (~30s on an A100). Every other request sees TTFT spike to 30+ seconds. With chunked prefill (chunk size 4096), ongoing requests maintain ~50ms inter-token latency while the long prompt is processed incrementally.
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="ring-attention">Ring Attention</h2>
+
+      <p>Ring attention distributes the sequence across multiple devices in a ring topology. Each device holds a contiguous block of the sequence and computes local attention. The KV blocks are then passed around the ring so that each device eventually attends to all positions — but never needs to store the full KV cache locally.</p>
+
+      <p><strong>How it works:</strong></p>
+      <ol>
+        <li>Partition the sequence of length <em>S</em> into <em>P</em> devices: each holds <em>S/P</em> tokens.</li>
+        <li>Each device computes Q×K<sup>T</sup> for its local KV block and stores partial softmax statistics (log-sum-exp).</li>
+        <li>KV blocks rotate around the ring — each device sends its KV block to the next device and receives from the previous.</li>
+        <li>After <em>P-1</em> rotations, every device has attended to all positions. Final attention output is computed using the online softmax correction (log-sum-exp trick).</li>
+      </ol>
+
+      <pre class="pseudo-code"><span class="cm">## Ring attention — each device processes one block</span>
+<span class="kw">def</span> <span class="fn">ring_attention</span>(Q_local, K_local, V_local, ring_comm):
+    <span class="cm">"""Each device has Q for its block, and iterates over all K,V blocks."""</span>
+    P = ring_comm.world_size
+    running_numerator = <span class="fn">zeros_like</span>(Q_local @ V_local[0])
+    running_denominator = <span class="fn">zeros_like</span>(Q_local.shape[0])
+    running_max = <span class="fn">full</span>(Q_local.shape[0], float(<span class="fn">'-inf'</span>))
+
+    K_buf, V_buf = K_local, V_local
+
+    <span class="kw">for</span> step <span class="kw">in</span> <span class="fn">range</span>(P):
+        <span class="cm"># Overlap communication with computation</span>
+        <span class="kw">if</span> step &lt; P - 1:
+            K_next, V_next = ring_comm.<span class="fn">async_send_recv</span>(K_buf, V_buf)
+
+        <span class="cm"># Local attention: Q_local × K_buf^T</span>
+        scores = Q_local @ K_buf.T / <span class="fn">sqrt</span>(d_head)
+        <span class="cm"># Apply causal mask if needed</span>
+        scores = <span class="fn">apply_causal_mask</span>(scores, step, ring_comm.rank)
+
+        <span class="cm"># Online softmax update (numerically stable)</span>
+        block_max = scores.<span class="fn">max</span>(dim=-1)
+        new_max = <span class="fn">maximum</span>(running_max, block_max)
+        correction = <span class="fn">exp</span>(running_max - new_max)
+        new_weights = <span class="fn">exp</span>(scores - new_max.unsqueeze(-1))
+
+        running_numerator = correction.unsqueeze(-1) * running_numerator + new_weights @ V_buf
+        running_denominator = correction * running_denominator + new_weights.<span class="fn">sum</span>(dim=-1)
+        running_max = new_max
+
+        <span class="kw">if</span> step &lt; P - 1:
+            K_buf, V_buf = K_next.<span class="fn">wait</span>(), V_next.<span class="fn">wait</span>()
+
+    <span class="kw">return</span> running_numerator / running_denominator.unsqueeze(-1)</pre>
+
+      <div class="callout">
+        <strong>Scaling:</strong> Ring attention achieves near-linear scaling. With 8 GPUs, each device holds 16K tokens of a 128K sequence. KV cache per device drops from 40 GB to ~5 GB. Communication overhead is hidden behind computation via double-buffering, adding only ~5-8% overhead in practice.
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="sliding-sparse">Sliding Window &amp; Sparse Attention</h2>
+
+      <p>Full quadratic attention is often unnecessary. Many production models use structured sparsity to reduce both computation and KV cache requirements:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Sliding Window Attention</h3>
+          <p>Each token attends to the last <em>W</em> tokens (e.g., W=4096 in Mistral). Memory scales as O(W) instead of O(S). Used in Mistral-7B, Mixtral-8x7B.</p>
+          <ul>
+            <li><strong>KV cache:</strong> Fixed at W × kv_per_token regardless of sequence length</li>
+            <li><strong>Mistral 7B:</strong> W=4096 → only 1.3 GB KV per request</li>
+            <li><strong>Limitation:</strong> Cannot recall information beyond the window</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Sparse Attention (e.g., BigBird, LongFormer)</h3>
+          <p>Combines local windows with global tokens and random connections. O(S) complexity instead of O(S²).</p>
+          <ul>
+            <li><strong>Global tokens:</strong> First few tokens attend to all positions (anchors)</li>
+            <li><strong>Local window:</strong> Each token attends to ±W neighbors</li>
+            <li><strong>Random:</strong> Small set of random connections per token</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>Hybrid approaches in modern models like Llama-3.1 use <strong>full attention in some layers</strong> and <strong>sliding window in others</strong>. For example, every 4th layer might use full attention while others use a 4096-token window. This balances long-range recall with memory efficiency.</p>
+
+      <pre class="pseudo-code"><span class="cm">## Sliding window KV cache eviction in serving</span>
+<span class="kw">class</span> <span class="fn">SlidingWindowKVCache</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, window_size=4096, num_layers=32):
+        self.window = window_size
+        <span class="cm"># Circular buffer per layer</span>
+        self.k_cache = [<span class="fn">CircularBuffer</span>(window_size) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_layers)]
+        self.v_cache = [<span class="fn">CircularBuffer</span>(window_size) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_layers)]
+
+    <span class="kw">def</span> <span class="fn">append</span>(self, layer_idx, new_k, new_v):
+        <span class="cm"># Old entries are overwritten automatically</span>
+        self.k_cache[layer_idx].<span class="fn">push</span>(new_k)
+        self.v_cache[layer_idx].<span class="fn">push</span>(new_v)
+        <span class="cm"># Memory stays constant at window_size × kv_per_token × num_layers</span></pre>
+
+      <!-- ================================================================ -->
+      <h2 id="memory-efficient">Memory-Efficient Attention Implementations</h2>
+
+      <p>Even with architectural changes, the attention computation itself must be memory-efficient. Key implementations:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>FlashAttention-2</h3>
+          <ul>
+            <li>Fuses Q×K<sup>T</sup>, softmax, and ×V into a single kernel</li>
+            <li>Never materializes the S×S attention matrix in HBM</li>
+            <li>Uses tiling: processes attention in blocks that fit in SRAM (192 KB on A100)</li>
+            <li><strong>Memory:</strong> O(S) instead of O(S²) — critical for 128K+ sequences</li>
+            <li><strong>Speed:</strong> 2-4× faster than standard attention at 8K+ sequence lengths</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>PagedAttention (vLLM)</h3>
+          <ul>
+            <li>Manages KV cache like virtual memory with fixed-size blocks (16 tokens/block)</li>
+            <li>Eliminates fragmentation from variable-length sequences</li>
+            <li>Enables KV cache sharing across requests (prompt caching)</li>
+            <li><strong>Memory waste:</strong> Reduced from 60-80% to &lt;4% on average</li>
+            <li>Supports copy-on-write for beam search and shared prefixes</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm">## FlashAttention-2 conceptual tiling</span>
+<span class="kw">def</span> <span class="fn">flash_attention_forward</span>(Q, K, V, block_size=128):
+    <span class="cm">"""Process attention in SRAM-sized tiles."""</span>
+    S, d = Q.shape
+    O = <span class="fn">zeros</span>(S, d)          <span class="cm"># output accumulator</span>
+    l = <span class="fn">zeros</span>(S)              <span class="cm"># log-sum-exp accumulator</span>
+    m = <span class="fn">full</span>(S, <span class="fn">float</span>('-inf'))  <span class="cm"># running max</span>
+
+    <span class="kw">for</span> j <span class="kw">in</span> <span class="fn">range</span>(0, S, block_size):      <span class="cm"># iterate over K,V blocks</span>
+        K_j = K[j:j+block_size]
+        V_j = V[j:j+block_size]
+        <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(0, S, block_size):  <span class="cm"># iterate over Q blocks</span>
+            Q_i = Q[i:i+block_size]
+            <span class="cm"># All of this happens in SRAM — no HBM reads for S×S matrix</span>
+            S_ij = Q_i @ K_j.T / <span class="fn">sqrt</span>(d)
+            m_new = <span class="fn">maximum</span>(m[i:i+block_size], S_ij.<span class="fn">max</span>(dim=-1))
+            P_ij = <span class="fn">exp</span>(S_ij - m_new.unsqueeze(-1))
+            <span class="cm"># Online softmax correction</span>
+            correction = <span class="fn">exp</span>(m[i:i+block_size] - m_new)
+            l[i:i+block_size] = correction * l[i:i+block_size] + P_ij.<span class="fn">sum</span>(dim=-1)
+            O[i:i+block_size] = correction.unsqueeze(-1) * O[i:i+block_size] + P_ij @ V_j
+            m[i:i+block_size] = m_new
+
+    <span class="kw">return</span> O / l.unsqueeze(-1)</pre>
+
+      <!-- ================================================================ -->
+      <h2 id="deployment-strategies">Deployment Strategies</h2>
+
+      <p>Putting it all together — practical configurations for serving long-context models in production:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Small Scale (1-2 GPUs)</h3>
+          <ul>
+            <li><strong>Model:</strong> Llama-3.1-8B, 32K context</li>
+            <li><strong>Hardware:</strong> 1× A100 80GB</li>
+            <li>KV cache quantization: FP8 (halves KV memory)</li>
+            <li>Chunked prefill: 4096 tokens/chunk</li>
+            <li>Max concurrent requests: ~8-12</li>
+            <li>Effective throughput: ~500 tok/s</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Production Scale (8+ GPUs)</h3>
+          <ul>
+            <li><strong>Model:</strong> Llama-3.1-70B, 128K context</li>
+            <li><strong>Hardware:</strong> 8× H100 80GB (TP=8)</li>
+            <li>Ring attention for sequences &gt;64K</li>
+            <li>KV cache: FP8 + PagedAttention</li>
+            <li>Prefix caching for system prompts</li>
+            <li>Max concurrent long-context: 4-6 requests</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm">## Production deployment: vLLM with long-context optimizations</span>
+<span class="kw">import</span> subprocess
+
+cmd = [
+    <span class="fn">"python"</span>, <span class="fn">"-m"</span>, <span class="fn">"vllm.entrypoints.openai.api_server"</span>,
+    <span class="fn">"--model"</span>, <span class="fn">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+    <span class="fn">"--tensor-parallel-size"</span>, <span class="fn">"8"</span>,
+    <span class="fn">"--max-model-len"</span>, <span class="fn">"131072"</span>,           <span class="cm"># 128K context</span>
+    <span class="fn">"--enable-chunked-prefill"</span>,
+    <span class="fn">"--max-num-batched-tokens"</span>, <span class="fn">"4096"</span>,    <span class="cm"># chunk size</span>
+    <span class="fn">"--kv-cache-dtype"</span>, <span class="fn">"fp8_e5m2"</span>,         <span class="cm"># halves KV memory</span>
+    <span class="fn">"--enable-prefix-caching"</span>,              <span class="cm"># reuse system prompts</span>
+    <span class="fn">"--gpu-memory-utilization"</span>, <span class="fn">"0.92"</span>,     <span class="cm"># leave headroom</span>
+    <span class="fn">"--max-num-seqs"</span>, <span class="fn">"64"</span>,                 <span class="cm"># concurrent sequences</span>
+    <span class="fn">"--port"</span>, <span class="fn">"8000"</span>,
+]
+
+<span class="cm">## Key monitoring metrics:</span>
+<span class="cm">## - gpu_cache_usage_perc: KV cache utilization (alert at >90%)</span>
+<span class="cm">## - num_preemptions: requests evicted due to memory pressure</span>
+<span class="cm">## - avg_prompt_throughput_toks_per_s: prefill speed</span>
+<span class="cm">## - avg_generation_throughput_toks_per_s: decode speed</span></pre>
+
+      <div class="callout">
+        <strong>Prefix caching is critical for long-context deployments.</strong> If many requests share a common system prompt (e.g., 4K tokens of instructions), prefix caching stores this KV cache once and reuses it across all requests. For a 4K shared prefix with 100 requests, this saves 100 × 4K × 320 KB ≈ 122 GB of redundant KV computation and memory.
+      </div>
+
+      <p><strong>Key takeaway:</strong> Serving long-context models is primarily a memory management problem. The combination of chunked prefill (latency isolation), KV cache quantization (2× memory reduction), PagedAttention (eliminate fragmentation), and prefix caching (deduplicate shared context) makes 128K-token serving practical on 8× H100 nodes. Beyond 128K, ring attention or model-specific architectural changes (sliding window + sparse) become essential.</p>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Comprehensive guide to distributed checkpointing for large-scale LLM training including sharded state dicts, async I/O, and elastic resharding.">
+  <title>Checkpoint Management: Distributed, Async I/O | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#checkpoint-problem">The Checkpoint Problem at Scale</a></li>
+        <li><a href="#sharded-state-dict">Sharded State Dict Saving</a></li>
+        <li><a href="#async-checkpointing">Async Checkpointing &amp; Non-Blocking I/O</a></li>
+        <li><a href="#checkpoint-formats">Checkpoint Formats</a></li>
+        <li><a href="#elastic-resharding">Elastic Checkpointing &amp; Resharding</a></li>
+        <li><a href="#storage-architecture">Storage Architecture</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Checkpoint Management: Distributed, Async I/O</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ======== Section 1 ======== -->
+      <h2 id="checkpoint-problem">The Checkpoint Problem at Scale</h2>
+      <p>Training a 70B-parameter model across 512 GPUs for weeks means that every minute of wasted compute costs real money&mdash;often $2&ndash;$4 per GPU-hour on cloud A100/H100 clusters. If a single node fails after 12 hours of training without a checkpoint, you lose that entire window: roughly <strong>$12,000&ndash;$24,000</strong> in wasted compute. Checkpointing is the insurance policy against hardware faults, preemptions, and software crashes, but it comes with its own costs that must be carefully managed.</p>
+
+      <p>The core tension in checkpoint design is between <strong>checkpoint frequency</strong> and <strong>training throughput</strong>. A naive synchronous checkpoint of a 70B model in bf16 requires writing ~140 GB of model parameters plus an additional ~560 GB of optimizer states (Adam maintains first and second moment estimates, each the size of the model, in fp32). With mixed-precision master weights, total checkpoint size easily reaches <strong>700 GB&ndash;1.2 TB</strong> per save.</p>
+
+      <div class="callout warn">
+        <strong>Cost of Naive Checkpointing:</strong> A synchronous checkpoint that pauses all training to write 1 TB to a distributed filesystem at 10 GB/s aggregate bandwidth takes ~100 seconds. If you checkpoint every 15 minutes, you lose ~10% of your training throughput just to I/O. At $50/hour cluster cost, that's $120/day wasted on blocking writes.
+      </div>
+
+      <p>The key metrics for evaluating checkpoint strategy are:</p>
+      <ul>
+        <li><strong>Mean Time Between Failures (MTBF):</strong> At scale, hardware failures occur every 2&ndash;8 hours. Node-level MTBF may be 30+ days, but across 64 nodes the cluster-level MTBF drops dramatically.</li>
+        <li><strong>Checkpoint Overhead Ratio:</strong> Time spent checkpointing divided by total training time. Target &lt; 2%.</li>
+        <li><strong>Recovery Time Objective (RTO):</strong> Time from failure detection to resuming training. Includes loading checkpoint, rebuilding communication groups, and warming up.</li>
+        <li><strong>Recovery Point Objective (RPO):</strong> Maximum acceptable training progress loss, measured in steps or tokens processed.</li>
+      </ul>
+
+      <!-- Distributed Checkpoint Flow SVG -->
+      <svg viewBox="0 0 800 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;margin:1.4rem auto;display:block" aria-label="Distributed checkpoint flow diagram">
+        <defs>
+          <marker id="lt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+          <linearGradient id="lt-grad-gpu" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e8f5e9"/><stop offset="100%" stop-color="#c8e6c9"/></linearGradient>
+          <linearGradient id="lt-grad-buf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff3e0"/><stop offset="100%" stop-color="#ffe0b2"/></linearGradient>
+          <linearGradient id="lt-grad-store" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e3f2fd"/><stop offset="100%" stop-color="#bbdefb"/></linearGradient>
+        </defs>
+        <!-- GPU Ranks -->
+        <rect id="lt-gpu0" x="20" y="30" width="130" height="56" rx="10" fill="url(#lt-grad-gpu)" stroke="#388e3c" stroke-width="1.5"/>
+        <text id="lt-gpu0-label" x="85" y="54" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="700" fill="#2e7d32">GPU Rank 0</text>
+        <text x="85" y="72" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">shard_0.pt (175GB)</text>
+
+        <rect id="lt-gpu1" x="20" y="100" width="130" height="56" rx="10" fill="url(#lt-grad-gpu)" stroke="#388e3c" stroke-width="1.5"/>
+        <text id="lt-gpu1-label" x="85" y="124" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="700" fill="#2e7d32">GPU Rank 1</text>
+        <text x="85" y="142" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">shard_1.pt (175GB)</text>
+
+        <rect id="lt-gpu2" x="20" y="170" width="130" height="56" rx="10" fill="url(#lt-grad-gpu)" stroke="#388e3c" stroke-width="1.5"/>
+        <text id="lt-gpu2-label" x="85" y="194" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="700" fill="#2e7d32">GPU Rank 2</text>
+        <text x="85" y="212" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">shard_2.pt (175GB)</text>
+
+        <rect id="lt-gpu3" x="20" y="240" width="130" height="56" rx="10" fill="url(#lt-grad-gpu)" stroke="#388e3c" stroke-width="1.5"/>
+        <text id="lt-gpu3-label" x="85" y="264" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="700" fill="#2e7d32">GPU Rank 3</text>
+        <text x="85" y="282" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">shard_3.pt (175GB)</text>
+
+        <!-- Staging Buffers -->
+        <rect id="lt-stage" x="260" y="60" width="150" height="210" rx="12" fill="url(#lt-grad-buf)" stroke="#f57c00" stroke-width="1.5"/>
+        <text id="lt-stage-label" x="335" y="86" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#e65100">CPU / NVMe Stage</text>
+        <text id="lt-stage-d2h" x="335" y="110" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">D2H memcpy (async)</text>
+        <rect id="lt-buf0" x="278" y="126" width="114" height="24" rx="5" fill="#fff" stroke="#f57c00" stroke-width="1"/>
+        <text x="335" y="142" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">pinned_buf[0]</text>
+        <rect id="lt-buf1" x="278" y="158" width="114" height="24" rx="5" fill="#fff" stroke="#f57c00" stroke-width="1"/>
+        <text x="335" y="174" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">pinned_buf[1]</text>
+        <rect id="lt-buf2" x="278" y="190" width="114" height="24" rx="5" fill="#fff" stroke="#f57c00" stroke-width="1"/>
+        <text x="335" y="206" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">pinned_buf[2]</text>
+        <rect id="lt-buf3" x="278" y="222" width="114" height="24" rx="5" fill="#fff" stroke="#f57c00" stroke-width="1"/>
+        <text x="335" y="238" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">pinned_buf[3]</text>
+
+        <!-- Distributed Storage -->
+        <rect id="lt-storage" x="530" y="80" width="240" height="180" rx="14" fill="url(#lt-grad-store)" stroke="#1565c0" stroke-width="1.5"/>
+        <text id="lt-storage-label" x="650" y="108" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0d47a1">Distributed Storage</text>
+        <text id="lt-storage-sub" x="650" y="126" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">Lustre / FSx / GPFS</text>
+        <rect id="lt-ost0" x="548" y="142" width="96" height="22" rx="4" fill="#fff" stroke="#1565c0" stroke-width="1"/>
+        <text x="596" y="157" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">OST-0</text>
+        <rect id="lt-ost1" x="656" y="142" width="96" height="22" rx="4" fill="#fff" stroke="#1565c0" stroke-width="1"/>
+        <text x="704" y="157" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">OST-1</text>
+        <rect id="lt-ost2" x="548" y="174" width="96" height="22" rx="4" fill="#fff" stroke="#1565c0" stroke-width="1"/>
+        <text x="596" y="189" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">OST-2</text>
+        <rect id="lt-ost3" x="656" y="174" width="96" height="22" rx="4" fill="#fff" stroke="#1565c0" stroke-width="1"/>
+        <text x="704" y="189" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#333">OST-3</text>
+        <text id="lt-meta" x="650" y="222" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#0d47a1">metadata.json + .distcp/</text>
+        <rect id="lt-meta-box" x="570" y="228" width="160" height="20" rx="4" fill="#e3f2fd" stroke="#1565c0" stroke-width="1" stroke-dasharray="4,2"/>
+        <text x="650" y="242" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">resharding plan &amp; tensor map</text>
+
+        <!-- Arrows: GPU → Stage -->
+        <line id="lt-arr-g0" x1="150" y1="58" x2="258" y2="138" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-g1" x1="150" y1="128" x2="258" y2="160" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-g2" x1="150" y1="198" x2="258" y2="200" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-g3" x1="150" y1="268" x2="258" y2="234" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <!-- Arrows: Stage → Storage -->
+        <line id="lt-arr-s0" x1="410" y1="138" x2="528" y2="150" stroke="#1565c0" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-s1" x1="410" y1="170" x2="528" y2="165" stroke="#1565c0" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-s2" x1="410" y1="202" x2="528" y2="182" stroke="#1565c0" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+        <line id="lt-arr-s3" x1="410" y1="234" x2="528" y2="195" stroke="#1565c0" stroke-width="1.5" marker-end="url(#lt-arrow)"/>
+
+        <!-- Labels -->
+        <text id="lt-lbl-async" x="200" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">async D2H copy</text>
+        <text id="lt-lbl-bg" x="470" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#1565c0" font-weight="600">background write threads</text>
+        <text id="lt-lbl-parallel" x="650" y="320" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Each rank writes independently &mdash; no all-gather required</text>
+      </svg>
+
+      <p>The diagram above illustrates the high-performance checkpoint pipeline: each GPU rank asynchronously copies its local shard from device memory to pinned CPU memory (or NVMe staging), then background threads write those buffers to distributed storage in parallel. This avoids the catastrophic bottleneck of gathering all parameters to rank 0.</p>
+
+      <!-- ======== Section 2 ======== -->
+      <h2 id="sharded-state-dict">Sharded State Dict Saving</h2>
+      <p>In Fully Sharded Data Parallelism (FSDP), model parameters and optimizer states are sharded across all participating ranks. The naive approach to checkpointing&mdash;calling <code>model.state_dict()</code> which triggers an all-gather to consolidate the full model onto rank 0&mdash;is disastrous at scale. For a 70B model, this requires 140+ GB of peak memory on rank 0, likely causing an OOM crash.</p>
+
+      <p>The sharded state dict approach instead has each rank save only its local shard. PyTorch's FSDP provides <code>StateDictType.SHARDED_STATE_DICT</code> which preserves the sharded representation. Each rank writes a file like <code>__0_0.distcp</code> containing only its portion of the parameter and optimizer tensors.</p>
+
+      <div class="callout">
+        <strong>Memory Overhead:</strong> Sharded saving requires zero additional GPU memory beyond the existing shard. The only overhead is pinned CPU memory for the staging buffer, which can be pre-allocated once and reused across checkpoints. For a 70B model on 512 GPUs, each rank holds ~280 MB of parameters and ~1.1 GB of optimizer states.
+      </div>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+<span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> (
+    FullyShardedDataParallel <span class="kw">as</span> FSDP,
+    StateDictType,
+    ShardedStateDictConfig,
+    ShardedOptimStateDictConfig,
+)
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> save, load
+<span class="kw">from</span> pathlib <span class="kw">import</span> Path
+<span class="kw">import</span> json, time
+
+
+<span class="kw">def</span> <span class="fn">save_sharded_checkpoint</span>(
+    model: FSDP,
+    optimizer: torch.optim.Optimizer,
+    checkpoint_dir: str,
+    step: int,
+    rank: int,
+    world_size: int,
+) -> <span class="kw">None</span>:
+    <span class="cm"># Configure FSDP to yield sharded (not full) state dicts</span>
+    <span class="kw">with</span> FSDP.<span class="fn">state_dict_type</span>(
+        model,
+        StateDictType.SHARDED_STATE_DICT,
+        state_dict_config=<span class="fn">ShardedStateDictConfig</span>(offload_to_cpu=<span class="kw">True</span>),
+        optim_state_dict_config=<span class="fn">ShardedOptimStateDictConfig</span>(offload_to_cpu=<span class="kw">True</span>),
+    ):
+        model_state = model.<span class="fn">state_dict</span>()
+        optim_state = FSDP.<span class="fn">sharded_optim_state_dict</span>(model, optimizer)
+
+    <span class="cm"># Each rank writes its own shard via DCP</span>
+    save_path = Path(checkpoint_dir) / f"step_{step}"
+    state_dict = {
+        "model": model_state,
+        "optimizer": optim_state,
+    }
+    save(state_dict, checkpoint_dir=<span class="fn">str</span>(save_path))
+
+    <span class="cm"># Rank 0 writes metadata for resharding compatibility</span>
+    <span class="kw">if</span> rank == 0:
+        metadata = {
+            "step": step,
+            "world_size": world_size,
+            "timestamp": time.<span class="fn">time</span>(),
+            "fsdp_sharding_strategy": "FULL_SHARD",
+            "dtype": "bfloat16",
+        }
+        <span class="kw">with</span> <span class="fn">open</span>(save_path / "metadata.json", "w") <span class="kw">as</span> f:
+            json.<span class="fn">dump</span>(metadata, f, indent=2)
+
+    dist.<span class="fn">barrier</span>()  <span class="cm"># Ensure all ranks finish before training resumes</span>
+
+
+<span class="kw">def</span> <span class="fn">load_sharded_checkpoint</span>(
+    model: FSDP,
+    optimizer: torch.optim.Optimizer,
+    checkpoint_dir: str,
+    step: int,
+) -> dict:
+    load_path = <span class="fn">str</span>(Path(checkpoint_dir) / f"step_{step}")
+    <span class="kw">with</span> FSDP.<span class="fn">state_dict_type</span>(
+        model,
+        StateDictType.SHARDED_STATE_DICT,
+    ):
+        state_dict = {"model": model.<span class="fn">state_dict</span>()}
+        <span class="fn">load</span>(state_dict, checkpoint_dir=load_path)
+        model.<span class="fn">load_state_dict</span>(state_dict["model"])
+
+        optim_state = {"optimizer": {}}
+        <span class="fn">load</span>(optim_state, checkpoint_dir=load_path)
+        optim_sd = FSDP.<span class="fn">optim_state_dict_to_load</span>(
+            model, optimizer, optim_state["optimizer"]
+        )
+        optimizer.<span class="fn">load_state_dict</span>(optim_sd)
+
+    <span class="kw">with</span> <span class="fn">open</span>(Path(load_path) / "metadata.json") <span class="kw">as</span> f:
+        metadata = json.<span class="fn">load</span>(f)
+    <span class="kw">return</span> metadata</div>
+
+      <p>The critical detail here is <code>offload_to_cpu=True</code>: this ensures the state dict tensors are moved to pinned CPU memory during extraction, freeing GPU memory immediately. Without this flag, you double your GPU memory usage during checkpointing, which will OOM on most production configurations where GPU memory is fully utilized by activations and optimizer states.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Full State Dict (Rank 0 Gather)</h3>
+          <ul>
+            <li>All-gathers entire model to rank 0</li>
+            <li>Peak memory: full model size on rank 0</li>
+            <li>Single write bottleneck</li>
+            <li>Simple but <strong>does not scale</strong> beyond 13B</li>
+            <li>Recovery: direct <code>load_state_dict()</code></li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Sharded State Dict (Per-Rank)</h3>
+          <ul>
+            <li>Each rank saves only its local shard</li>
+            <li>Peak memory: ~0 extra on GPU</li>
+            <li>Parallel writes saturate storage bandwidth</li>
+            <li>Scales to <strong>any model size</strong></li>
+            <li>Recovery: requires DCP resharding if world_size changes</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ======== Section 3 ======== -->
+      <h2 id="async-checkpointing">Async Checkpointing &amp; Non-Blocking I/O</h2>
+      <p>Even with sharded writes, a synchronous checkpoint blocks the training loop during the entire storage write. For a 70B model checkpoint of ~1 TB, writing at 12 GB/s aggregate bandwidth still takes ~80 seconds. With async checkpointing, we decouple the checkpoint I/O from the training computation using a two-phase pipeline:</p>
+
+      <ol>
+        <li><strong>Phase 1 &ndash; Device-to-Host Copy (blocking, fast):</strong> Copy the sharded state dict from GPU memory to pre-allocated pinned CPU buffers using CUDA async memcpy. This takes 1&ndash;3 seconds for typical shard sizes. Training is paused only for this phase.</li>
+        <li><strong>Phase 2 &ndash; Background Write (non-blocking):</strong> A separate thread pool writes the CPU buffers to the distributed filesystem while the next training iteration proceeds. The GPU is fully utilized during this phase.</li>
+      </ol>
+
+      <div class="callout warn">
+        <strong>Double-Buffer Hazard:</strong> If training modifies parameters before the background write completes, the checkpoint will contain corrupted data. The solution is double-buffering: maintain two sets of pinned CPU buffers and alternate between them. Before starting a new checkpoint, wait for the previous background write to complete. This is why you'll see <code>_prev_future</code> tracking in production checkpoint managers.
+      </div>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> threading
+<span class="kw">import</span> os
+<span class="kw">from</span> concurrent.futures <span class="kw">import</span> ThreadPoolExecutor, Future
+<span class="kw">from</span> typing <span class="kw">import</span> Optional, Dict
+<span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass, field
+<span class="kw">import</span> time, logging
+
+log = logging.<span class="fn">getLogger</span>(__name__)
+
+
+@<span class="fn">dataclass</span>
+<span class="kw">class</span> CheckpointStats:
+    staging_secs: float = 0.0
+    write_secs: float = 0.0
+    total_bytes: int = 0
+
+
+<span class="kw">class</span> AsyncCheckpointManager:
+    <span class="cm">"""Non-blocking checkpoint manager with CPU staging and background writes.
+
+    Supports double-buffering to overlap write I/O of checkpoint N
+    with training compute after checkpoint N is staged."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        self,
+        checkpoint_dir: str,
+        rank: int,
+        world_size: int,
+        num_writers: int = 4,
+        pinned_pool_bytes: int = 4 * 1024**3,  <span class="cm"># 4 GB pinned pool</span>
+    ):
+        self.checkpoint_dir = checkpoint_dir
+        self.rank = rank
+        self.world_size = world_size
+        self._executor = <span class="fn">ThreadPoolExecutor</span>(max_workers=num_writers)
+        self._prev_future: Optional[Future] = <span class="kw">None</span>
+        self._lock = threading.<span class="fn">Lock</span>()
+        self._stats = <span class="fn">CheckpointStats</span>()
+
+        <span class="cm"># Pre-allocate pinned memory for double buffering</span>
+        self._buffers = [
+            torch.<span class="fn">empty</span>(pinned_pool_bytes, dtype=torch.uint8,
+                       pin_memory=<span class="kw">True</span>)
+            <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(2)
+        ]
+        self._buf_idx = 0
+
+    <span class="kw">def</span> <span class="fn">save_async</span>(
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        step: int,
+    ) -> Future:
+        <span class="cm"># Block if previous write hasn't finished (back-pressure)</span>
+        <span class="kw">if</span> self._prev_future <span class="kw">is not</span> <span class="kw">None</span>:
+            self._prev_future.<span class="fn">result</span>()  <span class="cm"># Wait for completion</span>
+
+        <span class="cm"># Phase 1: Stage tensors from GPU to pinned CPU (blocking)</span>
+        t0 = time.<span class="fn">perf_counter</span>()
+        cpu_state = {}
+        <span class="kw">for</span> key, tensor <span class="kw">in</span> state_dict.<span class="fn">items</span>():
+            <span class="kw">if</span> tensor.is_cuda:
+                cpu_state[key] = tensor.<span class="fn">to</span>("cpu", non_blocking=<span class="kw">True</span>)
+            <span class="kw">else</span>:
+                cpu_state[key] = tensor.<span class="fn">clone</span>()
+        torch.cuda.<span class="fn">synchronize</span>()  <span class="cm"># Ensure all D2H copies complete</span>
+        self._stats.staging_secs = time.<span class="fn">perf_counter</span>() - t0
+
+        <span class="cm"># Phase 2: Submit background write</span>
+        save_path = os.path.<span class="fn">join</span>(
+            self.checkpoint_dir,
+            f"step_{step}",
+            f"rank_{self.rank}.pt",
+        )
+        future = self._executor.<span class="fn">submit</span>(
+            self._write_to_disk, cpu_state, save_path, step
+        )
+        self._prev_future = future
+        <span class="kw">return</span> future
+
+    <span class="kw">def</span> <span class="fn">_write_to_disk</span>(
+        self, cpu_state: dict, path: str, step: int
+    ) -> CheckpointStats:
+        t0 = time.<span class="fn">perf_counter</span>()
+        os.<span class="fn">makedirs</span>(os.path.<span class="fn">dirname</span>(path), exist_ok=<span class="kw">True</span>)
+        torch.<span class="fn">save</span>(cpu_state, path)
+        self._stats.write_secs = time.<span class="fn">perf_counter</span>() - t0
+        self._stats.total_bytes = os.path.<span class="fn">getsize</span>(path)
+        log.<span class="fn">info</span>(
+            f"[Rank {self.rank}] Checkpoint step {step} written "
+            f"in {self._stats.write_secs:.1f}s "
+            f"({self._stats.total_bytes / 1e9:.2f} GB)"
+        )
+        <span class="kw">return</span> self._stats
+
+    <span class="kw">def</span> <span class="fn">wait_for_completion</span>(self) -> <span class="kw">None</span>:
+        <span class="cm"># Call at end of training or before evaluation</span>
+        <span class="kw">if</span> self._prev_future <span class="kw">is not</span> <span class="kw">None</span>:
+            self._prev_future.<span class="fn">result</span>()
+
+    <span class="kw">def</span> <span class="fn">shutdown</span>(self) -> <span class="kw">None</span>:
+        self.<span class="fn">wait_for_completion</span>()
+        self._executor.<span class="fn">shutdown</span>(wait=<span class="kw">True</span>)</div>
+
+      <p>In production systems like Meta's internal training stack and PyTorch DCP (<code>torch.distributed.checkpoint</code>), the async pipeline achieves <strong>&lt;3 seconds of training pause</strong> for a 70B model checkpoint, compared to 80+ seconds for synchronous writes. The key insight is that D2H bandwidth on modern PCIe 5.0 / NVLink interconnects (32&ndash;64 GB/s) is vastly faster than storage bandwidth (5&ndash;20 GB/s), so the blocking phase is minimal.</p>
+
+      <div class="callout">
+        <strong>PyTorch DCP Integration:</strong> As of PyTorch 2.3+, <code>torch.distributed.checkpoint.async_save()</code> provides first-class support for this pattern. It handles D2H staging, background writes, and barrier synchronization automatically. Use it instead of rolling your own async manager unless you need fine-grained control over the write pipeline.
+      </div>
+
+      <!-- ======== Section 4 ======== -->
+      <h2 id="checkpoint-formats">Checkpoint Formats</h2>
+      <p>The choice of serialization format has significant implications for checkpoint speed, safety, and interoperability. The three dominant formats in the LLM training ecosystem are PyTorch native (<code>.pt</code>/<code>.bin</code>), SafeTensors, and the DCP format.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>PyTorch Native (.pt)</h3>
+          <ul>
+            <li>Uses Python pickle under the hood</li>
+            <li><strong>Security risk:</strong> arbitrary code execution on load</li>
+            <li>Supports arbitrary Python objects (optimizers, schedulers)</li>
+            <li>No memory mapping&mdash;entire file loaded into RAM</li>
+            <li>De facto standard but being superseded</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>SafeTensors (.safetensors)</h3>
+          <ul>
+            <li>Zero-copy memory mapping for fast loads</li>
+            <li><strong>No pickle:</strong> impossible to execute arbitrary code</li>
+            <li>Header-based metadata allows partial tensor loading</li>
+            <li>~2&ndash;5x faster load times on large checkpoints</li>
+            <li>Tensor-only: cannot store optimizer states natively</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>The DCP (Distributed Checkpoint) format used by <code>torch.distributed.checkpoint</code> deserves special attention. It stores each rank's shard as a separate file with a global metadata file (<code>.metadata</code>) that maps logical tensor names to physical file locations and byte offsets. This enables <strong>elastic resharding</strong>&mdash;the metadata file allows any number of ranks to reconstruct the full model by reading the appropriate byte ranges from the shard files.</p>
+
+      <div class="pseudo-code"><span class="cm"># DCP metadata structure (simplified)</span>
+<span class="cm"># .metadata file maps logical names → physical locations</span>
+{
+    "state_dict_metadata": {
+        "model.layers.0.attention.wq.weight": {
+            "chunks": [
+                {"offsets": [0, 0], "sizes": [4096, 2048],
+                 "file": "__0_0.distcp", "byte_offset": 0},
+                {"offsets": [0, 2048], "sizes": [4096, 2048],
+                 "file": "__1_0.distcp", "byte_offset": 0},
+            ]
+        }
+    },
+    "planner_metadata": {
+        "world_size": 512,
+        "sharding_spec": "fsdp_full_shard"
+    }
+}</div>
+
+      <div class="callout warn">
+        <strong>Pickle Deserialization Attacks:</strong> Never load a <code>.pt</code> checkpoint from an untrusted source. A malicious pickle payload can execute arbitrary code including reverse shells, data exfiltration, or cryptomining payloads. For model distribution, always prefer SafeTensors. For internal training checkpoints where you control the pipeline, PyTorch native format is acceptable but should be stored on access-controlled filesystems.
+      </div>
+
+      <p>In practice, many teams use a hybrid approach: SafeTensors for model weights (which enables fast inference loading and safe distribution) and PyTorch native for optimizer states and training metadata (which contain complex nested Python objects that SafeTensors cannot represent). The DCP format bridges this gap by supporting both tensor data and metadata in a resharding-friendly structure.</p>
+
+      <!-- ======== Section 5 ======== -->
+      <h2 id="elastic-resharding">Elastic Checkpointing &amp; Resharding</h2>
+      <p>One of the most challenging operational problems in large-scale training is <strong>elastic resharding</strong>: resuming training with a different number of GPUs than the checkpoint was saved with. This happens frequently in practice&mdash;nodes fail and are not immediately replaced, preemptible instances are reclaimed, or teams scale up mid-run when more capacity becomes available.</p>
+
+      <p>When you change the world size, every tensor that was sharded across the original ranks must be re-partitioned. For FSDP, this means re-flattening and re-chunking the parameters. For tensor parallelism (TP), it means splitting or merging the column/row-parallel linear layers along different dimensions. For pipeline parallelism (PP), it means reassigning layer groups to stages.</p>
+
+      <p>The resharding problem has three main dimensions:</p>
+      <ul>
+        <li><strong>FSDP shard count change:</strong> Each flat parameter is split differently. DCP handles this via its metadata &ndash; it knows the original chunk boundaries and can re-partition.</li>
+        <li><strong>TP degree change (e.g., TP=4 → TP=8):</strong> Column-parallel weights need further column splitting; row-parallel weights need row splitting. Attention head assignments change.</li>
+        <li><strong>PP stage change:</strong> Layer-to-stage mapping is recalculated, and each stage loads different layers than before.</li>
+      </ul>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> load
+<span class="kw">from</span> torch.distributed.checkpoint.default_planner <span class="kw">import</span> DefaultLoadPlanner
+<span class="kw">from</span> typing <span class="kw">import</span> Dict, Tuple
+
+
+<span class="kw">class</span> ElasticReshardPlanner(DefaultLoadPlanner):
+    <span class="cm">"""Custom load planner that handles TP degree changes.
+
+    When TP degree changes between save and load, column-parallel
+    and row-parallel layers must be split or concatenated along
+    the correct dimension."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, orig_tp: int, new_tp: int):
+        <span class="fn">super</span>().<span class="fn">__init__</span>()
+        self.orig_tp = orig_tp
+        self.new_tp = new_tp
+
+    <span class="kw">def</span> <span class="fn">resolve_tensor</span>(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        <span class="cm"># Identify column-parallel layers (split along dim=0)</span>
+        <span class="kw">if</span> <span class="fn">any</span>(k <span class="kw">in</span> name <span class="kw">for</span> k <span class="kw">in</span> ["wq", "wk", "wv", "w1", "w3"]):
+            <span class="kw">return</span> self.<span class="fn">_reshard_col_parallel</span>(tensor)
+        <span class="cm"># Identify row-parallel layers (split along dim=1)</span>
+        <span class="kw">elif</span> <span class="fn">any</span>(k <span class="kw">in</span> name <span class="kw">for</span> k <span class="kw">in</span> ["wo", "w2"]):
+            <span class="kw">return</span> self.<span class="fn">_reshard_row_parallel</span>(tensor)
+        <span class="kw">return</span> tensor
+
+    <span class="kw">def</span> <span class="fn">_reshard_col_parallel</span>(self, tensor: torch.Tensor) -> torch.Tensor:
+        <span class="cm"># Full tensor is [hidden, hidden]. Each TP rank gets [hidden, hidden/tp]</span>
+        tp_rank = dist.<span class="fn">get_rank</span>() % self.new_tp
+        chunks = tensor.<span class="fn">chunk</span>(self.new_tp, dim=0)
+        <span class="kw">return</span> chunks[tp_rank].<span class="fn">contiguous</span>()
+
+    <span class="kw">def</span> <span class="fn">_reshard_row_parallel</span>(self, tensor: torch.Tensor) -> torch.Tensor:
+        tp_rank = dist.<span class="fn">get_rank</span>() % self.new_tp
+        chunks = tensor.<span class="fn">chunk</span>(self.new_tp, dim=1)
+        <span class="kw">return</span> chunks[tp_rank].<span class="fn">contiguous</span>()
+
+
+<span class="kw">def</span> <span class="fn">load_with_resharding</span>(
+    model,
+    checkpoint_path: str,
+    orig_world_size: int,
+    orig_tp_degree: int,
+    new_tp_degree: int,
+) -> <span class="kw">None</span>:
+    <span class="cm"># DCP handles FSDP resharding automatically via metadata</span>
+    <span class="cm"># We only need custom logic for TP dimension changes</span>
+    planner = <span class="kw">None</span>
+    <span class="kw">if</span> orig_tp_degree != new_tp_degree:
+        planner = <span class="fn">ElasticReshardPlanner</span>(orig_tp_degree, new_tp_degree)
+
+    state_dict = {"model": model.<span class="fn">state_dict</span>()}
+    <span class="fn">load</span>(
+        state_dict,
+        checkpoint_dir=checkpoint_path,
+        planner=planner,
+    )
+    model.<span class="fn">load_state_dict</span>(state_dict["model"])</div>
+
+      <p>Optimizer state resharding is even more complex. Adam optimizer stores <code>exp_avg</code> (first moment) and <code>exp_avg_sq</code> (second moment) for every parameter, and these must be resharded identically to their corresponding parameters. If resharding is done incorrectly, the optimizer moments will be misaligned, causing training instability&mdash;often manifesting as a sudden loss spike followed by slow recovery over hundreds of steps.</p>
+
+      <div class="callout">
+        <strong>Practical Tip:</strong> When changing TP degree, verify resharding correctness by loading the checkpoint, running a single forward-backward pass, and comparing the gradients against a reference run. Gradient mismatch beyond fp16 tolerance (~1e-3 relative error) indicates a resharding bug.
+      </div>
+
+      <!-- ======== Section 6 ======== -->
+      <h2 id="storage-architecture">Storage Architecture</h2>
+      <p>The storage backend is often the bottleneck of the entire checkpoint pipeline. Training clusters typically use parallel distributed filesystems designed for high-throughput sequential writes. The choice of filesystem and its configuration dramatically affects checkpoint performance.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Lustre / FSx for Lustre</h3>
+          <ul>
+            <li>POSIX-compliant parallel filesystem</li>
+            <li>Data striped across Object Storage Targets (OSTs)</li>
+            <li>Aggregate bandwidth scales with OST count</li>
+            <li>Typical: 50&ndash;200 GB/s on large clusters</li>
+            <li>Stripe size tuning critical for checkpoint perf</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>GPFS / IBM Spectrum Scale</h3>
+          <ul>
+            <li>Block-level parallel filesystem</li>
+            <li>Strong metadata performance (millions of IOPS)</li>
+            <li>Native RDMA support for low-latency I/O</li>
+            <li>Better for mixed workloads (checkpoints + logs)</li>
+            <li>More complex administration</li>
+          </ul>
+        </div>
+      </div>
+
+      <p><strong>Checkpoint Compression:</strong> Modern models are stored in bfloat16, which does not compress well with general-purpose algorithms (only ~5&ndash;10% reduction with zstd). However, optimizer states in fp32 can compress 20&ndash;40% because Adam moments for well-trained models have low entropy in the least-significant bits. The trade-off is CPU overhead during compression, but this can be overlapped with I/O using a pipeline of compress → write stages.</p>
+
+      <p><strong>Incremental Checkpointing:</strong> Rather than saving the entire state dict every time, incremental checkpointing saves only the tensors that have changed beyond a threshold since the last checkpoint. For LLM training, most parameters change every step, but the magnitude of change decreases as training progresses. A practical approach is to compute the L2 norm of the delta and only save tensors where <code>‖Δw‖/‖w‖ > ε</code>. This can reduce checkpoint size by 30&ndash;60% in the later stages of training.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> os, glob, time, json
+<span class="kw">from</span> pathlib <span class="kw">import</span> Path
+<span class="kw">from</span> typing <span class="kw">import</span> List
+<span class="kw">import</span> logging
+
+log = logging.<span class="fn">getLogger</span>(__name__)
+
+
+<span class="kw">class</span> CheckpointGarbageCollector:
+    <span class="cm">"""Manages checkpoint lifecycle: keeps recent N checkpoints,
+    plus milestone checkpoints at fixed intervals.
+
+    Prevents disk exhaustion on long training runs where each
+    checkpoint can be 500GB-1TB."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        self,
+        checkpoint_dir: str,
+        keep_recent: int = 3,
+        milestone_interval: int = 5000,
+    ):
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.keep_recent = keep_recent
+        self.milestone_interval = milestone_interval
+
+    <span class="kw">def</span> <span class="fn">collect</span>(self, current_step: int) -> List[str]:
+        <span class="cm"># List all checkpoint directories sorted by step</span>
+        ckpt_dirs = <span class="fn">sorted</span>(
+            self.checkpoint_dir.<span class="fn">glob</span>("step_*"),
+            key=<span class="kw">lambda</span> p: <span class="fn">int</span>(p.name.<span class="fn">split</span>("_")[1]),
+        )
+
+        to_delete = []
+        <span class="kw">for</span> ckpt <span class="kw">in</span> ckpt_dirs:
+            step = <span class="fn">int</span>(ckpt.name.<span class="fn">split</span>("_")[1])
+
+            <span class="cm"># Never delete milestone checkpoints</span>
+            <span class="kw">if</span> step % self.milestone_interval == 0:
+                <span class="kw">continue</span>
+
+            <span class="cm"># Keep the N most recent non-milestone checkpoints</span>
+            recent_steps = <span class="fn">sorted</span>(
+                [<span class="fn">int</span>(d.name.<span class="fn">split</span>("_")[1]) <span class="kw">for</span> d <span class="kw">in</span> ckpt_dirs
+                 <span class="kw">if</span> <span class="fn">int</span>(d.name.<span class="fn">split</span>("_")[1]) % self.milestone_interval != 0],
+                reverse=<span class="kw">True</span>,
+            )[:self.keep_recent]
+
+            <span class="kw">if</span> step <span class="kw">not</span> <span class="kw">in</span> recent_steps:
+                to_delete.<span class="fn">append</span>(<span class="fn">str</span>(ckpt))
+
+        <span class="kw">for</span> path <span class="kw">in</span> to_delete:
+            log.<span class="fn">info</span>(f"GC: removing old checkpoint {path}")
+            <span class="cm"># Use shutil.rmtree in production; omitted for clarity</span>
+
+        <span class="kw">return</span> to_delete</div>
+
+      <p><strong>Lustre Stripe Configuration:</strong> For checkpoint files, set the stripe count equal to the number of OSTs and a stripe size of 4&ndash;16 MB. This ensures writes are distributed across all storage targets. Use <code>lfs setstripe -c -1 -S 16M /checkpoint/dir</code> before training begins. Without this, all writes may go to a single OST, limiting throughput to ~2 GB/s instead of the aggregate 50+ GB/s.</p>
+
+      <div class="callout">
+        <strong>Storage Budget Rule of Thumb:</strong> For a training run of S steps with checkpoint interval I, keeping K recent checkpoints plus milestones every M steps, total storage needed is approximately: <code>K × ckpt_size + (S / M) × ckpt_size</code>. For a 70B model training for 100K steps with K=3, I=500, M=5000: that's <code>3 × 1TB + 20 × 1TB = 23 TB</code> of storage. Budget at least 2x this for headroom.
+      </div>
+
+      <p><strong>Multi-Tier Storage:</strong> Production training infrastructure often uses a tiered approach: NVMe SSDs local to each node for fast staging (Phase 1 writes), a high-bandwidth parallel filesystem for the active checkpoint window (last K checkpoints), and object storage (S3/GCS) for long-term archival of milestone checkpoints. This balances cost against performance&mdash;object storage is 10&ndash;50x cheaper per TB than Lustre but has significantly higher latency.</p>
+
+      <p>The interplay between checkpointing strategy, storage architecture, and cluster reliability defines the operational boundary of large-scale training. Getting this right is the difference between a training run that completes in 4 weeks and one that takes 8 weeks due to repeated failures and checkpoint overhead.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into RLHF infrastructure including the 4-model PPO setup, memory requirements, rollout generation, distributed training, and throughput optimization.">
+  <title>RLHF Infrastructure: PPO at Scale | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#four-model-architecture">The 4-Model RLHF Architecture</a></li>
+        <li><a href="#memory-requirements">Memory Requirements &amp; Optimization</a></li>
+        <li><a href="#rollout-generation">Rollout Generation Pipeline</a></li>
+        <li><a href="#ppo-training-loop">PPO Training Loop</a></li>
+        <li><a href="#kl-divergence-control">KL Divergence Control</a></li>
+        <li><a href="#distributed-rlhf">Distributed RLHF Systems</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>RLHF Infrastructure: PPO at Scale</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 1 – The 4-Model RLHF Architecture                   -->
+      <!-- ============================================================ -->
+      <h2 id="four-model-architecture">The 4-Model RLHF Architecture</h2>
+
+      <p>Proximal Policy Optimization (PPO) applied to language models requires <strong>four distinct neural networks</strong> running simultaneously, which fundamentally differentiates RLHF training from standard supervised fine-tuning. Understanding why each model exists and how they interact is critical for designing infrastructure that can support this workload at scale.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Policy Model (Actor)</h3>
+          <p>The model being optimized. It generates token-level actions (next-token predictions) given a prompt. Its parameters &theta; are updated via the PPO clipped surrogate objective. This is typically initialized from an SFT checkpoint and is the only model whose weights change during RLHF.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Reference Model (Frozen Copy)</h3>
+          <p>A frozen snapshot of the policy at the start of RLHF training (or the SFT checkpoint). It provides the baseline log-probabilities &pi;<sub>ref</sub>(a|s) needed to compute the KL divergence penalty, preventing the policy from drifting too far and exploiting the reward model.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Reward Model</h3>
+          <p>Trained on human preference data (Bradley-Terry pairwise comparisons) to output a scalar score for a complete (prompt, response) pair. It replaces the human evaluator in the loop. Typically shares the same architecture as the policy but has a scalar projection head instead of a language model head.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Value Model (Critic)</h3>
+          <p>Estimates the expected future reward V(s) at each token position. Used in Generalized Advantage Estimation (GAE) to compute low-variance advantage estimates. Often initialized from the reward model checkpoint and shares the same backbone, with a separate scalar head per token.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Why four models?</strong> Standard RL (e.g., Atari PPO) uses two models: actor and critic. RLHF adds the reward model (because we cannot query humans in real-time) and the reference model (because the KL constraint is essential to prevent reward hacking in the open-ended language generation setting).
+      </div>
+
+      <!-- SVG: 4-Model PPO Loop Diagram -->
+      <svg id="lt-ppo-loop-svg" viewBox="0 0 780 420" style="width:100%;max-width:780px;margin:1.5rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="lt-arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#0a8f6a"/></marker>
+          <marker id="lt-arrow-orange" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#ff6b35"/></marker>
+        </defs>
+        <!-- Policy Model box -->
+        <rect id="lt-policy-box" x="30" y="60" width="160" height="70" rx="12" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-policy-label" x="110" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Policy Model</text>
+        <text id="lt-policy-sub" x="110" y="112" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">(Actor, &theta;)</text>
+        <!-- Reference Model box -->
+        <rect id="lt-ref-box" x="30" y="280" width="160" height="70" rx="12" fill="#fff3e0" stroke="#ff6b35" stroke-width="2"/>
+        <text id="lt-ref-label" x="110" y="312" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#ff6b35">Reference Model</text>
+        <text id="lt-ref-sub" x="110" y="332" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">(Frozen &theta;<tspan baseline-shift="sub" font-size="8">0</tspan>)</text>
+        <!-- Reward Model box -->
+        <rect id="lt-reward-box" x="310" y="60" width="160" height="70" rx="12" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+        <text id="lt-reward-label" x="390" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1565c0">Reward Model</text>
+        <text id="lt-reward-sub" x="390" y="112" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">(Scalar r(x,y))</text>
+        <!-- Value Model box -->
+        <rect id="lt-value-box" x="590" y="60" width="160" height="70" rx="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+        <text id="lt-value-label" x="670" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#7b1fa2">Value Model</text>
+        <text id="lt-value-sub" x="670" y="112" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">(Critic V(s))</text>
+        <!-- PPO Update box -->
+        <rect id="lt-ppo-update-box" x="420" y="230" width="180" height="60" rx="12" fill="#0a8f6a" stroke="none"/>
+        <text id="lt-ppo-update-label" x="510" y="265" text-anchor="middle" font-family="Manrope,sans-serif" font-size="14" font-weight="700" fill="#fff">PPO Update</text>
+        <!-- Arrows: Policy -> Reward (generates response, scored) -->
+        <line id="lt-flow-gen" x1="190" y1="95" x2="305" y2="95" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+        <text id="lt-flow-gen-label" x="248" y="85" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">generates y</text>
+        <!-- Reward -> Value (scores feed into advantage) -->
+        <line id="lt-flow-score" x1="470" y1="95" x2="585" y2="95" stroke="#1565c0" stroke-width="2" marker-end="url(#lt-arrow)"/>
+        <text id="lt-flow-score-label" x="528" y="85" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">reward r</text>
+        <!-- Value -> PPO Update -->
+        <line id="lt-flow-adv" x1="670" y1="135" x2="570" y2="228" stroke="#7b1fa2" stroke-width="2" marker-end="url(#lt-arrow)"/>
+        <text id="lt-flow-adv-label" x="640" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">advantage A&#770;</text>
+        <!-- Reward -> PPO Update -->
+        <line id="lt-flow-rew-ppo" x1="390" y1="135" x2="470" y2="228" stroke="#1565c0" stroke-width="2" marker-end="url(#lt-arrow)"/>
+        <text id="lt-flow-rew-label2" x="415" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">reward signal</text>
+        <!-- PPO Update -> Policy (weight update) -->
+        <line id="lt-flow-update" x1="420" y1="260" x2="165" y2="133" stroke="#0a8f6a" stroke-width="2.5" stroke-dasharray="6,3" marker-end="url(#lt-arrow)"/>
+        <text id="lt-flow-update-label" x="270" y="210" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#0a8f6a">update &theta;</text>
+        <!-- Reference -> PPO Update (KL anchor) -->
+        <line id="lt-flow-kl" x1="190" y1="315" x2="420" y2="270" stroke="#ff6b35" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#lt-arrow-orange)"/>
+        <text id="lt-flow-kl-label" x="290" y="306" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#ff6b35">KL(&pi; || &pi;<tspan baseline-shift="sub" font-size="7">ref</tspan>)</text>
+        <!-- Legend -->
+        <rect id="lt-legend-bg" x="540" y="330" width="220" height="75" rx="8" fill="#fafafa" stroke="#ccc" stroke-width="1"/>
+        <text id="lt-legend-title" x="555" y="350" font-family="Manrope,sans-serif" font-size="10" font-weight="700" fill="#333">Legend</text>
+        <line id="lt-legend-solid" x1="555" y1="365" x2="590" y2="365" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-legend-solid-txt" x="598" y="369" font-family="Manrope,sans-serif" font-size="9" fill="#555">Data flow</text>
+        <line id="lt-legend-dash" x1="555" y1="385" x2="590" y2="385" stroke="#ff6b35" stroke-width="2" stroke-dasharray="5,3"/>
+        <text id="lt-legend-dash-txt" x="598" y="389" font-family="Manrope,sans-serif" font-size="9" fill="#555">KL constraint / weight update</text>
+      </svg>
+
+      <p>The interaction flow proceeds as follows: (1) The policy model generates a batch of responses given prompts from a dataset. (2) Each (prompt, response) pair is scored by the reward model to produce scalar rewards. (3) The value model provides per-token value estimates. (4) The reference model computes log-probabilities of the same tokens for KL penalty computation. (5) GAE computes advantages, and the PPO objective updates the policy and value model weights. This cycle repeats for thousands of iterations.</p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 2 – Memory Requirements & Optimization               -->
+      <!-- ============================================================ -->
+      <h2 id="memory-requirements">Memory Requirements &amp; Optimization</h2>
+
+      <p>The fundamental challenge of RLHF is that you must fit <strong>four copies of a large language model</strong> in GPU memory simultaneously. For a 70B-parameter model in bf16, each copy occupies roughly 140 GB. With Adam optimizer states (8 bytes per parameter for momentum and variance), the trainable policy alone needs ~700 GB. This makes naive RLHF training impractical even on 8&times;A100-80GB nodes.</p>
+
+      <div class="callout warn">
+        <strong>Memory back-of-envelope for 70B RLHF:</strong> Policy (140 GB weights + 560 GB optimizer) + Reference (140 GB) + Reward (140 GB) + Value (140 GB weights + 560 GB optimizer) = <strong>~1,680 GB total.</strong> That is 21 A100-80GB GPUs just for model state, before activations, KV-cache, or rollout buffers.
+      </div>
+
+      <p>Production systems apply several optimizations to make this feasible:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Backbone Sharing</h3>
+          <p>The policy (actor) and value (critic) models can share the transformer backbone, with separate heads for token prediction and value estimation. This nearly halves the trainable parameter count. TRL and OpenRLHF both support this via a shared-backbone architecture. The tradeoff: gradient conflicts between the two objectives can hurt stability.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Reference Model Offloading</h3>
+          <p>The reference model is only needed during the KL computation phase, not during generation or the gradient update. It can be offloaded to CPU memory (or NVMe via DeepSpeed ZeRO-Infinity) and loaded on-demand. This frees GPU memory at the cost of PCIe transfer latency (~12 GB/s per lane).</p>
+        </div>
+        <div class="compare-card">
+          <h3>Reward Model Quantization</h3>
+          <p>The reward model only runs inference (no gradients). Quantizing it to INT8 or INT4 via bitsandbytes or GPTQ reduces its footprint by 2-4&times; with minimal scoring accuracy loss. A 70B reward model drops from 140 GB to 35-70 GB, a significant saving.</p>
+        </div>
+        <div class="compare-card">
+          <h3>ZeRO Stage 3 Partitioning</h3>
+          <p>DeepSpeed ZeRO-3 shards optimizer states, gradients, <em>and</em> parameters across all GPUs. For an 8-GPU node training a 70B policy, each GPU only holds 1/8th of parameters (~17.5 GB). Combined with activation checkpointing, this makes 70B RLHF feasible on a single 8&times;A100 node for the trainable models.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Practical allocation (70B on 32&times;A100-80GB):</strong> GPUs 0-15: Policy + Value (shared backbone, ZeRO-3, 16-way sharding). GPUs 16-23: Reward model (INT8, tensor-parallel 8-way). GPUs 24-31: Generation engine (vLLM with policy weights, continuous batching). Reference model offloaded to CPU with async prefetch.
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 3 – Rollout Generation Pipeline                      -->
+      <!-- ============================================================ -->
+      <h2 id="rollout-generation">Rollout Generation Pipeline</h2>
+
+      <p>Rollout generation — producing responses from the current policy given a batch of prompts — is typically the <strong>throughput bottleneck</strong> in RLHF training. Unlike supervised training where we process fixed input-output pairs, RLHF requires autoregressive generation: each token depends on all previous tokens, making the process inherently sequential per sequence. A single rollout batch for a 70B model generating 512 tokens per response can take 30-60 seconds even on 8 GPUs.</p>
+
+      <p>Modern RLHF systems decouple generation from training by running inference on a dedicated GPU pool using optimized serving engines:</p>
+
+      <ul>
+        <li><strong>vLLM with PagedAttention:</strong> Eliminates KV-cache fragmentation by managing cache in non-contiguous pages, achieving near-zero waste. Supports continuous batching where new prompts are inserted as sequences complete, maximizing GPU utilization during generation.</li>
+        <li><strong>TensorRT-LLM / TGI:</strong> Compile-time kernel fusion and INT8/FP8 quantized inference. TensorRT-LLM can deliver 2-3&times; higher token throughput than vanilla HuggingFace generate() through custom CUDA kernels for attention and MLP layers.</li>
+        <li><strong>Speculative decoding:</strong> A small draft model proposes N tokens, and the large policy verifies them in a single forward pass. Acceptance rates of 70-85% translate to 2-3&times; wall-clock speedups for generation without changing the output distribution.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Generation throughput math:</strong> For a 70B model on 8&times;A100 with tensor parallelism, expect ~1,500 tokens/sec aggregate throughput. A rollout batch of 512 prompts &times; 512 output tokens = 262K tokens, requiring ~175 seconds. Pipelining generation with training on separate GPU pools hides this latency.
+      </div>
+
+      <p>KV-cache management is critical: for a 70B model with 80 layers, 64 heads, and 128-dim per head, each token's KV cache consumes 80 &times; 2 &times; 64 &times; 128 &times; 2 bytes (bf16) = ~2.6 MB. A batch of 256 sequences at 2048 tokens each requires 256 &times; 2048 &times; 2.6 MB &approx; <strong>1.3 TB</strong> of KV-cache alone. PagedAttention and prompt-prefix sharing (for system prompts) are essential to keep this manageable.</p>
+
+<div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass
+<span class="kw">from</span> typing <span class="kw">import</span> List, Tuple
+
+<span class="cm"># Rollout generation with KL computation against reference model</span>
+
+@dataclass
+<span class="kw">class</span> RolloutBatch:
+    prompts: torch.Tensor           <span class="cm"># (B, prompt_len)</span>
+    responses: torch.Tensor         <span class="cm"># (B, response_len)</span>
+    logprobs: torch.Tensor          <span class="cm"># (B, response_len) policy log-probs</span>
+    ref_logprobs: torch.Tensor      <span class="cm"># (B, response_len) reference log-probs</span>
+    rewards: torch.Tensor           <span class="cm"># (B,) scalar reward per sequence</span>
+    values: torch.Tensor            <span class="cm"># (B, response_len) per-token values</span>
+
+<span class="kw">def</span> <span class="fn">generate_rollouts</span>(
+    policy_model,
+    ref_model,
+    reward_model,
+    value_model,
+    prompt_batch: torch.Tensor,
+    max_new_tokens: int = 512,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+) -> RolloutBatch:
+    <span class="cm"># Step 1: Generate responses from the current policy</span>
+    <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+        responses, logprobs = policy_model.<span class="fn">generate_with_logprobs</span>(
+            prompt_batch,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=<span class="kw">True</span>,
+        )
+
+    <span class="cm"># Step 2: Compute reference log-probs for KL penalty</span>
+    <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+        full_seq = torch.<span class="fn">cat</span>([prompt_batch, responses], dim=1)
+        ref_logprobs = ref_model.<span class="fn">forward_logprobs</span>(
+            full_seq, response_start=prompt_batch.<span class="fn">size</span>(1)
+        )
+
+    <span class="cm"># Step 3: Score each (prompt, response) pair with reward model</span>
+    <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+        rewards = reward_model.<span class="fn">score</span>(prompt_batch, responses)
+
+    <span class="cm"># Step 4: Estimate values at each token for GAE</span>
+    <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+        values = value_model.<span class="fn">forward_values</span>(
+            full_seq, response_start=prompt_batch.<span class="fn">size</span>(1)
+        )
+
+    <span class="kw">return</span> <span class="fn">RolloutBatch</span>(
+        prompts=prompt_batch,
+        responses=responses,
+        logprobs=logprobs,
+        ref_logprobs=ref_logprobs,
+        rewards=rewards,
+        values=values,
+    )</div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 4 – PPO Training Loop                                -->
+      <!-- ============================================================ -->
+      <h2 id="ppo-training-loop">PPO Training Loop</h2>
+
+      <p>The PPO training loop consumes a batch of rollouts and updates the policy and value model through multiple epochs of mini-batch gradient descent. The key components are: <strong>Generalized Advantage Estimation (GAE)</strong> for computing low-variance advantages, the <strong>clipped surrogate objective</strong> for stable policy updates, the <strong>value function loss</strong> for critic training, and the <strong>entropy bonus</strong> to prevent premature convergence.</p>
+
+      <h3>Generalized Advantage Estimation (GAE)</h3>
+      <p>GAE computes per-token advantage estimates that balance bias and variance through a discount parameter &lambda;. At each token position t in the response, the TD-residual is &delta;<sub>t</sub> = r<sub>t</sub> + &gamma;V(s<sub>t+1</sub>) - V(s<sub>t</sub>). For language model RLHF, the reward is typically sparse (only at the final token), so &delta;<sub>t</sub> = -V(s<sub>t</sub>) + &gamma;V(s<sub>t+1</sub>) for intermediate tokens and &delta;<sub>T</sub> = r - V(s<sub>T</sub>) at the last token. The advantage is the exponentially-weighted sum: &Acirc;<sub>t</sub> = &sum;<sub>l=0</sub><sup>T-t</sup> (&gamma;&lambda;)<sup>l</sup> &delta;<sub>t+l</sub>.</p>
+
+      <h3>Clipped Surrogate Objective</h3>
+      <p>The policy loss uses the PPO clipping mechanism to constrain how far the new policy can move from the old policy (the one that generated the rollouts): L<sup>CLIP</sup> = -E[min(r<sub>t</sub>&Acirc;<sub>t</sub>, clip(r<sub>t</sub>, 1-&epsilon;, 1+&epsilon;)&Acirc;<sub>t</sub>)] where r<sub>t</sub> = &pi;<sub>&theta;</sub>(a<sub>t</sub>|s<sub>t</sub>) / &pi;<sub>&theta;<sub>old</sub></sub>(a<sub>t</sub>|s<sub>t</sub>). The clipping parameter &epsilon; is typically 0.2, meaning the probability ratio cannot move more than 20% from 1.0.</p>
+
+<div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn.functional <span class="kw">as</span> F
+<span class="kw">from</span> typing <span class="kw">import</span> Dict
+
+<span class="kw">class</span> PPOTrainer:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, policy, value_model, lr=1e-6, clip_eps=0.2,
+                 gamma=1.0, lam=0.95, vf_coeff=0.5, entropy_coeff=0.01,
+                 kl_coeff=0.1, target_kl=0.02, epochs=4, batch_size=64):
+        self.policy = policy
+        self.value_model = value_model
+        self.clip_eps = clip_eps
+        self.gamma = gamma
+        self.lam = lam
+        self.vf_coeff = vf_coeff
+        self.entropy_coeff = entropy_coeff
+        self.kl_coeff = kl_coeff
+        self.target_kl = target_kl
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.optimizer = torch.optim.<span class="fn">AdamW</span>(
+            <span class="fn">list</span>(policy.<span class="fn">parameters</span>()) + <span class="fn">list</span>(value_model.<span class="fn">parameters</span>()),
+            lr=lr, betas=(0.9, 0.95), weight_decay=0.01,
+        )
+
+    <span class="kw">def</span> <span class="fn">compute_gae</span>(self, rewards, values, response_mask) -> torch.Tensor:
+        <span class="cm"># rewards: (B, T) per-token rewards (sparse: nonzero only at last token)</span>
+        <span class="cm"># values:  (B, T) per-token value estimates from critic</span>
+        B, T = values.shape
+        advantages = torch.<span class="fn">zeros_like</span>(values)
+        last_gae = torch.<span class="fn">zeros</span>(B, device=values.device)
+
+        <span class="kw">for</span> t <span class="kw">in</span> <span class="fn">reversed</span>(<span class="fn">range</span>(T)):
+            <span class="kw">if</span> t == T - 1:
+                next_value = torch.<span class="fn">zeros</span>(B, device=values.device)
+            <span class="kw">else</span>:
+                next_value = values[:, t + 1]
+
+            delta = rewards[:, t] + self.gamma * next_value - values[:, t]
+            last_gae = delta + self.gamma * self.lam * last_gae
+            <span class="cm"># Zero out advantage for padding tokens</span>
+            last_gae = last_gae * response_mask[:, t]
+            advantages[:, t] = last_gae
+
+        <span class="kw">return</span> advantages
+
+    <span class="kw">def</span> <span class="fn">ppo_step</span>(self, rollout: RolloutBatch) -> Dict[str, float]:
+        <span class="cm"># Build per-token reward: KL penalty at each step, RM reward at end</span>
+        kl_per_token = rollout.logprobs - rollout.ref_logprobs
+        per_token_rewards = -self.kl_coeff * kl_per_token
+        <span class="cm"># Add the reward model score to the final token</span>
+        seq_lens = (rollout.responses != 0).<span class="fn">sum</span>(dim=1) - 1
+        <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(rollout.responses.<span class="fn">size</span>(0)):
+            per_token_rewards[i, seq_lens[i]] += rollout.rewards[i]
+
+        response_mask = (rollout.responses != 0).<span class="fn">float</span>()
+        advantages = self.<span class="fn">compute_gae</span>(per_token_rewards, rollout.values, response_mask)
+        returns = advantages + rollout.values
+
+        <span class="cm"># Normalize advantages (critical for training stability)</span>
+        adv_mean = (advantages * response_mask).<span class="fn">sum</span>() / response_mask.<span class="fn">sum</span>()
+        adv_std = ((advantages - adv_mean).pow(2) * response_mask).<span class="fn">sum</span>() / response_mask.<span class="fn">sum</span>()
+        advantages = (advantages - adv_mean) / (adv_std.<span class="fn">sqrt</span>() + 1e-8)
+
+        stats = {<span class="cm">"policy_loss"</span>: 0, <span class="cm">"value_loss"</span>: 0, <span class="cm">"entropy"</span>: 0, <span class="cm">"approx_kl"</span>: 0}
+
+        <span class="cm"># Multiple epochs of mini-batch updates over the rollout</span>
+        <span class="kw">for</span> epoch <span class="kw">in</span> <span class="fn">range</span>(self.epochs):
+            indices = torch.<span class="fn">randperm</span>(rollout.responses.<span class="fn">size</span>(0))
+            <span class="kw">for</span> start <span class="kw">in</span> <span class="fn">range</span>(0, <span class="fn">len</span>(indices), self.batch_size):
+                mb_idx = indices[start:start + self.batch_size]
+
+                <span class="cm"># Forward pass: get current log-probs and values</span>
+                new_logprobs = self.policy.<span class="fn">forward_logprobs</span>(
+                    rollout.prompts[mb_idx], rollout.responses[mb_idx]
+                )
+                new_values = self.value_model.<span class="fn">forward_values</span>(
+                    rollout.prompts[mb_idx], rollout.responses[mb_idx]
+                )
+                entropy = -(new_logprobs * new_logprobs.<span class="fn">exp</span>()).<span class="fn">sum</span>(dim=-1).<span class="fn">mean</span>()
+
+                <span class="cm"># Policy loss with clipped surrogate objective</span>
+                ratio = (new_logprobs - rollout.logprobs[mb_idx]).<span class="fn">exp</span>()
+                mb_adv = advantages[mb_idx]
+                surr1 = ratio * mb_adv
+                surr2 = torch.<span class="fn">clamp</span>(ratio, 1 - self.clip_eps, 1 + self.clip_eps) * mb_adv
+                policy_loss = -torch.<span class="fn">min</span>(surr1, surr2)
+                policy_loss = (policy_loss * response_mask[mb_idx]).<span class="fn">sum</span>() / response_mask[mb_idx].<span class="fn">sum</span>()
+
+                <span class="cm"># Value loss with clipping (optional but common)</span>
+                vf_loss = (new_values - returns[mb_idx]).pow(2)
+                vf_loss = (vf_loss * response_mask[mb_idx]).<span class="fn">sum</span>() / response_mask[mb_idx].<span class="fn">sum</span>()
+
+                <span class="cm"># Combined loss</span>
+                loss = policy_loss + self.vf_coeff * vf_loss - self.entropy_coeff * entropy
+
+                self.optimizer.<span class="fn">zero_grad</span>()
+                loss.<span class="fn">backward</span>()
+                torch.nn.utils.<span class="fn">clip_grad_norm_</span>(self.policy.<span class="fn">parameters</span>(), 1.0)
+                self.optimizer.<span class="fn">step</span>()
+
+                <span class="cm"># Track approximate KL for early stopping</span>
+                approx_kl = (rollout.logprobs[mb_idx] - new_logprobs).<span class="fn">mean</span>().<span class="fn">item</span>()
+                stats[<span class="cm">"approx_kl"</span>] = approx_kl
+
+            <span class="cm"># Early stopping if KL diverges too much</span>
+            <span class="kw">if</span> stats[<span class="cm">"approx_kl"</span>] > 1.5 * self.target_kl:
+                <span class="kw">break</span>
+
+        <span class="kw">return</span> stats</div>
+
+      <div class="callout">
+        <strong>Why multiple epochs?</strong> A single rollout batch is expensive to generate. Running 2-4 PPO epochs per batch amortizes the generation cost. However, too many epochs cause the policy to diverge from the data-generating policy, violating the on-policy assumption. The approximate KL early-stopping mechanism guards against this.
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 5 – KL Divergence Control                            -->
+      <!-- ============================================================ -->
+      <h2 id="kl-divergence-control">KL Divergence Control</h2>
+
+      <p>The KL divergence between the policy and reference model is the single most important regularization mechanism in RLHF. Without it, the policy rapidly overfits to the reward model's quirks — a phenomenon called <strong>reward hacking</strong>. The policy discovers degenerate sequences that score highly according to the reward model but are nonsensical or repetitive to humans.</p>
+
+      <p>InstructGPT introduced the KL penalty as a per-token reward modifier: r&#770;<sub>t</sub> = r(x, y) &middot; &delta;<sub>t=T</sub> - &beta; &middot; KL<sub>t</sub>, where KL<sub>t</sub> = log &pi;<sub>&theta;</sub>(y<sub>t</sub>|x, y<sub>&lt;t</sub>) - log &pi;<sub>ref</sub>(y<sub>t</sub>|x, y<sub>&lt;t</sub>). This per-token formulation means the policy is penalized at every step for deviating from the reference, not just at the sequence level.</p>
+
+      <h3>Adaptive KL Coefficient</h3>
+      <p>A fixed &beta; is fragile: too high and the policy barely moves from SFT; too low and reward hacking occurs. The adaptive approach (from OpenAI's PPO-RLHF paper) adjusts &beta; based on the observed KL:</p>
+
+<div class="pseudo-code"><span class="kw">def</span> <span class="fn">update_kl_coeff</span>(kl_coeff: float, observed_kl: float,
+                     target_kl: float = 6.0) -> float:
+    <span class="cm"># If KL is too high, increase penalty to pull policy back</span>
+    <span class="kw">if</span> observed_kl > target_kl * 1.5:
+        kl_coeff *= 2.0
+    <span class="cm"># If KL is too low, relax penalty to allow more exploration</span>
+    <span class="kw">elif</span> observed_kl < target_kl / 1.5:
+        kl_coeff *= 0.5
+    <span class="cm"># Clamp to prevent extreme values</span>
+    kl_coeff = <span class="fn">max</span>(0.001, <span class="fn">min</span>(10.0, kl_coeff))
+    <span class="kw">return</span> kl_coeff</div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>KL Penalty (Reward Modifier)</h3>
+          <p>Subtracts &beta;&middot;KL from the reward signal. The PPO optimizer then naturally reduces KL because it lowers returns. This is the InstructGPT approach. Advantage: works within the standard PPO framework. Disadvantage: conflates reward signal with regularization; the value function must model both.</p>
+        </div>
+        <div class="compare-card">
+          <h3>KL Constraint (Explicit)</h3>
+          <p>Enforces E[KL] &le; &delta; as a hard constraint via Lagrangian relaxation. The dual variable &lambda; is updated alongside policy parameters. This is more principled (TRPO-style) and separates reward from regularization. Used in some research implementations but rarer in production due to added complexity.</p>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>Reward hacking in practice:</strong> Common manifestations include the policy generating excessively long responses (reward models often correlate length with quality), repeating high-reward phrases, or producing outputs that exploit spurious patterns in the reward model's training data. Monitoring the KL divergence alongside reward during training is essential — if reward increases while KL explodes, reward hacking is likely occurring.
+      </div>
+
+      <h3>KL Approximations</h3>
+      <p>Computing exact KL requires a forward pass through both the policy and reference model. Several approximations reduce cost:</p>
+      <ul>
+        <li><strong>Log-ratio approximation:</strong> KL &approx; E[log(&pi;/&pi;<sub>ref</sub>)] = E[logprobs - ref_logprobs]. This is the standard unbiased estimator used in most implementations.</li>
+        <li><strong>k3 estimator (Schulman):</strong> KL &approx; (ratio - 1) - log(ratio), where ratio = &pi;/&pi;<sub>ref</sub>. This is always non-negative and has lower variance than the log-ratio estimator for large divergences.</li>
+        <li><strong>Periodic reference updates:</strong> Instead of keeping the reference model frozen, update it every N steps (EMA or hard copy). This allows the policy to drift further over time while maintaining local stability.</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 6 – Distributed RLHF Systems                        -->
+      <!-- ============================================================ -->
+      <h2 id="distributed-rlhf">Distributed RLHF Systems</h2>
+
+      <p>Scaling RLHF to hundreds of GPUs requires careful orchestration of four interacting model instances, each with different computation patterns: the policy needs both inference (generation) and training, the reward and reference models need only inference, and the value model needs training. This heterogeneity makes RLHF significantly harder to distribute than standard data-parallel training.</p>
+
+      <h3>Framework Comparison</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>TRL (HuggingFace)</h3>
+          <p>Built on Accelerate + DeepSpeed. Single-controller design where all models live in the same process. Easy to use for research but limited to models that fit in one node's memory. PPOTrainer handles rollout collection and optimization in a unified loop. Best for ≤13B models on single nodes.</p>
+        </div>
+        <div class="compare-card">
+          <h3>OpenRLHF</h3>
+          <p>Ray-based distributed architecture. Each model (actor, critic, reward, reference) runs on separate Ray actors with dedicated GPU pools. Supports vLLM for generation, ZeRO-3 for training, and automatic data routing between components. Scales to 70B+ models across multiple nodes.</p>
+        </div>
+        <div class="compare-card">
+          <h3>DeepSpeed-Chat</h3>
+          <p>Three-phase pipeline: SFT &rarr; Reward Modeling &rarr; RLHF. Uses DeepSpeed ZeRO and Hybrid Engine (combining training and inference optimization in one engine) for memory efficiency. The Hybrid Engine switches between ZeRO-partitioned training mode and tensor-parallel inference mode within the same process.</p>
+        </div>
+        <div class="compare-card">
+          <h3>NeMo-Aligner (NVIDIA)</h3>
+          <p>Built on NeMo and Megatron-Core. Uses Megatron's 3D parallelism (tensor + pipeline + data) for each model. Highest throughput for very large models (&gt;100B) at the cost of complexity. Supports critic/reward model sharding and interleaved pipeline schedules.</p>
+        </div>
+      </div>
+
+      <h3>Communication Patterns</h3>
+      <p>The dominant communication pattern in distributed RLHF is the <strong>data shuttle</strong> between the generation cluster and the training cluster. After the policy generates a batch of responses, the following data must be transferred to the training nodes:</p>
+      <ul>
+        <li>Response token IDs: B &times; T &times; 4 bytes (int32)</li>
+        <li>Policy log-probabilities: B &times; T &times; 4 bytes (float32)</li>
+        <li>Reward scores: B &times; 4 bytes (float32)</li>
+        <li>Value estimates: B &times; T &times; 4 bytes (float32)</li>
+        <li>Reference log-probs: B &times; T &times; 4 bytes (float32)</li>
+      </ul>
+      <p>For a batch of B=512 sequences with T=1024 tokens, this is ~8 MB — trivial compared to gradient synchronization. The real challenge is <strong>weight synchronization</strong>: after each PPO update, the training cluster must broadcast the updated policy weights to the generation cluster. For a 70B model in bf16, this is 140 GB per sync, requiring ~12 seconds over 100 Gbps InfiniBand.</p>
+
+      <div class="callout">
+        <strong>Pipelining strategy:</strong> To hide weight-sync latency, advanced systems overlap generation batch N+1 with the PPO training on batch N. The generation cluster uses the <em>previous</em> policy weights (one step stale), which introduces slight off-policy bias but is acceptable given PPO's robustness. This is analogous to asynchronous SGD in data-parallel training.
+      </div>
+
+      <h3>Scaling Throughput Optimization</h3>
+      <p>End-to-end RLHF throughput is measured in <strong>samples per second</strong> (complete (prompt, response, reward) tuples processed). Key optimizations for scaling beyond 64 GPUs include:</p>
+      <ul>
+        <li><strong>Micro-batch interleaving:</strong> While one micro-batch is in the reward model forward pass, another is being generated, and a third is in the PPO backward pass. This keeps all GPU pools active simultaneously.</li>
+        <li><strong>Fused generation-scoring:</strong> Run the reward model immediately after each sequence completes (continuous batching), rather than waiting for the entire batch to finish generation. This reduces idle time on reward model GPUs.</li>
+        <li><strong>Gradient accumulation with async allreduce:</strong> Overlap the gradient allreduce of mini-batch K with the forward pass of mini-batch K+1. With 4 PPO epochs and 8 mini-batches per epoch, this hides most of the communication cost.</li>
+        <li><strong>Dynamic batch sizing:</strong> Adjust the rollout batch size based on sequence length distribution. Short responses complete faster, so batches heavy on short prompts should be larger to maintain constant GPU utilization.</li>
+      </ul>
+
+      <div class="callout warn">
+        <strong>Scaling bottleneck:</strong> Beyond ~256 GPUs, the weight synchronization between generation and training clusters becomes the dominant bottleneck. Solutions include ring-allreduce weight broadcast, sharded weight loading (each generation node fetches only its tensor-parallel shard), and using RDMA (Remote Direct Memory Access) for zero-copy weight transfer over InfiniBand.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

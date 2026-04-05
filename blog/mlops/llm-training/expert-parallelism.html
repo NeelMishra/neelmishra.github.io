@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Expert parallelism for Mixture-of-Experts models: routing mechanisms, load balancing, all-to-all communication, and scaling MoE to trillions of parameters.">
+  <title>Expert Parallelism for MoE | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#moe-architecture">Mixture-of-Experts Architecture</a></li>
+        <li><a href="#expert-routing">Expert Routing &amp; Gating</a></li>
+        <li><a href="#load-balancing">Load Balancing &amp; Auxiliary Losses</a></li>
+        <li><a href="#all-to-all">All-to-All Communication</a></li>
+        <li><a href="#ep-implementation">Expert Parallelism Implementation</a></li>
+        <li><a href="#scaling-moe">Scaling MoE Models</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Expert Parallelism for MoE</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 1 — Mixture-of-Experts Architecture                  -->
+      <!-- ============================================================ -->
+      <h2 id="moe-architecture">Mixture-of-Experts Architecture</h2>
+
+      <p>
+        Mixture-of-Experts (MoE) models replace the monolithic feed-forward network (FFN)
+        in each Transformer block with a set of <em>N</em> parallel expert sub-networks,
+        of which only a small subset <em>k</em> are activated for any given token.
+        This <strong>conditional computation</strong> decouples total parameter count from
+        per-token FLOPs: a model with 1.6&nbsp;T parameters can consume roughly the same
+        compute as a 100&nbsp;B dense model at inference, because each token activates only
+        2 out of 64 experts.
+      </p>
+
+      <p>
+        Concretely, a standard Transformer FFN with hidden dimension <em>d<sub>model</sub></em>
+        and intermediate dimension <em>d<sub>ff</sub></em> has <code>2 &times; d<sub>model</sub> &times; d<sub>ff</sub></code>
+        parameters. An MoE layer replaces this single FFN with <em>N</em> independent copies
+        (experts), each of identical architecture, plus a lightweight gating network of size
+        <code>d<sub>model</sub> &times; N</code>. The total parameters grow to
+        <code>N &times; 2 &times; d<sub>model</sub> &times; d<sub>ff</sub> + d<sub>model</sub> &times; N</code>,
+        but active parameters per token remain <code>k &times; 2 &times; d<sub>model</sub> &times; d<sub>ff</sub></code>.
+      </p>
+
+      <div class="callout">
+        <strong>Key Insight:</strong> MoE achieves sub-linear scaling of compute with respect to
+        parameters. Switch Transformer (2021) demonstrated that a 1.6&nbsp;T parameter MoE model
+        trains with comparable wall-clock cost to a T5-XXL (11B dense), achieving 4&times; faster
+        pre-training speedup at fixed compute budgets.
+      </div>
+
+      <p>
+        Every other Transformer layer is typically replaced with an MoE layer (alternating
+        dense and MoE), though some architectures like Mixtral 8&times;7B replace every FFN.
+        The attention layers remain shared across all tokens; sparsity is applied only to the FFN
+        component. This design keeps the model's ability to attend over all tokens while
+        allowing specialization in the expert FFN sub-networks.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># MoE layer forward pass (simplified)</span>
+<span class="kw">class</span> <span class="fn">MoELayer</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, d_ff, num_experts, top_k):
+        <span class="fn">super</span>().__init__()
+        self.experts = nn.ModuleList([
+            <span class="fn">FeedForward</span>(d_model, d_ff) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_experts)
+        ])
+        self.gate = nn.Linear(d_model, num_experts)
+        self.top_k = top_k
+        self.num_experts = num_experts
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="cm"># x shape: (batch, seq_len, d_model)</span>
+        gate_logits = self.gate(x)           <span class="cm"># (B, S, num_experts)</span>
+        weights, indices = <span class="fn">top_k_gating</span>(gate_logits, self.top_k)
+        output = <span class="fn">dispatch_to_experts</span>(x, self.experts, weights, indices)
+        <span class="kw">return</span> output</div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 2 — Expert Routing and Gating                        -->
+      <!-- ============================================================ -->
+      <h2 id="expert-routing">Expert Routing &amp; Gating</h2>
+
+      <p>
+        The gating network (router) determines which experts process each token. For a
+        token representation <em>x</em> &isin; &reals;<sup>d</sup>, the router computes
+        logits <code>h(x) = W<sub>g</sub> &middot; x</code> where
+        <em>W<sub>g</sub></em> &isin; &reals;<sup>N&times;d</sup>. The top-<em>k</em>
+        experts are then selected, and their gating weights are renormalized via softmax
+        over the selected subset.
+      </p>
+
+      <p>
+        The gating function can be formalized as:
+      </p>
+      <p style="text-align:center;font-style:italic;">
+        G(x) = Softmax(TopK(h(x), k))
+      </p>
+      <p>
+        where <code>TopK</code> keeps the top-<em>k</em> values and sets the rest to
+        &minus;&infin; before the softmax, producing a sparse probability distribution.
+        The final MoE output for a token is:
+      </p>
+      <p style="text-align:center;font-style:italic;">
+        y = &sum;<sub>i &isin; TopK</sub> G(x)<sub>i</sub> &middot; E<sub>i</sub>(x)
+      </p>
+
+      <div class="callout warn">
+        <strong>Warning — Routing Collapse:</strong> Without careful regularization,
+        the router can converge to sending all tokens to a single expert. This
+        <em>routing collapse</em> effectively wastes (N&minus;1) experts' parameters and
+        degrades the model to a dense network with extra dead weight. Auxiliary losses
+        (discussed below) are essential to prevent this.
+      </div>
+
+      <div class="pseudo-code"><span class="cm"># Top-k gating with softmax normalization</span>
+<span class="kw">def</span> <span class="fn">top_k_gating</span>(logits, k):
+    <span class="cm"># logits: (batch * seq_len, num_experts)</span>
+    top_values, top_indices = <span class="fn">torch.topk</span>(logits, k, dim=-1)
+    <span class="cm"># Mask out non-selected experts with -inf</span>
+    mask = <span class="fn">torch.full_like</span>(logits, <span class="fn">float</span>(<span class="kw">'-inf'</span>))
+    mask.<span class="fn">scatter_</span>(1, top_indices, top_values)
+    <span class="cm"># Softmax over all experts (non-selected become 0)</span>
+    gates = <span class="fn">torch.softmax</span>(mask, dim=-1)
+    <span class="kw">return</span> gates, top_indices
+
+<span class="cm"># Capacity factor determines buffer size per expert</span>
+<span class="kw">def</span> <span class="fn">compute_capacity</span>(num_tokens, num_experts, top_k, capacity_factor):
+    <span class="cm"># Average tokens per expert under uniform distribution</span>
+    tokens_per_expert = (num_tokens * top_k) / num_experts
+    capacity = <span class="fn">int</span>(tokens_per_expert * capacity_factor)
+    <span class="kw">return</span> capacity</div>
+
+      <p>
+        The <strong>capacity factor</strong> (CF) controls the buffer allocated to each
+        expert. With CF&nbsp;=&nbsp;1.0, each expert can process exactly its fair share
+        of tokens under a perfectly uniform distribution. In practice, CF is set between
+        1.0 and 1.5 to accommodate routing imbalance. Tokens that exceed an expert's
+        capacity are <em>dropped</em> and passed through a residual connection unchanged.
+        Higher CF values waste compute on padding; lower values risk dropping too many tokens.
+      </p>
+
+      <!-- SVG Diagram — MoE Routing Across GPUs -->
+      <h3>MoE Token Routing Across GPUs</h3>
+      <svg id="lt-moe-routing-diagram" viewBox="0 0 780 420" style="width:100%;max-width:780px;margin:1.2rem auto;display:block;" xmlns="http://www.w3.org/2000/svg">
+        <!-- Background -->
+        <rect id="lt-bg" x="0" y="0" width="780" height="420" rx="12" fill="#f8f9fa" stroke="#dee2e6" stroke-width="1"/>
+
+        <!-- Title -->
+        <text id="lt-title" x="390" y="30" text-anchor="middle" font-family="Manrope,sans-serif" font-size="15" font-weight="700" fill="#1a1a2e">Expert Parallelism: Token Routing Across GPUs</text>
+
+        <!-- Input tokens row -->
+        <text id="lt-input-label" x="70" y="68" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#555">Input Tokens</text>
+        <rect id="lt-tok-0" x="160" y="52" width="60" height="28" rx="6" fill="#4a90d9" opacity="0.85"/><text x="190" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₀</text>
+        <rect id="lt-tok-1" x="230" y="52" width="60" height="28" rx="6" fill="#d94a7a" opacity="0.85"/><text x="260" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₁</text>
+        <rect id="lt-tok-2" x="300" y="52" width="60" height="28" rx="6" fill="#4ad97a" opacity="0.85"/><text x="330" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₂</text>
+        <rect id="lt-tok-3" x="370" y="52" width="60" height="28" rx="6" fill="#d9b44a" opacity="0.85"/><text x="400" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₃</text>
+        <rect id="lt-tok-4" x="440" y="52" width="60" height="28" rx="6" fill="#9a4ad9" opacity="0.85"/><text x="470" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₄</text>
+        <rect id="lt-tok-5" x="510" y="52" width="60" height="28" rx="6" fill="#4ad9d9" opacity="0.85"/><text x="540" y="71" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#fff">T₅</text>
+
+        <!-- Router / Gating box -->
+        <rect id="lt-router-box" x="240" y="105" width="300" height="36" rx="8" fill="#ff6b35" opacity="0.9"/>
+        <text id="lt-router-text" x="390" y="128" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#fff">Router / Gating Network (Top-2)</text>
+
+        <!-- Arrows from tokens to router -->
+        <line id="lt-arr-t0-r" x1="190" y1="80" x2="340" y2="105" stroke="#4a90d9" stroke-width="1.5" opacity="0.6"/>
+        <line id="lt-arr-t1-r" x1="260" y1="80" x2="360" y2="105" stroke="#d94a7a" stroke-width="1.5" opacity="0.6"/>
+        <line id="lt-arr-t2-r" x1="330" y1="80" x2="380" y2="105" stroke="#4ad97a" stroke-width="1.5" opacity="0.6"/>
+        <line id="lt-arr-t3-r" x1="400" y1="80" x2="400" y2="105" stroke="#d9b44a" stroke-width="1.5" opacity="0.6"/>
+        <line id="lt-arr-t4-r" x1="470" y1="80" x2="420" y2="105" stroke="#9a4ad9" stroke-width="1.5" opacity="0.6"/>
+        <line id="lt-arr-t5-r" x1="540" y1="80" x2="450" y2="105" stroke="#4ad9d9" stroke-width="1.5" opacity="0.6"/>
+
+        <!-- All-to-All zone label -->
+        <text id="lt-a2a-label" x="390" y="170" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#888">⇣ All-to-All Dispatch ⇣</text>
+
+        <!-- GPU boxes with experts -->
+        <rect id="lt-gpu0-box" x="30" y="195" width="165" height="140" rx="10" fill="#fff" stroke="#4a90d9" stroke-width="2"/>
+        <text id="lt-gpu0-label" x="112" y="215" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#4a90d9">GPU 0</text>
+        <rect id="lt-expert0" x="45" y="225" width="135" height="30" rx="6" fill="#e8f0fe"/><text x="112" y="245" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 0 (FFN)</text>
+        <rect id="lt-expert1" x="45" y="262" width="135" height="30" rx="6" fill="#e8f0fe"/><text x="112" y="282" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 1 (FFN)</text>
+        <text id="lt-gpu0-tokens" x="112" y="310" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#4a90d9">T₀ T₂ → E0 | T₁ → E1</text>
+
+        <rect id="lt-gpu1-box" x="210" y="195" width="165" height="140" rx="10" fill="#fff" stroke="#d94a7a" stroke-width="2"/>
+        <text id="lt-gpu1-label" x="292" y="215" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#d94a7a">GPU 1</text>
+        <rect id="lt-expert2" x="225" y="225" width="135" height="30" rx="6" fill="#fde8ee"/><text x="292" y="245" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 2 (FFN)</text>
+        <rect id="lt-expert3" x="225" y="262" width="135" height="30" rx="6" fill="#fde8ee"/><text x="292" y="282" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 3 (FFN)</text>
+        <text id="lt-gpu1-tokens" x="292" y="310" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#d94a7a">T₃ → E2 | T₀ T₄ → E3</text>
+
+        <rect id="lt-gpu2-box" x="390" y="195" width="165" height="140" rx="10" fill="#fff" stroke="#4ad97a" stroke-width="2"/>
+        <text id="lt-gpu2-label" x="472" y="215" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#4ad97a">GPU 2</text>
+        <rect id="lt-expert4" x="405" y="225" width="135" height="30" rx="6" fill="#e8feec"/><text x="472" y="245" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 4 (FFN)</text>
+        <rect id="lt-expert5" x="405" y="262" width="135" height="30" rx="6" fill="#e8feec"/><text x="472" y="282" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 5 (FFN)</text>
+        <text id="lt-gpu2-tokens" x="472" y="310" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#4ad97a">T₁ T₅ → E4 | T₂ → E5</text>
+
+        <rect id="lt-gpu3-box" x="570" y="195" width="180" height="140" rx="10" fill="#fff" stroke="#9a4ad9" stroke-width="2"/>
+        <text id="lt-gpu3-label" x="660" y="215" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#9a4ad9">GPU 3</text>
+        <rect id="lt-expert6" x="585" y="225" width="150" height="30" rx="6" fill="#f0e8fe"/><text x="660" y="245" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 6 (FFN)</text>
+        <rect id="lt-expert7" x="585" y="262" width="150" height="30" rx="6" fill="#f0e8fe"/><text x="660" y="282" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Expert 7 (FFN)</text>
+        <text id="lt-gpu3-tokens" x="660" y="310" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#9a4ad9">T₃ T₅ → E6 | T₄ → E7</text>
+
+        <!-- All-to-All Combine arrows -->
+        <text id="lt-combine-label" x="390" y="360" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#888">⇣ All-to-All Combine ⇣</text>
+
+        <!-- Output -->
+        <rect id="lt-output-bar" x="140" y="375" width="500" height="30" rx="8" fill="#0a8f6a" opacity="0.15" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text id="lt-output-text" x="390" y="395" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">Weighted Sum of Expert Outputs → Next Layer</text>
+      </svg>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 3 — Load Balancing and Auxiliary Losses              -->
+      <!-- ============================================================ -->
+      <h2 id="load-balancing">Load Balancing &amp; Auxiliary Losses</h2>
+
+      <p>
+        Without explicit regularization, the router tends to converge on a small subset of
+        experts, creating a positive feedback loop: popular experts receive more gradient
+        signal, improve faster, and attract even more tokens. The remaining experts stagnate.
+        Load balancing losses add a penalty that encourages uniform token distribution.
+      </p>
+
+      <h3>Switch Transformer Load Balancing Loss</h3>
+      <p>
+        Given <em>N</em> experts and a batch of <em>T</em> tokens, define
+        <code>f<sub>i</sub></code> as the fraction of tokens routed to expert <em>i</em>,
+        and <code>P<sub>i</sub></code> as the mean router probability for expert <em>i</em>
+        across all tokens. The auxiliary loss is:
+      </p>
+      <p style="text-align:center;font-style:italic;">
+        L<sub>aux</sub> = &alpha; &middot; N &middot; &sum;<sub>i=1</sub><sup>N</sup> f<sub>i</sub> &middot; P<sub>i</sub>
+      </p>
+      <p>
+        This product is minimized when <code>f<sub>i</sub> = 1/N</code> for all experts.
+        The coefficient &alpha; is typically set to 0.01 so the auxiliary loss does not
+        overwhelm the primary language modeling objective.
+      </p>
+
+      <h3>Z-Loss for Router Stability</h3>
+      <p>
+        ST-MoE introduced <strong>z-loss</strong> to penalize large router logits, preventing
+        the gating network from becoming overly confident, which causes training instability
+        via exponential growth inside the softmax:
+      </p>
+      <p style="text-align:center;font-style:italic;">
+        L<sub>z</sub> = &beta; &middot; (1/T) &middot; &sum;<sub>t=1</sub><sup>T</sup> (log &sum;<sub>i=1</sub><sup>N</sup> e<sup>h<sub>i</sub>(x<sub>t</sub>)</sup>)&sup2;
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># Load balancing loss (Switch Transformer formulation)</span>
+<span class="kw">def</span> <span class="fn">load_balancing_loss</span>(gate_probs, expert_indices, num_experts, alpha=0.01):
+    <span class="cm"># gate_probs: (num_tokens, num_experts) — softmax probabilities</span>
+    <span class="cm"># expert_indices: (num_tokens, top_k) — selected expert ids</span>
+    num_tokens = gate_probs.<span class="fn">shape</span>[0]
+
+    <span class="cm"># f_i: fraction of tokens dispatched to each expert</span>
+    one_hot = <span class="fn">torch.zeros_like</span>(gate_probs)
+    one_hot.<span class="fn">scatter_</span>(1, expert_indices, 1.0)
+    f = one_hot.<span class="fn">mean</span>(dim=0)                  <span class="cm"># (num_experts,)</span>
+
+    <span class="cm"># P_i: mean router probability for each expert</span>
+    P = gate_probs.<span class="fn">mean</span>(dim=0)                 <span class="cm"># (num_experts,)</span>
+
+    <span class="cm"># Auxiliary loss: encourages f_i ≈ P_i ≈ 1/N</span>
+    loss = alpha * num_experts * <span class="fn">torch.sum</span>(f * P)
+    <span class="kw">return</span> loss
+
+<span class="cm"># Z-loss for router logit stability (ST-MoE)</span>
+<span class="kw">def</span> <span class="fn">z_loss</span>(router_logits, beta=0.001):
+    <span class="cm"># router_logits: (num_tokens, num_experts)</span>
+    log_z = <span class="fn">torch.logsumexp</span>(router_logits, dim=-1)  <span class="cm"># (num_tokens,)</span>
+    loss = beta * <span class="fn">torch.mean</span>(log_z ** 2)
+    <span class="kw">return</span> loss</div>
+
+      <h3>Switch Transformer vs GShard Approaches</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Switch Transformer</h4>
+          <ul>
+            <li><strong>Top-1 routing</strong> — each token goes to exactly one expert</li>
+            <li>Capacity factor CF = 1.0–1.5; dropped tokens use residual skip</li>
+            <li>Simplified auxiliary loss: <code>&alpha; &middot; N &middot; &sum; f<sub>i</sub> &middot; P<sub>i</sub></code></li>
+            <li>Selective precision: router in FP32, experts in BF16</li>
+            <li>Achieved 7&times; pre-training speedup over T5-Base</li>
+            <li>Scales to 1.6&nbsp;T parameters on 2048 TPU v3 cores</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>GShard</h4>
+          <ul>
+            <li><strong>Top-2 routing</strong> — each token dispatched to two experts</li>
+            <li>Random routing for second expert weighted by gate probability</li>
+            <li>Both importance loss and load loss used jointly</li>
+            <li>Group-level balancing across expert groups</li>
+            <li>Scaled to 600&nbsp;B parameters on 2048 TPU v3 cores</li>
+            <li>Demonstrated MoE effectiveness for machine translation</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Practical Tip:</strong> In Mixtral 8&times;7B, each token is routed to 2
+        of 8 experts, yielding active parameters of ~13B from a total of ~47B. The auxiliary
+        loss coefficient &alpha; is set low enough (0.001–0.01) that the main cross-entropy loss
+        still dominates, but high enough to prevent any single expert from receiving more than
+        ~20% of tokens.
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 4 — All-to-All Communication                        -->
+      <!-- ============================================================ -->
+      <h2 id="all-to-all">All-to-All Communication</h2>
+
+      <p>
+        Expert parallelism distributes the <em>N</em> experts across <em>P</em> GPUs, with
+        each GPU hosting <em>N/P</em> experts. Because any token can be routed to any
+        expert, tokens must be reshuffled between GPUs after routing decisions are made.
+        This requires an <strong>all-to-all</strong> collective operation — conceptually
+        a distributed transpose where GPU&nbsp;<em>i</em> sends a distinct chunk of data
+        to every other GPU&nbsp;<em>j</em>.
+      </p>
+
+      <p>
+        The all-to-all pattern occurs <strong>twice</strong> per MoE layer:
+      </p>
+      <ol>
+        <li><strong>Dispatch:</strong> After the router decides which tokens go to which
+        experts, tokens are sent from their current GPU to the GPU hosting the target expert.</li>
+        <li><strong>Combine:</strong> After expert computation, the results are sent back
+        to the original GPU to be recombined with the gating weights.</li>
+      </ol>
+
+      <div class="callout warn">
+        <strong>Bandwidth Bottleneck:</strong> For a model with sequence length <em>S</em>,
+        batch size <em>B</em>, hidden dimension <em>d</em>, across <em>P</em> GPUs, each
+        all-to-all transfers approximately <code>B &times; S &times; d &times; 2 bytes</code>
+        (in BF16) per direction. With B=2, S=4096, d=8192, P=64, that's
+        ~128&nbsp;MB per GPU per direction per MoE layer. With 32 MoE layers, the total
+        all-to-all volume reaches ~8&nbsp;GB per GPU per forward pass.
+      </div>
+
+      <div class="pseudo-code"><span class="cm"># All-to-All dispatch and combine pattern</span>
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+
+<span class="kw">def</span> <span class="fn">expert_parallel_forward</span>(tokens, gate_weights, expert_indices, experts, ep_group):
+    <span class="cm"># Step 1: Determine which tokens go to which GPU</span>
+    <span class="cm"># Arrange tokens into per-destination buffers</span>
+    send_buffers = <span class="fn">prepare_dispatch_buffers</span>(tokens, expert_indices, ep_group)
+
+    <span class="cm"># Step 2: All-to-All DISPATCH — send tokens to expert-hosting GPUs</span>
+    recv_buffers = <span class="fn">torch.empty_like</span>(send_buffers)
+    dist.<span class="fn">all_to_all_single</span>(recv_buffers, send_buffers, group=ep_group)
+
+    <span class="cm"># Step 3: Local expert computation on received tokens</span>
+    local_results = []
+    <span class="kw">for</span> i, expert <span class="kw">in</span> <span class="fn">enumerate</span>(experts):
+        expert_tokens = recv_buffers[i]
+        local_results.<span class="fn">append</span>(expert(expert_tokens))
+    result_buffer = <span class="fn">torch.stack</span>(local_results)
+
+    <span class="cm"># Step 4: All-to-All COMBINE — send results back to original GPUs</span>
+    combined = <span class="fn">torch.empty_like</span>(result_buffer)
+    dist.<span class="fn">all_to_all_single</span>(combined, result_buffer, group=ep_group)
+
+    <span class="cm"># Step 5: Weighted sum using gating weights</span>
+    output = <span class="fn">weighted_combine</span>(combined, gate_weights)
+    <span class="kw">return</span> output</div>
+
+      <p>
+        Modern implementations overlap communication with computation by pipelining:
+        while GPU&nbsp;0 sends tokens for expert&nbsp;2 on GPU&nbsp;1, it simultaneously
+        computes expert&nbsp;0 on locally-routed tokens. This <strong>computation-communication
+        overlap</strong> reduces the effective latency overhead, though the total bandwidth
+        demand remains unchanged.
+      </p>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 5 — Expert Parallelism Implementation                -->
+      <!-- ============================================================ -->
+      <h2 id="ep-implementation">Expert Parallelism Implementation</h2>
+
+      <p>
+        Expert Parallelism (EP) is a parallelism dimension orthogonal to Data Parallelism
+        (DP) and Tensor Parallelism (TP). In practice, these strategies are combined.
+        Consider a cluster of 64 GPUs training a model with 64 experts. One configuration:
+      </p>
+      <ul>
+        <li><strong>EP = 8:</strong> experts are partitioned across 8 GPUs, each hosting 8 experts</li>
+        <li><strong>TP = 2:</strong> each expert's parameters are split across 2 GPUs</li>
+        <li><strong>DP = 4:</strong> the entire configuration is replicated 4 times (64 / 8 / 2 = 4)</li>
+      </ul>
+
+      <p>
+        The total GPU count must satisfy: <code>DP &times; EP &times; TP = Total GPUs</code>.
+        Choosing the right decomposition depends on expert size, interconnect bandwidth,
+        and memory constraints.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># DeepSpeed-MoE style parallelism configuration</span>
+<span class="cm"># Configuring EP + DP + TP for a 64-expert model on 64 GPUs</span>
+
+config = {
+    <span class="cm"># Model configuration</span>
+    "num_experts": 64,
+    "d_model": 8192,
+    "d_ff": 22016,
+    "num_layers": 80,
+    "moe_layer_interval": 2,       <span class="cm"># MoE every other layer</span>
+    "top_k": 2,
+
+    <span class="cm"># Parallelism configuration</span>
+    "expert_parallel_size": 8,     <span class="cm"># 64 experts / 8 = 8 experts per GPU</span>
+    "tensor_parallel_size": 2,     <span class="cm"># Each expert split across 2 GPUs</span>
+    "data_parallel_size": 4,       <span class="cm"># 64 / (8 * 2) = 4-way DP</span>
+
+    <span class="cm"># Expert-specific settings</span>
+    "capacity_factor_train": 1.25,
+    "capacity_factor_eval": 2.0,   <span class="cm"># Higher at eval to avoid dropping</span>
+    "min_capacity": 4,
+    "drop_tokens": <span class="kw">True</span>,
+    "use_residual": <span class="kw">True</span>,          <span class="cm"># Skip connection for dropped tokens</span>
+}
+
+<span class="cm"># Memory per GPU calculation:</span>
+<span class="cm"># Expert params per GPU: 8 experts × 2 × d_model × d_ff / TP</span>
+<span class="cm">#   = 8 × 2 × 8192 × 22016 / 2 = 1.44B params ≈ 2.88 GB (BF16)</span>
+<span class="cm"># Shared layers (attention etc.) are replicated across DP</span>
+<span class="cm"># Total per-GPU model memory ≈ 5-8 GB + optimizer states</span></div>
+
+      <div class="callout">
+        <strong>DeepSpeed-MoE Hierarchy:</strong> DeepSpeed introduces a two-level
+        hierarchy: <em>intra-node EP</em> uses fast NVLink/NVSwitch for all-to-all within
+        a node, while <em>inter-node DP</em> uses slower InfiniBand for gradient
+        synchronization. This topology-aware placement minimizes cross-node
+        communication for the latency-sensitive all-to-all operations.
+      </div>
+
+      <h3>Process Group Setup</h3>
+      <div class="pseudo-code"><span class="cm"># Setting up EP + DP process groups (PyTorch distributed)</span>
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+
+<span class="kw">def</span> <span class="fn">setup_moe_process_groups</span>(world_size, ep_size, tp_size):
+    <span class="cm"># Validate decomposition</span>
+    dp_size = world_size // (ep_size * tp_size)
+    <span class="kw">assert</span> dp_size * ep_size * tp_size == world_size
+
+    rank = dist.<span class="fn">get_rank</span>()
+
+    <span class="cm"># EP group: ranks that share the expert-parallel dimension</span>
+    <span class="cm"># Ranks [0..ep_size-1], [ep_size..2*ep_size-1], etc.</span>
+    ep_groups = []
+    <span class="kw">for</span> dp_idx <span class="kw">in</span> <span class="fn">range</span>(dp_size):
+        <span class="kw">for</span> tp_idx <span class="kw">in</span> <span class="fn">range</span>(tp_size):
+            ranks = [dp_idx * ep_size * tp_size + ep_idx * tp_size + tp_idx
+                     <span class="kw">for</span> ep_idx <span class="kw">in</span> <span class="fn">range</span>(ep_size)]
+            group = dist.<span class="fn">new_group</span>(ranks)
+            <span class="kw">if</span> rank <span class="kw">in</span> ranks:
+                ep_group = group
+        ep_groups.<span class="fn">append</span>(group)
+
+    <span class="cm"># DP group: ranks that replicate the same experts</span>
+    dp_groups = []
+    <span class="kw">for</span> ep_idx <span class="kw">in</span> <span class="fn">range</span>(ep_size):
+        <span class="kw">for</span> tp_idx <span class="kw">in</span> <span class="fn">range</span>(tp_size):
+            ranks = [dp_idx * ep_size * tp_size + ep_idx * tp_size + tp_idx
+                     <span class="kw">for</span> dp_idx <span class="kw">in</span> <span class="fn">range</span>(dp_size)]
+            group = dist.<span class="fn">new_group</span>(ranks)
+            <span class="kw">if</span> rank <span class="kw">in</span> ranks:
+                dp_group = group
+        dp_groups.<span class="fn">append</span>(group)
+
+    <span class="kw">return</span> ep_group, dp_group</div>
+
+      <!-- ============================================================ -->
+      <!-- SECTION 6 — Scaling MoE Models                              -->
+      <!-- ============================================================ -->
+      <h2 id="scaling-moe">Scaling MoE Models</h2>
+
+      <p>
+        Scaling MoE models to trillions of parameters introduces unique challenges beyond
+        those of dense models. While MoE provides parameter efficiency through sparse
+        activation, the <em>total</em> model footprint still determines memory requirements,
+        checkpoint sizes, and communication overhead.
+      </p>
+
+      <h3>Memory Footprint Analysis</h3>
+      <p>
+        Consider a Mixtral-scale model: 8 experts per MoE layer, d<sub>model</sub>=4096,
+        d<sub>ff</sub>=14336, 32 layers (all MoE). Per-expert parameters:
+        <code>2 &times; 4096 &times; 14336 = 117.4M</code>. Total expert parameters:
+        <code>32 layers &times; 8 experts &times; 117.4M = 30.1B</code>.
+        In BF16, that's ~60&nbsp;GB just for expert weights. With Adam optimizer states
+        (2&times; in FP32), the optimizer footprint alone reaches ~240&nbsp;GB, necessitating
+        distribution across many GPUs even before considering activations.
+      </p>
+
+      <div class="callout warn">
+        <strong>Checkpoint Size Explosion:</strong> A 1.6T parameter MoE model's checkpoint
+        is ~3.2&nbsp;TB in BF16. Saving checkpoints to distributed storage at full training
+        speed requires careful async I/O and sharded checkpointing (e.g., PyTorch FSDP's
+        sharded state dict or DeepSpeed's ZeRO checkpoint format). A naive checkpoint save
+        at this scale can stall training for 10+ minutes.
+      </div>
+
+      <h3>Training Stability Strategies</h3>
+      <ul>
+        <li><strong>Router z-loss:</strong> Penalizes large logits to prevent exponential
+        blowup in softmax, critical for BF16 training where the dynamic range is limited.</li>
+        <li><strong>Expert dropout:</strong> During training, randomly bypass MoE layers with
+        probability <em>p</em>, forcing the model to be robust to expert unavailability.</li>
+        <li><strong>Jitter noise:</strong> Add multiplicative noise to router inputs
+        (<code>x &times; (1 + &epsilon;)</code>, &epsilon; ~ U(-0.01, 0.01)) to break
+        symmetry early in training and encourage exploration of all experts.</li>
+        <li><strong>Gradient clipping per expert group:</strong> Apply separate gradient norms
+        to expert parameters vs. shared parameters, as expert gradients can be spiky due to
+        sparse activation patterns.</li>
+      </ul>
+
+      <h3>Inference Considerations</h3>
+      <p>
+        At inference, MoE models present a unique challenge: even though only <em>k</em>
+        experts are active per token, <strong>all</strong> expert weights must be resident
+        in memory (or quickly loadable) because routing decisions are input-dependent. This
+        means MoE models have the memory footprint of a dense model with <em>N &times; FFN</em>
+        parameters, but the FLOP cost of a model with <em>k &times; FFN</em> parameters.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># Memory estimation for MoE training</span>
+<span class="kw">def</span> <span class="fn">estimate_moe_memory</span>(
+    num_layers, num_experts, d_model, d_ff, top_k,
+    seq_len, batch_size, precision_bytes=2
+):
+    <span class="cm"># Expert parameters per layer</span>
+    expert_params_per_layer = num_experts * 2 * d_model * d_ff
+    <span class="cm"># Shared attention parameters (approximate)</span>
+    attn_params_per_layer = 4 * d_model * d_model  <span class="cm"># Q, K, V, O projections</span>
+    <span class="cm"># Total model parameters</span>
+    total_params = num_layers * (expert_params_per_layer + attn_params_per_layer)
+
+    <span class="cm"># Memory components (in bytes)</span>
+    model_memory = total_params * precision_bytes
+    <span class="cm"># Adam optimizer: 2x FP32 copies (momentum + variance)</span>
+    optimizer_memory = total_params * 4 * 2
+    <span class="cm"># Gradients in training precision</span>
+    gradient_memory = total_params * precision_bytes
+    <span class="cm"># Activation memory (rough estimate for one MoE layer)</span>
+    activation_per_layer = batch_size * seq_len * d_model * precision_bytes * 12
+
+    total_gb = (model_memory + optimizer_memory + gradient_memory) / (1024**3)
+    activation_gb = (activation_per_layer * num_layers) / (1024**3)
+
+    <span class="kw">return</span> {
+        "total_params": total_params,
+        "active_params_per_token": num_layers * (top_k * 2 * d_model * d_ff + attn_params_per_layer),
+        "model_memory_gb": model_memory / (1024**3),
+        "optimizer_memory_gb": optimizer_memory / (1024**3),
+        "gradient_memory_gb": gradient_memory / (1024**3),
+        "activation_memory_gb": activation_gb,
+        "total_training_memory_gb": total_gb + activation_gb,
+    }
+
+<span class="cm"># Example: Mixtral-scale model</span>
+stats = <span class="fn">estimate_moe_memory</span>(
+    num_layers=32, num_experts=8, d_model=4096, d_ff=14336,
+    top_k=2, seq_len=4096, batch_size=2
+)
+<span class="cm"># total_params ≈ 46.7B, active_params ≈ 12.9B</span>
+<span class="cm"># total_training_memory ≈ 430 GB across all GPUs</span></div>
+
+      <div class="callout">
+        <strong>The MoE Scaling Law:</strong> Empirical results from Google's ST-MoE and
+        Meta's research suggest that MoE models follow a modified scaling law where
+        performance scales with <em>active</em> parameters rather than total parameters, but
+        with a favorable constant — an MoE model with <em>k</em> active parameters out of
+        <em>N</em> total typically outperforms a dense model of <em>k</em> parameters by a
+        significant margin, though not as much as a dense model of <em>N</em> parameters. The
+        sweet spot appears to be 8–64 experts with top-2 routing, balancing parameter
+        efficiency against communication and load balancing overhead.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

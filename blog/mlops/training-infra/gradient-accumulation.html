@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Simulating large batch sizes with gradient accumulation, implementation details, and effective batch size calculation">
+  <title>Gradient Accumulation: Virtual Batch Sizes | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-accumulate">Why Gradient Accumulation</a></li>
+        <li><a href="#how-it-works">How It Works</a></li>
+        <li><a href="#implementation">Implementation</a></li>
+        <li><a href="#effective-batch-size">Effective Batch Size</a></li>
+        <li><a href="#interaction-ddp">Interaction with DDP</a></li>
+        <li><a href="#batch-norm-issues">Batch Normalization Issues</a></li>
+        <li><a href="#lr-scheduling">Learning Rate Scheduling</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Gradient Accumulation: Virtual Batch Sizes</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- SECTION 1 -->
+      <h2 id="why-accumulate">Why Gradient Accumulation</h2>
+      <p>Large-batch training is essential for modern deep learning — larger batches provide more stable gradient estimates, enabling higher learning rates and faster convergence. Research on LLMs frequently uses effective batch sizes of 1M+ tokens. However, a single GPU often cannot fit such batches in memory.</p>
+
+      <p><strong>The core insight:</strong> gradient accumulation exploits the mathematical property that the gradient of a sum equals the sum of gradients. Instead of computing gradients on one large batch, we compute them on <em>K</em> smaller micro-batches and sum the results before applying the optimizer update.</p>
+
+      <p>Mathematically, for a loss function <em>L</em> averaged over a batch of size <em>N</em>:</p>
+      <p style="text-align:center;font-size:1.1rem;padding:0.5rem 0">∇<sub>θ</sub> L(B) = (1/N) Σ<sub>i=1..N</sub> ∇<sub>θ</sub> ℓ(x<sub>i</sub>) = (1/K) Σ<sub>k=1..K</sub> [ (1/m) Σ<sub>j∈B_k</sub> ∇<sub>θ</sub> ℓ(x<sub>j</sub>) ]</p>
+      <p>where <em>K</em> is the accumulation steps and <em>m = N/K</em> is the micro-batch size. The result is mathematically identical to processing the full batch at once.</p>
+
+      <div class="callout">
+        <strong>Interview insight:</strong> Gradient accumulation is <em>mathematically exact</em> for most loss functions (MSE, cross-entropy with mean reduction). However, it is NOT exact for losses with batch-level statistics (e.g., contrastive loss with in-batch negatives), where the effective negative pool size shrinks per micro-batch.
+      </div>
+
+      <!-- SECTION 2 -->
+      <h2 id="how-it-works">How It Works</h2>
+      <p>The accumulation cycle has three phases: <strong>accumulate</strong> (forward + backward without optimizer step), <strong>sync</strong> (average accumulated gradients), and <strong>step</strong> (apply optimizer update and zero gradients).</p>
+
+      <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:1.2rem auto;display:block" aria-label="Gradient accumulation timeline">
+        <defs>
+          <style>
+            .ti-box{rx:8;stroke-width:1.5} .ti-acc{fill:#e8f5e9;stroke:#0a8f6a}
+            .ti-step{fill:#fff3e0;stroke:#ff6b35}
+            .ti-txt{font-family:Manrope,sans-serif;font-size:11px;fill:#333;text-anchor:middle}
+            .ti-bold{font-weight:700;font-size:12px}
+            .ti-arrow{stroke:#666;stroke-width:1.5;fill:none;marker-end:url(#ti-arrowhead)}
+          </style>
+          <marker id="ti-arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="#666"/>
+          </marker>
+        </defs>
+        <!-- Micro-batch boxes -->
+        <rect id="ti-acc-mb1" class="ti-box ti-acc" x="20" y="30" width="130" height="50"/>
+        <text class="ti-txt ti-bold" x="85" y="50">Micro-batch 1</text>
+        <text class="ti-txt" x="85" y="68">fwd + bwd (no step)</text>
+
+        <rect id="ti-acc-mb2" class="ti-box ti-acc" x="170" y="30" width="130" height="50"/>
+        <text class="ti-txt ti-bold" x="235" y="50">Micro-batch 2</text>
+        <text class="ti-txt" x="235" y="68">fwd + bwd (no step)</text>
+
+        <rect id="ti-acc-mb3" class="ti-box ti-acc" x="320" y="30" width="130" height="50"/>
+        <text class="ti-txt ti-bold" x="385" y="50">Micro-batch 3</text>
+        <text class="ti-txt" x="385" y="68">fwd + bwd (no step)</text>
+
+        <rect id="ti-acc-mb4" class="ti-box ti-acc" x="470" y="30" width="130" height="50"/>
+        <text class="ti-txt ti-bold" x="535" y="50">Micro-batch 4</text>
+        <text class="ti-txt" x="535" y="68">fwd + bwd (accumulate)</text>
+
+        <!-- Step box -->
+        <rect id="ti-acc-step" class="ti-box ti-step" x="620" y="30" width="80" height="50"/>
+        <text class="ti-txt ti-bold" x="660" y="50">Step</text>
+        <text class="ti-txt" x="660" y="68">optimizer</text>
+
+        <!-- Arrows -->
+        <line class="ti-arrow" x1="150" y1="55" x2="168" y2="55"/>
+        <line class="ti-arrow" x1="300" y1="55" x2="318" y2="55"/>
+        <line class="ti-arrow" x1="450" y1="55" x2="468" y2="55"/>
+        <line class="ti-arrow" x1="600" y1="55" x2="618" y2="55"/>
+
+        <!-- Gradient bar -->
+        <text class="ti-txt" x="20" y="115" style="text-anchor:start">Gradient buffer:</text>
+        <rect id="ti-grad-bar1" x="130" y="100" width="100" height="24" rx="4" fill="#c8e6c9" stroke="#0a8f6a"/>
+        <text class="ti-txt" x="180" y="116">g₁</text>
+        <rect id="ti-grad-bar2" x="240" y="100" width="140" height="24" rx="4" fill="#a5d6a7" stroke="#0a8f6a"/>
+        <text class="ti-txt" x="310" y="116">g₁ + g₂</text>
+        <rect id="ti-grad-bar3" x="390" y="100" width="140" height="24" rx="4" fill="#81c784" stroke="#0a8f6a"/>
+        <text class="ti-txt" x="460" y="116">g₁ + g₂ + g₃</text>
+        <rect id="ti-grad-bar4" x="540" y="100" width="100" height="24" rx="4" fill="#66bb6a" stroke="#0a8f6a"/>
+        <text class="ti-txt" x="590" y="116">Σg / K</text>
+
+        <!-- Zero after step -->
+        <rect id="ti-grad-zero" x="650" y="100" width="50" height="24" rx="4" fill="#f5f5f5" stroke="#ccc"/>
+        <text class="ti-txt" x="675" y="116">0</text>
+
+        <!-- Labels -->
+        <text class="ti-txt" x="360" y="160" style="font-size:10px;fill:#888">K = 4 accumulation steps → one optimizer step</text>
+        <text class="ti-txt" x="360" y="180" style="font-size:10px;fill:#888">Effective batch = 4 × micro_batch_size</text>
+      </svg>
+
+      <p>The critical detail: <code>loss.backward()</code> <strong>accumulates</strong> gradients by default in PyTorch — calling it multiple times adds to <code>param.grad</code> rather than replacing it. We only call <code>optimizer.zero_grad()</code> after the optimizer step, not between micro-batches.</p>
+
+      <!-- SECTION 3 -->
+      <h2 id="implementation">Implementation</h2>
+      <p>Here is the standard PyTorch implementation. The key is the division by <code>accumulation_steps</code> to maintain correct gradient magnitude.</p>
+
+<pre class="pseudo-code"><span class="cm"># Standard gradient accumulation in PyTorch</span>
+<span class="kw">def</span> <span class="fn">train_with_accumulation</span>(model, dataloader, optimizer, loss_fn,
+                            accumulation_steps=4):
+    model.<span class="fn">train</span>()
+    optimizer.<span class="fn">zero_grad</span>(set_to_none=True)
+
+    <span class="kw">for</span> step, (inputs, targets) <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+        inputs, targets = inputs.cuda(), targets.cuda()
+
+        <span class="cm"># Forward pass</span>
+        outputs = model(inputs)
+        loss = <span class="fn">loss_fn</span>(outputs, targets)
+
+        <span class="cm"># Normalize loss by accumulation steps</span>
+        <span class="cm"># This ensures gradient magnitude matches a true large batch</span>
+        loss = loss / accumulation_steps
+        loss.<span class="fn">backward</span>()  <span class="cm"># Gradients accumulate in param.grad</span>
+
+        <span class="cm"># Only step when we've accumulated enough</span>
+        <span class="kw">if</span> (step + 1) % accumulation_steps == 0:
+            torch.nn.utils.<span class="fn">clip_grad_norm_</span>(model.<span class="fn">parameters</span>(), 1.0)
+            optimizer.<span class="fn">step</span>()
+            optimizer.<span class="fn">zero_grad</span>(set_to_none=True)</pre>
+
+      <div class="callout warn">
+        <strong>Critical detail:</strong> You must divide the loss by <code>accumulation_steps</code> <em>before</em> calling <code>backward()</code>. If you use <code>reduction='mean'</code> in your loss function (the default), each micro-batch loss is already averaged over that micro-batch. Dividing by K then gives you the correct average over the full effective batch. Forgetting this step effectively multiplies your learning rate by K.
+      </div>
+
+      <p>For mixed precision with gradient accumulation:</p>
+
+<pre class="pseudo-code"><span class="cm"># Gradient accumulation + mixed precision</span>
+scaler = torch.amp.<span class="fn">GradScaler</span>(<span class="cm">"cuda"</span>)
+
+<span class="kw">for</span> step, (inputs, targets) <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+    <span class="kw">with</span> torch.amp.<span class="fn">autocast</span>(device_type=<span class="cm">"cuda"</span>, dtype=torch.float16):
+        outputs = model(inputs.cuda())
+        loss = <span class="fn">loss_fn</span>(outputs, targets.cuda()) / accumulation_steps
+
+    scaler.<span class="fn">scale</span>(loss).<span class="fn">backward</span>()
+
+    <span class="kw">if</span> (step + 1) % accumulation_steps == 0:
+        scaler.<span class="fn">unscale_</span>(optimizer)
+        torch.nn.utils.<span class="fn">clip_grad_norm_</span>(model.<span class="fn">parameters</span>(), 1.0)
+        scaler.<span class="fn">step</span>(optimizer)
+        scaler.<span class="fn">update</span>()
+        optimizer.<span class="fn">zero_grad</span>(set_to_none=True)</pre>
+
+      <!-- SECTION 4 -->
+      <h2 id="effective-batch-size">Effective Batch Size</h2>
+      <p>The effective batch size determines the actual number of samples contributing to each optimizer step. This is the number that matters for learning rate tuning, warmup schedules, and convergence behavior.</p>
+
+      <p style="text-align:center;font-size:1.1rem;padding:0.8rem;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;margin:1rem 0">
+        <strong>effective_batch_size = micro_batch_size × accumulation_steps × num_gpus</strong>
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Example A: Single GPU</h3>
+          <ul>
+            <li>micro_batch_size = 8</li>
+            <li>accumulation_steps = 16</li>
+            <li>num_gpus = 1</li>
+            <li><strong>Effective: 8 × 16 × 1 = 128</strong></li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Example B: Multi-GPU</h3>
+          <ul>
+            <li>micro_batch_size = 8</li>
+            <li>accumulation_steps = 4</li>
+            <li>num_gpus = 8</li>
+            <li><strong>Effective: 8 × 4 × 8 = 256</strong></li>
+          </ul>
+        </div>
+      </div>
+
+      <p><strong>Choosing the right decomposition:</strong> Prefer maximizing <code>micro_batch_size</code> first (better GPU utilization), then <code>num_gpus</code> (parallel computation), and use <code>accumulation_steps</code> as the final multiplier (sequential, slowest). Each accumulation step adds wall-clock time proportional to one forward-backward pass.</p>
+
+      <div class="callout">
+        <strong>Token-based batching (LLMs):</strong> For language models, effective batch size is measured in tokens, not sequences: <code>effective_tokens = micro_bs × seq_len × accum_steps × num_gpus</code>. GPT-3 used 3.2M tokens per batch; LLaMA used 4M tokens.
+      </div>
+
+      <p><strong>Learning rate scaling:</strong> When increasing effective batch size, the linear scaling rule suggests scaling LR proportionally: if you double the batch size, double the learning rate. For very large batches (>8K), use the square root scaling rule or LARS/LAMB optimizers to maintain stability.</p>
+
+      <!-- SECTION 5 -->
+      <h2 id="interaction-ddp">Interaction with DDP</h2>
+      <p>In Distributed Data Parallel (DDP), gradients are synchronized across GPUs via AllReduce after every <code>backward()</code> call. During gradient accumulation, this synchronization is wasteful for intermediate steps — we only need the AllReduce on the final accumulation step.</p>
+
+      <p>PyTorch provides the <code>no_sync()</code> context manager to skip gradient synchronization:</p>
+
+<pre class="pseudo-code"><span class="cm"># Efficient gradient accumulation with DDP</span>
+<span class="kw">from</span> contextlib <span class="kw">import</span> nullcontext
+
+<span class="kw">def</span> <span class="fn">train_ddp_accumulation</span>(model, dataloader, optimizer, loss_fn,
+                           accumulation_steps=4):
+    <span class="kw">for</span> step, (inputs, targets) <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+        <span class="cm"># Skip AllReduce on intermediate accumulation steps</span>
+        is_accumulating = (step + 1) % accumulation_steps != 0
+        context = model.<span class="fn">no_sync</span>() <span class="kw">if</span> is_accumulating <span class="kw">else</span> <span class="fn">nullcontext</span>()
+
+        <span class="kw">with</span> context:
+            outputs = model(inputs.cuda())
+            loss = <span class="fn">loss_fn</span>(outputs, targets.cuda()) / accumulation_steps
+            loss.<span class="fn">backward</span>()  <span class="cm"># AllReduce only on sync step</span>
+
+        <span class="kw">if not</span> is_accumulating:
+            torch.nn.utils.<span class="fn">clip_grad_norm_</span>(model.<span class="fn">parameters</span>(), 1.0)
+            optimizer.<span class="fn">step</span>()
+            optimizer.<span class="fn">zero_grad</span>(set_to_none=True)</pre>
+
+      <div class="callout">
+        <strong>Performance impact:</strong> Without <code>no_sync()</code>, DDP performs an AllReduce at every backward pass. For accumulation_steps=8, you'd do 8 AllReduce operations instead of 1 per optimizer step — a potential 8× increase in communication overhead. The <code>no_sync()</code> optimization is essential for training at scale.
+      </div>
+
+      <p><strong>How no_sync works internally:</strong> DDP registers a backward hook that triggers AllReduce when gradients are ready. <code>no_sync()</code> temporarily disables these hooks. On the final accumulation step (without <code>no_sync()</code>), the hooks fire and AllReduce synchronizes the accumulated gradients across all ranks.</p>
+
+      <!-- SECTION 6 -->
+      <h2 id="batch-norm-issues">Batch Normalization Issues</h2>
+      <p>Batch normalization computes statistics (mean and variance) over the current micro-batch. With gradient accumulation, each micro-batch is small, leading to noisy statistics that degrade model quality.</p>
+
+      <p><strong>The problem:</strong> With a micro-batch of 4 samples, the BatchNorm running mean and variance are computed from just 4 examples — far too few for stable statistics. The forward pass uses these noisy statistics, and the running averages updated during training become unreliable.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Problem: Small Micro-batch BN</h3>
+          <ul>
+            <li>Noisy mean/variance estimates</li>
+            <li>Running stats diverge from true population stats</li>
+            <li>Eval mode performance degrades</li>
+            <li>Training becomes unstable with micro_bs &lt; 16</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Solutions</h3>
+          <ul>
+            <li><strong>GroupNorm / LayerNorm:</strong> Compute stats per-sample, independent of batch</li>
+            <li><strong>SyncBatchNorm:</strong> Aggregate stats across GPUs before normalization</li>
+            <li><strong>Ghost BatchNorm:</strong> Use virtual mini-batches within the micro-batch</li>
+            <li><strong>Freeze BN:</strong> Use pre-computed running stats, skip BN gradient updates</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>Critical insight:</strong> BatchNorm's running stats are updated per forward pass, NOT per optimizer step. With accumulation_steps=8, the running stats are updated 8× per optimizer step but with 8× smaller batches. This can cause train/eval distribution mismatch. Prefer LayerNorm for transformer architectures where this is a non-issue.
+      </div>
+
+      <p><strong>For vision models</strong> that rely on BatchNorm (ResNet, EfficientNet), the recommended approach is <code>SyncBatchNorm</code> combined with gradient accumulation:</p>
+
+<pre class="pseudo-code"><span class="cm"># Convert BatchNorm to SyncBatchNorm for multi-GPU training</span>
+model = <span class="fn">ResNet50</span>()
+model = torch.nn.<span class="fn">SyncBatchNorm</span>.<span class="fn">convert_sync_batchnorm</span>(model)
+model = model.cuda()
+model = torch.nn.parallel.<span class="fn">DistributedDataParallel</span>(model)
+
+<span class="cm"># SyncBatchNorm computes mean/var across all GPUs</span>
+<span class="cm"># Effective BN batch = micro_bs × num_gpus</span>
+<span class="cm"># For 8 GPUs with micro_bs=4, BN sees 32 samples</span></pre>
+
+      <!-- SECTION 7 -->
+      <h2 id="lr-scheduling">Learning Rate Scheduling</h2>
+      <p>A subtle but important detail: learning rate schedulers must be aligned with optimizer steps, not micro-batch iterations. Miscounting steps is one of the most common bugs when adding gradient accumulation to existing code.</p>
+
+      <p><strong>Steps vs iterations:</strong> An "iteration" is a single forward-backward pass on one micro-batch. An optimizer "step" happens every <code>accumulation_steps</code> iterations. The scheduler should advance once per optimizer step.</p>
+
+<pre class="pseudo-code"><span class="cm"># Correct LR scheduling with gradient accumulation</span>
+optimizer = torch.optim.<span class="fn">AdamW</span>(model.<span class="fn">parameters</span>(), lr=3e-4)
+num_training_steps = <span class="fn">len</span>(dataloader) // accumulation_steps * num_epochs
+scheduler = <span class="fn">get_cosine_schedule_with_warmup</span>(
+    optimizer,
+    num_warmup_steps=1000,         <span class="cm"># In optimizer steps, not iterations</span>
+    num_training_steps=num_training_steps,
+)
+
+<span class="kw">for</span> step, (inputs, targets) <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+    loss = <span class="fn">loss_fn</span>(model(inputs.cuda()), targets.cuda()) / accumulation_steps
+    loss.<span class="fn">backward</span>()
+
+    <span class="kw">if</span> (step + 1) % accumulation_steps == 0:
+        optimizer.<span class="fn">step</span>()
+        scheduler.<span class="fn">step</span>()      <span class="cm"># Advance scheduler ONCE per optimizer step</span>
+        optimizer.<span class="fn">zero_grad</span>(set_to_none=True)</pre>
+
+      <div class="callout">
+        <strong>Warmup alignment:</strong> Warmup steps should be specified in optimizer steps. If you want 1000 warmup steps with accumulation_steps=4, that's 4000 micro-batch iterations of warmup. HuggingFace Trainer handles this automatically; custom loops must be explicit.
+      </div>
+
+      <p><strong>Logging alignment:</strong> Training metrics (loss, learning rate, gradient norm) should also be logged per optimizer step, not per iteration. Logging per iteration produces K repeated data points at the same effective training progress, making loss curves misleading.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Common Bugs</h3>
+          <ul>
+            <li>Scheduler advances per iteration → LR decays K× too fast</li>
+            <li>Warmup counted in iterations → model under-warms</li>
+            <li>Forgetting loss division → effective LR multiplied by K</li>
+            <li>Missing no_sync() in DDP → K× communication overhead</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Verification Checklist</h3>
+          <ul>
+            <li>✓ Loss curves match non-accumulated baseline</li>
+            <li>✓ LR schedule shape matches expected curve</li>
+            <li>✓ Gradient norm is comparable across configs</li>
+            <li>✓ Total optimizer steps = total_iters / accum_steps</li>
+          </ul>
+        </div>
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

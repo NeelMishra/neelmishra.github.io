@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Activation recomputation trade-offs, segment checkpointing, and memory savings formulas">
+  <title>Gradient Checkpointing: Compute vs Memory | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#memory-problem">The Memory Problem</a></li>
+        <li><a href="#how-checkpointing-works">How Checkpointing Works</a></li>
+        <li><a href="#memory-savings">Memory Savings Formula</a></li>
+        <li><a href="#segment-checkpointing">Segment Checkpointing</a></li>
+        <li><a href="#pytorch-implementation">PyTorch Implementation</a></li>
+        <li><a href="#selective-checkpointing">Selective Checkpointing</a></li>
+        <li><a href="#performance-impact">Performance Impact</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Gradient Checkpointing: Compute vs Memory</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- SECTION 1 -->
+      <h2 id="memory-problem">The Memory Problem</h2>
+      <p>During the forward pass, every intermediate activation must be stored for use in the backward pass. For a model with <em>n</em> layers, each producing activations of size <em>a</em>, total activation memory is <strong>O(n × a)</strong>. This quickly dominates GPU memory for deep models.</p>
+
+      <p><strong>Memory breakdown for a transformer layer</strong> (hidden dim <em>h</em>, sequence length <em>s</em>, batch size <em>b</em>):</p>
+      <ul>
+        <li>Attention Q, K, V projections: <strong>3 × b × s × h</strong> (often stored as 3 separate tensors)</li>
+        <li>Attention scores: <strong>b × num_heads × s × s</strong> (quadratic in sequence length!)</li>
+        <li>Attention output: <strong>b × s × h</strong></li>
+        <li>FFN intermediate: <strong>b × s × 4h</strong> (common expansion ratio)</li>
+        <li>Layer norm inputs: <strong>2 × b × s × h</strong></li>
+      </ul>
+
+      <p>For a 7B parameter model with 32 layers, batch size 8, sequence length 2048, and hidden dim 4096 in FP16: activation memory can reach <strong>~60 GB</strong> — well beyond a single 80 GB A100's capacity after accounting for model weights (14 GB) and optimizer states (28 GB with Adam).</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Model parameters and optimizer states scale with model size. Activations scale with model size × batch size × sequence length. For LLMs with long sequences, activations are almost always the memory bottleneck.
+      </div>
+
+      <!-- SECTION 2 -->
+      <h2 id="how-checkpointing-works">How Checkpointing Works</h2>
+      <p>Gradient checkpointing (also called activation recomputation or rematerialization) trades compute for memory: instead of storing all activations, we save only a subset and recompute the rest during backward.</p>
+
+      <svg viewBox="0 0 720 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:1.2rem auto;display:block" aria-label="Comparison of standard vs checkpointed backward pass">
+        <defs>
+          <style>
+            .ti-layer{rx:6;stroke-width:1.5;height:32px;width:80px}
+            .ti-stored{fill:#e8f5e9;stroke:#0a8f6a}
+            .ti-recompute{fill:#fff3e0;stroke:#ff6b35}
+            .ti-freed{fill:#f5f5f5;stroke:#ccc;stroke-dasharray:4,3}
+            .ti-chk{fill:#e3f2fd;stroke:#4a6cf7;stroke-width:2}
+            .ti-stxt{font-family:Manrope,sans-serif;font-size:10px;fill:#333;text-anchor:middle}
+            .ti-htxt{font-family:Manrope,sans-serif;font-size:13px;font-weight:700;fill:#222}
+          </style>
+        </defs>
+        <!-- Standard (no checkpointing) -->
+        <text id="ti-std-title" x="10" y="20" class="ti-htxt">Standard: Store All Activations</text>
+        <text class="ti-stxt" x="50" y="48" style="font-size:11px;fill:#666">Forward →</text>
+        <rect id="ti-std-l1" class="ti-layer ti-stored" x="100" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="140" y="55">Layer 1</text>
+        <rect id="ti-std-l2" class="ti-layer ti-stored" x="200" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="240" y="55">Layer 2</text>
+        <rect id="ti-std-l3" class="ti-layer ti-stored" x="300" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="340" y="55">Layer 3</text>
+        <rect id="ti-std-l4" class="ti-layer ti-stored" x="400" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="440" y="55">Layer 4</text>
+        <rect id="ti-std-l5" class="ti-layer ti-stored" x="500" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="540" y="55">Layer 5</text>
+        <rect id="ti-std-l6" class="ti-layer ti-stored" x="600" y="34" width="80" height="32"/>
+        <text class="ti-stxt" x="640" y="55">Layer 6</text>
+
+        <text class="ti-stxt" x="50" y="98" style="font-size:11px;fill:#666">Memory:</text>
+        <rect x="100" y="82" width="580" height="20" rx="4" fill="#c8e6c9" stroke="#0a8f6a"/>
+        <text class="ti-stxt" x="390" y="96">6 layers of activations stored (O(n))</text>
+
+        <!-- Checkpointed -->
+        <text id="ti-chk-title" x="10" y="150" class="ti-htxt">Checkpointed: Store Every 3rd Layer</text>
+        <text class="ti-stxt" x="50" y="178" style="font-size:11px;fill:#666">Forward →</text>
+        <rect id="ti-chk-l1" class="ti-layer ti-chk" x="100" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="140" y="185">Layer 1 ✓</text>
+        <rect id="ti-chk-l2" class="ti-layer ti-freed" x="200" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="240" y="185">Layer 2</text>
+        <rect id="ti-chk-l3" class="ti-layer ti-freed" x="300" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="340" y="185">Layer 3</text>
+        <rect id="ti-chk-l4" class="ti-layer ti-chk" x="400" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="440" y="185">Layer 4 ✓</text>
+        <rect id="ti-chk-l5" class="ti-layer ti-freed" x="500" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="540" y="185">Layer 5</text>
+        <rect id="ti-chk-l6" class="ti-layer ti-freed" x="600" y="164" width="80" height="32"/>
+        <text class="ti-stxt" x="640" y="185">Layer 6</text>
+
+        <text class="ti-stxt" x="50" y="228" style="font-size:11px;fill:#666">Memory:</text>
+        <rect x="100" y="212" width="190" height="20" rx="4" fill="#bbdefb" stroke="#4a6cf7"/>
+        <text class="ti-stxt" x="195" y="226">2 checkpoints stored (O(√n))</text>
+
+        <!-- Backward recompute -->
+        <text id="ti-bwd-title" x="10" y="270" class="ti-htxt">Backward: Recompute from Checkpoints</text>
+        <text class="ti-stxt" x="50" y="298" style="font-size:11px;fill:#666">← Backward</text>
+        <rect id="ti-bwd-chk" class="ti-layer ti-chk" x="400" y="284" width="80" height="32"/>
+        <text class="ti-stxt" x="440" y="305">Chkpt 4</text>
+        <rect id="ti-bwd-r5" class="ti-layer ti-recompute" x="500" y="284" width="80" height="32"/>
+        <text class="ti-stxt" x="540" y="305">Recomp 5</text>
+        <rect id="ti-bwd-r6" class="ti-layer ti-recompute" x="600" y="284" width="80" height="32"/>
+        <text class="ti-stxt" x="640" y="305">Recomp 6</text>
+        <text class="ti-stxt" x="540" y="338" style="font-size:10px;fill:#888">Recompute layers 5–6 from checkpoint 4 during backward</text>
+
+        <!-- Legend -->
+        <rect x="100" y="340" width="14" height="14" class="ti-layer ti-chk" style="height:14px;width:14px"/>
+        <text class="ti-stxt" x="140" y="352" style="text-anchor:start;font-size:10px">Checkpoint (stored)</text>
+        <rect x="250" y="340" width="14" height="14" class="ti-layer ti-freed" style="height:14px;width:14px"/>
+        <text class="ti-stxt" x="290" y="352" style="text-anchor:start;font-size:10px">Freed (not stored)</text>
+        <rect x="400" y="340" width="14" height="14" class="ti-layer ti-recompute" style="height:14px;width:14px"/>
+        <text class="ti-stxt" x="440" y="352" style="text-anchor:start;font-size:10px">Recomputed during backward</text>
+      </svg>
+
+      <p>The process: (1) During forward, only save activations at checkpoint boundaries. (2) During backward, when gradients need non-checkpointed activations, re-run the forward pass from the nearest checkpoint to recompute them. (3) Free recomputed activations after use.</p>
+
+      <div class="callout">
+        <strong>Terminology note:</strong> "Gradient checkpointing" is the PyTorch/HuggingFace term. Megatron-LM calls it "activation recomputation." DeepSpeed uses "activation checkpointing." They all refer to the same technique.
+      </div>
+
+      <!-- SECTION 3 -->
+      <h2 id="memory-savings">Memory Savings Formula</h2>
+      <p>For a model with <em>n</em> layers, the optimal checkpoint placement uses <strong>√n</strong> evenly-spaced checkpoints, achieving <strong>O(√n)</strong> memory instead of O(n).</p>
+
+      <p><strong>Derivation:</strong> Suppose we place <em>k</em> checkpoints, dividing the model into <em>k</em> segments of <em>n/k</em> layers each. We store <em>k</em> checkpoint activations plus the activations for one segment being recomputed during backward:</p>
+
+      <p style="text-align:center;padding:0.5rem;font-size:1.05rem">Memory = k + n/k</p>
+
+      <p>Minimizing with respect to <em>k</em> (d/dk = 1 − n/k² = 0): the minimum occurs at <strong>k = √n</strong>, giving memory = <strong>2√n</strong>.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Memory Comparison</h3>
+          <ul>
+            <li><strong>n = 24 layers (GPT-2 medium):</strong> Standard: 24 → Checkpointed: ~10 (2.4× savings)</li>
+            <li><strong>n = 48 layers (GPT-3 6.7B):</strong> Standard: 48 → Checkpointed: ~14 (3.4× savings)</li>
+            <li><strong>n = 96 layers (GPT-3 175B):</strong> Standard: 96 → Checkpointed: ~20 (4.8× savings)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Compute Overhead</h3>
+          <ul>
+            <li><strong>√n strategy:</strong> One extra forward pass per segment during backward</li>
+            <li><strong>Worst case:</strong> ~33% compute overhead (one full extra forward pass)</li>
+            <li><strong>Typical:</strong> 20–30% overhead in practice due to caching and overlap</li>
+          </ul>
+        </div>
+      </div>
+
+      <p><strong>Full recomputation</strong> is the extreme case where only the model input is checkpointed: all layers are recomputed during backward, giving O(1) activation memory but doubling compute (100% overhead). This is what <code>gradient_checkpointing_enable()</code> in HuggingFace does by default for every layer.</p>
+
+      <!-- SECTION 4 -->
+      <h2 id="segment-checkpointing">Segment Checkpointing</h2>
+      <p>Rather than checkpointing every individual layer, segment checkpointing groups layers into contiguous segments. The entire segment is treated as a single checkpointed function: only the segment input is saved, and all internal activations are recomputed during backward.</p>
+
+      <p><strong>Choosing segment boundaries:</strong> In transformer models, natural segment boundaries are at transformer block (layer) boundaries, since these have the smallest activation tensors (just the hidden states). Placing checkpoints mid-layer would require storing intermediate attention scores or FFN activations, which defeats the purpose.</p>
+
+      <p>For a 32-layer transformer with √32 ≈ 6 segments of ~5 layers each:</p>
+      <ul>
+        <li>Checkpoint activations saved at layers: 0, 5, 10, 15, 20, 25</li>
+        <li>During backward for layers 20–24, recompute forward from checkpoint at layer 20</li>
+        <li>Peak memory: 6 checkpoint activations + 5 recomputed activations for current segment</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Megatron-LM approach:</strong> Megatron uses two recomputation strategies: "full" (recompute everything per layer — stores nothing) and "selective" (only recompute the attention softmax and dropout, which are the most memory-heavy per-layer activations). Selective recomputation gives ~70% of the memory savings for ~5% compute overhead.
+      </div>
+
+      <!-- SECTION 5 -->
+      <h2 id="pytorch-implementation">PyTorch Implementation</h2>
+      <p>PyTorch provides <code>torch.utils.checkpoint.checkpoint</code> for wrapping individual functions and <code>checkpoint_sequential</code> for sequential models.</p>
+
+<pre class="pseudo-code"><span class="cm"># Per-layer checkpointing in a transformer</span>
+<span class="kw">import</span> torch
+<span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint
+
+<span class="kw">class</span> <span class="fn">CheckpointedTransformer</span>(torch.nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_layers, hidden_dim, num_heads):
+        <span class="fn">super</span>().__init__()
+        self.layers = torch.nn.<span class="fn">ModuleList</span>([
+            <span class="fn">TransformerBlock</span>(hidden_dim, num_heads)
+            <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_layers)
+        ])
+        self.use_checkpoint = True
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="kw">for</span> layer <span class="kw">in</span> self.layers:
+            <span class="kw">if</span> self.use_checkpoint <span class="kw">and</span> self.training:
+                <span class="cm"># use_reentrant=False is the modern recommended API</span>
+                x = <span class="fn">checkpoint</span>(layer, x, use_reentrant=False)
+            <span class="kw">else</span>:
+                x = layer(x)
+        <span class="kw">return</span> x</pre>
+
+      <div class="callout warn">
+        <strong>use_reentrant=False:</strong> Always set this flag. The legacy <code>use_reentrant=True</code> (default in older PyTorch) has subtle bugs: it doesn't work with <code>torch.autograd.detect_anomaly()</code>, doesn't support non-tensor inputs, and has issues with <code>torch.compile</code>. PyTorch 2.x recommends <code>use_reentrant=False</code>.
+      </div>
+
+      <p>For sequential models, <code>checkpoint_sequential</code> is more convenient:</p>
+
+<pre class="pseudo-code"><span class="cm"># Sequential checkpointing — divide into segments</span>
+<span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint_sequential
+
+<span class="kw">class</span> <span class="fn">SequentialTransformer</span>(torch.nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_layers, hidden_dim, num_heads):
+        <span class="fn">super</span>().__init__()
+        self.layers = torch.nn.<span class="fn">Sequential</span>(*[
+            <span class="fn">TransformerBlock</span>(hidden_dim, num_heads)
+            <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_layers)
+        ])
+        self.num_segments = <span class="fn">int</span>(num_layers ** 0.5)  <span class="cm"># √n segments</span>
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="kw">if</span> self.training:
+            <span class="kw">return</span> <span class="fn">checkpoint_sequential</span>(
+                self.layers,
+                segments=self.num_segments,
+                input=x,
+                use_reentrant=False
+            )
+        <span class="kw">return</span> self.layers(x)</pre>
+
+      <p><strong>HuggingFace integration:</strong> For pre-built models, simply call <code>model.gradient_checkpointing_enable()</code>. This wraps each transformer layer with <code>checkpoint</code> automatically. Pass <code>gradient_checkpointing_kwargs={"use_reentrant": False}</code> for the modern API.</p>
+
+      <!-- SECTION 6 -->
+      <h2 id="selective-checkpointing">Selective Checkpointing</h2>
+      <p>Not all activations are equal. Selective checkpointing recomputes only the most memory-expensive operations while keeping cheaper ones stored. This provides a better Pareto trade-off than uniform checkpointing.</p>
+
+      <p><strong>Cost-benefit analysis for a transformer layer:</strong></p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Expensive to Store (Checkpoint These)</h3>
+          <ul>
+            <li><strong>Attention scores:</strong> O(b × h × s²) — quadratic in seq_len</li>
+            <li><strong>Softmax output:</strong> Same size as attention scores</li>
+            <li><strong>Dropout masks:</strong> Same size as their input tensor</li>
+            <li><strong>FFN intermediate:</strong> O(b × s × 4d) — 4× hidden dim</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Cheap to Store (Keep These)</h3>
+          <ul>
+            <li><strong>Layer norm output:</strong> O(b × s × d) — small relative to above</li>
+            <li><strong>Residual connections:</strong> O(b × s × d) — must keep for addition</li>
+            <li><strong>Q, K, V projections:</strong> O(b × s × d) — cheap to store, expensive to recompute</li>
+          </ul>
+        </div>
+      </div>
+
+<pre class="pseudo-code"><span class="cm"># Selective checkpointing: only recompute attention core</span>
+<span class="kw">class</span> <span class="fn">SelectiveCheckpointAttention</span>(torch.nn.Module):
+    <span class="kw">def</span> <span class="fn">forward</span>(self, hidden_states):
+        <span class="cm"># Q, K, V projections: STORE these (cheap to store, expensive to recompute)</span>
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+        <span class="cm"># Attention core: RECOMPUTE this (expensive to store due to O(s²))</span>
+        <span class="kw">if</span> self.training <span class="kw">and</span> self.use_selective_checkpoint:
+            attn_out = <span class="fn">checkpoint</span>(self._attention_core, q, k, v,
+                                  use_reentrant=False)
+        <span class="kw">else</span>:
+            attn_out = self.<span class="fn">_attention_core</span>(q, k, v)
+
+        <span class="kw">return</span> self.<span class="fn">out_proj</span>(attn_out)
+
+    <span class="kw">def</span> <span class="fn">_attention_core</span>(self, q, k, v):
+        <span class="cm"># This is the O(s²) memory operation</span>
+        scores = torch.<span class="fn">matmul</span>(q, k.transpose(-2, -1)) / self.scale
+        attn_weights = torch.nn.functional.<span class="fn">softmax</span>(scores, dim=-1)
+        attn_weights = self.<span class="fn">dropout</span>(attn_weights)
+        <span class="kw">return</span> torch.<span class="fn">matmul</span>(attn_weights, v)</pre>
+
+      <div class="callout">
+        <strong>FlashAttention interaction:</strong> FlashAttention already avoids materializing the full O(s²) attention matrix, making selective checkpointing of the attention core redundant. When using FlashAttention, checkpoint the FFN instead — it becomes the largest activation consumer at O(b × s × 4d).
+      </div>
+
+      <!-- SECTION 7 -->
+      <h2 id="performance-impact">Performance Impact</h2>
+      <p>Gradient checkpointing introduces a fundamental compute-memory trade-off. Understanding the actual overhead helps make informed decisions about when and where to apply it.</p>
+
+      <p><strong>Theoretical overhead:</strong> Full recomputation (every layer checkpointed) performs one additional forward pass during backward, increasing total compute by ~33% (forward pass is roughly 1/3 of forward + backward). In practice, the overhead varies:</p>
+      <ul>
+        <li><strong>20–25%</strong> for typical transformer training with selective checkpointing</li>
+        <li><strong>30–35%</strong> for full per-layer checkpointing</li>
+        <li><strong>50–60%</strong> in rare worst-case scenarios with very deep models and no overlap</li>
+      </ul>
+
+      <p><strong>Why the overhead is often less than 33%:</strong> (1) The backward pass itself is typically 2× the cost of forward (due to gradient computation), so the extra forward is 1/(1+2) = 33%. (2) Recomputed activations are often already warm in GPU L2 cache. (3) Recomputation can overlap with gradient communication in distributed training.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>When to Use Checkpointing</h3>
+          <ul>
+            <li>Training doesn't fit in memory at desired batch size</li>
+            <li>Long sequence lengths (where attention activations dominate)</li>
+            <li>Large models (50+ layers)</li>
+            <li>Prefer over reducing batch size (larger batches → better convergence)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>When to Avoid</h3>
+          <ul>
+            <li>Model already fits comfortably (no memory pressure)</li>
+            <li>Throughput is the primary concern (inference, fast iteration)</li>
+            <li>Using FlashAttention already eliminated the biggest activation hog</li>
+            <li>Can scale to more GPUs instead (pure parallelism is faster)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Optimal strategy for LLM training:</strong> Use selective checkpointing (attention core or FFN) + FlashAttention + gradient accumulation together. This combination typically allows 2–4× larger batch sizes per GPU with only 10–15% throughput reduction — a far better trade-off than reducing batch size or using more GPUs.
+      </div>
+
+      <p><strong>Profiling tip:</strong> Use <code>torch.cuda.memory_stats()</code> to measure peak activation memory with and without checkpointing. The ratio directly quantifies your memory savings. Compare <code>allocated_bytes.all.peak</code> across configurations.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

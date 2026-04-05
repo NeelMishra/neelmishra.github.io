@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into speculative decoding: how draft models generate candidate tokens verified by target models in parallel, achieving 2-3x speedups without quality loss.">
+  <title>Speculative Decoding | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#li-bottleneck">The Autoregressive Bottleneck</a></li>
+        <li><a href="#li-core-algorithm">Core Algorithm</a></li>
+        <li><a href="#li-rejection-sampling">Modified Rejection Sampling</a></li>
+        <li><a href="#li-speedup-analysis">Speedup Analysis &amp; Math</a></li>
+        <li><a href="#li-implementation">Implementation</a></li>
+        <li><a href="#li-variants">Variants: Medusa, EAGLE &amp; Beyond</a></li>
+        <li><a href="#li-practical">Practical Considerations</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Speculative Decoding</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-bottleneck">The Autoregressive Bottleneck</h2>
+      <p>Autoregressive decoding is fundamentally <strong>memory-bandwidth bound</strong>, not compute bound. Each forward pass through a 70B-parameter model loads ~140 GB of weights from HBM to compute a single token. On an A100 (2 TB/s bandwidth), this means a theoretical minimum latency of ~70 ms per token — regardless of how many FLOPs the GPU can deliver. The arithmetic intensity is roughly 1 FLOP per byte loaded, far below the ~300 FLOP/byte ratio needed to saturate the A100's compute.</p>
+      <p>Speculative decoding (Leviathan et al., 2022; Chen et al., 2023) exploits this gap: if we're wasting compute anyway, use it to verify multiple candidate tokens in a single forward pass of the large model.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> A single forward pass of the target model with K+1 tokens costs nearly the same wall-clock time as a forward pass with 1 token when batch size is small, because both are equally memory-bandwidth bound. This is the free lunch that speculative decoding exploits.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="li-core-algorithm">Core Algorithm</h2>
+      <p>The algorithm uses two models: a small <strong>draft model</strong> M<sub>q</sub> (e.g., 68M–1B parameters) and the large <strong>target model</strong> M<sub>p</sub> (e.g., 70B parameters). The draft model is ~50–100× faster per token.</p>
+
+      <svg viewBox="0 0 800 280" style="width:100%;max-width:800px;margin:1.2rem auto;display:block" aria-label="Speculative decoding draft-verify pipeline">
+        <defs>
+          <marker id="li-sd-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+        </defs>
+        <!-- Draft phase -->
+        <rect x="10" y="20" width="180" height="50" rx="10" fill="#eaf7f2" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="100" y="50" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Draft Model (M_q)</text>
+        <!-- Draft tokens -->
+        <rect x="30" y="90" width="40" height="32" rx="6" fill="#fff" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="50" y="111" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">t₁</text>
+        <rect x="80" y="90" width="40" height="32" rx="6" fill="#fff" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="100" y="111" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">t₂</text>
+        <rect x="130" y="90" width="40" height="32" rx="6" fill="#fff" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="150" y="111" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">t₃</text>
+        <text x="100" y="145" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666">γ = 3 draft tokens</text>
+        <!-- Arrow -->
+        <line x1="200" y1="106" x2="290" y2="106" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-sd-arrow)"/>
+        <text x="245" y="98" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">batch</text>
+        <!-- Verify phase -->
+        <rect x="300" y="20" width="200" height="50" rx="10" fill="#fff5f0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="400" y="50" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#ff6b35">Target Model (M_p)</text>
+        <text x="400" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666">Single forward pass verifies all γ tokens</text>
+        <!-- Verify results -->
+        <rect x="310" y="110" width="40" height="32" rx="6" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <text x="330" y="131" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#28a745">✓ t₁</text>
+        <rect x="360" y="110" width="40" height="32" rx="6" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <text x="380" y="131" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#28a745">✓ t₂</text>
+        <rect x="410" y="110" width="40" height="32" rx="6" fill="#f8d7da" stroke="#dc3545" stroke-width="1"/>
+        <text x="430" y="131" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#dc3545">✗ t₃</text>
+        <rect x="460" y="110" width="40" height="32" rx="6" fill="#fff3cd" stroke="#ffc107" stroke-width="1"/>
+        <text x="480" y="131" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#856404">t₃'</text>
+        <text x="400" y="168" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666">Accept 2, resample 1 → net 3 tokens</text>
+        <!-- Output -->
+        <line x1="510" y1="126" x2="570" y2="126" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-sd-arrow)"/>
+        <rect x="580" y="20" width="200" height="50" rx="10" fill="#eaf7f2" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="680" y="50" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Output Tokens</text>
+        <text x="680" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" fill="#333">... prefix + t₁ + t₂ + t₃'</text>
+        <text x="680" y="115" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666">3 tokens from 1 target forward pass</text>
+        <!-- Timeline -->
+        <line x1="30" y1="210" x2="760" y2="210" stroke="#ccc" stroke-width="1" stroke-dasharray="4"/>
+        <text x="30" y="235" font-family="Manrope,sans-serif" font-size="11" fill="#666">Standard: 3 serial target passes = 3×70ms = 210ms</text>
+        <text x="30" y="255" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a" font-weight="600">Speculative: 3 draft passes + 1 target pass ≈ 3×1ms + 70ms = 73ms (2.9× faster)</text>
+      </svg>
+
+      <p>The pipeline operates in <strong>draft-then-verify</strong> loops:</p>
+      <ol>
+        <li><strong>Draft phase:</strong> The draft model autoregressively generates γ candidate tokens (typically γ = 3–8).</li>
+        <li><strong>Verify phase:</strong> The target model processes all γ tokens plus the prefix in a single forward pass, producing logits for positions n+1 through n+γ+1.</li>
+        <li><strong>Accept/reject:</strong> Tokens are accepted left-to-right using a modified rejection sampling scheme. At the first rejection, we resample from an adjusted distribution and discard remaining draft tokens.</li>
+        <li><strong>Repeat:</strong> Advance the sequence by the number of accepted tokens plus one (the resampled token) and loop.</li>
+      </ol>
+
+      <!-- Section 3 -->
+      <h2 id="li-rejection-sampling">Modified Rejection Sampling</h2>
+      <p>The critical property of speculative decoding is that it produces <strong>exactly the same distribution</strong> as sampling from the target model alone. This is achieved through a modified rejection sampling scheme.</p>
+      <p>For each draft token x<sub>i</sub> sampled from q(x), we compute the acceptance probability:</p>
+
+      <div class="callout">
+        <strong>Acceptance criterion:</strong> Accept token x with probability min(1, p(x)/q(x)), where p(x) is the target model probability and q(x) is the draft model probability. When rejected, resample from the <em>residual distribution</em>: norm(max(0, p(x) - q(x))).
+      </div>
+
+      <p>The residual distribution ensures that the combined accept-or-resample procedure yields exactly p(x). Formally:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        P(output = x) = q(x) · min(1, p(x)/q(x)) + (1 - Σ_x q(x)·min(1, p(x)/q(x))) · max(0, p(x)-q(x)) / Σ_x max(0, p(x)-q(x)) = p(x)
+      </p>
+      <p>The <strong>acceptance rate</strong> α for a single token is:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        α = Σ_x min(p(x), q(x)) = 1 - ½ · TV(p, q)
+      </p>
+      <p>where TV(p,q) is the total variation distance between the two distributions. When the draft model closely matches the target model (small TV distance), the acceptance rate is high.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>High Acceptance (α ≈ 0.85)</h3>
+          <p>Draft model closely matches target. Typical for well-distilled models on common text patterns. Expected tokens per iteration: ~5.7 with γ=6.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Low Acceptance (α ≈ 0.5)</h3>
+          <p>Draft model diverges from target. Occurs on domain-specific text or reasoning-heavy tasks. Expected tokens per iteration: ~2.0 with γ=6.</p>
+        </div>
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="li-speedup-analysis">Speedup Analysis &amp; Math</h2>
+      <p>Let c = T<sub>draft</sub>/T<sub>target</sub> be the cost ratio of one draft forward pass to one target forward pass (typically c ≈ 0.01–0.05 for a 68M draft with a 70B target).</p>
+      <p>The <strong>expected number of tokens per iteration</strong> with speculation length γ is:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        E[tokens] = (1 - α^(γ+1)) / (1 - α)
+      </p>
+      <p>The wallclock cost per iteration is γ·c·T<sub>target</sub> + T<sub>target</sub> = T<sub>target</sub>(γc + 1). The <strong>expected speedup</strong> is therefore:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        Speedup = E[tokens] / (γc + 1) = (1 - α^(γ+1)) / ((1 - α)(γc + 1))
+      </p>
+
+      <p>For α = 0.8, γ = 5, c = 0.02:</p>
+      <ul>
+        <li>E[tokens] = (1 - 0.8⁶)/(1 - 0.8) = (1 - 0.262)/0.2 = 3.69</li>
+        <li>Cost = 5 × 0.02 + 1 = 1.10 target-passes</li>
+        <li>Speedup = 3.69 / 1.10 = <strong>3.35×</strong></li>
+      </ul>
+      <p>In practice, reported speedups range from <strong>2.0–3.5×</strong> depending on task distribution, model pair quality, and hardware utilization.</p>
+
+      <div class="callout warn">
+        <strong>Optimal γ:</strong> The optimal speculation length depends on α and c. Too small wastes the verification pass; too large wastes draft compute on tokens that will be rejected. For α=0.8, the optimal γ is typically 5–8. Some systems adapt γ dynamically based on recent acceptance rates.
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="li-implementation">Implementation</h2>
+      <p>Below is the core speculative decoding loop. The key operations are: (1) draft generation, (2) parallel verification, (3) acceptance with rejection sampling.</p>
+
+<pre class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> torch.distributions <span class="kw">import</span> Categorical
+
+<span class="kw">def</span> <span class="fn">speculative_decode</span>(target_model, draft_model, prefix, gamma=5, max_tokens=256):
+    <span class="cm">"""Speculative decoding: exact target distribution, ~3x speedup."""</span>
+    generated = prefix.clone()
+    n_generated = 0
+
+    <span class="kw">while</span> n_generated &lt; max_tokens:
+        <span class="cm"># Phase 1: Draft model generates gamma candidate tokens</span>
+        draft_tokens = []
+        draft_probs = []
+        draft_input = generated.clone()
+
+        <span class="kw">for</span> _ <span class="kw">in</span> range(gamma):
+            logits = <span class="fn">draft_model</span>(draft_input)[:, -1, :]
+            q = torch.softmax(logits, dim=-1)
+            token = <span class="fn">Categorical</span>(q).sample()
+            draft_tokens.append(token)
+            draft_probs.append(q)
+            draft_input = torch.cat([draft_input, token.unsqueeze(1)], dim=1)
+
+        <span class="cm"># Phase 2: Target model verifies all tokens in one forward pass</span>
+        candidate_seq = torch.cat([generated] + [t.unsqueeze(1) <span class="kw">for</span> t <span class="kw">in</span> draft_tokens], dim=1)
+        target_logits = <span class="fn">target_model</span>(candidate_seq)
+        <span class="cm"># Extract p(x) at each draft position</span>
+        n = generated.shape[1]
+        target_probs = [torch.softmax(target_logits[:, n+i, :], dim=-1) <span class="kw">for</span> i <span class="kw">in</span> range(gamma + 1)]
+
+        <span class="cm"># Phase 3: Accept/reject with modified rejection sampling</span>
+        accepted = 0
+        <span class="kw">for</span> i <span class="kw">in</span> range(gamma):
+            token = draft_tokens[i]
+            p_x = target_probs[i].gather(1, token.unsqueeze(1)).squeeze()
+            q_x = draft_probs[i].gather(1, token.unsqueeze(1)).squeeze()
+            acceptance_prob = torch.min(torch.ones_like(p_x), p_x / q_x)
+
+            <span class="kw">if</span> torch.rand(1).item() &lt; acceptance_prob.item():
+                generated = torch.cat([generated, token.unsqueeze(1)], dim=1)
+                accepted += 1
+            <span class="kw">else</span>:
+                <span class="cm"># Resample from residual distribution: norm(max(0, p - q))</span>
+                residual = torch.clamp(target_probs[i] - draft_probs[i], min=0)
+                residual = residual / residual.sum(dim=-1, keepdim=True)
+                new_token = <span class="fn">Categorical</span>(residual).sample()
+                generated = torch.cat([generated, new_token.unsqueeze(1)], dim=1)
+                accepted += 1  <span class="cm"># resampled token still counts</span>
+                <span class="kw">break</span>
+
+        <span class="kw">if</span> accepted == gamma:
+            <span class="cm"># All draft tokens accepted — bonus token from target at position gamma</span>
+            bonus = <span class="fn">Categorical</span>(target_probs[gamma]).sample()
+            generated = torch.cat([generated, bonus.unsqueeze(1)], dim=1)
+            accepted += 1
+
+        n_generated += accepted
+
+    <span class="kw">return</span> generated</pre>
+
+      <!-- Section 6 -->
+      <h2 id="li-variants">Variants: Medusa, EAGLE &amp; Beyond</h2>
+      <p>The original speculative decoding requires a separate draft model. Recent variants eliminate this requirement or improve upon the basic scheme.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Medusa (Cai et al., 2024)</h3>
+          <p>Adds multiple parallel prediction heads to the target model itself. Each head i predicts the token at position t+i. Uses a tree-structured attention mask to verify multiple candidate continuations simultaneously. Achieves <strong>2.2–3.6× speedup</strong> with minimal additional parameters (~0.6% of model size). No separate draft model needed.</p>
+        </div>
+        <div class="compare-card">
+          <h3>EAGLE (Li et al., 2024)</h3>
+          <p>Uses a lightweight auto-regression head that operates on the <em>feature level</em> rather than the token level. Predicts the next hidden state using the current hidden state + token embedding. Achieves <strong>2.5–3.8× speedup</strong>, outperforming Medusa on most benchmarks. Tree-structured verification for better acceptance.</p>
+        </div>
+        <div class="compare-card">
+          <h3>SpecInfer (Miao et al., 2023)</h3>
+          <p>Uses <em>multiple</em> small draft models in parallel, generating a token tree of candidates. The target model verifies the entire tree in a single pass using tree attention. Higher acceptance rates through diversity. Integrated into FlexFlow serving framework. Reports <strong>1.5–2.8× speedup</strong>.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Staged Speculative (Spector et al., 2023)</h3>
+          <p>Cascades multiple draft models of increasing size (e.g., 68M → 1B → 7B → 70B). Each stage speculates for the next one. Allows deeper speculation trees with better acceptance rates. Particularly effective when the cost ratio between adjacent stages is small.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Self-speculative decoding:</strong> Recent approaches like Draft &amp; Verify (Zhang et al., 2023) use early exit from the target model itself as the draft. By exiting after layer 8 of a 32-layer model, you get a cheap approximation without any additional model. This eliminates the draft model entirely but requires architectural modifications.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="li-practical">Practical Considerations</h2>
+      <p>Deploying speculative decoding in production requires careful engineering beyond the core algorithm.</p>
+
+      <h3>Draft Model Selection</h3>
+      <p>The ideal draft model has <strong>high acceptance rate</strong> (close distribution to target) and <strong>low latency</strong> (small parameter count). Common pairings:</p>
+      <ul>
+        <li><strong>LLaMA-70B + LLaMA-68M:</strong> c ≈ 0.01, α ≈ 0.7–0.85 depending on domain</li>
+        <li><strong>GPT-4 + GPT-3.5:</strong> High acceptance rate but larger cost ratio c ≈ 0.1</li>
+        <li><strong>CodeLlama-34B + CodeLlama-7B:</strong> Strong alignment on code tasks, α ≈ 0.8</li>
+      </ul>
+
+      <h3>KV Cache Management</h3>
+      <p>Both draft and target models maintain KV caches. On rejection, the target model's KV cache must be rolled back to exclude rejected tokens. Efficient implementations pre-allocate the cache for the maximum speculation length and simply adjust the valid-length pointer.</p>
+
+      <h3>Batching Challenges</h3>
+      <p>Speculative decoding complicates continuous batching because different sequences accept different numbers of tokens per iteration. Solutions include: (1) padding to the max accepted length, (2) per-request speculation length, or (3) running speculative decoding only for latency-critical requests while using standard decoding for throughput-oriented batches.</p>
+
+      <h3>When NOT to Use Speculative Decoding</h3>
+      <ul>
+        <li><strong>High-throughput serving:</strong> When the GPU is already compute-saturated from large batches, speculative decoding provides no benefit since the bottleneck shifts from memory-bandwidth to compute.</li>
+        <li><strong>Very low acceptance rate domains:</strong> If α &lt; 0.5 consistently, the overhead of draft generation may negate any speedup.</li>
+        <li><strong>Prefill-dominated workloads:</strong> Long input contexts where prefill time dominates make the per-token decode speedup less impactful.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Production numbers:</strong> Google DeepMind reported 2.46× speedup on PaLM 2 using speculative decoding in production. Hugging Face's implementation of Medusa on Vicuna-33B achieves 2.3× speedup. vLLM's speculative decoding with LLaMA-70B + LLaMA-7B achieves approximately 1.8–2.5× speedup depending on the request distribution.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

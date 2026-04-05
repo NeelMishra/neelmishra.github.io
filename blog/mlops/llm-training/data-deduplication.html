@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Data deduplication for LLM training: exact hashing, MinHash with LSH for near-duplicates, suffix arrays, and Bloom filters scaled to billions of documents.">
+  <title>Data Dedup: MinHash, Exact, Fuzzy | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-dedup-matters">Why Deduplication Matters</a></li>
+        <li><a href="#exact-dedup">Exact Deduplication</a></li>
+        <li><a href="#minhash-lsh">MinHash &amp; LSH for Near-Duplicates</a></li>
+        <li><a href="#suffix-array-dedup">Suffix Array Deduplication</a></li>
+        <li><a href="#scaling-dedup">Scaling to Billions of Documents</a></li>
+        <li><a href="#impact-training-quality">Impact on Training Quality</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Data Dedup: MinHash, Exact, Fuzzy</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <p>Large language model training is fundamentally a data problem. Before a single gradient is computed, the quality of the training corpus dictates model capability. Among all data quality dimensions—toxicity, language ID, quality filtering—<strong>deduplication</strong> consistently delivers the largest measurable improvement in downstream performance per unit of engineering effort. This post covers every major dedup technique from exact hashing to probabilistic near-duplicate detection, with the math, implementation details, and scaling strategies needed to run dedup at web scale.</p>
+
+      <!-- ========== SECTION 1 ========== -->
+      <h2 id="why-dedup-matters">Why Deduplication Matters</h2>
+
+      <p>Web crawls are massively redundant. Common Crawl snapshots contain 30–60% duplicate content at the document level, and up to 70% at the paragraph level when accounting for boilerplate headers, footers, and navigation text. This redundancy directly damages model training through three mechanisms:</p>
+
+      <p><strong>1. Memorization over generalization.</strong> When a model sees identical passages hundreds of times, it memorizes them verbatim rather than learning generalizable patterns. Lee et al. (2022) showed that deduplicating C4 reduced verbatim memorization by 10× while improving perplexity. The model allocates capacity to rote recall instead of transferable representations.</p>
+
+      <p><strong>2. Benchmark contamination.</strong> Training data overlapping with evaluation benchmarks inflates reported metrics. The GPT-3 paper flagged this issue: a 13-gram overlap analysis revealed contamination across multiple benchmarks. Without aggressive dedup, you cannot trust your own evals.</p>
+
+      <p><strong>3. Wasted compute.</strong> Every duplicate token consumes the same FLOPs as a novel token but provides near-zero marginal information. At $2–5M per training run, processing 40% duplicate data wastes $800K–$2M in compute alone. The ROI on dedup infrastructure is enormous.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Deduplication is not just data cleaning—it is a <em>training efficiency multiplier</em>. The Chinchilla scaling laws assume each token provides independent information. Duplicates violate this assumption, effectively reducing your dataset size without reducing your compute budget.
+      </div>
+
+      <p><strong>Empirical evidence.</strong> The RefinedWeb paper (Penedo et al., 2023) demonstrated that aggressive dedup of Common Crawl yielded a 5T-token corpus whose quality matched curated datasets like The Pile. Deduplication alone closed the gap between web crawl data and hand-curated corpora. The Dolma dataset (AI2) reported similar findings: fuzzy dedup removed an additional 30% of data beyond exact dedup, and models trained on the deduplicated corpus showed consistent gains across 12 downstream tasks.</p>
+
+      <!-- ========== SECTION 2 ========== -->
+      <h2 id="exact-dedup">Exact Deduplication</h2>
+
+      <p>Exact dedup is the first and cheapest pass over any corpus. It catches verbatim copies—pages mirrored across domains, scraped RSS feeds, syndicated news articles, and duplicated boilerplate. There are several granularity levels, each with distinct trade-offs.</p>
+
+      <h3>URL-Level Dedup</h3>
+      <p>The simplest dedup: normalize URLs (strip query parameters, fragments, trailing slashes, lowercase the hostname) and keep only the first occurrence. This catches mirrors and CDN duplicates but misses content-identical pages hosted at different URLs. It is a preprocessing filter, not a substitute for content-based dedup.</p>
+
+      <h3>Document-Level SHA-256 Hashing</h3>
+      <p>Hash the full document text (after stripping HTML/boilerplate) with SHA-256. Two documents with identical hashes are identical. The collision probability for SHA-256 is 1/2<sup>256</sup>—effectively zero even at trillion-document scale. This is O(n) in documents and trivially parallelizable.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> hashlib
+<span class="kw">from</span> typing <span class="kw">import</span> Dict, Set
+
+<span class="kw">def</span> <span class="fn">exact_dedup_sha256</span>(documents: list[str]) -&gt; list[str]:
+    <span class="cm"># O(n) exact deduplication using SHA-256 content hashing</span>
+    seen: Set[str] = <span class="fn">set</span>()
+    unique: list[str] = []
+    <span class="kw">for</span> doc <span class="kw">in</span> documents:
+        <span class="cm"># Normalize whitespace before hashing</span>
+        normalized = <span class="fn">" ".join</span>(doc.<span class="fn">split</span>())
+        h = hashlib.<span class="fn">sha256</span>(normalized.<span class="fn">encode</span>(<span class="fn">"utf-8"</span>)).<span class="fn">hexdigest</span>()
+        <span class="kw">if</span> h <span class="kw">not</span> <span class="kw">in</span> seen:
+            seen.<span class="fn">add</span>(h)
+            unique.<span class="fn">append</span>(doc)
+    <span class="kw">return</span> unique</div>
+
+      <h3>Paragraph-Level Exact Match</h3>
+      <p>Many documents share paragraphs without being fully identical—boilerplate disclaimers, cookie consent text, navigation menus that survive extraction. Hashing individual paragraphs (split on double newlines) and removing paragraphs seen more than <em>k</em> times catches this. The threshold <em>k</em> must be tuned: setting it too low removes legitimately common phrases; setting it too high misses boilerplate. Typical values range from 5–100 depending on corpus size.</p>
+
+      <h3>Bloom Filters for Memory-Efficient Dedup</h3>
+      <p>Storing SHA-256 hashes for billions of URLs in a Python set requires ~64 bytes per entry (hash string + set overhead). For 10B URLs that is 640 GB of RAM. A Bloom filter provides a probabilistic alternative with controllable false-positive rate and dramatically lower memory.</p>
+
+      <p>For a target false-positive rate <em>p</em> with <em>n</em> elements, the optimal Bloom filter uses <em>m = −n ln(p) / (ln 2)²</em> bits and <em>k = (m/n) ln 2</em> hash functions. For <em>n</em> = 10B and <em>p</em> = 0.001: <em>m</em> ≈ 143.7 billion bits ≈ <strong>17 GB</strong>—a 37× memory reduction over a hash set.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> math
+<span class="kw">import</span> mmh3
+<span class="kw">from</span> bitarray <span class="kw">import</span> bitarray
+
+<span class="kw">class</span> <span class="fn">BloomFilter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, n_items: int, fp_rate: float = 0.001):
+        <span class="cm"># Compute optimal size and hash count</span>
+        self.size = <span class="fn">int</span>(-n_items * math.<span class="fn">log</span>(fp_rate) / (math.<span class="fn">log</span>(2) ** 2))
+        self.k = <span class="fn">int</span>((self.size / n_items) * math.<span class="fn">log</span>(2))
+        self.bits = <span class="fn">bitarray</span>(self.size)
+        self.bits.<span class="fn">setall</span>(<span class="kw">False</span>)
+
+    <span class="kw">def</span> <span class="fn">_hashes</span>(self, item: str) -&gt; list[int]:
+        <span class="cm"># Double hashing: h_i = h1 + i*h2 mod m</span>
+        h1 = mmh3.<span class="fn">hash</span>(item, seed=0) % self.size
+        h2 = mmh3.<span class="fn">hash</span>(item, seed=42) % self.size
+        <span class="kw">return</span> [(h1 + i * h2) % self.size <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(self.k)]
+
+    <span class="kw">def</span> <span class="fn">add</span>(self, item: str):
+        <span class="kw">for</span> pos <span class="kw">in</span> self.<span class="fn">_hashes</span>(item):
+            self.bits[pos] = <span class="kw">True</span>
+
+    <span class="kw">def</span> <span class="fn">__contains__</span>(self, item: str) -&gt; bool:
+        <span class="kw">return</span> <span class="fn">all</span>(self.bits[pos] <span class="kw">for</span> pos <span class="kw">in</span> self.<span class="fn">_hashes</span>(item))</div>
+
+      <div class="callout warn">
+        <strong>Warning:</strong> Bloom filters have false positives but <em>never</em> false negatives. In the dedup context, a false positive means discarding a unique document. At 0.1% FP rate across 10B docs, you lose ~10M documents unnecessarily. For most LLM training corpora this is acceptable, but for small high-value datasets, use exact hash sets instead.
+      </div>
+
+      <!-- ========== SECTION 3 ========== -->
+      <h2 id="minhash-lsh">MinHash &amp; LSH for Near-Duplicate Detection</h2>
+
+      <p>Exact dedup misses the most damaging class of duplicates: near-copies that differ only in whitespace, formatting, timestamps, or minor edits. Two news articles from different outlets covering the same press release may share 90% of their content but have different SHA-256 hashes. MinHash with Locality-Sensitive Hashing (LSH) detects these efficiently.</p>
+
+      <h3>Jaccard Similarity and Shingling</h3>
+      <p>The Jaccard similarity between two sets A and B is J(A, B) = |A ∩ B| / |A ∪ B|. We represent documents as sets of <em>n</em>-gram shingles (contiguous word sequences). For character-level shingles, typical values are n=5–13; for word-level, n=3–5. Word 5-grams are the standard for LLM training dedup (used by BigScience/ROOTS, RefinedWeb, and GPT-3).</p>
+
+      <h3>MinHash Signature Generation</h3>
+      <p>Computing exact Jaccard for all O(n²) document pairs is infeasible. MinHash provides an unbiased estimator: for a random permutation π of the universe, the minimum hash value over a set's elements has the property that Pr[min(π(A)) = min(π(B))] = J(A, B). By using <em>k</em> independent hash functions, we build a signature of <em>k</em> values per document where the fraction of matching positions estimates Jaccard similarity.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> hashlib
+<span class="kw">from</span> typing <span class="kw">import</span> List, Set, Tuple
+
+<span class="kw">class</span> <span class="fn">MinHashSignature</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_perm: int = 128):
+        self.num_perm = num_perm
+        <span class="cm"># Generate random hash parameters: h(x) = (ax + b) mod p</span>
+        self.MAX_HASH = (1 &lt;&lt; 32) - 1
+        self.PRIME = 4294967311  <span class="cm"># Mersenne prime &gt; 2^32</span>
+        <span class="kw">import</span> random
+        self.a = [random.<span class="fn">randint</span>(1, self.PRIME - 1) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_perm)]
+        self.b = [random.<span class="fn">randint</span>(0, self.PRIME - 1) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_perm)]
+
+    <span class="kw">def</span> <span class="fn">shingle</span>(self, text: str, k: int = 5) -&gt; Set[str]:
+        <span class="cm"># Extract word k-grams from text</span>
+        words = text.<span class="fn">lower</span>().<span class="fn">split</span>()
+        <span class="kw">return</span> {<span class="fn">" ".join</span>(words[i:i+k]) <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="fn">len</span>(words) - k + 1)}
+
+    <span class="kw">def</span> <span class="fn">signature</span>(self, shingles: Set[str]) -&gt; List[int]:
+        <span class="cm"># Compute MinHash signature from shingle set</span>
+        sig = [self.MAX_HASH] * self.num_perm
+        <span class="kw">for</span> s <span class="kw">in</span> shingles:
+            h_val = <span class="fn">int</span>(hashlib.<span class="fn">sha1</span>(s.<span class="fn">encode</span>()).<span class="fn">hexdigest</span>(), 16) &amp; self.MAX_HASH
+            <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(self.num_perm):
+                val = (self.a[i] * h_val + self.b[i]) % self.PRIME
+                <span class="kw">if</span> val &lt; sig[i]:
+                    sig[i] = val
+        <span class="kw">return</span> sig</div>
+
+      <h3>Locality-Sensitive Hashing (LSH) Banding</h3>
+      <p>Even with MinHash, comparing all pairs of signatures is O(n²). LSH reduces this to near-linear time by hashing <em>bands</em> of the signature. Divide the <em>k</em>-length signature into <em>b</em> bands of <em>r</em> rows each (k = b × r). Two documents become candidates if they agree in <em>all r rows</em> within at least one band.</p>
+
+      <p>The probability that two documents with Jaccard similarity <em>s</em> become a candidate pair is: <strong>P(candidate) = 1 − (1 − s<sup>r</sup>)<sup>b</sup></strong>. This is an S-curve that approximates a step function around the threshold <em>t ≈ (1/b)<sup>1/r</sup></em>. The steepness of the curve controls the false-positive/false-negative trade-off.</p>
+
+      <p><strong>Parameter selection example:</strong> With k = 128 permutations, b = 16 bands, r = 8 rows: threshold ≈ (1/16)<sup>1/8</sup> ≈ 0.66. At s = 0.8: P = 1 − (1 − 0.8⁸)¹⁶ ≈ 0.998. At s = 0.5: P = 1 − (1 − 0.5⁸)¹⁶ ≈ 0.061. Excellent separation.</p>
+
+      <!-- SVG Diagram: MinHash LSH Pipeline -->
+      <svg id="lt-minhash-lsh-pipeline" viewBox="0 0 850 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:850px;margin:1.5rem auto;display:block;" aria-label="MinHash LSH pipeline diagram">
+        <defs>
+          <marker id="lt-arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#0a8f6a"/></marker>
+          <linearGradient id="lt-grad-doc" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e8f5e9"/><stop offset="100%" stop-color="#c8e6c9"/></linearGradient>
+          <linearGradient id="lt-grad-sig" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e3f2fd"/><stop offset="100%" stop-color="#bbdefb"/></linearGradient>
+          <linearGradient id="lt-grad-lsh" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff3e0"/><stop offset="100%" stop-color="#ffe0b2"/></linearGradient>
+          <linearGradient id="lt-grad-cand" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fce4ec"/><stop offset="100%" stop-color="#f8bbd0"/></linearGradient>
+        </defs>
+
+        <!-- Stage 1: Document -->
+        <rect id="lt-stage-doc" x="10" y="80" width="120" height="160" rx="12" fill="url(#lt-grad-doc)" stroke="#4caf50" stroke-width="1.5"/>
+        <text id="lt-label-doc" x="70" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#2e7d32">Document</text>
+        <text id="lt-doc-lines" x="70" y="135" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">The quick brown</text>
+        <text x="70" y="150" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">fox jumps over</text>
+        <text x="70" y="165" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">the lazy dog...</text>
+        <line x1="130" y1="160" x2="170" y2="160" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+
+        <!-- Stage 2: Shingles -->
+        <rect id="lt-stage-shingles" x="175" y="80" width="120" height="160" rx="12" fill="url(#lt-grad-doc)" stroke="#4caf50" stroke-width="1.5"/>
+        <text id="lt-label-shingles" x="235" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#2e7d32">5-gram Shingles</text>
+        <text x="235" y="135" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">{the quick brown fox jumps}</text>
+        <text x="235" y="150" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">{quick brown fox jumps over}</text>
+        <text x="235" y="165" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">{brown fox jumps over the}</text>
+        <text x="235" y="180" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">...</text>
+        <line x1="295" y1="160" x2="335" y2="160" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+
+        <!-- Stage 3: MinHash Signature -->
+        <rect id="lt-stage-sig" x="340" y="80" width="120" height="160" rx="12" fill="url(#lt-grad-sig)" stroke="#1976d2" stroke-width="1.5"/>
+        <text id="lt-label-sig" x="400" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#1565c0">MinHash Sig</text>
+        <text id="lt-sig-vals" x="400" y="135" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555">[0x3a1, 0x0f7,</text>
+        <text x="400" y="150" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555"> 0x8c2, 0x44b,</text>
+        <text x="400" y="165" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#555"> ...128 vals...]</text>
+        <line x1="460" y1="160" x2="500" y2="160" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+
+        <!-- Stage 4: LSH Bands -->
+        <rect id="lt-stage-lsh" x="505" y="80" width="130" height="160" rx="12" fill="url(#lt-grad-lsh)" stroke="#f57c00" stroke-width="1.5"/>
+        <text id="lt-label-lsh" x="570" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#e65100">LSH Bands</text>
+        <rect id="lt-band-1" x="520" y="125" width="100" height="18" rx="4" fill="#ffe0b2" stroke="#f57c00" stroke-width="0.8"/>
+        <text x="570" y="138" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">Band 1 (r=8)</text>
+        <rect id="lt-band-2" x="520" y="148" width="100" height="18" rx="4" fill="#ffe0b2" stroke="#f57c00" stroke-width="0.8"/>
+        <text x="570" y="161" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">Band 2 (r=8)</text>
+        <rect id="lt-band-b" x="520" y="171" width="100" height="18" rx="4" fill="#ffe0b2" stroke="#f57c00" stroke-width="0.8"/>
+        <text x="570" y="184" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">...Band b</text>
+        <line x1="635" y1="160" x2="675" y2="160" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+
+        <!-- Stage 5: Candidate Pairs + Verify -->
+        <rect id="lt-stage-cand" x="680" y="80" width="150" height="160" rx="12" fill="url(#lt-grad-cand)" stroke="#c62828" stroke-width="1.5"/>
+        <text id="lt-label-cand" x="755" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#b71c1c">Candidate Pairs</text>
+        <text id="lt-cand-verify" x="755" y="140" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">Verify exact Jaccard</text>
+        <text x="755" y="158" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">on candidate pairs</text>
+        <text x="755" y="178" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">→ Deduplicate</text>
+
+        <!-- Bottom labels -->
+        <text id="lt-formula" x="425" y="285" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">P(candidate) = 1 − (1 − s^r)^b    |    threshold ≈ (1/b)^(1/r)</text>
+        <text id="lt-formula-desc" x="425" y="305" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">k=128 perms, b=16 bands, r=8 rows → threshold ≈ 0.66 Jaccard</text>
+      </svg>
+
+      <div class="pseudo-code"><span class="kw">from</span> collections <span class="kw">import</span> defaultdict
+<span class="kw">from</span> typing <span class="kw">import</span> List, Set, Tuple, Dict
+
+<span class="kw">class</span> <span class="fn">LSH</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_bands: int = 16, rows_per_band: int = 8):
+        self.b = num_bands
+        self.r = rows_per_band
+        <span class="cm"># Each band maps bucket_hash → set of doc IDs</span>
+        self.buckets: List[Dict[int, Set[int]]] = [
+            <span class="fn">defaultdict</span>(<span class="fn">set</span>) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(self.b)
+        ]
+
+    <span class="kw">def</span> <span class="fn">insert</span>(self, doc_id: int, signature: List[int]):
+        <span class="cm"># Split signature into b bands of r rows each</span>
+        <span class="kw">for</span> band_idx <span class="kw">in</span> <span class="fn">range</span>(self.b):
+            start = band_idx * self.r
+            band = <span class="fn">tuple</span>(signature[start:start + self.r])
+            bucket_key = <span class="fn">hash</span>(band)
+            self.buckets[band_idx][bucket_key].<span class="fn">add</span>(doc_id)
+
+    <span class="kw">def</span> <span class="fn">query_candidates</span>(self) -&gt; Set[Tuple[int, int]]:
+        <span class="cm"># Return all candidate pairs from any shared bucket</span>
+        candidates: Set[Tuple[int, int]] = <span class="fn">set</span>()
+        <span class="kw">for</span> band_idx <span class="kw">in</span> <span class="fn">range</span>(self.b):
+            <span class="kw">for</span> bucket <span class="kw">in</span> self.buckets[band_idx].<span class="fn">values</span>():
+                <span class="kw">if</span> <span class="fn">len</span>(bucket) &gt; 1:
+                    docs = <span class="fn">sorted</span>(bucket)
+                    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="fn">len</span>(docs)):
+                        <span class="kw">for</span> j <span class="kw">in</span> <span class="fn">range</span>(i + 1, <span class="fn">len</span>(docs)):
+                            candidates.<span class="fn">add</span>((docs[i], docs[j]))
+        <span class="kw">return</span> candidates</div>
+
+      <div class="callout">
+        <strong>Choosing b and r:</strong> The product b × r = k (total permutations). Increasing r raises the threshold (more strict), reducing false positives but increasing false negatives. For LLM training dedup, a Jaccard threshold of 0.7–0.8 is standard. With k=128: b=20, r=6 gives threshold ≈ 0.72; b=16, r=8 gives threshold ≈ 0.66. Profile your corpus to choose.
+      </div>
+
+      <!-- ========== SECTION 4 ========== -->
+      <h2 id="suffix-array-dedup">Suffix Array Deduplication</h2>
+
+      <p>MinHash operates at the document level—it identifies pairs of similar documents. But training corpora also contain <em>substring-level</em> duplication: identical paragraphs, copied code snippets, or templated text that appears across otherwise distinct documents. Suffix array dedup (Lee et al., 2022) addresses this by finding repeated substrings of any length across the entire corpus.</p>
+
+      <h3>Suffix Array Construction</h3>
+      <p>A suffix array SA for a string S of length n is a sorted array of all n suffixes. Construction takes O(n) time with algorithms like SA-IS. For a corpus concatenated into a single string (with document boundary markers), the suffix array reveals all repeated substrings: adjacent entries in SA sharing a long common prefix indicate duplicated content.</p>
+
+      <p>The key data structure is the <strong>LCP array</strong> (Longest Common Prefix): LCP[i] stores the length of the longest common prefix between SA[i] and SA[i-1]. Any LCP value exceeding a threshold <em>T</em> (typically 50–100 tokens) indicates a duplicated substring worth removing.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> numpy <span class="kw">as</span> np
+
+<span class="kw">def</span> <span class="fn">find_duplicate_substrings</span>(text: str, min_length: int = 100) -&gt; list:
+    <span class="cm"># Build suffix array and LCP array</span>
+    <span class="cm"># In production, use pysuffixarray or divsufsort bindings</span>
+    sa = <span class="fn">build_suffix_array</span>(text)      <span class="cm"># O(n) via SA-IS</span>
+    lcp = <span class="fn">build_lcp_array</span>(text, sa)    <span class="cm"># O(n) via Kasai's algorithm</span>
+
+    duplicates = []
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(1, <span class="fn">len</span>(lcp)):
+        <span class="kw">if</span> lcp[i] &gt;= min_length:
+            <span class="cm"># Found a duplicated substring of length lcp[i]</span>
+            start_1 = sa[i - 1]
+            start_2 = sa[i]
+            <span class="cm"># Skip if both positions are in the same document</span>
+            <span class="kw">if</span> <span class="fn">get_doc_id</span>(start_1) != <span class="fn">get_doc_id</span>(start_2):
+                duplicates.<span class="fn">append</span>((start_1, start_2, lcp[i]))
+    <span class="kw">return</span> duplicates</div>
+
+      <h3>Scaling with Disk-Based Suffix Arrays</h3>
+      <p>For multi-terabyte corpora, the suffix array and LCP array cannot fit in memory. The approach is to shard the corpus, build suffix arrays per shard (on disk using memory-mapped files), then merge results. Lee et al. used a sliding-window approach: build the suffix array for a window of text, extract duplicates, slide the window. This trades O(n²) worst-case merge cost for practical O(n log n) with bounded memory.</p>
+
+      <div class="callout warn">
+        <strong>Cost trade-off:</strong> Suffix array dedup is the most expensive technique—O(n) space and time where n is the total corpus length <em>in characters</em>, not documents. For a 1T-token corpus at ~4 bytes/token, the suffix array alone requires 4–8 TB of storage. Reserve this for final-pass dedup after MinHash has already eliminated document-level near-duplicates.
+      </div>
+
+      <!-- ========== SECTION 5 ========== -->
+      <h2 id="scaling-dedup">Scaling to Billions of Documents</h2>
+
+      <p>Production dedup pipelines must process 10B+ documents from Common Crawl snapshots. No single machine can hold the data or the data structures in memory. The solution is distributed computing with careful partitioning.</p>
+
+      <h3>MapReduce / Spark Architecture</h3>
+      <p><strong>Exact dedup:</strong> Map phase emits (hash, doc_id). Reduce groups by hash—groups with >1 member are duplicates. Keep the doc with the lowest crawl timestamp. This is a trivial shuffle-and-group operation, bottlenecked by I/O not compute.</p>
+
+      <p><strong>MinHash LSH at scale:</strong> The map phase computes the MinHash signature and emits (band_hash, doc_id) for each of the <em>b</em> bands. The reduce phase groups by band_hash, generating candidate pairs. A second pass verifies candidates by computing exact Jaccard. The RefinedWeb pipeline uses this architecture on a 400-node Spark cluster, processing one Common Crawl snapshot (~3B pages) in ~6 hours.</p>
+
+      <div class="pseudo-code"><span class="cm"># PySpark MinHash LSH dedup pipeline (simplified)</span>
+<span class="kw">from</span> pyspark.sql <span class="kw">import</span> SparkSession
+<span class="kw">from</span> pyspark.sql.functions <span class="kw">import</span> udf, col, explode
+
+spark = SparkSession.<span class="fn">builder</span>.<span class="fn">appName</span>("MinHashDedup").<span class="fn">getOrCreate</span>()
+
+<span class="cm"># Step 1: Compute MinHash signatures per document</span>
+<span class="kw">def</span> <span class="fn">compute_bands</span>(text, doc_id):
+    <span class="cm"># Returns list of (band_idx, band_hash, doc_id)</span>
+    sig = minhash.<span class="fn">signature</span>(minhash.<span class="fn">shingle</span>(text))
+    bands = []
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(NUM_BANDS):
+        band_slice = <span class="fn">tuple</span>(sig[i * ROWS:(i + 1) * ROWS])
+        bands.<span class="fn">append</span>((i, <span class="fn">hash</span>(band_slice), doc_id))
+    <span class="kw">return</span> bands
+
+<span class="cm"># Step 2: Group by (band_idx, band_hash) to find candidates</span>
+bands_df = docs_df.<span class="fn">rdd</span>.<span class="fn">flatMap</span>(
+    <span class="kw">lambda</span> row: <span class="fn">compute_bands</span>(row.text, row.doc_id)
+).<span class="fn">toDF</span>(["band_idx", "band_hash", "doc_id"])
+
+candidates = bands_df.<span class="fn">groupBy</span>("band_idx", "band_hash").<span class="fn">agg</span>(
+    <span class="fn">collect_set</span>("doc_id").<span class="fn">alias</span>("doc_ids")
+).<span class="fn">filter</span>(<span class="fn">size</span>(col("doc_ids")) &gt; 1)
+
+<span class="cm"># Step 3: Verify and build connected components for removal</span></div>
+
+      <h3>Cross-Dataset vs. Within-Dataset Dedup</h3>
+      <p><strong>Within-dataset dedup</strong> removes duplicates inside a single source (e.g., one Common Crawl snapshot). <strong>Cross-dataset dedup</strong> removes overlaps between your training data and (a) held-out evaluation sets, (b) other training data sources, or (c) previously processed snapshots. Cross-dataset dedup requires building a global index—typically a Bloom filter or shared LSH hash table—that persists across pipeline runs.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Within-Dataset Dedup</h4>
+          <ul>
+            <li>Processes one data source at a time</li>
+            <li>Simpler orchestration—stateless pipeline</li>
+            <li>Misses cross-source duplicates</li>
+            <li>Sufficient for single-snapshot processing</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Cross-Dataset Dedup</h4>
+          <ul>
+            <li>Maintains a persistent global index</li>
+            <li>Catches benchmark contamination</li>
+            <li>Essential for multi-epoch or multi-source training</li>
+            <li>Requires careful versioning of the index</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Memory and Compute Budgets</h3>
+      <p>For 10B documents with 128-perm MinHash signatures: signature storage = 10B × 128 × 4 bytes = <strong>5.12 TB</strong>. LSH band hashes (16 bands × 10B entries × 8 bytes) = <strong>1.28 TB</strong>. Total is dominated by signatures. Using 16-bit MinHash values (sufficient for most applications) halves this to ~2.56 TB. These fit comfortably in a distributed hash table across a 100-node cluster with 64 GB RAM each.</p>
+
+      <!-- ========== SECTION 6 ========== -->
+      <h2 id="impact-training-quality">Impact on Training Quality</h2>
+
+      <p>Deduplication is not merely a data hygiene step—it is one of the highest-leverage interventions for improving model quality. Multiple large-scale studies confirm this:</p>
+
+      <p><strong>Lee et al. (2022)</strong> trained 1.3B-parameter models on C4 with and without dedup. The deduplicated model achieved 14.4 perplexity vs. 14.9 for the non-deduplicated baseline—a 3.4% improvement. More strikingly, exact memorization (measured by extracting training sequences from the model) dropped by 10× after dedup. The model generalized better because it was forced to learn patterns rather than memorize specific text.</p>
+
+      <p><strong>Penedo et al. (2023, RefinedWeb)</strong> showed that URL dedup + MinHash fuzzy dedup reduced Common Crawl from ~30B to ~5B high-quality documents. Models trained on this deduplicated web data matched or exceeded curated datasets (The Pile, C4) across all benchmarks—demonstrating that <em>dedup + scale > curation</em>.</p>
+
+      <p><strong>Benchmark contamination.</strong> The GPT-4 technical report and Llama 2 paper both report removing evaluation data from training corpora. Without this step, reported accuracies can be inflated by 2–5% on contaminated benchmarks. The n-gram overlap detection method (typically 8-gram or 13-gram matching) is now standard practice.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Exact Dedup</h4>
+          <ul>
+            <li><strong>Speed:</strong> O(n) — fastest</li>
+            <li><strong>Recall:</strong> Low — misses near-duplicates</li>
+            <li><strong>Memory:</strong> ~64 bytes/doc (hash set) or ~2 bytes/doc (Bloom)</li>
+            <li><strong>Use case:</strong> First pass, URL and document level</li>
+            <li><strong>Typical removal:</strong> 20–40% of web crawl</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>MinHash + LSH</h4>
+          <ul>
+            <li><strong>Speed:</strong> O(n × k) — moderate</li>
+            <li><strong>Recall:</strong> High — catches ~90% of near-duplicates</li>
+            <li><strong>Memory:</strong> ~512 bytes/doc (128 × 4-byte signature)</li>
+            <li><strong>Use case:</strong> Primary fuzzy dedup pass</li>
+            <li><strong>Typical removal:</strong> Additional 10–30% after exact dedup</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Suffix Array</h4>
+          <ul>
+            <li><strong>Speed:</strong> O(n) in corpus length — slowest at scale</li>
+            <li><strong>Recall:</strong> Perfect for substring matches above threshold</li>
+            <li><strong>Memory:</strong> ~8 bytes/char — enormous for large corpora</li>
+            <li><strong>Use case:</strong> Final pass, substring-level dedup</li>
+            <li><strong>Typical removal:</strong> Additional 5–15% of tokens</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Recommended Pipeline</h4>
+          <ul>
+            <li><strong>Stage 1:</strong> URL dedup (Bloom filter)</li>
+            <li><strong>Stage 2:</strong> Exact document hash (SHA-256)</li>
+            <li><strong>Stage 3:</strong> MinHash LSH (b=20, r=6, threshold ~0.72)</li>
+            <li><strong>Stage 4:</strong> Suffix array (optional, for highest quality)</li>
+            <li><strong>Stage 5:</strong> Benchmark contamination removal (13-gram)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Production recommendation:</strong> Run exact dedup first (cheapest, removes the most data), then MinHash LSH (catches near-duplicates), and optionally suffix array dedup for final quality. Always dedup against evaluation benchmarks as the last step. This pipeline removes 40–70% of raw web crawl data while preserving the highest-information-density documents.
+      </div>
+
+      <p><strong>Diminishing returns.</strong> There is a point where additional dedup removes more signal than noise. Extremely aggressive fuzzy dedup (e.g., Jaccard threshold 0.5) starts removing topically similar but informationally distinct documents. Monitor downstream task metrics and perplexity on a held-out set to calibrate the aggressiveness of each dedup stage. The goal is to remove redundancy, not topical coverage.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

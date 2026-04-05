@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into pre-training infrastructure for large language models including GPU cluster architecture, InfiniBand networking, distributed storage, and job scheduling.">
+  <title>Pre-Training Infrastructure: GPU Clusters | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#cluster-architecture">Cluster Architecture</a></li>
+        <li><a href="#high-speed-networking">High-Speed Networking</a></li>
+        <li><a href="#distributed-storage">Distributed Storage</a></li>
+        <li><a href="#job-scheduling">Job Scheduling</a></li>
+        <li><a href="#fault-tolerance">Fault Tolerance &amp; Checkpointing</a></li>
+        <li><a href="#cluster-topology-diagram">Cluster Topology Diagram</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Pre-Training Infrastructure: GPU Clusters</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <p>
+        Pre-training a frontier language model—GPT-4-class or beyond—requires orchestrating thousands of accelerators
+        into a single, tightly-coupled compute fabric. The infrastructure choices you make at this layer determine
+        your effective FLOP utilization (MFU), wall-clock time per training token, and ultimately, cost per quality unit.
+        This post dissects the five pillars of pre-training infrastructure: cluster architecture, networking, storage,
+        scheduling, and fault tolerance.
+      </p>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 1: Cluster Architecture                                  -->
+      <!-- ================================================================ -->
+      <h2 id="cluster-architecture">Cluster Architecture</h2>
+
+      <p>
+        Modern LLM training clusters are built from dense GPU nodes interconnected by high-radix, low-latency
+        networks. The canonical building block is NVIDIA's DGX platform, but cloud-native alternatives using
+        custom VM topologies have become viable for organizations without on-premise capital.
+      </p>
+
+      <h3>DGX SuperPOD &amp; BasePOD</h3>
+      <p>
+        A single NVIDIA DGX H100 node contains 8× H100 SXM5 GPUs connected via NVLink 4.0 (900 GB/s bidirectional
+        per GPU). Within the node, NVSwitch provides all-to-all GPU connectivity at full bisection bandwidth—this
+        is the <em>intra-node</em> fabric. A SuperPOD scales to 32 DGX nodes (256 GPUs) on a single InfiniBand
+        leaf-spine fabric, while linking multiple SuperPODs produces clusters of 4,096+ GPUs.
+      </p>
+
+      <div class="callout">
+        <strong>Key metric:</strong> A single DGX H100 node delivers ~32 PFLOPS of FP8 compute. A 1,024-GPU cluster
+        (128 nodes) therefore has a theoretical peak of ~4 EFLOPS FP8. In practice, MFU of 40–55% is considered
+        excellent for transformer pre-training, yielding ~1.6–2.2 EFLOPS sustained.
+      </div>
+
+      <h3>Cloud-Native Clusters</h3>
+      <p>
+        Cloud providers expose GPU VMs with similar intra-node topologies (e.g., GCP a3-mega with 8× H100,
+        AWS p5.48xlarge). The critical difference is <em>inter-node networking</em>: cloud fabrics use proprietary
+        or RoCEv2 networks that may introduce higher tail latency compared to dedicated InfiniBand. Topology-aware
+        VM placement (e.g., GCP compact placement policies, AWS cluster placement groups) is essential to keep
+        all-reduce latency bounded.
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>On-Premise (DGX SuperPOD)</h4>
+          <ul>
+            <li>Full control over network topology</li>
+            <li>InfiniBand HDR/NDR with predictable latency</li>
+            <li>High upfront CapEx, lower long-run cost</li>
+            <li>Dedicated Lustre/GPFS storage tier</li>
+            <li>Typical scale: 512–16,384 GPUs</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Cloud-Native (GCP/AWS/Azure)</h4>
+          <ul>
+            <li>Elastic scaling with pay-per-use</li>
+            <li>RoCEv2 or proprietary fabric (e.g., EFA, Titanium)</li>
+            <li>Placement groups critical for collocation</li>
+            <li>Object-store backed (GCS/S3) + local NVMe</li>
+            <li>Typical scale: 256–4,096 GPUs per job</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>
+        Regardless of deployment model, the node-level configuration must be tuned. Below is a typical
+        environment configuration script for an H100 cluster node:
+      </p>
+
+      <div class="pseudo-code"><span class="cm">#!/bin/bash — Node-level GPU environment setup</span>
+
+<span class="cm"># Pin GPU clocks to max for deterministic perf</span>
+nvidia-smi -pm 1
+nvidia-smi -lgc 1980,1980
+
+<span class="cm"># Enable persistent mode and set compute mode</span>
+nvidia-smi -c EXCLUSIVE_PROCESS
+
+<span class="cm"># Verify NVLink topology</span>
+nvidia-smi topo -m
+
+<span class="cm"># Set NCCL environment variables</span>
+export NCCL_IB_HCA=mlx5
+export NCCL_IB_GID_INDEX=3
+export NCCL_SOCKET_IFNAME=eth0
+export NCCL_DEBUG=INFO
+export NCCL_NET_GDR_LEVEL=PHB</div>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 2: High-Speed Networking                                 -->
+      <!-- ================================================================ -->
+      <h2 id="high-speed-networking">High-Speed Networking</h2>
+
+      <p>
+        The inter-node network is the single biggest bottleneck in distributed training. Gradient
+        synchronization via all-reduce scales with model size: a 70B-parameter model produces ~140 GB
+        of gradients per step (FP16), all of which must be reduced across the data-parallel dimension.
+        At 400 Gbps per link, a ring all-reduce across 128 nodes takes ~4.5 seconds—comparable to the
+        forward+backward compute time itself.
+      </p>
+
+      <h3>InfiniBand vs. RoCEv2</h3>
+      <p>
+        InfiniBand (IB) remains the gold standard for training fabrics. NDR (400 Gbps) provides
+        RDMA with hardware-level congestion control, adaptive routing, and credit-based flow control.
+        RoCEv2 (RDMA over Converged Ethernet) runs over standard Ethernet switches but requires
+        careful PFC (Priority Flow Control) and ECN (Explicit Congestion Notification) tuning to avoid
+        head-of-line blocking and PFC storms.
+      </p>
+
+      <div class="callout warn">
+        <strong>PFC Storm Warning:</strong> In RoCEv2 deployments, a single slow receiver can trigger
+        PFC pause frames that propagate across the fabric, stalling unrelated flows. This is the #1
+        cause of training hangs in cloud GPU clusters. Mitigations include per-port PFC watchdogs,
+        ECN marking thresholds at 5–10% queue depth, and DCQCN congestion control.
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>InfiniBand NDR (400G)</h4>
+          <ul>
+            <li>Sub-microsecond RDMA latency (~0.6 µs)</li>
+            <li>Hardware adaptive routing</li>
+            <li>Credit-based flow control (lossless)</li>
+            <li>SHARP in-network reduction for all-reduce</li>
+            <li>Proven at 10K+ GPU scale</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>RoCEv2 (400GbE)</h4>
+          <ul>
+            <li>~1–2 µs RDMA latency</li>
+            <li>Standard Ethernet switches (lower cost)</li>
+            <li>Requires PFC + ECN tuning</li>
+            <li>No native in-network reduction</li>
+            <li>Risk of PFC storms at scale</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Fat-Tree Topology</h3>
+      <p>
+        Both IB and Ethernet clusters use a fat-tree (Clos) topology to achieve full bisection bandwidth.
+        In a 3-tier fat-tree with 64-port switches: leaf switches connect 32 GPUs (4 nodes × 8 NICs)
+        and uplink 32 ports to spine switches. Spine switches connect to super-spine (core) switches.
+        The oversubscription ratio at each tier determines whether the fabric is blocking. A 1:1
+        subscription ratio at all tiers gives <em>non-blocking</em> full bisection bandwidth—critical
+        for all-reduce-heavy workloads.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># NCCL tuning for InfiniBand fat-tree topology</span>
+<span class="cm"># These environment variables are set per-job in the SLURM script</span>
+
+<span class="cm"># Use all available IB HCAs (8 per DGX node)</span>
+export NCCL_IB_HCA="^=mlx5_bond_0"
+export NCCL_IB_TIMEOUT=23
+export NCCL_IB_RETRY_CNT=7
+
+<span class="cm"># Enable SHARP for in-network all-reduce (IB only)</span>
+export NCCL_COLLNET_ENABLE=1
+export SHARP_COLL_LOG_LEVEL=3
+
+<span class="cm"># Topology-aware algorithm selection</span>
+export NCCL_ALGO=Ring,Tree
+export NCCL_PROTO=Simple,LL128
+
+<span class="cm"># GDR (GPUDirect RDMA) for zero-copy transfers</span>
+export NCCL_NET_GDR_LEVEL=SYS
+export NCCL_NET_GDR_READ=1
+export NCCL_P2P_LEVEL=NVL</div>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 3: Distributed Storage                                   -->
+      <!-- ================================================================ -->
+      <h2 id="distributed-storage">Distributed Storage</h2>
+
+      <p>
+        Pre-training workloads generate three distinct I/O patterns: (1) streaming reads of tokenized
+        training data at ~2–10 GB/s aggregate, (2) bursty checkpoint writes of 100+ GB model states
+        every 5–30 minutes, and (3) random reads for data shuffling and curriculum sampling. No single
+        storage tier optimally serves all three patterns.
+      </p>
+
+      <h3>Lustre &amp; GPFS</h3>
+      <p>
+        Parallel file systems like Lustre and IBM Spectrum Scale (GPFS) remain the backbone of on-premise
+        training storage. Lustre stripes files across Object Storage Targets (OSTs), delivering aggregate
+        throughput proportional to the number of OSTs. A typical SuperPOD attaches 20–40 PB of Lustre
+        with 200+ GB/s aggregate read bandwidth—sufficient to keep 1,024 GPUs fed without I/O stalls.
+      </p>
+
+      <div class="callout">
+        <strong>Checkpoint I/O bottleneck:</strong> A 70B model with optimizer states in FP32 produces
+        ~560 GB per checkpoint (4 bytes × 70B params × 2 for Adam moments). With 1,024 data-parallel
+        ranks writing simultaneously, the storage system must absorb 560 GB in under 60 seconds to avoid
+        blocking training—requiring ~10 GB/s sustained write throughput.
+      </div>
+
+      <h3>Object Stores &amp; Tiered Caching</h3>
+      <p>
+        Cloud clusters use a tiered approach: training data resides in object storage (S3/GCS) and is
+        prefetched into local NVMe SSDs or a shared NFS/Filestore cache. Checkpoints are written to
+        local NVMe first, then asynchronously flushed to object storage. This decouples checkpoint
+        latency from the training critical path.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># Tiered checkpoint manager using PyTorch distributed checkpointing</span>
+<span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> (
+    FileSystemWriter, save_state_dict
+)
+<span class="kw">import</span> threading
+<span class="kw">import</span> subprocess
+
+<span class="kw">class</span> TieredCheckpointManager:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, local_dir, remote_uri, interval_steps=500):
+        self.local_dir = local_dir
+        self.remote_uri = remote_uri
+        self.interval = interval_steps
+        self._flush_thread = <span class="kw">None</span>
+
+    <span class="kw">def</span> <span class="fn">save</span>(self, model, optimizer, step):
+        <span class="cm"># Phase 1: fast write to local NVMe</span>
+        ckpt_path = f"{self.local_dir}/step_{step}"
+        writer = <span class="fn">FileSystemWriter</span>(ckpt_path)
+        state = {"model": model.state_dict(), "optim": optimizer.state_dict()}
+        <span class="fn">save_state_dict</span>(state, writer)
+        <span class="fn">dist.barrier</span>()
+
+        <span class="cm"># Phase 2: async flush to object store (non-blocking)</span>
+        <span class="kw">if</span> <span class="fn">dist.get_rank</span>() == 0:
+            self._flush_thread = threading.<span class="fn">Thread</span>(
+                target=self.<span class="fn">_flush_to_remote</span>, args=(ckpt_path, step)
+            )
+            self._flush_thread.<span class="fn">start</span>()
+
+    <span class="kw">def</span> <span class="fn">_flush_to_remote</span>(self, local_path, step):
+        remote_path = f"{self.remote_uri}/step_{step}"
+        subprocess.<span class="fn">run</span>(
+            ["gsutil", "-m", "cp", "-r", local_path, remote_path],
+            check=<span class="kw">True</span>
+        )</div>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 4: Job Scheduling                                        -->
+      <!-- ================================================================ -->
+      <h2 id="job-scheduling">Job Scheduling</h2>
+
+      <p>
+        Large-scale training jobs require topology-aware scheduling to minimize cross-rack communication.
+        SLURM remains the dominant scheduler for on-premise GPU clusters, while Kubernetes with custom
+        operators (e.g., Volcano, Run:ai) handles cloud-native deployments. The scheduler must understand
+        GPU affinity, NVLink domains, network locality, and job preemption policies.
+      </p>
+
+      <h3>SLURM Configuration</h3>
+      <p>
+        A SLURM job script for multi-node training must request the correct number of tasks per node
+        (matching GPUs), bind tasks to specific GPU and NIC affinity, and set environment variables for
+        NCCL transport. Below is a production-grade SLURM script for launching a 128-GPU (16-node)
+        training run:
+      </p>
+
+      <div class="pseudo-code"><span class="cm">#!/bin/bash</span>
+<span class="cm">#SBATCH --job-name=llm-pretrain-70b</span>
+<span class="cm">#SBATCH --partition=gpu-h100</span>
+<span class="cm">#SBATCH --nodes=16</span>
+<span class="cm">#SBATCH --ntasks-per-node=8</span>
+<span class="cm">#SBATCH --gpus-per-node=8</span>
+<span class="cm">#SBATCH --cpus-per-task=12</span>
+<span class="cm">#SBATCH --mem=0</span>
+<span class="cm">#SBATCH --time=168:00:00</span>
+<span class="cm">#SBATCH --exclusive</span>
+<span class="cm">#SBATCH --switches=1@00:30:00</span>
+
+<span class="cm"># ^ --switches=1 requests all nodes under one spine switch</span>
+<span class="cm">#   with a 30-minute wait tolerance for topology placement</span>
+
+module load cuda/12.3 nccl/2.20.3 openmpi/4.1.6
+
+<span class="cm"># Master node address for torch distributed</span>
+export MASTER_ADDR=$(<span class="fn">scontrol</span> show hostname $SLURM_NODELIST | head -n 1)
+export MASTER_PORT=29500
+export WORLD_SIZE=$((SLURM_NNODES * 8))
+
+<span class="cm"># NCCL tuning</span>
+export NCCL_IB_HCA=mlx5
+export NCCL_IB_GID_INDEX=3
+export NCCL_SOCKET_IFNAME=ib0
+export NCCL_DEBUG=WARN
+
+<span class="cm"># Launch with torchrun via srun</span>
+srun --mpi=pmix \
+    torchrun \
+    --nproc_per_node=8 \
+    --nnodes=$SLURM_NNODES \
+    --node_rank=$SLURM_NODEID \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    train.py \
+    --model-config configs/llama-70b.yaml \
+    --data-path /lustre/datasets/tokenized/ \
+    --checkpoint-dir /lustre/checkpoints/70b-run-003/ \
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 4 \
+    --data-parallel-size 4 \
+    --micro-batch-size 2 \
+    --global-batch-size 1024 \
+    --lr 1.5e-4 \
+    --warmup-steps 2000 \
+    --max-steps 500000</div>
+
+      <h3>Kubernetes &amp; Volcano</h3>
+      <p>
+        For cloud deployments, Kubernetes with the Volcano batch scheduler provides topology-aware
+        gang scheduling. The key abstraction is a <code>VolcanoJob</code> that ensures all pods in a
+        training job are co-scheduled atomically—no partial allocations that waste resources. Topology
+        affinity rules map pods to nodes within the same rack or placement group.
+      </p>
+
+      <div class="callout warn">
+        <strong>Gang scheduling is non-negotiable:</strong> Without gang scheduling, Kubernetes may
+        schedule 60 of 128 pods, leaving them idle while waiting for the remaining 68. This wastes
+        GPU-hours at ~$2/GPU/hr. Volcano's <code>minAvailable</code> field and pod-group primitives
+        solve this by treating the job as an atomic unit.
+      </div>
+
+      <div class="pseudo-code"><span class="cm"># Kubernetes VolcanoJob spec for distributed training</span>
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: llm-pretrain-70b
+spec:
+  minAvailable: 16          <span class="cm"># gang scheduling: all or nothing</span>
+  schedulerName: volcano
+  policies:
+    - event: PodEvicted
+      action: RestartJob
+  plugins:
+    sla: ["--max-schedule-delay=30m"]
+  tasks:
+    - replicas: 16
+      name: trainer
+      template:
+        spec:
+          schedulerName: volcano
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: topology.kubernetes.io/zone
+              whenUnsatisfiable: DoNotSchedule
+          containers:
+            - name: gpu-trainer
+              image: registry.internal/llm-train:v2.4
+              resources:
+                limits:
+                  nvidia.com/gpu: 8
+                  memory: "1800Gi"
+              env:
+                - name: NCCL_SOCKET_IFNAME
+                  value: "eth0"</div>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 5: Fault Tolerance & Checkpointing                       -->
+      <!-- ================================================================ -->
+      <h2 id="fault-tolerance">Fault Tolerance &amp; Checkpointing</h2>
+
+      <p>
+        At 1,000+ GPU scale, hardware failures are a statistical certainty. With a per-GPU MTBF of
+        ~10,000 hours, a 4,096-GPU cluster expects a failure every ~2.5 hours. The training system must
+        detect failures, checkpoint frequently, and resume from the latest consistent state with minimal
+        lost compute.
+      </p>
+
+      <h3>Failure Modes</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Hardware Failures</h4>
+          <ul>
+            <li><strong>GPU ECC errors:</strong> Uncorrectable memory errors crash the CUDA context</li>
+            <li><strong>NVLink errors:</strong> Lane degradation reduces intra-node bandwidth</li>
+            <li><strong>Network link flaps:</strong> IB port resets cause NCCL timeouts</li>
+            <li><strong>Node crashes:</strong> Kernel panics, PSU failures, thermal shutdowns</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Software Failures</h4>
+          <ul>
+            <li><strong>NCCL timeout:</strong> Collective hangs from network asymmetry</li>
+            <li><strong>OOM kills:</strong> Activation memory spikes exceeding GPU VRAM</li>
+            <li><strong>NaN divergence:</strong> Loss spikes requiring rollback to earlier checkpoint</li>
+            <li><strong>Deadlocks:</strong> Pipeline bubble miscalculations in PP schedules</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Elastic Training &amp; Auto-Recovery</h3>
+      <p>
+        Production systems implement a supervisor loop that monitors all ranks via heartbeat.
+        On failure detection, the supervisor (1) identifies the failed node, (2) requests a replacement
+        from the scheduler, (3) redistributes the parallelism mapping, and (4) resumes from the last
+        checkpoint. Frameworks like Megatron-LM, torchtitan, and Nvidia NeMo provide built-in
+        checkpoint-resume with automatic rank remapping.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># Fault-tolerant training loop with automatic checkpoint-resume</span>
+<span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+<span class="kw">import</span> os, signal, logging
+
+logger = logging.<span class="fn">getLogger</span>(__name__)
+
+<span class="kw">class</span> FaultTolerantTrainer:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model, optimizer, ckpt_dir, ckpt_interval=500):
+        self.model = model
+        self.optimizer = optimizer
+        self.ckpt_dir = ckpt_dir
+        self.ckpt_interval = ckpt_interval
+        self.global_step = 0
+        self.<span class="fn">_register_signal_handlers</span>()
+
+    <span class="kw">def</span> <span class="fn">_register_signal_handlers</span>(self):
+        <span class="cm"># Graceful shutdown on SIGTERM (SLURM preemption)</span>
+        signal.<span class="fn">signal</span>(signal.SIGTERM, self.<span class="fn">_handle_preempt</span>)
+
+    <span class="kw">def</span> <span class="fn">_handle_preempt</span>(self, signum, frame):
+        logger.<span class="fn">warning</span>("SIGTERM received — saving emergency checkpoint")
+        self.<span class="fn">save_checkpoint</span>(tag="emergency")
+        <span class="fn">dist.destroy_process_group</span>()
+        <span class="fn">exit</span>(0)
+
+    <span class="kw">def</span> <span class="fn">resume</span>(self):
+        <span class="cm"># Find latest checkpoint in directory</span>
+        ckpts = <span class="fn">sorted</span>(
+            [d <span class="kw">for</span> d <span class="kw">in</span> os.<span class="fn">listdir</span>(self.ckpt_dir) <span class="kw">if</span> d.startswith("step_")],
+            key=<span class="kw">lambda</span> x: <span class="fn">int</span>(x.split("_")[1])
+        )
+        <span class="kw">if</span> ckpts:
+            latest = os.path.<span class="fn">join</span>(self.ckpt_dir, ckpts[-1])
+            state = torch.<span class="fn">load</span>(latest, map_location="cpu")
+            self.model.<span class="fn">load_state_dict</span>(state["model"])
+            self.optimizer.<span class="fn">load_state_dict</span>(state["optim"])
+            self.global_step = state["step"]
+            logger.<span class="fn">info</span>(f"Resumed from step {self.global_step}")
+
+    <span class="kw">def</span> <span class="fn">save_checkpoint</span>(self, tag=<span class="kw">None</span>):
+        name = tag <span class="kw">if</span> tag <span class="kw">else</span> f"step_{self.global_step}"
+        path = os.path.<span class="fn">join</span>(self.ckpt_dir, name)
+        <span class="kw">if</span> <span class="fn">dist.get_rank</span>() == 0:
+            torch.<span class="fn">save</span>({
+                "model": self.model.<span class="fn">state_dict</span>(),
+                "optim": self.optimizer.<span class="fn">state_dict</span>(),
+                "step": self.global_step
+            }, path)
+        <span class="fn">dist.barrier</span>()
+
+    <span class="kw">def</span> <span class="fn">train</span>(self, dataloader, max_steps):
+        self.<span class="fn">resume</span>()
+        <span class="kw">for</span> batch <span class="kw">in</span> dataloader:
+            <span class="kw">if</span> self.global_step >= max_steps:
+                <span class="kw">break</span>
+            loss = self.model(batch)
+            loss.<span class="fn">backward</span>()
+            self.optimizer.<span class="fn">step</span>()
+            self.optimizer.<span class="fn">zero_grad</span>()
+            self.global_step += 1
+
+            <span class="kw">if</span> self.global_step % self.ckpt_interval == 0:
+                self.<span class="fn">save_checkpoint</span>()</div>
+
+      <div class="callout">
+        <strong>Async checkpointing:</strong> Blocking all ranks for checkpoint I/O wastes 2–5% of
+        training time. Production systems use asynchronous checkpointing: ranks snapshot their state
+        to pinned host memory, then a background thread writes to storage while training continues on
+        the next micro-batch. PyTorch's <code>torch.distributed.checkpoint</code> and NVIDIA's
+        <code>NeMo</code> both support this pattern.
+      </div>
+
+      <!-- ================================================================ -->
+      <!-- SECTION 6: Cluster Topology SVG Diagram                          -->
+      <!-- ================================================================ -->
+      <h2 id="cluster-topology-diagram">Cluster Topology Diagram</h2>
+
+      <p>
+        The diagram below illustrates a simplified 3-tier fat-tree cluster with 4 DGX nodes (32 GPUs),
+        leaf switches, spine switches, and a shared parallel file system. In production, this pattern
+        is replicated across multiple pods with core/super-spine switches connecting them.
+      </p>
+
+      <svg viewBox="0 0 800 520" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:800px;margin:1.5rem auto;display:block;font-family:'Manrope',sans-serif">
+        <!-- Background -->
+        <rect id="lt-bg" x="0" y="0" width="800" height="520" rx="12" fill="#f8f9fa" stroke="#dee2e6" stroke-width="1"/>
+
+        <!-- Title -->
+        <text id="lt-title" x="400" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#1a1a2e">3-Tier Fat-Tree GPU Cluster Topology</text>
+
+        <!-- Spine Switches (Top Tier) -->
+        <rect id="lt-spine-1" x="240" y="50" width="130" height="36" rx="6" fill="#0a8f6a" stroke="#087a5b" stroke-width="1.5"/>
+        <text x="305" y="73" text-anchor="middle" font-size="11" fill="#fff" font-weight="600">Spine Switch 1</text>
+
+        <rect id="lt-spine-2" x="430" y="50" width="130" height="36" rx="6" fill="#0a8f6a" stroke="#087a5b" stroke-width="1.5"/>
+        <text x="495" y="73" text-anchor="middle" font-size="11" fill="#fff" font-weight="600">Spine Switch 2</text>
+
+        <!-- Leaf Switches (Middle Tier) -->
+        <rect id="lt-leaf-1" x="80" y="140" width="120" height="32" rx="6" fill="#ff6b35" stroke="#e55a2b" stroke-width="1.5"/>
+        <text x="140" y="161" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Leaf Switch 1</text>
+
+        <rect id="lt-leaf-2" x="260" y="140" width="120" height="32" rx="6" fill="#ff6b35" stroke="#e55a2b" stroke-width="1.5"/>
+        <text x="320" y="161" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Leaf Switch 2</text>
+
+        <rect id="lt-leaf-3" x="440" y="140" width="120" height="32" rx="6" fill="#ff6b35" stroke="#e55a2b" stroke-width="1.5"/>
+        <text x="500" y="161" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Leaf Switch 3</text>
+
+        <rect id="lt-leaf-4" x="620" y="140" width="120" height="32" rx="6" fill="#ff6b35" stroke="#e55a2b" stroke-width="1.5"/>
+        <text x="680" y="161" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Leaf Switch 4</text>
+
+        <!-- Spine-to-Leaf connections -->
+        <line id="lt-link-s1l1" x1="280" y1="86" x2="140" y2="140" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s1l2" x1="300" y1="86" x2="320" y2="140" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s1l3" x1="340" y1="86" x2="500" y2="140" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s1l4" x1="360" y1="86" x2="680" y2="140" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s2l1" x1="460" y1="86" x2="140" y2="140" stroke="#087a5b" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s2l2" x1="480" y1="86" x2="320" y2="140" stroke="#087a5b" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s2l3" x1="520" y1="86" x2="500" y2="140" stroke="#087a5b" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <line id="lt-link-s2l4" x1="540" y1="86" x2="680" y2="140" stroke="#087a5b" stroke-width="1.5" stroke-dasharray="4,2"/>
+
+        <!-- DGX Node 1 -->
+        <rect id="lt-dgx-1" x="40" y="220" width="160" height="110" rx="8" fill="#1a1a2e" stroke="#2d2d44" stroke-width="1.5"/>
+        <text x="120" y="242" text-anchor="middle" font-size="10" fill="#e0e0e0" font-weight="700">DGX Node 1</text>
+        <g id="lt-gpus-n1" transform="translate(52,250)">
+          <rect x="0"  y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="0"  y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+        </g>
+        <text x="120" y="322" text-anchor="middle" font-size="8" fill="#aaa">8× H100 · NVLink 4.0</text>
+
+        <!-- DGX Node 2 -->
+        <rect id="lt-dgx-2" x="220" y="220" width="160" height="110" rx="8" fill="#1a1a2e" stroke="#2d2d44" stroke-width="1.5"/>
+        <text x="300" y="242" text-anchor="middle" font-size="10" fill="#e0e0e0" font-weight="700">DGX Node 2</text>
+        <g id="lt-gpus-n2" transform="translate(232,250)">
+          <rect x="0"  y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="0"  y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+        </g>
+        <text x="300" y="322" text-anchor="middle" font-size="8" fill="#aaa">8× H100 · NVLink 4.0</text>
+
+        <!-- DGX Node 3 -->
+        <rect id="lt-dgx-3" x="420" y="220" width="160" height="110" rx="8" fill="#1a1a2e" stroke="#2d2d44" stroke-width="1.5"/>
+        <text x="500" y="242" text-anchor="middle" font-size="10" fill="#e0e0e0" font-weight="700">DGX Node 3</text>
+        <g id="lt-gpus-n3" transform="translate(432,250)">
+          <rect x="0"  y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="0"  y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+        </g>
+        <text x="500" y="322" text-anchor="middle" font-size="8" fill="#aaa">8× H100 · NVLink 4.0</text>
+
+        <!-- DGX Node 4 -->
+        <rect id="lt-dgx-4" x="600" y="220" width="160" height="110" rx="8" fill="#1a1a2e" stroke="#2d2d44" stroke-width="1.5"/>
+        <text x="680" y="242" text-anchor="middle" font-size="10" fill="#e0e0e0" font-weight="700">DGX Node 4</text>
+        <g id="lt-gpus-n4" transform="translate(612,250)">
+          <rect x="0"  y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="0" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="14" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="0"  y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="15" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="34" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="49" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="68" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="83" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+          <rect x="102" y="26" width="30" height="20" rx="3" fill="#0a8f6a"/><text x="117" y="40" text-anchor="middle" font-size="7" fill="#fff">H100</text>
+        </g>
+        <text x="680" y="322" text-anchor="middle" font-size="8" fill="#aaa">8× H100 · NVLink 4.0</text>
+
+        <!-- Leaf-to-Node connections -->
+        <line id="lt-link-l1n1" x1="140" y1="172" x2="120" y2="220" stroke="#ff6b35" stroke-width="1.2"/>
+        <line id="lt-link-l2n2" x1="320" y1="172" x2="300" y2="220" stroke="#ff6b35" stroke-width="1.2"/>
+        <line id="lt-link-l3n3" x1="500" y1="172" x2="500" y2="220" stroke="#ff6b35" stroke-width="1.2"/>
+        <line id="lt-link-l4n4" x1="680" y1="172" x2="680" y2="220" stroke="#ff6b35" stroke-width="1.2"/>
+
+        <!-- Storage Tier -->
+        <rect id="lt-storage-bg" x="120" y="370" width="560" height="60" rx="8" fill="#e8f4f0" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text id="lt-storage-label" x="400" y="395" text-anchor="middle" font-size="12" font-weight="700" fill="#0a8f6a">Lustre Parallel File System</text>
+        <text x="400" y="415" text-anchor="middle" font-size="9" fill="#666">40 PB · 200+ GB/s aggregate · striped across 128 OSTs</text>
+
+        <!-- Storage connections -->
+        <line id="lt-link-n1s" x1="120" y1="330" x2="200" y2="370" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="3,2"/>
+        <line id="lt-link-n2s" x1="300" y1="330" x2="320" y2="370" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="3,2"/>
+        <line id="lt-link-n3s" x1="500" y1="330" x2="480" y2="370" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="3,2"/>
+        <line id="lt-link-n4s" x1="680" y1="330" x2="600" y2="370" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="3,2"/>
+
+        <!-- Legend -->
+        <g id="lt-legend" transform="translate(120,455)">
+          <rect x="0" y="0" width="12" height="12" rx="2" fill="#0a8f6a"/>
+          <text x="18" y="11" font-size="9" fill="#444">Spine Switch (NDR 400G IB)</text>
+          <rect x="200" y="0" width="12" height="12" rx="2" fill="#ff6b35"/>
+          <text x="218" y="11" font-size="9" fill="#444">Leaf Switch</text>
+          <rect x="360" y="0" width="12" height="12" rx="2" fill="#1a1a2e"/>
+          <text x="378" y="11" font-size="9" fill="#444">DGX H100 Node (8 GPUs)</text>
+        </g>
+
+        <!-- Bandwidth annotations -->
+        <text id="lt-bw-spine" x="385" y="115" text-anchor="middle" font-size="8" fill="#087a5b" font-style="italic">400 Gbps per port</text>
+        <text id="lt-bw-leaf" x="400" y="200" text-anchor="middle" font-size="8" fill="#e55a2b" font-style="italic">8× 400G IB per node (3.2 Tbps)</text>
+        <text id="lt-bw-storage" x="400" y="448" text-anchor="middle" font-size="8" fill="#0a8f6a" font-style="italic">InfiniBand storage network (separate fabric)</text>
+      </svg>
+
+      <p>
+        In this topology, each DGX node has 8 ConnectX-7 NICs providing 8× 400 Gbps = 3.2 Tbps of
+        aggregate inter-node bandwidth. The two spine switches provide full bisection bandwidth across
+        all 4 leaf switches. In a production SuperPOD, this scales to 32 nodes per pod with 8 spine
+        switches, and multiple pods are interconnected via a core switching tier.
+      </p>
+
+      <div class="callout">
+        <strong>Rail-optimized topology:</strong> NVIDIA's rail-optimized design assigns each of the 8
+        GPUs in a node to a dedicated NIC and leaf switch "rail." GPU 0 across all nodes communicates
+        via Rail 0 (Leaf Switch 1), GPU 1 via Rail 1, and so on. This eliminates intra-node PCIe
+        contention during all-reduce and enables optimal NCCL ring/tree algorithm placement.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Production patterns for autoscaling LLM inference services: GPU-aware HPA, custom metrics, scale-to-zero with KEDA, cold start mitigation, and Kubernetes GPU scheduling.">
+  <title>Autoscaling LLM Services | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#li-why-different">Why LLM Autoscaling Is Different</a></li>
+          <li><a href="#li-custom-metrics">Custom Metrics for LLM HPA</a></li>
+          <li><a href="#li-hpa-config">GPU-Aware HPA Configuration</a></li>
+          <li><a href="#li-scale-to-zero">Scale-to-Zero with KEDA</a></li>
+          <li><a href="#li-cold-start">Cold Start Mitigation</a></li>
+          <li><a href="#li-scaling-policies">Scaling Policies &amp; Strategies</a></li>
+          <li><a href="#li-gpu-scheduling">Kubernetes GPU Scheduling</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Autoscaling LLM Services</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-why-different">Why LLM Autoscaling Is Different</h2>
+      <p>Standard web application autoscaling (CPU utilization → add pods) fails catastrophically for LLM workloads. The fundamental issues:</p>
+      <ul>
+        <li><strong>Scale-up latency is minutes, not seconds.</strong> Loading a 70B model takes 30-120 seconds even from local NVMe. During this time, all queued requests are blocked or failing. By contrast, a typical web pod starts in 2-5 seconds.</li>
+        <li><strong>GPU utilization is a poor signal.</strong> A GPU can show 90% utilization while batch size is 1 (inefficient) or 30% utilization while efficiently processing a batch of 64 at memory bandwidth limits. The relationship between GPU util and capacity is non-linear.</li>
+        <li><strong>Requests have wildly variable cost.</strong> A 128-token prompt + 32-token output costs ~100× less compute than a 4096-token prompt + 2048-token output. Standard request-count-based scaling ignores this variance entirely.</li>
+        <li><strong>KV cache memory is the real bottleneck.</strong> Even if compute is available, the GPU can run out of KV cache memory and reject new requests. Memory pressure must be a first-class scaling signal.</li>
+      </ul>
+
+      <svg viewBox="0 0 780 380" style="width:100%;max-width:780px;margin:1.5rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="li-as-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+        </defs>
+        <!-- Metrics Sources -->
+        <rect x="20" y="20" width="200" height="180" rx="12" fill="#fff" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="120" y="45" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Metrics Sources</text>
+        <rect x="35" y="58" width="170" height="28" rx="6" fill="#0a8f6a" opacity="0.08"/><text x="120" y="77" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">Queue Depth (pending reqs)</text>
+        <rect x="35" y="92" width="170" height="28" rx="6" fill="#0a8f6a" opacity="0.08"/><text x="120" y="111" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">KV Cache Utilization %</text>
+        <rect x="35" y="126" width="170" height="28" rx="6" fill="#0a8f6a" opacity="0.08"/><text x="120" y="145" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">Tokens/Second (throughput)</text>
+        <rect x="35" y="160" width="170" height="28" rx="6" fill="#0a8f6a" opacity="0.08"/><text x="120" y="179" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">GPU Memory Pressure</text>
+        <!-- Custom Metrics Adapter -->
+        <rect x="280" y="60" width="180" height="100" rx="10" fill="#ff6b35" opacity="0.1" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="370" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#ff6b35">Prometheus Adapter</text>
+        <text x="370" y="110" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">custom.metrics.k8s.io</text>
+        <text x="370" y="130" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">external.metrics.k8s.io</text>
+        <!-- HPA -->
+        <rect x="530" y="40" width="220" height="70" rx="10" fill="#0a8f6a" opacity="0.15" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="640" y="68" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">HPA / KEDA ScaledObject</text>
+        <text x="640" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#555">desiredReplicas = ceil(metric / target)</text>
+        <!-- GPU Pods -->
+        <rect x="530" y="150" width="220" height="120" rx="10" fill="#fff" stroke="#1a1a2e" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="640" y="175" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#1a1a2e">LLM Serving Pods</text>
+        <rect x="545" y="190" width="55" height="35" rx="6" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="572" y="212" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#333">Pod 1</text>
+        <rect x="610" y="190" width="55" height="35" rx="6" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="637" y="212" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#333">Pod 2</text>
+        <rect x="675" y="190" width="55" height="35" rx="6" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="702" y="212" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#333">Pod N</text>
+        <rect x="545" y="235" width="55" height="25" rx="4" fill="#ff6b35" opacity="0.1"/><text x="572" y="252" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">GPU×4</text>
+        <rect x="610" y="235" width="55" height="25" rx="4" fill="#ff6b35" opacity="0.1"/><text x="637" y="252" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">GPU×4</text>
+        <rect x="675" y="235" width="55" height="25" rx="4" fill="#ff6b35" opacity="0.1"/><text x="702" y="252" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">GPU×4</text>
+        <!-- Arrows -->
+        <line x1="222" y1="110" x2="278" y2="110" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-as-arrow)"/>
+        <line x1="462" y1="110" x2="528" y2="80" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-as-arrow)"/>
+        <line x1="640" y1="112" x2="640" y2="148" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-as-arrow)"/>
+        <!-- Node Autoscaler -->
+        <rect x="280" y="280" width="260" height="50" rx="10" fill="#1a1a2e" opacity="0.06" stroke="#1a1a2e"/>
+        <text x="410" y="305" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Cluster Autoscaler / Karpenter</text>
+        <text x="410" y="320" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#666">Provisions GPU nodes when pods are unschedulable</text>
+        <path d="M640,272 L640,290 L542,290" stroke="#1a1a2e" stroke-width="1" stroke-dasharray="4,2" marker-end="url(#li-as-arrow)"/>
+        <text x="390" y="365" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#999">Two-level scaling: HPA scales pods → Cluster Autoscaler provisions GPU nodes</text>
+      </svg>
+
+      <!-- Section 2 -->
+      <h2 id="li-custom-metrics">Custom Metrics for LLM Autoscaling</h2>
+      <p>The right metrics determine scaling accuracy. Here are the four essential metrics for LLM serving, ranked by importance:</p>
+
+      <p><strong>1. Request queue depth</strong> — the most responsive signal. Measures pending requests waiting for GPU capacity. When queue depth exceeds a threshold, scale up. Unlike throughput metrics, queue depth reacts instantly to traffic spikes.</p>
+
+      <p><strong>2. KV cache utilization</strong> — measures what percentage of GPU memory allocated for KV cache is in use. When KV cache utilization exceeds 80%, the system cannot accept new long-context requests. This is often the binding constraint before compute saturates.</p>
+
+      <p><strong>3. Generation throughput (tokens/second)</strong> — actual output token rate across all active sequences. Useful for capacity planning but lags behind demand changes. Best used with a target-based policy: if per-pod throughput drops below target, add replicas.</p>
+
+      <p><strong>4. Time-to-First-Token (TTFT) P95</strong> — direct SLO metric. If TTFT exceeds the SLO threshold, it's a definitive signal that capacity is insufficient. However, it's a lagging indicator — by the time P95 TTFT degrades, many users are already affected.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Prometheus metrics exposed by vLLM / TGI serving endpoints</span>
+<span class="cm"># These are scraped by Prometheus and made available to HPA via adapter</span>
+
+<span class="cm"># Queue depth — instant signal</span>
+<span class="fn">vllm_num_requests_waiting</span>                   <span class="cm"># gauge</span>
+
+<span class="cm"># KV cache utilization — memory pressure signal</span>
+<span class="fn">vllm_gpu_cache_usage_perc</span>                    <span class="cm"># gauge, 0.0-1.0</span>
+
+<span class="cm"># Throughput — capacity signal</span>
+<span class="fn">vllm_generation_tokens_total</span>                  <span class="cm"># counter (rate it)</span>
+<span class="fn">rate</span>(vllm_generation_tokens_total[1m])        <span class="cm"># tokens/sec</span>
+
+<span class="cm"># Latency — SLO signal</span>
+<span class="fn">vllm_time_to_first_token_seconds</span>             <span class="cm"># histogram</span>
+<span class="fn">histogram_quantile</span>(0.95,
+  <span class="fn">rate</span>(vllm_time_to_first_token_seconds_bucket[5m]))
+
+<span class="cm"># Batch size — efficiency signal</span>
+<span class="fn">vllm_num_requests_running</span>                     <span class="cm"># gauge</span></pre>
+
+      <div class="callout">
+        <strong>Best practice:</strong> Use queue depth as the primary scaling trigger (fast response), KV cache utilization as a safety valve (prevents OOM), and TTFT P95 as an SLO-based backstop. Combine them with a max() policy — scale up if <em>any</em> metric exceeds its threshold.
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="li-hpa-config">GPU-Aware HPA Configuration</h2>
+      <p>Here's a production-ready HPA configuration that combines multiple custom metrics for LLM serving:</p>
+
+      <pre class="pseudo-code"><span class="cm"># HPA with custom LLM metrics</span>
+<span class="kw">apiVersion</span>: autoscaling/v2
+<span class="kw">kind</span>: HorizontalPodAutoscaler
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: llm-serving-hpa
+  <span class="kw">namespace</span>: inference
+<span class="kw">spec</span>:
+  <span class="kw">scaleTargetRef</span>:
+    <span class="kw">apiVersion</span>: apps/v1
+    <span class="kw">kind</span>: Deployment
+    <span class="kw">name</span>: vllm-llama70b
+  <span class="kw">minReplicas</span>: 2          <span class="cm"># Always keep 2 warm replicas</span>
+  <span class="kw">maxReplicas</span>: 12         <span class="cm"># Bounded by GPU node pool size</span>
+  <span class="kw">metrics</span>:
+    <span class="cm"># Primary: scale on queue depth per pod</span>
+    - <span class="kw">type</span>: Pods
+      <span class="kw">pods</span>:
+        <span class="kw">metric</span>:
+          <span class="kw">name</span>: vllm_num_requests_waiting
+        <span class="kw">target</span>:
+          <span class="kw">type</span>: AverageValue
+          <span class="kw">averageValue</span>: <span class="fn">"10"</span>   <span class="cm"># Scale when avg queue &gt; 10</span>
+    <span class="cm"># Secondary: scale on KV cache pressure</span>
+    - <span class="kw">type</span>: Pods
+      <span class="kw">pods</span>:
+        <span class="kw">metric</span>:
+          <span class="kw">name</span>: vllm_gpu_cache_usage_perc
+        <span class="kw">target</span>:
+          <span class="kw">type</span>: AverageValue
+          <span class="kw">averageValue</span>: <span class="fn">"0.80"</span> <span class="cm"># Scale when KV cache &gt; 80%</span>
+  <span class="kw">behavior</span>:
+    <span class="kw">scaleUp</span>:
+      <span class="kw">stabilizationWindowSeconds</span>: 60
+      <span class="kw">policies</span>:
+        - <span class="kw">type</span>: Pods
+          <span class="kw">value</span>: 2          <span class="cm"># Add max 2 pods per 60s</span>
+          <span class="kw">periodSeconds</span>: 60
+    <span class="kw">scaleDown</span>:
+      <span class="kw">stabilizationWindowSeconds</span>: 300  <span class="cm"># 5 min cooldown</span>
+      <span class="kw">policies</span>:
+        - <span class="kw">type</span>: Pods
+          <span class="kw">value</span>: 1          <span class="cm"># Remove max 1 pod per 5min</span>
+          <span class="kw">periodSeconds</span>: 300</pre>
+
+      <div class="callout warn">
+        <strong>Asymmetric scaling is critical:</strong> Scale up aggressively (60s window, +2 pods) but scale down conservatively (300s window, -1 pod). GPU pods are expensive to start (model loading = 30-120s) and cheap to keep warm relative to the user experience impact of being under-provisioned.
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="li-scale-to-zero">Scale-to-Zero with KEDA</h2>
+      <p>For development, staging, or low-traffic production endpoints, scale-to-zero eliminates GPU costs during idle periods. KEDA (Kubernetes Event-Driven Autoscaler) provides this capability with external metric triggers.</p>
+
+      <pre class="pseudo-code"><span class="cm"># KEDA ScaledObject for LLM scale-to-zero</span>
+<span class="kw">apiVersion</span>: keda.sh/v1alpha1
+<span class="kw">kind</span>: ScaledObject
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: llm-serving-keda
+  <span class="kw">namespace</span>: inference
+<span class="kw">spec</span>:
+  <span class="kw">scaleTargetRef</span>:
+    <span class="kw">name</span>: vllm-llama70b
+  <span class="kw">minReplicaCount</span>: 0       <span class="cm"># Enable scale-to-zero</span>
+  <span class="kw">maxReplicaCount</span>: 8
+  <span class="kw">idleReplicaCount</span>: 0      <span class="cm"># Zero pods when no traffic</span>
+  <span class="kw">cooldownPeriod</span>: 600      <span class="cm"># 10 min before scaling to zero</span>
+  <span class="kw">triggers</span>:
+    - <span class="kw">type</span>: prometheus
+      <span class="kw">metadata</span>:
+        <span class="kw">serverAddress</span>: http://prometheus:9090
+        <span class="kw">metricName</span>: llm_request_rate
+        <span class="kw">query</span>: |
+          <span class="fn">sum</span>(<span class="fn">rate</span>(
+            vllm_request_success_total{deployment=<span class="kw">"vllm-llama70b"</span>}[2m]
+          ))
+        <span class="kw">threshold</span>: <span class="fn">"0.1"</span>    <span class="cm"># Scale from 0→1 at &gt;0.1 req/s</span>
+  <span class="kw">advanced</span>:
+    <span class="kw">horizontalPodAutoscalerConfig</span>:
+      <span class="kw">behavior</span>:
+        <span class="kw">scaleUp</span>:
+          <span class="kw">stabilizationWindowSeconds</span>: 0  <span class="cm"># Instant scale-up from zero</span></pre>
+
+      <p>The cold start challenge with scale-to-zero is severe for LLMs. When the first request arrives after an idle period, the pod must: (1) be scheduled on a GPU node (5-15s), (2) pull the container image if not cached (10-60s), (3) load the model into GPU memory (30-120s). Total cold start: <strong>45-195 seconds</strong> — unacceptable for synchronous requests.</p>
+
+      <!-- Section 5 -->
+      <h2 id="li-cold-start">Cold Start Mitigation Strategies</h2>
+      <p>Cold start is the central challenge of LLM autoscaling. Here are production-tested mitigation strategies, from simple to sophisticated:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🔥 Keep-Warm (Simplest)</h3>
+          <p>Maintain <code>minReplicas: 1</code> at all times. Cost: one GPU pod 24/7. For an A100 at $2.21/hr, that's $1,613/month — but guarantees P1 latency for the first request.</p>
+          <p><strong>When to use:</strong> Production endpoints where cold start is unacceptable and cost is secondary.</p>
+        </div>
+        <div class="compare-card">
+          <h3>📦 Model Pre-Loading (Fastest Start)</h3>
+          <p>Pre-bake the model into the container image or use a DaemonSet to cache model files on local NVMe. Eliminates download time, reducing cold start to 30-60s (GPU load only).</p>
+          <p><strong>When to use:</strong> Multi-model deployments where you can predict which models will be needed.</p>
+        </div>
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🔮 Predictive Pre-Scaling</h3>
+          <p>Analyze historical traffic patterns (time-of-day, day-of-week) and scale up <em>before</em> demand arrives. A CronJob triggers scale-up 15 minutes before predicted peaks.</p>
+          <pre class="pseudo-code"><span class="cm"># Predictive pre-scale CronJob</span>
+<span class="kw">apiVersion</span>: batch/v1
+<span class="kw">kind</span>: CronJob
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: llm-prescale-morning
+<span class="kw">spec</span>:
+  <span class="cm"># Scale to 4 replicas at 8:45 AM</span>
+  <span class="kw">schedule</span>: <span class="fn">"45 8 * * 1-5"</span>
+  <span class="kw">jobTemplate</span>:
+    <span class="kw">spec</span>:
+      <span class="kw">template</span>:
+        <span class="kw">spec</span>:
+          <span class="kw">containers</span>:
+          - <span class="kw">name</span>: scaler
+            <span class="kw">image</span>: bitnami/kubectl
+            <span class="kw">command</span>:
+            - kubectl
+            - scale
+            - deployment/vllm-llama70b
+            - --replicas=4</pre>
+        </div>
+        <div class="compare-card">
+          <h3>🏊 Warm Pool (Most Sophisticated)</h3>
+          <p>Maintain a pool of "warm" pods with the model loaded but not serving traffic. When HPA triggers scale-up, promote a warm pod to active in &lt;5 seconds instead of 60-120s cold start.</p>
+          <pre class="pseudo-code"><span class="cm"># Warm pool controller (concept)</span>
+<span class="kw">class</span> <span class="fn">WarmPoolController</span>:
+  <span class="kw">def</span> <span class="fn">reconcile</span>(self):
+    active = <span class="fn">get_active_pods</span>()
+    warm   = <span class="fn">get_warm_pods</span>()
+    <span class="cm"># Always keep 2 warm pods ready</span>
+    <span class="kw">if</span> <span class="fn">len</span>(warm) &lt; 2:
+      <span class="fn">create_warm_pod</span>()
+    <span class="cm"># Promote warm → active on demand</span>
+    <span class="kw">if</span> <span class="fn">needs_scaleup</span>():
+      pod = warm.<span class="fn">pop</span>()
+      pod.<span class="fn">add_to_service</span>()
+      <span class="fn">create_warm_pod</span>()  <span class="cm"># replenish</span></pre>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Production recommendation:</strong> Use keep-warm (minReplicas=2) for production, predictive pre-scaling for known traffic patterns, and warm pools for large fleets (10+ replicas) where the cost of 2 idle warm pods is small relative to total fleet cost.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="li-scaling-policies">Scaling Policies: Target-Based vs Step-Based</h2>
+      <p>Kubernetes HPA supports two scaling policy types. For LLM workloads, the choice matters:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🎯 Target-Based (Recommended)</h3>
+          <p><code>desiredReplicas = ceil(currentMetricValue / targetValue × currentReplicas)</code></p>
+          <ul>
+            <li>Smooth, proportional scaling</li>
+            <li>Self-correcting (converges to target)</li>
+            <li>Works well with queue depth target</li>
+            <li>Example: target queue depth = 10 per pod. If total queue = 45 with 3 pods → scale to 5</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>📊 Step-Based (Emergency Scaling)</h3>
+          <p>Discrete steps triggered by metric thresholds.</p>
+          <ul>
+            <li>Faster response to sudden spikes</li>
+            <li>Better for binary signals (SLO breach)</li>
+            <li>Risk of over-provisioning (stepping too high)</li>
+            <li>Example: if TTFT P95 &gt; 5s → immediately add 4 pods</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>In practice, combine both: use target-based for steady-state scaling and step-based as an emergency override when SLOs are breached.</p>
+
+      <!-- Section 7 -->
+      <h2 id="li-gpu-scheduling">Kubernetes GPU Scheduling</h2>
+      <p>GPU scheduling in Kubernetes adds complexity beyond standard CPU pod scheduling. Key considerations:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Pod spec for multi-GPU LLM serving</span>
+<span class="kw">apiVersion</span>: v1
+<span class="kw">kind</span>: Pod
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: vllm-llama70b-0
+<span class="kw">spec</span>:
+  <span class="kw">containers</span>:
+  - <span class="kw">name</span>: vllm
+    <span class="kw">image</span>: vllm/vllm-openai:latest
+    <span class="kw">resources</span>:
+      <span class="kw">limits</span>:
+        <span class="fn">nvidia.com/gpu</span>: 4     <span class="cm"># Request 4 GPUs for tensor parallelism</span>
+      <span class="kw">requests</span>:
+        <span class="fn">nvidia.com/gpu</span>: 4
+        <span class="kw">memory</span>: <span class="fn">"64Gi"</span>
+        <span class="kw">cpu</span>: <span class="fn">"16"</span>
+    <span class="kw">env</span>:
+    - <span class="kw">name</span>: NVIDIA_VISIBLE_DEVICES
+      <span class="kw">value</span>: all
+    <span class="kw">readinessProbe</span>:           <span class="cm"># Model loaded and ready</span>
+      <span class="kw">httpGet</span>:
+        <span class="kw">path</span>: /health
+        <span class="kw">port</span>: 8000
+      <span class="kw">initialDelaySeconds</span>: 120  <span class="cm"># Model load takes ~2 min</span>
+      <span class="kw">periodSeconds</span>: 10
+  <span class="kw">nodeSelector</span>:
+    <span class="fn">nvidia.com/gpu.product</span>: A100-SXM4-80GB
+  <span class="kw">tolerations</span>:
+  - <span class="kw">key</span>: nvidia.com/gpu
+    <span class="kw">operator</span>: Exists
+    <span class="kw">effect</span>: NoSchedule</pre>
+
+      <p>Critical GPU scheduling pitfalls:</p>
+      <ul>
+        <li><strong>GPU topology awareness:</strong> For tensor parallelism, all GPUs must be on the same node with NVLink interconnect. Kubernetes doesn't guarantee GPU topology by default — use the NVIDIA GPU Operator's <code>gpu-feature-discovery</code> to label nodes with GPU topology and set affinity rules.</li>
+        <li><strong>Node pool isolation:</strong> Separate GPU node pools by GPU type (A100 vs H100) and size (4-GPU vs 8-GPU nodes). Use node selectors or node affinity to ensure pods land on the right hardware.</li>
+        <li><strong>Cluster Autoscaler / Karpenter:</strong> Configure GPU-specific node pools with appropriate scaling limits. Set <code>scale-down-delay-after-add: 10m</code> for GPU node pools (longer than default) to avoid thrashing on expensive GPU nodes.</li>
+        <li><strong>Preemption priority:</strong> Set high <code>PriorityClass</code> for serving workloads so they preempt batch jobs when GPU capacity is needed. This acts as a natural overflow mechanism.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Architecture summary:</strong> The two-level scaling model works best: HPA scales pods based on LLM-specific metrics (queue depth, KV cache) → Cluster Autoscaler provisions GPU nodes when pods are unschedulable. Each level has different time constants (pods: seconds, nodes: minutes), and both must be tuned for the cold start budget of your SLO.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

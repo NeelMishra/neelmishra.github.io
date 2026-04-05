@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into self-attention O(n²) memory costs, KV cache scaling, and why context length is the critical bottleneck for LLM serving infrastructure at scale.">
+  <title>Attention Memory Costs: Why Context Length Matters for Infra | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .n-default{fill:#fffdf9;stroke:#0a8f6a;stroke-width:2.5}
+    .n-visited{fill:#0a8f6a;stroke:#0a8f6a;stroke-width:2.5}
+    .n-cur{fill:#fffdf9;stroke:#ff6b35;stroke-width:3}
+    .n-label{font-family:"Manrope",sans-serif;font-size:14px;font-weight:700;text-anchor:middle;dominant-baseline:central}
+    .n-label-w{fill:#fff}.n-label-d{fill:#13201a}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+    .memory-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem}
+    .memory-table th,.memory-table td{border:1px solid var(--line);padding:0.6rem 0.8rem;text-align:center}
+    .memory-table th{background:var(--brand);color:#fff;font-weight:700}
+    .memory-table tr:nth-child(even){background:rgba(10,143,106,0.03)}
+    .formula-box{background:#1a1a2e;color:#e0e0e0;padding:1.2rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.95rem;line-height:1.8;margin:1rem 0;text-align:center;overflow-x:auto}
+    .formula-box .hl{color:#ff6b35;font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#self-attention-quadratic">Self-Attention: The O(n²) Problem</a></li>
+          <li><a href="#kv-cache-mechanics">KV Cache Mechanics</a></li>
+          <li><a href="#memory-formula">The Memory Formula</a></li>
+          <li><a href="#gpu-memory-impact">Impact on GPU Memory &amp; Throughput</a></li>
+          <li><a href="#memory-scaling-visual">Memory Scaling Visualized</a></li>
+          <li><a href="#serving-implications">Why Providers Care About This</a></li>
+          <li><a href="#mitigation-strategies">Mitigation Strategies</a></li>
+          <li><a href="#interview-takeaways">Interview Takeaways</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Attention Memory Costs: Why Context Length Matters for Infra</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Fundamentals</span>
+        </div>
+      </div>
+
+      <p>
+        Context length is the single most impactful parameter for LLM infrastructure costs. Moving from
+        4K to 128K tokens doesn't just use 32× more memory — the attention mechanism's quadratic scaling
+        means the actual memory and compute costs can grow by <strong>1,024×</strong> for the attention
+        matrices alone. This post breaks down exactly why, how the KV cache dominates GPU memory during
+        inference, and what this means if you're building or operating serving infrastructure.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2 id="self-attention-quadratic">Self-Attention: The O(n²) Problem</h2>
+
+      <p>
+        In standard multi-head self-attention, every token attends to every other token. For a sequence
+        of length <em>n</em>, this creates an attention score matrix of shape
+        <code>[n × n]</code> per head. With <em>h</em> heads, you store <code>h × n × n</code> float values
+        just for the attention weights.
+      </p>
+
+      <p>The core computation is:</p>
+
+      <div class="formula-box">
+        Attention(Q, K, V) = softmax( Q K<sup>T</sup> / √d<sub>k</sub> ) · V
+      </div>
+
+      <p>
+        The <code>Q K<sup>T</sup></code> product produces the <code>[n × n]</code> matrix. This is where
+        the quadratic cost lives — both in FLOPs and in memory.
+      </p>
+
+<pre class="pseudo-code"><span class="cm"># Self-attention: the quadratic bottleneck</span>
+<span class="kw">def</span> <span class="fn">self_attention</span>(Q, K, V, d_k):
+    <span class="cm"># Q, K, V: [batch, heads, seq_len, head_dim]</span>
+    <span class="cm"># This matmul creates an [n × n] matrix — O(n²) memory</span>
+    scores = <span class="fn">matmul</span>(Q, K.<span class="fn">transpose</span>(-2, -1)) / <span class="fn">sqrt</span>(d_k)
+    weights = <span class="fn">softmax</span>(scores, dim=-1)   <span class="cm"># [batch, heads, n, n]</span>
+    output = <span class="fn">matmul</span>(weights, V)          <span class="cm"># [batch, heads, n, d_k]</span>
+    <span class="kw">return</span> output</pre>
+
+      <p>Let's put concrete numbers on this. For a single forward pass through one attention layer:</p>
+
+      <table class="memory-table">
+        <thead>
+          <tr>
+            <th>Sequence Length</th>
+            <th>Attention Matrix Size (per head)</th>
+            <th>Memory (32 heads, FP16)</th>
+            <th>Relative Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>2,048</td><td>4M entries</td><td>~256 MB</td><td>1×</td></tr>
+          <tr><td>8,192</td><td>67M entries</td><td>~4 GB</td><td>16×</td></tr>
+          <tr><td>32,768</td><td>1.07B entries</td><td>~64 GB</td><td>256×</td></tr>
+          <tr><td>131,072</td><td>17.2B entries</td><td>~1,024 GB</td><td>4,096×</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Key insight:</strong> At 128K context, the raw attention matrices alone would need over
+        1 TB of memory per layer — far exceeding any single GPU. This is why FlashAttention (which
+        tiles the computation and never materializes the full matrix) is essential for long-context models.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="kv-cache-mechanics">KV Cache Mechanics</h2>
+
+      <p>
+        During autoregressive inference (generating tokens one at a time), you don't recompute attention
+        from scratch for every new token. Instead, you cache the Key and Value projections from all
+        previous tokens — the <strong>KV cache</strong>.
+      </p>
+
+      <p>
+        For each new token generated, you only compute a fresh Q vector, then attend over the
+        entire cached K and V. This turns the per-step cost from O(n²) to O(n) — but the cache itself
+        grows linearly with every token generated.
+      </p>
+
+<pre class="pseudo-code"><span class="cm"># KV cache during autoregressive generation</span>
+<span class="kw">class</span> <span class="fn">KVCache</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_layers, num_heads, head_dim, max_seq_len, dtype):
+        <span class="cm"># Pre-allocate cache for K and V across all layers</span>
+        self.k_cache = <span class="fn">zeros</span>(num_layers, max_seq_len, num_heads, head_dim, dtype=dtype)
+        self.v_cache = <span class="fn">zeros</span>(num_layers, max_seq_len, num_heads, head_dim, dtype=dtype)
+        self.seq_pos = 0
+
+    <span class="kw">def</span> <span class="fn">update</span>(self, layer_idx, new_k, new_v):
+        <span class="cm"># Append new K, V at current position</span>
+        self.k_cache[layer_idx, self.seq_pos] = new_k
+        self.v_cache[layer_idx, self.seq_pos] = new_v
+        self.seq_pos += 1
+
+    <span class="kw">def</span> <span class="fn">get_kv</span>(self, layer_idx):
+        <span class="cm"># Return all cached K, V up to current position</span>
+        <span class="kw">return</span> (
+            self.k_cache[layer_idx, :self.seq_pos],
+            self.v_cache[layer_idx, :self.seq_pos]
+        )</pre>
+
+      <div class="callout">
+        <strong>Why this matters for infra:</strong> The KV cache is the dominant memory consumer during
+        inference. Model weights are static and shared across requests, but KV cache is
+        <em>per-request</em> and grows with every token. At 128K context, the KV cache for a single
+        request on a 70B model can consume <strong>40+ GB</strong> — more than an entire A100-40GB GPU.
+      </div>
+
+      <p>
+        The KV cache stores two tensors (K and V) at every layer. For models using
+        <strong>Grouped Query Attention (GQA)</strong> — like Llama 2 70B (8 KV heads vs 64 query heads)
+        — the cache is reduced by the grouping ratio, but it still scales linearly with sequence length.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2 id="memory-formula">The Memory Formula</h2>
+
+      <p>
+        The KV cache memory for a single request can be computed precisely. Here is the formula:
+      </p>
+
+      <div class="formula-box">
+        KV Cache = <span class="hl">2</span> × num_layers × <span class="hl">2</span> × hidden_dim × seq_len × batch_size × bytes_per_param
+      </div>
+
+      <p>Breaking down each factor:</p>
+      <ul>
+        <li><strong>First 2:</strong> We store both K and V tensors</li>
+        <li><strong>num_layers:</strong> Each transformer layer has its own KV cache</li>
+        <li><strong>Second 2:</strong> Convention factor — some formulations fold this into hidden_dim
+            as <code>2 × num_kv_heads × head_dim</code>; here we separate it for clarity</li>
+        <li><strong>hidden_dim:</strong> The model's hidden dimension (e.g., 8192 for Llama 2 70B)</li>
+        <li><strong>seq_len:</strong> Current sequence length (prompt + generated tokens)</li>
+        <li><strong>batch_size:</strong> Number of concurrent sequences</li>
+        <li><strong>bytes_per_param:</strong> 2 for FP16/BF16, 1 for INT8, 0.5 for INT4</li>
+      </ul>
+
+<pre class="pseudo-code"><span class="kw">def</span> <span class="fn">kv_cache_memory_gb</span>(
+    num_layers,      <span class="cm"># e.g., 80 for Llama 2 70B</span>
+    hidden_dim,      <span class="cm"># e.g., 8192</span>
+    seq_len,         <span class="cm"># e.g., 4096</span>
+    batch_size=1,    <span class="cm"># concurrent requests</span>
+    bytes_per_param=2,  <span class="cm"># FP16 = 2 bytes</span>
+    gqa_ratio=1      <span class="cm"># 1 = MHA, 8 for Llama 2 70B (64/8)</span>
+):
+    effective_dim = hidden_dim / gqa_ratio
+    kv_bytes = 2 * num_layers * effective_dim * seq_len * batch_size * bytes_per_param
+    <span class="kw">return</span> kv_bytes / (1024 ** 3)
+
+<span class="cm"># Example: Llama 2 70B (GQA with 8 KV heads, head_dim=128)</span>
+<span class="cm"># effective_dim = 8192 / 8 = 1024</span>
+<span class="fn">print</span>(<span class="fn">kv_cache_memory_gb</span>(80, 8192, 4096, batch_size=1, gqa_ratio=8))
+<span class="cm"># → ~0.625 GB per request at 4K context</span>
+
+<span class="fn">print</span>(<span class="fn">kv_cache_memory_gb</span>(80, 8192, 131072, batch_size=1, gqa_ratio=8))
+<span class="cm"># → ~20 GB per request at 128K context</span>
+
+<span class="fn">print</span>(<span class="fn">kv_cache_memory_gb</span>(80, 8192, 131072, batch_size=8, gqa_ratio=8))
+<span class="cm"># → ~160 GB for 8 concurrent 128K requests</span></pre>
+
+      <p>Now let's see how this plays out for real models:</p>
+
+      <table class="memory-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Layers</th>
+            <th>Hidden Dim</th>
+            <th>KV Cache @ 4K (FP16)</th>
+            <th>KV Cache @ 128K (FP16)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Llama 2 7B (MHA)</td><td>32</td><td>4096</td><td>1.0 GB</td><td>32 GB</td></tr>
+          <tr><td>Llama 2 70B (GQA)</td><td>80</td><td>8192</td><td>0.6 GB</td><td>20 GB</td></tr>
+          <tr><td>GPT-4 class (~1.8T, est.)</td><td>~120</td><td>~12288</td><td>~5.6 GB</td><td>~180 GB</td></tr>
+          <tr><td>Claude 3 class (est.)</td><td>~96</td><td>~8192</td><td>~3.0 GB</td><td>~96 GB</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>The batch size trap:</strong> A single 128K request on a 70B model uses ~20 GB of KV cache.
+        Serving 32 concurrent users at 128K would require <strong>640 GB</strong> just for KV cache — 
+        that's 8× A100-80GB GPUs dedicated entirely to caching, before you even count model weights.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="gpu-memory-impact">Impact on GPU Memory &amp; Throughput</h2>
+
+      <p>
+        GPU memory during inference is split between three consumers:
+      </p>
+
+      <ol>
+        <li><strong>Model weights</strong> — fixed, shared across all requests (e.g., 140 GB for 70B in FP16)</li>
+        <li><strong>KV cache</strong> — per-request, grows with sequence length</li>
+        <li><strong>Activation memory</strong> — temporary, relatively small during inference</li>
+      </ol>
+
+      <p>
+        The critical constraint: <code>Total GPU Memory ≥ Weights + KV_Cache(batch × seq_len) + Activations</code>.
+        Since weights are fixed and activations are small, the KV cache determines how many concurrent
+        requests (and at what context length) you can serve.
+      </p>
+
+<pre class="pseudo-code"><span class="cm"># GPU memory budget calculation</span>
+<span class="kw">def</span> <span class="fn">max_batch_size</span>(
+    gpu_memory_gb,
+    model_weight_gb,
+    kv_per_request_gb,
+    activation_overhead_gb=2.0
+):
+    available = gpu_memory_gb - model_weight_gb - activation_overhead_gb
+    <span class="kw">if</span> available &lt;= 0:
+        <span class="kw">return</span> 0
+    <span class="kw">return</span> <span class="fn">int</span>(available / kv_per_request_gb)
+
+<span class="cm"># Llama 2 70B on 8× A100-80GB (640 GB total)</span>
+<span class="cm"># Model weights in FP16: ~140 GB</span>
+<span class="fn">print</span>(<span class="fn">max_batch_size</span>(640, 140, 0.625))   <span class="cm"># 4K ctx → 796 concurrent requests</span>
+<span class="fn">print</span>(<span class="fn">max_batch_size</span>(640, 140, 5.0))     <span class="cm"># 32K ctx → 99 concurrent requests</span>
+<span class="fn">print</span>(<span class="fn">max_batch_size</span>(640, 140, 20.0))    <span class="cm"># 128K ctx → 24 concurrent requests</span></pre>
+
+      <div class="callout">
+        <strong>Throughput cliff:</strong> Going from 4K → 128K context cuts your maximum concurrent
+        batch from ~800 to ~24 on the same hardware. That's a <strong>33× reduction</strong> in serving
+        throughput. This is why long-context APIs are more expensive — you need proportionally more GPUs.
+      </div>
+
+      <p>
+        This creates a direct relationship between context length and cost-per-token:
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4 style="margin-top:0">Short Context (≤4K)</h4>
+          <ul style="font-size:0.88rem">
+            <li>KV cache fits easily in GPU memory</li>
+            <li>Hundreds of concurrent requests per node</li>
+            <li>High GPU utilization (compute-bound)</li>
+            <li>Low cost per token</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4 style="margin-top:0">Long Context (32K–200K)</h4>
+          <ul style="font-size:0.88rem">
+            <li>KV cache dominates GPU memory</li>
+            <li>Tens of concurrent requests per node</li>
+            <li>Low GPU utilization (memory-bound)</li>
+            <li>High cost per token</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="memory-scaling-visual">Memory Scaling Visualized</h2>
+
+      <p>
+        The chart below shows how KV cache memory scales with context length for a 70B-class model
+        (GQA, FP16). Notice how a single request at 128K consumes what 32 requests would use at 4K.
+      </p>
+
+      <svg id="lf-memory-scaling-chart" viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg"
+           style="width:100%;max-width:700px;margin:1.2rem auto;display:block"
+           aria-label="Bar chart showing KV cache memory scaling with context length">
+        <defs>
+          <linearGradient id="lf-bar-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.9"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.5"/>
+          </linearGradient>
+          <linearGradient id="lf-bar-warn" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#ff6b35" stop-opacity="0.9"/>
+            <stop offset="100%" stop-color="#ff6b35" stop-opacity="0.5"/>
+          </linearGradient>
+        </defs>
+
+        <!-- Title -->
+        <text x="350" y="25" text-anchor="middle" font-family="Manrope,sans-serif"
+              font-size="14" font-weight="700" fill="#13201a">
+          KV Cache Memory per Request (70B Model, GQA, FP16)
+        </text>
+
+        <!-- Y-axis label -->
+        <text x="18" y="195" text-anchor="middle" font-family="Manrope,sans-serif"
+              font-size="11" fill="#666" transform="rotate(-90,18,195)">
+          Memory (GB)
+        </text>
+
+        <!-- Axes -->
+        <line x1="80" y1="45" x2="80" y2="320" stroke="#ccc" stroke-width="1"/>
+        <line x1="80" y1="320" x2="670" y2="320" stroke="#ccc" stroke-width="1"/>
+
+        <!-- Y-axis gridlines and labels -->
+        <line x1="80" y1="320" x2="670" y2="320" stroke="#eee" stroke-width="0.5"/>
+        <text x="72" y="324" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">0</text>
+
+        <line x1="80" y1="265" x2="670" y2="265" stroke="#eee" stroke-width="0.5" stroke-dasharray="4,3"/>
+        <text x="72" y="269" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">5</text>
+
+        <line x1="80" y1="210" x2="670" y2="210" stroke="#eee" stroke-width="0.5" stroke-dasharray="4,3"/>
+        <text x="72" y="214" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">10</text>
+
+        <line x1="80" y1="155" x2="670" y2="155" stroke="#eee" stroke-width="0.5" stroke-dasharray="4,3"/>
+        <text x="72" y="159" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">15</text>
+
+        <line x1="80" y1="100" x2="670" y2="100" stroke="#eee" stroke-width="0.5" stroke-dasharray="4,3"/>
+        <text x="72" y="104" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">20</text>
+
+        <line x1="80" y1="45" x2="670" y2="45" stroke="#eee" stroke-width="0.5" stroke-dasharray="4,3"/>
+        <text x="72" y="49" text-anchor="end" font-family="Manrope,sans-serif" font-size="10" fill="#999">25</text>
+
+        <!-- A100-80GB reference line -->
+        <line x1="80" y1="56" x2="670" y2="56" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="6,4"/>
+        <text x="672" y="52" font-family="Manrope,sans-serif" font-size="9" fill="#ff6b35"
+              text-anchor="start" font-weight="600">A100-80GB budget*</text>
+        <text x="672" y="64" font-family="Manrope,sans-serif" font-size="8" fill="#999"
+              text-anchor="start">(*after model weights)</text>
+
+        <!-- Bars: 2K, 4K, 8K, 16K, 32K, 64K, 128K -->
+        <!-- Scale: 0 GB = y:320, 25 GB = y:45 → 1 GB = 11px -->
+        <!-- 70B GQA: ~0.31 GB/2K, 0.63 GB/4K, 1.25 GB/8K, 2.5 GB/16K, 5 GB/32K, 10 GB/64K, 20 GB/128K -->
+
+        <!-- 2K: 0.31 GB → height ~3.4px -->
+        <rect x="105" y="316.6" width="60" height="3.4" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="135" y="313" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">0.3 GB</text>
+        <text x="135" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">2K</text>
+
+        <!-- 4K: 0.63 GB → height ~6.9px -->
+        <rect x="185" y="313.1" width="60" height="6.9" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="215" y="309" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">0.6 GB</text>
+        <text x="215" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">4K</text>
+
+        <!-- 8K: 1.25 GB → height ~13.75px -->
+        <rect x="265" y="306.3" width="60" height="13.7" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="295" y="302" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">1.3 GB</text>
+        <text x="295" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">8K</text>
+
+        <!-- 16K: 2.5 GB → height ~27.5px -->
+        <rect x="345" y="292.5" width="60" height="27.5" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="375" y="288" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">2.5 GB</text>
+        <text x="375" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">16K</text>
+
+        <!-- 32K: 5.0 GB → height ~55px -->
+        <rect x="425" y="265" width="60" height="55" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="455" y="260" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">5.0 GB</text>
+        <text x="455" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">32K</text>
+
+        <!-- 64K: 10.0 GB → height ~110px -->
+        <rect x="505" y="210" width="60" height="110" rx="3" fill="url(#lf-bar-grad)"/>
+        <text x="535" y="205" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">10 GB</text>
+        <text x="535" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">64K</text>
+
+        <!-- 128K: 20.0 GB → height ~220px (exceeds comfortable budget) -->
+        <rect x="585" y="100" width="60" height="220" rx="3" fill="url(#lf-bar-warn)"/>
+        <text x="615" y="94" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#ff6b35" font-weight="700">20 GB</text>
+        <text x="615" y="340" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666" font-weight="700">128K</text>
+
+        <!-- X-axis label -->
+        <text x="375" y="365" text-anchor="middle" font-family="Manrope,sans-serif"
+              font-size="11" fill="#666">
+          Context Length (tokens)
+        </text>
+      </svg>
+
+      <p style="font-size:0.85rem;color:var(--ink-muted);text-align:center;margin-top:-0.5rem">
+        *A100-80GB budget assumes ~24 GB available after model weights for a 70B model across a tensor-parallel setup.
+        Actual budget depends on parallelism strategy and weight quantization.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2 id="serving-implications">Why Providers Care About This</h2>
+
+      <p>
+        Companies like Anthropic and OpenAI operate serving clusters with thousands of GPUs.
+        The KV cache memory problem directly dictates their infrastructure costs, pricing,
+        and architectural choices.
+      </p>
+
+      <h3>Scheduling and Bin-Packing</h3>
+      <p>
+        Serving requests of mixed context lengths is a bin-packing problem. A 128K request occupies
+        GPU memory that could serve 30+ short-context requests. Serving systems like
+        <strong>vLLM</strong> use <strong>PagedAttention</strong> — borrowing virtual memory concepts
+        from OS design — to allocate KV cache in non-contiguous blocks, reducing fragmentation
+        from ~60% to under 4%.
+      </p>
+
+<pre class="pseudo-code"><span class="cm"># PagedAttention: KV cache as virtual memory pages</span>
+<span class="cm"># Instead of pre-allocating max_seq_len per request,</span>
+<span class="cm"># allocate in small fixed-size blocks on demand</span>
+
+<span class="kw">class</span> <span class="fn">PagedKVCache</span>:
+    BLOCK_SIZE = 16  <span class="cm"># tokens per block</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, total_gpu_blocks):
+        self.block_pool = <span class="fn">list</span>(<span class="fn">range</span>(total_gpu_blocks))
+        self.page_table = {}  <span class="cm"># request_id → [block_ids]</span>
+
+    <span class="kw">def</span> <span class="fn">allocate</span>(self, request_id, num_tokens):
+        num_blocks = <span class="fn">ceil</span>(num_tokens / self.BLOCK_SIZE)
+        blocks = [self.block_pool.<span class="fn">pop</span>() <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_blocks)]
+        self.page_table[request_id] = blocks
+
+    <span class="kw">def</span> <span class="fn">free</span>(self, request_id):
+        self.block_pool.<span class="fn">extend</span>(self.page_table.<span class="fn">pop</span>(request_id))</pre>
+
+      <h3>Pricing Asymmetry: Input vs. Output Tokens</h3>
+      <p>
+        Most API providers charge differently for input and output tokens. This reflects
+        the KV cache economics:
+      </p>
+      <ul>
+        <li><strong>Input (prefill):</strong> Processed in parallel, high compute utilization, KV cache
+            built once — cheaper per token</li>
+        <li><strong>Output (decode):</strong> Generated sequentially, one token at a time, KV cache
+            read every step — more expensive due to memory bandwidth bottleneck</li>
+      </ul>
+
+      <h3>Why Context Length Tiers Exist</h3>
+      <p>
+        Claude's pricing for 200K context and GPT-4 Turbo's 128K option aren't just product features —
+        they're infrastructure decisions. Longer context means:
+      </p>
+      <ul>
+        <li>Fewer concurrent requests per GPU → lower throughput → higher cost per token</li>
+        <li>More tensor parallelism needed to fit KV cache → more inter-GPU communication</li>
+        <li>Longer time-to-first-token (TTFT) due to larger prefill computation</li>
+        <li>Higher tail latency from memory bandwidth saturation</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Interview insight:</strong> When asked "why do long-context requests cost more?", the
+        answer isn't just "more tokens." It's that the KV cache memory pressure reduces batch sizes,
+        underutilizes GPU compute, and shifts the bottleneck from compute to memory bandwidth — 
+        fundamentally changing the economics of serving.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="mitigation-strategies">Mitigation Strategies</h2>
+
+      <p>
+        The industry has developed several approaches to tame the attention memory problem:
+      </p>
+
+      <h3>1. Grouped Query Attention (GQA)</h3>
+      <p>
+        Instead of separate K, V heads for each query head, GQA groups multiple query heads to
+        share a single KV head. Llama 2 70B uses 64 query heads with only 8 KV heads — an
+        <strong>8× reduction</strong> in KV cache size with minimal quality loss.
+      </p>
+
+      <h3>2. Multi-Query Attention (MQA)</h3>
+      <p>
+        The extreme version: all query heads share a single K and single V head. Used in
+        PaLM and Falcon. Reduces KV cache by the number of heads (e.g., 32×) but can
+        degrade quality on complex reasoning tasks.
+      </p>
+
+      <h3>3. FlashAttention</h3>
+      <p>
+        Doesn't reduce the theoretical compute — still O(n²) FLOPs — but avoids materializing the
+        full <code>[n × n]</code> attention matrix in HBM. By tiling the computation and keeping
+        intermediate results in SRAM (on-chip memory), it reduces memory usage from O(n²) to O(n)
+        for the attention computation itself.
+      </p>
+
+      <h3>4. KV Cache Quantization</h3>
+      <p>
+        Quantize cached K and V values to INT8 or INT4, cutting memory by 2–4× with ~1% quality
+        loss. Critical for production serving — most inference engines now support this.
+      </p>
+
+<pre class="pseudo-code"><span class="cm"># KV cache quantization impact</span>
+<span class="kw">def</span> <span class="fn">kv_cache_with_quantization</span>(base_gb, quant_bits=8):
+    <span class="cm"># FP16 = 16 bits baseline</span>
+    ratio = 16 / quant_bits
+    <span class="kw">return</span> base_gb / ratio
+
+base = 20.0  <span class="cm"># 128K context, 70B model, FP16</span>
+<span class="fn">print</span>(f"FP16: {base:.1f} GB")                                     <span class="cm"># 20.0 GB</span>
+<span class="fn">print</span>(f"INT8: {<span class="fn">kv_cache_with_quantization</span>(base, 8):.1f} GB")      <span class="cm"># 10.0 GB</span>
+<span class="fn">print</span>(f"INT4: {<span class="fn">kv_cache_with_quantization</span>(base, 4):.1f} GB")      <span class="cm">#  5.0 GB</span></pre>
+
+      <h3>5. Sliding Window / Sparse Attention</h3>
+      <p>
+        Mistral uses a sliding window of 4,096 tokens — each token only attends to its nearest
+        4K neighbors. This caps the KV cache at a fixed size regardless of total context length,
+        with periodic "sink" tokens that attend globally to preserve long-range information.
+      </p>
+
+      <h3>6. Prefix Caching</h3>
+      <p>
+        When multiple requests share the same system prompt (common in API serving), the KV cache
+        for the shared prefix can be computed once and reused. For a 2K-token system prompt
+        served to 1,000 users, this saves ~600 GB of redundant KV computation.
+      </p>
+
+      <!-- ============================================================ -->
+      <h2 id="interview-takeaways">Interview Takeaways</h2>
+
+      <p>
+        When discussing attention memory in an infrastructure interview, anchor your answers
+        in these concrete facts:
+      </p>
+
+      <div class="callout">
+        <strong>The numbers to know:</strong>
+        <ul style="margin:0.5rem 0 0 1rem">
+          <li>Self-attention is <strong>O(n²)</strong> in sequence length for compute and memory</li>
+          <li>KV cache grows <strong>linearly</strong> with sequence length per request, but it's per-request</li>
+          <li>A 70B model at 128K context uses <strong>~20 GB</strong> of KV cache per request (GQA, FP16)</li>
+          <li>Going from 4K → 128K reduces concurrent batch capacity by <strong>~33×</strong></li>
+          <li>FlashAttention reduces attention <em>memory</em> from O(n²) to O(n) but not FLOPs</li>
+          <li>GQA reduces KV cache by the grouping ratio (8× for Llama 2 70B)</li>
+          <li>KV cache quantization to INT4 gives another <strong>4×</strong> reduction</li>
+        </ul>
+      </div>
+
+      <p>Key questions to be prepared for:</p>
+      <ul>
+        <li><strong>"Why is 128K context more expensive to serve than 4K?"</strong> — Memory-bound
+            regime: KV cache dominates GPU memory, reducing batch sizes and shifting the bottleneck
+            from compute to memory bandwidth.</li>
+        <li><strong>"How would you estimate GPU requirements for serving a 70B model at 100K context?"</strong>
+            — Use the KV cache formula, add model weights, account for GQA ratio and quantization,
+            then divide by available GPU memory to get minimum node count.</li>
+        <li><strong>"What's the difference between prefill and decode phases?"</strong> — Prefill is
+            compute-bound (parallel attention over full prompt), decode is memory-bandwidth-bound
+            (sequential generation reading entire KV cache per token).</li>
+        <li><strong>"How does PagedAttention help?"</strong> — Eliminates KV cache memory fragmentation
+            by allocating in fixed-size blocks, improving GPU memory utilization from ~40% to ~96%.</li>
+      </ul>
+
+      <p>
+        Understanding these memory constraints is foundational for any MLOps or infrastructure role.
+        Every decision in LLM serving — from hardware provisioning to request scheduling to pricing
+        strategy — flows from the simple fact that attention doesn't scale for free.
+      </p>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

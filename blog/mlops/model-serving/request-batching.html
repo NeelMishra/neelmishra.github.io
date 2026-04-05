@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into request batching and dynamic batching for ML inference — GPU utilization, adaptive batching strategies, and configuration tuning.">
+  <title>Request Batching: Dynamic Batching | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-batching">Why Batching Matters</a></li>
+        <li><a href="#static-vs-dynamic">Static vs Dynamic Batching</a></li>
+        <li><a href="#adaptive">Adaptive Batching</a></li>
+        <li><a href="#implementation">Implementation Patterns</a></li>
+        <li><a href="#config">Configuration Tuning</a></li>
+        <li><a href="#pitfalls">Common Pitfalls</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Request Batching: Dynamic Batching</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Model Serving &amp; Inference</span>
+        </div>
+      </div>
+
+      <h2 id="why-batching">Why Batching Matters</h2>
+      <p>GPUs achieve peak efficiency when processing many inputs in parallel. A single inference request uses a tiny fraction of GPU compute. Batching groups multiple requests into one GPU operation, dramatically improving throughput without proportionally increasing latency.</p>
+
+      <pre class="pseudo-code"><span class="cm"># GPU utilization with different batch sizes (typical)</span>
+Batch Size 1  : ██░░░░░░░░░░  ~15% GPU utilization
+Batch Size 4  : █████░░░░░░░  ~40% GPU utilization
+Batch Size 16 : █████████░░░  ~75% GPU utilization
+Batch Size 32 : ██████████░░  ~85% GPU utilization
+Batch Size 64 : ███████████░  ~92% GPU utilization
+
+<span class="cm"># Throughput improvement (ResNet-50, A100)</span>
+Batch 1  : 120 inferences/sec    (baseline)
+Batch 8  : 680 inferences/sec    (5.7× improvement)
+Batch 32 : 2100 inferences/sec   (17.5× improvement)</pre>
+
+      <div class="callout">
+        <strong>The batching paradox:</strong> Individual request latency increases slightly (waiting for the batch), but throughput increases dramatically. The sweet spot depends on your latency SLA and traffic pattern.
+      </div>
+
+      <h2 id="static-vs-dynamic">Static vs Dynamic Batching</h2>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Static Batching</h4>
+          <ul>
+            <li>Fixed batch size (e.g., always 32)</li>
+            <li>Wait until batch is full</li>
+            <li>Simple to implement</li>
+            <li>❌ High latency at low traffic</li>
+            <li>❌ Wasted GPU at varying loads</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>Dynamic Batching</h4>
+          <ul>
+            <li>Variable batch size (1 to max)</li>
+            <li>Timeout-based: send partial batch</li>
+            <li>Adapts to traffic patterns</li>
+            <li>✅ Low latency at low traffic</li>
+            <li>✅ High throughput at high traffic</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2 id="adaptive">Adaptive Batching</h2>
+      <p>Adaptive batching goes beyond dynamic batching by adjusting batch parameters in real-time based on observed latency and throughput metrics.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Adaptive batching algorithm</span>
+<span class="kw">class</span> <span class="fn">AdaptiveBatcher</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, max_batch=64, latency_target_ms=50):
+        self.max_batch = max_batch
+        self.latency_target = latency_target_ms
+        self.current_timeout = 10  <span class="cm"># ms, adaptive</span>
+        self.queue = []
+
+    <span class="kw">def</span> <span class="fn">add_request</span>(self, request):
+        self.queue.<span class="fn">append</span>(request)
+        <span class="kw">if</span> <span class="fn">len</span>(self.queue) >= self.max_batch:
+            <span class="kw">return</span> self.<span class="fn">flush</span>()
+
+    <span class="kw">def</span> <span class="fn">flush</span>(self):
+        batch = self.queue[:self.max_batch]
+        self.queue = self.queue[self.max_batch:]
+        <span class="kw">return</span> batch
+
+    <span class="kw">def</span> <span class="fn">adjust_timeout</span>(self, observed_latency_ms):
+        <span class="cm"># Increase timeout if latency is under budget (fill bigger batches)</span>
+        <span class="kw">if</span> observed_latency_ms < self.latency_target * 0.7:
+            self.current_timeout = <span class="fn">min</span>(self.current_timeout * 1.2, 100)
+        <span class="cm"># Decrease timeout if latency is near budget</span>
+        <span class="kw">elif</span> observed_latency_ms > self.latency_target * 0.9:
+            self.current_timeout = <span class="fn">max</span>(self.current_timeout * 0.8, 1)</pre>
+
+      <h2 id="implementation">Implementation Patterns</h2>
+      <h3>Server-Side Batching (Preferred)</h3>
+      <pre class="pseudo-code"><span class="cm"># Triton dynamic batching config</span>
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32 ]
+  max_queue_delay_microseconds: 10000
+}
+
+<span class="cm"># TorchServe batching config</span>
+batch_size=32
+max_batch_delay=50  <span class="cm"># ms</span>
+
+<span class="cm"># TF Serving batching config</span>
+max_batch_size { value: 32 }
+batch_timeout_micros { value: 10000 }</pre>
+
+      <h3>Client-Side Batching</h3>
+      <pre class="pseudo-code"><span class="cm"># Client-side batch collector</span>
+<span class="kw">import</span> asyncio
+<span class="kw">from</span> collections <span class="kw">import</span> deque
+
+<span class="kw">class</span> <span class="fn">ClientBatcher</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, endpoint, batch_size=32, timeout=0.05):
+        self.endpoint = endpoint
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.queue = deque()
+        self.futures = {}
+
+    <span class="kw">async def</span> <span class="fn">predict</span>(self, features):
+        future = asyncio.<span class="fn">Future</span>()
+        self.queue.<span class="fn">append</span>((features, future))
+        <span class="kw">if</span> <span class="fn">len</span>(self.queue) >= self.batch_size:
+            <span class="kw">await</span> self.<span class="fn">_flush</span>()
+        <span class="kw">return await</span> future
+
+    <span class="kw">async def</span> <span class="fn">_flush</span>(self):
+        batch = [self.queue.<span class="fn">popleft</span>() <span class="kw">for</span> _ <span class="kw">in</span> range(<span class="fn">min</span>(<span class="fn">len</span>(self.queue), self.batch_size))]
+        features = [b[0] <span class="kw">for</span> b <span class="kw">in</span> batch]
+        results = <span class="kw">await</span> self.<span class="fn">_call_endpoint</span>(features)
+        <span class="kw">for</span> (_, future), result <span class="kw">in</span> <span class="fn">zip</span>(batch, results):
+            future.<span class="fn">set_result</span>(result)</pre>
+
+      <h2 id="config">Configuration Tuning</h2>
+      <pre class="pseudo-code"><span class="cm"># Finding optimal batch size empirically</span>
+<span class="kw">def</span> <span class="fn">benchmark_batch_sizes</span>(model, input_shape):
+    results = {}
+    <span class="kw">for</span> bs <span class="kw">in</span> [1, 2, 4, 8, 16, 32, 64, 128]:
+        inputs = torch.<span class="fn">randn</span>(bs, *input_shape).cuda()
+        <span class="cm"># Warmup</span>
+        <span class="kw">for</span> _ <span class="kw">in</span> range(10):
+            model(inputs)
+        torch.cuda.<span class="fn">synchronize</span>()
+
+        start = time.<span class="fn">perf_counter</span>()
+        <span class="kw">for</span> _ <span class="kw">in</span> range(100):
+            model(inputs)
+        torch.cuda.<span class="fn">synchronize</span>()
+        elapsed = time.<span class="fn">perf_counter</span>() - start
+
+        results[bs] = {
+            <span class="fn">"throughput"</span>: bs * 100 / elapsed,
+            <span class="fn">"latency_ms"</span>: elapsed / 100 * 1000,
+            <span class="fn">"gpu_util"</span>: <span class="fn">get_gpu_util</span>()
+        }
+    <span class="kw">return</span> results</pre>
+
+      <div class="callout warn">
+        <strong>Memory constraint:</strong> Larger batches need more GPU memory. Profile memory usage with <code>torch.cuda.max_memory_allocated()</code>. If a batch size causes OOM, the server crashes — always set <code>max_batch_size</code> conservatively.
+      </div>
+
+      <h2 id="pitfalls">Common Pitfalls</h2>
+      <ul>
+        <li><strong>Variable-length inputs:</strong> Padding sequences to max length wastes compute. Use bucketing to group similar-length inputs.</li>
+        <li><strong>Head-of-line blocking:</strong> One slow request in a batch delays all others. Set per-request timeouts.</li>
+        <li><strong>Over-batching:</strong> Beyond a certain point, larger batches increase memory without improving throughput. Find the saturation point.</li>
+        <li><strong>Ignoring preprocessing:</strong> If preprocessing is CPU-bound, batching the GPU won't help. Batch the entire pipeline.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Rule of thumb:</strong> Start with max_batch_size = GPU_memory / (2 × single_inference_memory) and max_delay = latency_SLA × 0.3. Tune from there based on actual traffic patterns.
+      </div>
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

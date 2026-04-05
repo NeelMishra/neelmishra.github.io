@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into continuous batching for LLM inference: static vs dynamic batching, iteration-level scheduling, the Orca paper, and maximizing GPU utilization in production serving.">
+  <title>Continuous Batching: Maximizing GPU Utilization | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#the-batching-problem">The Batching Problem</a></li>
+        <li><a href="#static-batching">Static Batching</a></li>
+        <li><a href="#continuous-batching">Continuous Batching</a></li>
+        <li><a href="#timeline-comparison">Timeline Comparison</a></li>
+        <li><a href="#iteration-level-scheduling">Iteration-Level Scheduling</a></li>
+        <li><a href="#orca-paper">The Orca Paper</a></li>
+        <li><a href="#production-impact">Production Impact</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Continuous Batching: Maximizing GPU Utilization</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="the-batching-problem">The Batching Problem</h2>
+      <p>As we established in the fundamentals post, LLM decode is <strong>memory-bandwidth-bound</strong>. A single decode step for a 70B model reads 140 GB of weights from HBM to generate one token. Batching amortizes this weight read across multiple sequences: with batch size B, the same 140 GB weight read produces B tokens instead of one.</p>
+      <p>But LLM requests have a fundamental challenge: <strong>sequences finish at different times</strong>. One request might generate 10 tokens, another 500. Any batching strategy must handle this heterogeneity efficiently.</p>
+
+      <pre class="pseudo-code"><span class="cm"># The core problem: variable output lengths</span>
+<span class="cm"># Imagine 4 concurrent requests:</span>
+request_A: prompt=100 tokens, output=20 tokens    <span class="cm"># finishes quickly</span>
+request_B: prompt=200 tokens, output=500 tokens   <span class="cm"># runs for a long time</span>
+request_C: prompt=50 tokens,  output=150 tokens
+request_D: prompt=300 tokens, output=30 tokens     <span class="cm"># finishes quickly</span>
+
+<span class="cm"># How do we batch these efficiently?</span>
+<span class="cm"># Static batching: wait for slowest (B: 500 tokens) → GPU idle 70% of time</span>
+<span class="cm"># Continuous batching: swap in new requests as others finish → near-100% util</span></pre>
+
+      <!-- Section 2 -->
+      <h2 id="static-batching">Static Batching</h2>
+      <p>The simplest approach: collect B requests, run them all to completion, then start the next batch. This is how most frameworks (HuggingFace Transformers, early vLLM competitors) originally worked.</p>
+
+      <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">static_batching</span>(request_queue, model, batch_size=8):
+    <span class="kw">while</span> request_queue:
+        <span class="cm"># Step 1: Collect a full batch</span>
+        batch = []
+        <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(batch_size):
+            <span class="kw">if</span> request_queue:
+                batch.<span class="fn">append</span>(request_queue.<span class="fn">pop</span>())
+
+        <span class="cm"># Step 2: Pad all sequences to max length</span>
+        max_prompt_len = <span class="fn">max</span>(len(r.prompt) <span class="kw">for</span> r <span class="kw">in</span> batch)
+        padded_prompts = <span class="fn">pad_sequences</span>(batch, max_prompt_len)
+
+        <span class="cm"># Step 3: Run prefill for entire batch</span>
+        kv_caches = model.<span class="fn">prefill</span>(padded_prompts)
+
+        <span class="cm"># Step 4: Decode until ALL sequences hit EOS or max_len</span>
+        <span class="kw">for</span> step <span class="kw">in</span> <span class="fn">range</span>(max_output_len):
+            logits, kv_caches = model.<span class="fn">decode_step</span>(batch, kv_caches)
+            <span class="kw">for</span> seq <span class="kw">in</span> batch:
+                <span class="kw">if not</span> seq.finished:
+                    token = <span class="fn">sample</span>(logits[seq.idx])
+                    seq.<span class="fn">append_token</span>(token)
+                <span class="cm"># Finished sequences still occupy GPU memory!</span>
+                <span class="cm"># Their KV cache slots are wasted until batch completes</span>
+
+        <span class="cm"># Step 5: Return results, start next batch</span>
+        <span class="kw">yield</span> [seq.output <span class="kw">for</span> seq <span class="kw">in</span> batch]</pre>
+
+      <div class="callout warn">
+        <strong>Waste in static batching:</strong> If one sequence generates 500 tokens and another generates 20, the short sequence's GPU slot (weights computation, KV cache memory) sits idle for 480 decode steps. With diverse output lengths, static batching achieves only 20–40% GPU utilization on average. New requests wait in queue even when GPU capacity is available.
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="continuous-batching">Continuous Batching</h2>
+      <p>Continuous batching (also called <em>in-flight batching</em>) operates at the <strong>iteration level</strong> instead of the request level. After each decode step, the scheduler checks which sequences have completed, evicts them, and immediately admits new requests from the queue into the freed slots.</p>
+
+      <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">continuous_batching_scheduler</span>(request_queue, model, max_batch=64):
+    active_sequences = {}  <span class="cm"># slot_id → sequence state</span>
+    
+    <span class="kw">while</span> request_queue <span class="kw">or</span> active_sequences:
+        <span class="cm"># ──── Phase 1: Evict completed sequences ────</span>
+        completed = [sid <span class="kw">for</span> sid, seq <span class="kw">in</span> active_sequences.<span class="fn">items</span>()
+                     <span class="kw">if</span> seq.finished]
+        <span class="kw">for</span> sid <span class="kw">in</span> completed:
+            <span class="fn">yield_result</span>(active_sequences.<span class="fn">pop</span>(sid))
+            <span class="fn">free_kv_cache</span>(sid)  <span class="cm"># immediately reclaim memory</span>
+
+        <span class="cm"># ──── Phase 2: Admit new sequences into free slots ────</span>
+        <span class="kw">while</span> <span class="fn">len</span>(active_sequences) < max_batch <span class="kw">and</span> request_queue:
+            new_req = request_queue.<span class="fn">pop</span>()
+            slot_id = <span class="fn">allocate_kv_cache</span>()
+            <span class="cm"># Prefill happens inline, mixed with ongoing decode</span>
+            kv = model.<span class="fn">prefill</span>(new_req.prompt)
+            active_sequences[slot_id] = <span class="fn">SequenceState</span>(new_req, kv)
+
+        <span class="cm"># ──── Phase 3: One decode step for ALL active sequences ────</span>
+        <span class="kw">if</span> active_sequences:
+            tokens = model.<span class="fn">decode_step_batched</span>(active_sequences)
+            <span class="kw">for</span> sid, token <span class="kw">in</span> tokens.<span class="fn">items</span>():
+                active_sequences[sid].<span class="fn">append_token</span>(token)
+        
+        <span class="cm"># Loop back → completed sequences freed, new ones admitted</span>
+        <span class="cm"># GPU is ALWAYS working on a full (or near-full) batch!</span></pre>
+
+      <div class="callout">
+        <strong>The key insight:</strong> Continuous batching decouples request lifetime from batch lifetime. A request that generates 10 tokens occupies a slot for 10 iterations, then immediately frees it for a new request. The GPU stays at maximum batch occupancy virtually all the time, instead of waiting for the slowest request in the batch.
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="timeline-comparison">Timeline Comparison</h2>
+      <p>The diagram below contrasts static and continuous batching over time. Each row represents a batch slot, and each colored block represents a sequence being processed.</p>
+
+      <svg id="li-batching-timeline" viewBox="0 0 750 370" style="width:100%;max-width:750px;margin:1.2rem auto;display:block">
+        <text x="375" y="18" text-anchor="middle" font-size="13" font-weight="700" font-family="Manrope" fill="#333">Static vs Continuous Batching Timeline</text>
+
+        <!-- Static Batching -->
+        <text x="20" y="48" font-size="12" font-weight="700" font-family="Manrope" fill="#ff6b35">Static Batching</text>
+        <text x="720" y="48" text-anchor="end" font-size="10" font-family="Manrope" fill="#999">time →</text>
+
+        <!-- Batch 1 -->
+        <rect x="60" y="55" width="260" height="22" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="70" y="70" font-size="9" font-family="Consolas" fill="#333">Seq A (100 tok)</text>
+        <rect x="160" y="55" width="160" height="22" rx="0" fill="#f5f5f5" stroke="#ddd" stroke-width="0.5"/>
+        <text x="240" y="70" text-anchor="middle" font-size="8" font-family="Manrope" fill="#bbb">IDLE (waiting for B)</text>
+
+        <rect x="60" y="80" width="260" height="22" rx="4" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>
+        <text x="70" y="95" font-size="9" font-family="Consolas" fill="#333">Seq B (260 tok — slowest)</text>
+
+        <rect x="60" y="105" width="260" height="22" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="70" y="120" font-size="9" font-family="Consolas" fill="#333">Seq C (180 tok)</text>
+        <rect x="240" y="105" width="80" height="22" rx="0" fill="#f5f5f5" stroke="#ddd" stroke-width="0.5"/>
+        <text x="280" y="120" text-anchor="middle" font-size="8" font-family="Manrope" fill="#bbb">IDLE</text>
+
+        <rect x="60" y="130" width="260" height="22" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1"/>
+        <text x="70" y="145" font-size="9" font-family="Consolas" fill="#333">Seq D (60 tok)</text>
+        <rect x="120" y="130" width="200" height="22" rx="0" fill="#f5f5f5" stroke="#ddd" stroke-width="0.5"/>
+        <text x="220" y="145" text-anchor="middle" font-size="8" font-family="Manrope" fill="#bbb">IDLE (waiting for B)</text>
+
+        <!-- Batch 2 -->
+        <rect x="330" y="55" width="180" height="22" rx="4" fill="#fce4ec" stroke="#c62828" stroke-width="1"/>
+        <text x="340" y="70" font-size="9" font-family="Consolas" fill="#333">Seq E (180 tok)</text>
+        <rect x="330" y="80" width="180" height="22" rx="4" fill="#e0f2f1" stroke="#00695c" stroke-width="1"/>
+        <text x="340" y="95" font-size="9" font-family="Consolas" fill="#333">Seq F (110 tok)</text>
+        <rect x="440" y="80" width="70" height="22" rx="0" fill="#f5f5f5" stroke="#ddd" stroke-width="0.5"/>
+        <rect x="330" y="105" width="180" height="22" rx="4" fill="#e8eaf6" stroke="#283593" stroke-width="1"/>
+        <text x="340" y="120" font-size="9" font-family="Consolas" fill="#333">Seq G (170 tok)</text>
+        <rect x="330" y="130" width="180" height="22" rx="4" fill="#fff8e1" stroke="#f57f17" stroke-width="1"/>
+        <text x="340" y="145" font-size="9" font-family="Consolas" fill="#333">Seq H (40 tok)</text>
+        <rect x="370" y="130" width="140" height="22" rx="0" fill="#f5f5f5" stroke="#ddd" stroke-width="0.5"/>
+
+        <line x1="325" y1="52" x2="325" y2="155" stroke="#ccc" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="327" y="165" font-size="8" font-family="Manrope" fill="#999">batch boundary</text>
+
+        <!-- Utilization label -->
+        <rect x="555" y="65" width="160" height="80" rx="8" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="635" y="85" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#ff6b35">Static Batching</text>
+        <text x="635" y="100" text-anchor="middle" font-size="9" font-family="Manrope" fill="#333">Avg GPU utilization:</text>
+        <text x="635" y="118" text-anchor="middle" font-size="16" font-weight="700" font-family="Manrope" fill="#ff6b35">~35%</text>
+        <text x="635" y="135" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">Gray = wasted capacity</text>
+
+        <!-- Continuous Batching -->
+        <text x="20" y="200" font-size="12" font-weight="700" font-family="Manrope" fill="#0a8f6a">Continuous Batching</text>
+
+        <rect x="60" y="210" width="100" height="22" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="65" y="225" font-size="9" font-family="Consolas" fill="#333">A (100)</text>
+        <rect x="165" y="210" width="180" height="22" rx="4" fill="#fce4ec" stroke="#c62828" stroke-width="1"/>
+        <text x="170" y="225" font-size="9" font-family="Consolas" fill="#333">E (180) — fills A's slot</text>
+        <rect x="350" y="210" width="170" height="22" rx="4" fill="#e0f2f1" stroke="#00695c" stroke-width="1"/>
+        <text x="355" y="225" font-size="9" font-family="Consolas" fill="#333">I — fills E's slot</text>
+
+        <rect x="60" y="235" width="260" height="22" rx="4" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>
+        <text x="65" y="250" font-size="9" font-family="Consolas" fill="#333">B (260 — runs long)</text>
+        <rect x="325" y="235" width="195" height="22" rx="4" fill="#e8eaf6" stroke="#283593" stroke-width="1"/>
+        <text x="330" y="250" font-size="9" font-family="Consolas" fill="#333">G — fills B's slot</text>
+
+        <rect x="60" y="260" width="180" height="22" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="65" y="275" font-size="9" font-family="Consolas" fill="#333">C (180)</text>
+        <rect x="245" y="260" width="110" height="22" rx="4" fill="#fff8e1" stroke="#f57f17" stroke-width="1"/>
+        <text x="250" y="275" font-size="9" font-family="Consolas" fill="#333">H (fills C)</text>
+        <rect x="360" y="260" width="160" height="22" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1"/>
+        <text x="365" y="275" font-size="9" font-family="Consolas" fill="#333">J — fills H's slot</text>
+
+        <rect x="60" y="285" width="60" height="22" rx="4" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1"/>
+        <text x="65" y="300" font-size="9" font-family="Consolas" fill="#333">D</text>
+        <rect x="125" y="285" width="110" height="22" rx="4" fill="#e0f2f1" stroke="#00695c" stroke-width="1"/>
+        <text x="130" y="300" font-size="9" font-family="Consolas" fill="#333">F (fills D)</text>
+        <rect x="240" y="285" width="120" height="22" rx="4" fill="#e8eaf6" stroke="#283593" stroke-width="1"/>
+        <text x="245" y="300" font-size="9" font-family="Consolas" fill="#333">K (fills F)</text>
+        <rect x="365" y="285" width="155" height="22" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="370" y="300" font-size="9" font-family="Consolas" fill="#333">L — fills K's slot</text>
+
+        <!-- Utilization label -->
+        <rect x="555" y="220" width="160" height="80" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="635" y="240" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#0a8f6a">Continuous Batching</text>
+        <text x="635" y="255" text-anchor="middle" font-size="9" font-family="Manrope" fill="#333">Avg GPU utilization:</text>
+        <text x="635" y="273" text-anchor="middle" font-size="16" font-weight="700" font-family="Manrope" fill="#0a8f6a">~95%</text>
+        <text x="635" y="290" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">Slots always full</text>
+
+        <text x="375" y="340" text-anchor="middle" font-size="10" font-family="Manrope" fill="#666">Continuous batching serves 2–3× more requests in the same wall-clock time</text>
+      </svg>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🔴 Static Batching</h3>
+          <ul>
+            <li><strong>Scheduling unit:</strong> Entire batch of requests</li>
+            <li><strong>New admissions:</strong> Only after full batch completes</li>
+            <li><strong>GPU utilization:</strong> 20–40% (variable output lengths)</li>
+            <li><strong>Latency:</strong> Short requests delayed by long ones</li>
+            <li><strong>Memory:</strong> Allocated for max length, often wasted</li>
+            <li><strong>Throughput:</strong> Baseline</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>🟢 Continuous Batching</h3>
+          <ul>
+            <li><strong>Scheduling unit:</strong> Single decode iteration</li>
+            <li><strong>New admissions:</strong> Every iteration (slot freed → slot filled)</li>
+            <li><strong>GPU utilization:</strong> 85–98%</li>
+            <li><strong>Latency:</strong> Short requests exit immediately</li>
+            <li><strong>Memory:</strong> Freed as soon as sequence completes</li>
+            <li><strong>Throughput:</strong> 2–3× higher than static</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="iteration-level-scheduling">Iteration-Level Scheduling</h2>
+      <p>The heart of continuous batching is the <strong>iteration-level scheduler</strong>. Instead of making scheduling decisions at the request level (when to start/stop a batch), decisions happen at every single decode iteration—typically every 30–70ms for large models.</p>
+
+      <pre class="pseudo-code"><span class="kw">class</span> <span class="fn">IterationScheduler</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, max_batch_size, max_kv_memory):
+        self.active = {}           <span class="cm"># running sequences</span>
+        self.waiting = <span class="fn">deque</span>()     <span class="cm"># queue of pending requests</span>
+        self.max_batch = max_batch_size
+        self.kv_budget = max_kv_memory  <span class="cm"># in bytes</span>
+        self.kv_used = 0
+
+    <span class="kw">def</span> <span class="fn">schedule_iteration</span>(self):
+        <span class="cm">"""Called once per decode step (~30-70ms)."""</span>
+        
+        <span class="cm"># 1. Evict finished sequences</span>
+        <span class="kw">for</span> sid <span class="kw">in</span> <span class="fn">list</span>(self.active):
+            <span class="kw">if</span> self.active[sid].is_done():
+                freed = self.active[sid].kv_size
+                self.kv_used -= freed
+                <span class="kw">del</span> self.active[sid]
+        
+        <span class="cm"># 2. Admit new sequences (respecting memory budget)</span>
+        <span class="kw">while</span> (self.waiting
+               <span class="kw">and</span> <span class="fn">len</span>(self.active) < self.max_batch
+               <span class="kw">and</span> self.<span class="fn">can_fit</span>(self.waiting[0])):
+            req = self.waiting.<span class="fn">popleft</span>()
+            seq = self.<span class="fn">run_prefill</span>(req)   <span class="cm"># prefill inline</span>
+            self.active[seq.id] = seq
+            self.kv_used += seq.kv_size
+        
+        <span class="cm"># 3. Build decode batch from active sequences</span>
+        <span class="kw">return</span> <span class="fn">list</span>(self.active.<span class="fn">values</span>())
+    
+    <span class="kw">def</span> <span class="fn">can_fit</span>(self, request):
+        <span class="cm"># Estimate KV cache needed for this request</span>
+        est_kv = self.<span class="fn">estimate_kv</span>(request.prompt_len, request.max_output)
+        <span class="kw">return</span> self.kv_used + est_kv <= self.kv_budget</pre>
+
+      <div class="callout">
+        <strong>Preemption support:</strong> Advanced schedulers can also <em>preempt</em> running sequences. If a high-priority request arrives and no slots are free, the scheduler can swap a low-priority sequence's KV cache to CPU memory (or recompute it later), admit the high-priority request, and resume the preempted sequence when capacity is available. vLLM implements this with its swap/recompute mechanisms.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="orca-paper">The Orca Paper</h2>
+      <p>Continuous batching was formalized in the <strong>Orca paper</strong> (Yu et al., OSDI 2022). Orca introduced two key concepts that fundamentally changed LLM serving:</p>
+
+      <p><strong>1. Iteration-level scheduling:</strong> As described above—schedule at the granularity of individual decode steps, not entire request batches.</p>
+      <p><strong>2. Selective batching:</strong> Not all sequences in a batch need the same operations. Some might be in prefill (processing long prompts) while others are in decode (generating tokens). Orca handles this by selectively applying the appropriate operation to each sequence within the batch.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Orca's selective batching: mixed prefill + decode in one iteration</span>
+<span class="kw">def</span> <span class="fn">selective_batch_step</span>(prefill_seqs, decode_seqs, model):
+    <span class="cm"># Some sequences are doing prefill (new arrivals)</span>
+    <span class="cm"># Others are doing decode (ongoing generation)</span>
+    
+    <span class="cm"># Prefill sequences: process full prompt tokens</span>
+    <span class="kw">for</span> seq <span class="kw">in</span> prefill_seqs:
+        seq.kv_cache = model.<span class="fn">prefill</span>(seq.prompt_tokens)
+        seq.phase = 'decode'
+    
+    <span class="cm"># Decode sequences: process one token each</span>
+    <span class="cm"># Batch all decode sequences together for efficiency</span>
+    <span class="kw">if</span> decode_seqs:
+        input_tokens = [seq.last_token <span class="kw">for</span> seq <span class="kw">in</span> decode_seqs]
+        kv_caches = [seq.kv_cache <span class="kw">for</span> seq <span class="kw">in</span> decode_seqs]
+        
+        <span class="cm"># Batched decode: one forward pass for all decode sequences</span>
+        new_tokens = model.<span class="fn">batched_decode</span>(input_tokens, kv_caches)
+        
+        <span class="kw">for</span> seq, token <span class="kw">in</span> <span class="fn">zip</span>(decode_seqs, new_tokens):
+            seq.<span class="fn">append</span>(token)
+
+<span class="cm"># Key insight: prefill and decode have very different compute profiles</span>
+<span class="cm"># Chunked prefill (Sarathi, DeepSpeed-FastGen) interleaves prefill</span>
+<span class="cm"># chunks with decode tokens to balance compute within each iteration</span></pre>
+
+      <div class="callout">
+        <strong>Chunked prefill:</strong> A refinement introduced by Sarathi (Agrawal et al., 2023) and adopted by vLLM. Instead of processing an entire long prompt in one iteration (which would stall decode tokens), the prompt is broken into chunks (e.g., 512 tokens). Each iteration processes one chunk of prefill alongside ongoing decode tokens. This prevents prefill from causing latency spikes for in-flight decode sequences.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="production-impact">Production Impact</h2>
+      <p>Continuous batching is now standard in every major LLM serving framework. The throughput improvements are substantial and well-documented:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>📊 Throughput Numbers</h3>
+          <ul>
+            <li><strong>vLLM benchmark (LLaMA-13B):</strong> 14–24× throughput vs HuggingFace Transformers with continuous batching + PagedAttention</li>
+            <li><strong>TensorRT-LLM:</strong> Reports 2–3× throughput gain from in-flight batching alone</li>
+            <li><strong>Orca paper:</strong> 36.9× throughput improvement over FasterTransformer for GPT-2</li>
+            <li><strong>Typical real-world:</strong> 2–8× throughput improvement depending on workload</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>🏗️ Framework Support</h3>
+          <ul>
+            <li><strong>vLLM:</strong> Continuous batching + PagedAttention (default)</li>
+            <li><strong>TensorRT-LLM:</strong> In-flight batching (GptManager)</li>
+            <li><strong>TGI (HuggingFace):</strong> Continuous batching with Flash Attention</li>
+            <li><strong>DeepSpeed-FastGen:</strong> SplitFuse (chunked prefill)</li>
+            <li><strong>SGLang:</strong> RadixAttention with continuous batching</li>
+            <li><strong>LMDeploy:</strong> Persistent batch scheduling</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm"># Why the throughput gain is so large:</span>
+<span class="cm"># Static batching with 4 slots, requests averaging 200 output tokens:</span>
+<span class="cm"># - Longest request: 500 tokens → batch takes 500 steps</span>
+<span class="cm"># - Total tokens generated: 4 × 200 = 800 (avg)</span>
+<span class="cm"># - Effective throughput: 800 / 500 = 1.6 tokens/step</span>
+<span class="cm"># - GPU serving wasted slots: (500-200)/500 = 60% idle time per slot</span>
+
+<span class="cm"># Continuous batching with 4 slots, same workload:</span>
+<span class="cm"># - Slots always full: as one finishes, next starts immediately</span>
+<span class="cm"># - Total tokens generated per 500 steps: ~4 × 500 = 2000</span>
+<span class="cm"># - Effective throughput: 2000 / 500 = 4.0 tokens/step</span>
+<span class="cm"># - 2.5× improvement from batching strategy alone!</span>
+
+<span class="cm"># Combined with PagedAttention (eliminates memory waste):</span>
+<span class="cm"># - Can fit MORE concurrent sequences → larger effective batch</span>
+<span class="cm"># - Typical combined improvement: 5-15× over naive static serving</span></pre>
+
+      <div class="callout">
+        <strong>The bottom line:</strong> Continuous batching is not optional for production LLM serving. It's the difference between serving 10 requests/sec and 50+ requests/sec on the same hardware. Combined with PagedAttention (which we cover in the next post), it enables serving thousands of concurrent users from a single GPU node. If you're running <code>model.generate()</code> in a loop, you're leaving 60–80% of your GPU performance on the table.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

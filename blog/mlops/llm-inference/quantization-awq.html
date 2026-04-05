@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into AWQ (Activation-Aware Weight Quantization): salient weight detection, per-channel scaling, and why 1% of weights carry most of the model's information.">
+  <title>AWQ: Activation-Aware Quantization | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#li-core-observation">The Core Observation</a></li>
+        <li><a href="#li-salient-weights">Salient Weight Detection</a></li>
+        <li><a href="#li-scaling-transform">Per-Channel Scaling Transform</a></li>
+        <li><a href="#li-search-optimal">Searching for Optimal Scales</a></li>
+        <li><a href="#li-vs-gptq">AWQ vs GPTQ</a></li>
+        <li><a href="#li-awq-code">Implementation with AutoAWQ</a></li>
+        <li><a href="#li-hardware-efficiency">Hardware Efficiency &amp; Deployment</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>AWQ: Activation-Aware Quantization</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-core-observation">The Core Observation</h2>
+      <p>AWQ (Lin et al., 2023) starts from a surprisingly simple observation: <strong>not all weights are equally important</strong>. In a typical transformer linear layer, skipping the quantization of just <strong>1% of weight channels</strong> (keeping them in FP16) can reduce quantization error by an order of magnitude — far more than the 1% parameter overhead would suggest.</p>
+      <p>The key question is: <em>which</em> 1%? AWQ discovers that the salient weight channels correspond to channels with <strong>large activation magnitudes</strong>. A weight column w<sub>j</sub> is "salient" not because |w<sub>j</sub>| is large, but because |x<sub>j</sub>| (the corresponding input activation) is consistently large across calibration data.</p>
+
+      <div class="callout">
+        <strong>Why activations, not weights?</strong> The quantization error for output y is: Δy = (ΔW)·x. Even if ΔW is small for a given column, if the corresponding activation x<sub>j</sub> is large, the output error is amplified. Conversely, large ΔW on a channel with near-zero activations has negligible impact. AWQ protects the channels where errors are most amplified.
+      </div>
+
+      <p>However, a mixed-precision approach (keeping 1% in FP16) creates <strong>hardware inefficiency</strong> — GPUs cannot efficiently process a layer with mixed INT4/FP16 columns. AWQ's breakthrough is achieving the <em>same protection</em> through a mathematical scaling trick that keeps all weights at the same bit-width.</p>
+
+      <!-- Section 2 -->
+      <h2 id="li-salient-weights">Salient Weight Detection</h2>
+
+      <svg viewBox="0 0 780 300" style="width:100%;max-width:780px;margin:1.2rem auto;display:block" aria-label="AWQ salient weight detection showing activation magnitudes across channels">
+        <defs>
+          <marker id="li-awq-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+          <linearGradient id="li-awq-heat" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#ff6b35"/><stop offset="100%" stop-color="#ffe0cc"/>
+          </linearGradient>
+        </defs>
+        <!-- Activation magnitudes -->
+        <text x="20" y="22" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#333">Activation Magnitudes (avg |x_j| over calibration data)</text>
+        <!-- Bars representing channel activations -->
+        <rect x="30" y="80" width="18" height="15" rx="2" fill="#e0e0e0"/><text x="39" y="112" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#999">c₁</text>
+        <rect x="52" y="65" width="18" height="30" rx="2" fill="#e0e0e0"/><text x="61" y="112" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#999">c₂</text>
+        <rect x="74" y="30" width="18" height="65" rx="2" fill="#ff6b35" stroke="#ff6b35" stroke-width="1.5"/><text x="83" y="112" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35" font-weight="700">c₃</text>
+        <rect x="96" y="78" width="18" height="17" rx="2" fill="#e0e0e0"/>
+        <rect x="118" y="72" width="18" height="23" rx="2" fill="#e0e0e0"/>
+        <rect x="140" y="82" width="18" height="13" rx="2" fill="#e0e0e0"/>
+        <rect x="162" y="35" width="18" height="60" rx="2" fill="#ff6b35" stroke="#ff6b35" stroke-width="1.5"/><text x="171" y="112" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35" font-weight="700">c₇</text>
+        <rect x="184" y="75" width="18" height="20" rx="2" fill="#e0e0e0"/>
+        <rect x="206" y="70" width="18" height="25" rx="2" fill="#e0e0e0"/>
+        <rect x="228" y="83" width="18" height="12" rx="2" fill="#e0e0e0"/>
+        <text x="150" y="135" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">~1% of channels (orange) have 10-100× larger activations</text>
+        <!-- Arrow -->
+        <line x1="270" y1="70" x2="310" y2="70" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-awq-arrow)"/>
+        <!-- Scaling step -->
+        <rect x="320" y="25" width="200" height="100" rx="10" fill="#eaf7f2" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="420" y="52" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#0a8f6a">Per-Channel Scaling</text>
+        <text x="420" y="75" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">w_j' = w_j × s_j</text>
+        <text x="420" y="95" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">x_j' = x_j / s_j</text>
+        <text x="420" y="115" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">s_j &gt; 1 for salient channels</text>
+        <!-- Arrow -->
+        <line x1="530" y1="70" x2="570" y2="70" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-awq-arrow)"/>
+        <!-- Result -->
+        <rect x="580" y="25" width="180" height="100" rx="10" fill="#fff5f0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="670" y="50" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#ff6b35">After Scaling</text>
+        <text x="670" y="72" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">Salient weights are larger →</text>
+        <text x="670" y="88" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333">less relative quantization error</text>
+        <text x="670" y="108" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">All weights remain INT4!</text>
+        <!-- Bottom explanation -->
+        <rect x="30" y="165" width="730" height="120" rx="10" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+        <text x="50" y="190" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#333">Why scaling helps quantization:</text>
+        <text x="50" y="212" font-family="Consolas,monospace" font-size="11" fill="#333">Before: w = 0.02, quant(w) = 0 → error = 0.02 (100% relative error)</text>
+        <text x="50" y="232" font-family="Consolas,monospace" font-size="11" fill="#0a8f6a">After:  w' = 0.02 × 4 = 0.08, quant(w') = 0.0625 → error = 0.0175 (22% relative error)</text>
+        <text x="50" y="260" font-family="Manrope,sans-serif" font-size="11" fill="#666">Scaling up salient weights makes them occupy more quantization bins → finer effective resolution</text>
+      </svg>
+
+      <p>Salient channels are identified by computing the <strong>average activation magnitude</strong> per input channel across the calibration dataset:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        s_j ∝ (E[|x_j|])^α where α is a search parameter, typically α ∈ [0.5, 0.7]
+      </p>
+      <p>The exponent α controls the aggressiveness of protection: α = 0 gives uniform scaling (no protection), α = 1 gives full proportional scaling. The optimal α is found via grid search on a small calibration set.</p>
+
+      <!-- Section 3 -->
+      <h2 id="li-scaling-transform">Per-Channel Scaling Transform</h2>
+      <p>The mathematical foundation of AWQ is the <strong>scaling equivalence</strong>. For a linear layer y = Wx, we can introduce a diagonal scaling matrix S = diag(s₁, ..., s_d):</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        y = Wx = (W·S)·(S⁻¹·x) = W'·x'
+      </p>
+      <p>This transformation is mathematically exact — the output y is unchanged. But the <em>quantization properties</em> of W' = W·S differ from W. By choosing s_j > 1 for salient channels, we scale up those weight columns, which:</p>
+      <ol>
+        <li><strong>Increases the magnitude</strong> of salient weights, giving them more quantization bins (less relative error).</li>
+        <li><strong>Decreases</strong> the corresponding activations x'_j = x_j/s_j, but this is fine because activations are computed in full precision (FP16) before being multiplied by the quantized weights.</li>
+        <li><strong>Trades off</strong> quantization precision: non-salient channels get slightly less resolution (scaled down), but their low activation magnitudes mean the resulting output error is minimal.</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Implementation detail:</strong> The scaling is "folded" into the weights before quantization and into the preceding layer's output (or LayerNorm parameters). At inference time, there is zero overhead — the INT4 weights already incorporate the scaling, and the preceding layer absorbs the inverse scaling. No runtime division is needed.
+      </div>
+
+      <p>For the preceding LayerNorm with parameters γ (scale) and β (bias), the fusion is:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        γ' = γ / s, &nbsp;&nbsp; β' = β / s, &nbsp;&nbsp; W' = W · diag(s)
+      </p>
+
+      <!-- Section 4 -->
+      <h2 id="li-search-optimal">Searching for Optimal Scales</h2>
+      <p>AWQ performs a per-channel grid search for the optimal scaling exponent α per group of channels. The objective is to minimize the MSE between the FP16 output and the quantized output:</p>
+
+<pre class="pseudo-code"><span class="kw">def</span> <span class="fn">awq_find_scales</span>(weight, activations, group_size=128, n_grid=20):
+    <span class="cm">"""Find optimal per-channel scaling factors for AWQ."""</span>
+    d_out, d_in = weight.shape
+    scales = torch.ones(d_in, device=weight.device)
+    
+    <span class="cm"># Compute average activation magnitude per channel</span>
+    act_mean = activations.abs().mean(dim=0)  <span class="cm"># shape: [d_in]</span>
+    
+    <span class="kw">for</span> g <span class="kw">in</span> range(0, d_in, group_size):
+        g_end = min(g + group_size, d_in)
+        w_group = weight[:, g:g_end]          <span class="cm"># [d_out, group_size]</span>
+        a_group = act_mean[g:g_end]           <span class="cm"># [group_size]</span>
+        x_group = activations[:, g:g_end]     <span class="cm"># [n_cal, group_size]</span>
+        
+        <span class="cm"># FP16 reference output for this group</span>
+        y_ref = x_group @ w_group.T           <span class="cm"># [n_cal, d_out]</span>
+        
+        best_error = <span class="kw">float</span>(<span class="fn">"inf"</span>)
+        best_scale = torch.ones(g_end - g)
+        
+        <span class="cm"># Grid search over alpha ∈ [0, 1]</span>
+        <span class="kw">for</span> alpha <span class="kw">in</span> torch.linspace(0, 1, n_grid):
+            s = a_group.pow(alpha)
+            s = s / s.mean()                  <span class="cm"># normalize to preserve magnitude</span>
+            s = s.clamp(min=1e-4)
+            
+            <span class="cm"># Apply scaling: scale up weights, scale down activations</span>
+            w_scaled = w_group * s.unsqueeze(0)
+            x_scaled = x_group / s.unsqueeze(0)
+            
+            <span class="cm"># Quantize the scaled weights to INT4</span>
+            w_q = <span class="fn">pseudo_quantize</span>(w_scaled, bits=4)
+            
+            <span class="cm"># Compute quantized output</span>
+            y_q = x_scaled @ w_q.T
+            
+            <span class="cm"># MSE loss between FP16 and quantized output</span>
+            error = (y_ref - y_q).pow(2).mean()
+            
+            <span class="kw">if</span> error &lt; best_error:
+                best_error = error
+                best_scale = s.clone()
+        
+        scales[g:g_end] = best_scale
+    
+    <span class="kw">return</span> scales
+
+<span class="kw">def</span> <span class="fn">pseudo_quantize</span>(w, bits=4, group_size=128):
+    <span class="cm">"""Simulate INT4 quantization (round-to-nearest)."""</span>
+    max_val = (2 ** (bits - 1)) - 1
+    <span class="kw">for</span> g <span class="kw">in</span> range(0, w.shape[1], group_size):
+        g_end = min(g + group_size, w.shape[1])
+        w_g = w[:, g:g_end]
+        scale = w_g.abs().max(dim=1, keepdim=<span class="kw">True</span>).values / max_val
+        w[:, g:g_end] = (w_g / scale).round().clamp(-max_val, max_val) * scale
+    <span class="kw">return</span> w</pre>
+
+      <div class="callout warn">
+        <strong>Speed advantage:</strong> AWQ quantization takes only <strong>~10 minutes</strong> for a 70B model on a single GPU, compared to ~4 hours for GPTQ. This is because AWQ performs a simple grid search per channel group, while GPTQ requires sequential Hessian-based weight updates across all columns.
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="li-vs-gptq">AWQ vs GPTQ</h2>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>AWQ</h3>
+          <ul>
+            <li><strong>Method:</strong> Activation-aware per-channel scaling → round-to-nearest</li>
+            <li><strong>Quantization time:</strong> ~10 minutes (70B)</li>
+            <li><strong>Calibration data:</strong> 128 samples</li>
+            <li><strong>Quality (LLaMA-7B INT4):</strong> PPL 5.78 on WikiText-2</li>
+            <li><strong>Quality (LLaMA-70B INT4):</strong> PPL 3.55 on WikiText-2</li>
+            <li><strong>Kernel efficiency:</strong> Excellent (uniform INT4, no reordering)</li>
+            <li><strong>Fine-tuning friendly:</strong> Yes (weights are simply scaled)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>GPTQ</h3>
+          <ul>
+            <li><strong>Method:</strong> Hessian-based optimal weight update → column-by-column</li>
+            <li><strong>Quantization time:</strong> ~4 hours (70B)</li>
+            <li><strong>Calibration data:</strong> 128 samples</li>
+            <li><strong>Quality (LLaMA-7B INT4):</strong> PPL 5.85 on WikiText-2</li>
+            <li><strong>Quality (LLaMA-70B INT4):</strong> PPL 3.60 on WikiText-2</li>
+            <li><strong>Kernel efficiency:</strong> Good (act_order hurts fused kernels)</li>
+            <li><strong>Fine-tuning friendly:</strong> No (weight updates are non-trivial to reverse)</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>AWQ generally achieves <strong>better or equal perplexity</strong> compared to GPTQ at the same bit-width, while being significantly faster to quantize. The key difference is in methodology: GPTQ performs complex weight surgery using second-order information, while AWQ leverages a simpler scaling insight combined with efficient search.</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem">
+        <thead><tr style="border-bottom:2px solid var(--brand)">
+          <th style="text-align:left;padding:0.5rem">Benchmark</th>
+          <th style="text-align:right;padding:0.5rem">FP16</th>
+          <th style="text-align:right;padding:0.5rem">AWQ INT4</th>
+          <th style="text-align:right;padding:0.5rem">GPTQ INT4</th>
+          <th style="text-align:right;padding:0.5rem">RTN INT4</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-2-7B (WikiText-2 PPL ↓)</td><td style="text-align:right;padding:0.5rem">5.47</td><td style="text-align:right;padding:0.5rem">5.60</td><td style="text-align:right;padding:0.5rem">5.63</td><td style="text-align:right;padding:0.5rem">5.95</td></tr>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-2-13B (WikiText-2 PPL ↓)</td><td style="text-align:right;padding:0.5rem">4.88</td><td style="text-align:right;padding:0.5rem">4.97</td><td style="text-align:right;padding:0.5rem">5.01</td><td style="text-align:right;padding:0.5rem">5.22</td></tr>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-2-70B (WikiText-2 PPL ↓)</td><td style="text-align:right;padding:0.5rem">3.32</td><td style="text-align:right;padding:0.5rem">3.41</td><td style="text-align:right;padding:0.5rem">3.45</td><td style="text-align:right;padding:0.5rem">3.75</td></tr>
+          <tr><td style="padding:0.5rem">Vicuna-7B (MT-Bench ↑)</td><td style="text-align:right;padding:0.5rem">6.27</td><td style="text-align:right;padding:0.5rem">6.20</td><td style="text-align:right;padding:0.5rem">6.12</td><td style="text-align:right;padding:0.5rem">5.78</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Section 6 -->
+      <h2 id="li-awq-code">Implementation with AutoAWQ</h2>
+
+<pre class="pseudo-code"><span class="kw">from</span> awq <span class="kw">import</span> AutoAWQForCausalLM
+<span class="kw">from</span> transformers <span class="kw">import</span> AutoTokenizer
+
+model_name = <span class="fn">"meta-llama/Llama-2-70b-hf"</span>
+quant_path = <span class="fn">"./llama-70b-awq-int4"</span>
+
+<span class="cm"># Load model (requires FP16 model in memory during quantization)</span>
+model = <span class="fn">AutoAWQForCausalLM.from_pretrained</span>(model_name, device_map=<span class="fn">"auto"</span>)
+tokenizer = <span class="fn">AutoTokenizer.from_pretrained</span>(model_name)
+
+<span class="cm"># Configure AWQ quantization</span>
+quant_config = {
+    <span class="fn">"zero_point"</span>: <span class="kw">True</span>,         <span class="cm"># asymmetric quantization</span>
+    <span class="fn">"q_group_size"</span>: 128,        <span class="cm"># group size for quantization</span>
+    <span class="fn">"w_bit"</span>: 4,                  <span class="cm"># 4-bit weight quantization</span>
+    <span class="fn">"version"</span>: <span class="fn">"GEMM"</span>,          <span class="cm"># GEMM kernel (vs GEMV for batch=1)</span>
+}
+
+<span class="cm"># Quantize — ~10 minutes for 70B on single A100</span>
+model.<span class="fn">quantize</span>(tokenizer, quant_config=quant_config)
+
+<span class="cm"># Save: ~35GB INT4 model</span>
+model.<span class="fn">save_quantized</span>(quant_path)
+tokenizer.<span class="fn">save_pretrained</span>(quant_path)
+
+<span class="cm"># Load for inference (fits on single 48GB GPU)</span>
+model = <span class="fn">AutoAWQForCausalLM.from_quantized</span>(
+    quant_path,
+    fuse_layers=<span class="kw">True</span>,          <span class="cm"># fuse QKV + MLP for faster inference</span>
+    device_map=<span class="fn">"auto"</span>,
+)
+<span class="cm"># Generate</span>
+tokens = tokenizer(<span class="fn">"The meaning of life is"</span>, return_tensors=<span class="fn">"pt"</span>).to(<span class="fn">"cuda"</span>)
+output = model.<span class="fn">generate</span>(**tokens, max_new_tokens=128)
+<span class="kw">print</span>(tokenizer.<span class="fn">decode</span>(output[0], skip_special_tokens=<span class="kw">True</span>))
+
+<span class="cm"># For vLLM serving with AWQ:</span>
+<span class="cm"># python -m vllm.entrypoints.openai.api_server \</span>
+<span class="cm">#   --model ./llama-70b-awq-int4 \</span>
+<span class="cm">#   --quantization awq \</span>
+<span class="cm">#   --dtype float16 \</span>
+<span class="cm">#   --max-model-len 4096</span></pre>
+
+      <!-- Section 7 -->
+      <h2 id="li-hardware-efficiency">Hardware Efficiency &amp; Deployment</h2>
+      <p>AWQ is designed with hardware efficiency as a first-class concern. The uniform INT4 format enables highly optimized CUDA kernels:</p>
+      <ul>
+        <li><strong>GEMM kernels:</strong> For batched inference (batch size &gt; 1), AWQ uses INT4×FP16 GEMM kernels. Throughput improvement: 1.45× over FP16 GEMM on A100 at batch size 8.</li>
+        <li><strong>GEMV kernels:</strong> For single-request inference (batch size = 1), AWQ provides specialized GEMV kernels that are 3.2–3.5× faster than FP16, directly proportional to the 4× memory reduction.</li>
+        <li><strong>Fused operations:</strong> AutoAWQ fuses QKV projections and MLP gate/up projections into single kernel launches, reducing kernel launch overhead by ~40%.</li>
+      </ul>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Throughput Comparison (A100, LLaMA-70B)</h3>
+          <ul>
+            <li>FP16: 18 tokens/s (2× A100)</li>
+            <li>AWQ INT4: 42 tokens/s (1× A100)</li>
+            <li>GPTQ INT4: 38 tokens/s (1× A100)</li>
+            <li>AWQ INT4 + vLLM: 1200 tokens/s (1× A100, batch=32)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Memory Usage (LLaMA-70B)</h3>
+          <ul>
+            <li>FP16: 140 GB (2× A100 80GB)</li>
+            <li>AWQ INT4: 35 GB (1× A100 80GB)</li>
+            <li>AWQ INT4 + KV cache (4K ctx): ~52 GB</li>
+            <li>AWQ INT4 + KV cache (8K ctx): ~68 GB</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>TinyChat integration:</strong> The AWQ authors also released TinyChat, a lightweight inference engine that runs AWQ models on edge devices. LLaMA-2-7B INT4 achieves <strong>30 tokens/s on a Jetson Orin</strong> (mobile GPU with 32GB unified memory) and <strong>18 tokens/s on a Raspberry Pi 5</strong> (with 8GB RAM, using CPU-only execution). This demonstrates AWQ's versatility across the hardware spectrum.
+      </div>
+
+      <p>AWQ has been adopted as the default quantization method in several production systems including vLLM, TGI (Text Generation Inference), and NVIDIA's TensorRT-LLM. Its combination of superior quality, fast quantization, and hardware-friendly format makes it the recommended choice for most INT4 deployment scenarios.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

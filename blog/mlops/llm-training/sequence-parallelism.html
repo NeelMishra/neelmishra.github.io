@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into sequence and context parallelism for long-context LLM training: Ulysses, Ring Attention, and memory analysis for 100K+ token sequences.">
+  <title>Sequence and Context Parallelism | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-sequence-parallelism">Why Sequence Parallelism?</a></li>
+        <li><a href="#ulysses-splitting-sequence">Ulysses: Splitting the Sequence Dimension</a></li>
+        <li><a href="#ring-attention">Ring Attention</a></li>
+        <li><a href="#context-parallelism-100k">Context Parallelism for 100K+ Tokens</a></li>
+        <li><a href="#memory-and-performance">Memory Analysis and Performance</a></li>
+        <li><a href="#implementation-details">Implementation Details</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Sequence and Context Parallelism</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ==================== Section 1 ==================== -->
+      <h2 id="why-sequence-parallelism">Why Sequence Parallelism?</h2>
+
+      <p>
+        As large language models push context windows from 2K to 128K tokens and beyond, a fundamental memory bottleneck
+        emerges that neither data parallelism nor tensor parallelism can resolve. The self-attention mechanism computes a
+        full <strong>S &times; S</strong> attention matrix where S is the sequence length. For a single attention head with
+        hidden dimension d<sub>h</sub>, this means O(S&sup2; &middot; d<sub>h</sub>) FLOPs and O(S&sup2;) memory just for
+        the attention scores&mdash;before we even consider the KV cache or activation memory.
+      </p>
+
+      <p>
+        Consider a concrete example: a 70B parameter model with 64 attention heads, head dimension 128, training on a
+        sequence length of 131,072 tokens. The attention score matrix alone for a single layer is
+        <strong>S&sup2; &times; num_heads &times; sizeof(bf16) = 131072&sup2; &times; 64 &times; 2 bytes &asymp; 2.2 TB</strong>.
+        This is far beyond the 80 GB HBM capacity of a single A100/H100 GPU. Even with FlashAttention (which avoids
+        materializing the full S&times;S matrix), the activations for the linear projections still scale as
+        O(S &times; d<sub>model</sub>) per layer, and with 80+ layers the aggregate activation memory is untenable.
+      </p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Data parallelism replicates the full model and partitions <em>batch</em> dimension.
+        Tensor parallelism shards <em>weight matrices</em> across GPUs. Neither partitions the <em>sequence</em> dimension,
+        so a single long sequence still needs to fit in one GPU&rsquo;s memory. Sequence parallelism directly addresses this
+        by splitting the sequence across devices.
+      </div>
+
+      <p>
+        The activation memory per transformer layer scales as <strong>A<sub>layer</sub> = 10 &middot; S &middot; h &middot; b +
+        5 &middot; a &middot; S&sup2; &middot; b</strong> (in mixed precision, where h = hidden size, a = number of heads,
+        b = micro-batch size). For S = 128K, h = 8192, a = 64, b = 1, a single layer requires approximately
+        <strong>10 &times; 128K &times; 8192 &times; 2 + 5 &times; 64 &times; 128K&sup2; &times; 2 &asymp; 21 GB + 10.7 TB</strong>.
+        The quadratic term dominates completely. This is why sequence parallelism is not optional for long-context training&mdash;it
+        is the <em>only</em> viable strategy.
+      </p>
+
+      <p>
+        There are three major approaches to sequence parallelism in practice: <strong>Megatron-SP</strong> (which partitions
+        LayerNorm/Dropout activations along the sequence dimension within tensor-parallel groups),
+        <strong>DeepSpeed Ulysses</strong> (which uses all-to-all collectives to redistribute Q/K/V), and
+        <strong>Ring Attention</strong> (which passes KV blocks around a logical ring of GPUs). Each has distinct
+        communication patterns, memory trade-offs, and scaling characteristics that we will analyze in depth.
+      </p>
+
+      <!-- ==================== Section 2 ==================== -->
+      <h2 id="ulysses-splitting-sequence">Ulysses: Splitting the Sequence Dimension</h2>
+
+      <p>
+        DeepSpeed Ulysses (introduced in late 2023) takes a direct approach: partition the input sequence of length S into
+        P equal chunks across P GPUs, where each GPU holds S/P tokens. The critical insight is that attention requires each
+        query to attend to <em>all</em> keys and values. Rather than replicating the full KV tensors (which would negate
+        memory savings), Ulysses uses <strong>all-to-all</strong> collective communication to transpose the data layout
+        before and after attention.
+      </p>
+
+      <p>
+        The workflow proceeds as follows: (1) Each GPU computes Q, K, V projections locally on its S/P tokens, producing
+        tensors of shape <code>[S/P, num_heads, d_head]</code>. (2) An all-to-all scatter redistributes these along the
+        head dimension&mdash;after the all-to-all, each GPU holds the <em>full sequence</em> for <code>num_heads/P</code>
+        heads, i.e., shape <code>[S, num_heads/P, d_head]</code>. (3) Each GPU computes full self-attention on its subset of
+        heads over the complete sequence. (4) A second all-to-all gathers the results back to the original sequence-partitioned
+        layout.
+      </p>
+
+      <div class="callout warn">
+        <strong>Communication cost:</strong> Each all-to-all transfers <code>S &times; h &times; sizeof(bf16) / P</code> bytes
+        per GPU (for each of Q, K, V). With two all-to-all operations (pre- and post-attention), the total per-layer
+        communication volume is <strong>8 &times; S &times; h / P</strong> bytes (accounting for Q, K, V forward + backward).
+        This matches tensor parallelism&rsquo;s all-reduce cost&mdash;but critically, the memory per GPU drops from O(S) to O(S/P)
+        for non-attention activations.
+      </div>
+
+      <p>
+        The memory savings from Ulysses are substantial. The attention computation itself runs on the full sequence per GPU
+        (since each GPU holds all tokens for its head subset), but the linear projection activations&mdash;which dominate for
+        very large hidden dimensions&mdash;are reduced by a factor of P. For a model with h = 8192, S = 128K, P = 8:
+      </p>
+      <ul>
+        <li><strong>Without Ulysses:</strong> Activation memory for QKV projections = 3 &times; S &times; h &times; 2 = 3 &times; 128K &times; 8192 &times; 2 &asymp; 6 GB per layer</li>
+        <li><strong>With Ulysses (P=8):</strong> QKV projection activations = 3 &times; (S/P) &times; h &times; 2 &asymp; 0.75 GB per layer</li>
+        <li><strong>Attention score memory (with FlashAttention):</strong> O(S) per head &mdash; distributed across GPUs by head partitioning</li>
+      </ul>
+
+      <p>
+        Ulysses is most effective when the number of attention heads is evenly divisible by the sequence-parallelism degree P.
+        For GQA (Grouped Query Attention) models like Llama 2/3, where KV heads may be only 8, this limits Ulysses to
+        P &le; 8. Beyond this, the head dimension cannot be further partitioned without redundant computation.
+      </p>
+
+      <!-- ==================== Section 3 ==================== -->
+      <h2 id="ring-attention">Ring Attention</h2>
+
+      <p>
+        Ring Attention (Liu et al., 2023) takes a fundamentally different approach by arranging P GPUs in a logical ring
+        and streaming KV blocks between neighbors. Each GPU permanently holds its local chunk of Q (shape
+        <code>[S/P, num_heads, d_head]</code>) and iteratively receives KV blocks from other GPUs to compute partial
+        attention scores. After P&minus;1 communication steps, every GPU has attended its queries to all keys and values
+        without ever materializing the full KV set locally.
+      </p>
+
+      <svg viewBox="0 0 600 340" style="width:100%;max-width:600px;margin:1.5rem auto;display:block" aria-label="Ring Attention topology diagram">
+        <defs>
+          <marker id="lt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/>
+          </marker>
+        </defs>
+        <!-- GPU nodes -->
+        <rect id="lt-gpu0" x="230" y="20" width="140" height="50" rx="10" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="300" y="50" text-anchor="middle" font-family="Manrope" font-size="14" font-weight="700" fill="#0a8f6a">GPU 0 (Q₀, KV₀)</text>
+
+        <rect id="lt-gpu1" x="430" y="140" width="140" height="50" rx="10" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="500" y="170" text-anchor="middle" font-family="Manrope" font-size="14" font-weight="700" fill="#0a8f6a">GPU 1 (Q₁, KV₁)</text>
+
+        <rect id="lt-gpu2" x="230" y="260" width="140" height="50" rx="10" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="300" y="290" text-anchor="middle" font-family="Manrope" font-size="14" font-weight="700" fill="#0a8f6a">GPU 2 (Q₂, KV₂)</text>
+
+        <rect id="lt-gpu3" x="30" y="140" width="140" height="50" rx="10" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="100" y="170" text-anchor="middle" font-family="Manrope" font-size="14" font-weight="700" fill="#0a8f6a">GPU 3 (Q₃, KV₃)</text>
+
+        <!-- Ring arrows: KV blocks passed clockwise -->
+        <path id="lt-ring01" d="M370,55 Q440,70 440,140" fill="none" stroke="#0a8f6a" stroke-width="2.5" marker-end="url(#lt-arrow)"/>
+        <text id="lt-label01" x="425" y="95" font-family="Manrope" font-size="11" fill="#555">KV block →</text>
+
+        <path id="lt-ring12" d="M470,190 Q450,250 370,275" fill="none" stroke="#0a8f6a" stroke-width="2.5" marker-end="url(#lt-arrow)"/>
+        <text id="lt-label12" x="430" y="245" font-family="Manrope" font-size="11" fill="#555">KV block →</text>
+
+        <path id="lt-ring23" d="M230,280 Q160,270 160,190" fill="none" stroke="#0a8f6a" stroke-width="2.5" marker-end="url(#lt-arrow)"/>
+        <text id="lt-label23" x="160" y="245" font-family="Manrope" font-size="11" fill="#555">← KV block</text>
+
+        <path id="lt-ring30" d="M130,140 Q150,80 230,55" fill="none" stroke="#0a8f6a" stroke-width="2.5" marker-end="url(#lt-arrow)"/>
+        <text id="lt-label30" x="145" y="95" font-family="Manrope" font-size="11" fill="#555">← KV block</text>
+
+        <!-- Center label -->
+        <text id="lt-center-label" x="300" y="175" text-anchor="middle" font-family="Manrope" font-size="13" font-weight="600" fill="#333">P-1 = 3 steps</text>
+      </svg>
+
+      <p>
+        The algorithm works in P rounds. At each round r, GPU i holds its local Q<sub>i</sub> and the KV block from GPU
+        (i&minus;r) mod P. It computes a partial attention output using blockwise (tiled) attention, accumulating the
+        numerator and denominator of the softmax via the <strong>log-sum-exp trick</strong>. After computing, each GPU sends
+        its current KV block to the next neighbor in the ring (GPU (i+1) mod P) and receives the next block from (i&minus;1) mod P.
+      </p>
+
+      <p>
+        The critical optimization is <strong>overlapping communication with computation</strong>. While GPU i computes
+        attention with KV block r, it simultaneously sends KV block r to GPU (i+1) and receives KV block r+1. On modern
+        NVLink/NVSwitch interconnects, P2P bandwidth is 450+ GB/s per direction, so transferring a KV block of size
+        <code>2 &times; (S/P) &times; h &times; 2</code> bytes can be fully hidden behind the O(S/P &times; S/P &times; d_head)
+        attention computation for large enough S/P.
+      </p>
+
+      <div class="callout">
+        <strong>When does overlap work?</strong> The compute-to-communication ratio for ring attention is approximately
+        <code>(S/P) &times; d_head / bandwidth</code> FLOPs per byte. For S/P = 16K, d_head = 128, and NVLink at 450 GB/s,
+        the compute takes ~2&times; longer than communication, enabling effective overlap. Below S/P &asymp; 4K tokens,
+        communication begins to dominate and ring attention loses efficiency.
+      </div>
+
+      <p>
+        <strong>Striped Attention</strong> is a variant that interleaves token assignment instead of using contiguous chunks.
+        GPU i gets tokens {i, i+P, i+2P, ...}. This ensures that causal masking is uniformly distributed across all GPUs,
+        preventing the load imbalance where early GPUs (holding early tokens) do less work due to the triangular causal mask.
+        In contiguous partitioning, GPU 0 attends to at most S/P keys, while GPU P&minus;1 attends to all S keys&mdash;a
+        P&times; imbalance. Striped attention equalizes this to within one token.
+      </p>
+
+      <!-- ==================== Section 4 ==================== -->
+      <h2 id="context-parallelism-100k">Context Parallelism for 100K+ Tokens</h2>
+
+      <p>
+        Context parallelism (CP) is the umbrella term used in frameworks like <strong>Megatron-LM</strong> to describe
+        sequence-dimension partitioning that is orthogonal to tensor parallelism (TP) and pipeline parallelism (PP). In
+        Megatron-LM&rsquo;s 5D parallelism hierarchy (DP &times; TP &times; PP &times; CP &times; EP), context parallelism
+        forms its own communication group&mdash;GPUs within a CP group exchange KV blocks, while TP groups handle weight
+        sharding and PP groups handle layer sharding.
+      </p>
+
+      <p>
+        The practical distinction from &ldquo;pure&rdquo; ring attention is that CP in Megatron-LM integrates with the
+        existing parallelism dimensions. A typical configuration for training a 70B model on 128K context might use:
+        <strong>TP=8, PP=4, CP=4, DP=8</strong> across 1024 GPUs. Here, the 128K sequence is split into 4 chunks of 32K tokens
+        each, and each CP-rank processes 32K tokens through the full pipeline of layers (with TP sharding the weights within
+        each CP-rank).
+      </p>
+
+      <div class="callout warn">
+        <strong>Memory analysis for 128K context (70B model, bf16):</strong><br>
+        &bull; Model parameters: 70B &times; 2 bytes / TP=8 &asymp; 17.5 GB per GPU<br>
+        &bull; Optimizer states (AdamW, fp32): 70B &times; 12 bytes / (TP &times; DP) &asymp; 13.1 GB per GPU<br>
+        &bull; Activations per layer (without CP): ~21 GB (linear) + ~10.7 TB (attention) &mdash; impossible<br>
+        &bull; Activations per layer (CP=4, FlashAttn): ~5.25 GB (linear/4) + O(S/CP) attention workspace &asymp; 6 GB<br>
+        &bull; Total activation across 80 layers with activation checkpointing (every 4 layers): ~120 GB / PP=4 &asymp; 30 GB per GPU<br>
+        &bull; <strong>Total per GPU: ~17.5 + 13.1 + 30 &asymp; 60.6 GB &mdash; fits in 80 GB HBM</strong>
+      </div>
+
+      <p>
+        For even longer contexts (512K&ndash;1M tokens), CP must be scaled to 16 or 32. At CP=32, each GPU processes only
+        S/32 tokens, but the ring communication requires 31 P2P steps. The key bottleneck shifts from memory to
+        <strong>communication latency</strong>: each step introduces a minimum latency of the KV transfer time, and with 31
+        steps this accumulates. The Megatron-LM implementation mitigates this by using <strong>hierarchical communication</strong>&mdash;
+        intra-node NVSwitch for nearby CP ranks and inter-node InfiniBand for distant ranks&mdash;and by carefully scheduling
+        computation to maximize overlap.
+      </p>
+
+      <p>
+        Context parallelism also interacts with <strong>Grouped Query Attention (GQA)</strong>. In GQA, KV heads are shared
+        across multiple query heads (e.g., Llama 3 uses 8 KV heads for 64 query heads). This means the KV blocks being
+        communicated are 8&times; smaller than the Q blocks, reducing ring communication volume proportionally. For a model
+        with n<sub>kv</sub> = 8 KV heads, h = 8192, S = 128K, CP = 8, the per-step KV transfer is only
+        <code>2 &times; (128K/8) &times; 8 &times; 128 &times; 2 = 64 MB</code>&mdash;easily hidden behind computation
+        on NVLink.
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Ulysses (All-to-All)</h3>
+          <ul>
+            <li><strong>Communication:</strong> Two all-to-all collectives per layer</li>
+            <li><strong>Volume:</strong> O(S &times; h / P) per GPU per collective</li>
+            <li><strong>Scaling limit:</strong> P &le; num_kv_heads (GQA bottleneck)</li>
+            <li><strong>Overlap:</strong> Hard to overlap &mdash; all-to-all is blocking</li>
+            <li><strong>Memory:</strong> Full attention per GPU (on head subset)</li>
+            <li><strong>Best for:</strong> Moderate P (2&ndash;8), dense attention heads</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Ring Attention (P2P)</h3>
+          <ul>
+            <li><strong>Communication:</strong> P&minus;1 P2P send/recv per layer</li>
+            <li><strong>Volume:</strong> O(S &times; h / P) per step (KV block)</li>
+            <li><strong>Scaling limit:</strong> S/P must be large enough for overlap</li>
+            <li><strong>Overlap:</strong> Natural overlap of comm &amp; compute</li>
+            <li><strong>Memory:</strong> Only S/P tokens of KV at any time</li>
+            <li><strong>Best for:</strong> Large P (8&ndash;64), very long sequences</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ==================== Section 5 ==================== -->
+      <h2 id="memory-and-performance">Memory Analysis and Performance</h2>
+
+      <p>
+        Let us formalize the per-GPU memory breakdown for a transformer model with L layers, hidden size h, number of
+        attention heads a, head dimension d<sub>h</sub> = h/a, sequence length S, micro-batch size b, and sequence
+        parallelism degree P.
+      </p>
+
+      <p><strong>Activation memory per layer (without sequence parallelism, with FlashAttention):</strong></p>
+      <ul>
+        <li>QKV projection outputs: 3 &times; S &times; h &times; b &times; 2 bytes</li>
+        <li>Attention output projection: S &times; h &times; b &times; 2 bytes</li>
+        <li>MLP intermediate (SwiGLU): 2 &times; S &times; 4h &times; b &times; 2 bytes (gate + up projections)</li>
+        <li>MLP output: S &times; h &times; b &times; 2 bytes</li>
+        <li>LayerNorm inputs (2 per layer): 2 &times; S &times; h &times; b &times; 2 bytes</li>
+        <li><strong>Total per layer:</strong> (3h + h + 8h + h + 2h) &times; S &times; b &times; 2 = <strong>30 &times; S &times; h &times; b</strong> bytes</li>
+      </ul>
+
+      <p><strong>With sequence parallelism (degree P):</strong></p>
+      <ul>
+        <li>All sequence-dimension tensors are sharded by P: <strong>30 &times; S &times; h &times; b / P</strong> bytes per layer</li>
+        <li>For S = 128K, h = 8192, b = 1, P = 8: 30 &times; 128K &times; 8192 / 8 = <strong>3.84 GB per layer</strong></li>
+        <li>With activation checkpointing (recompute every k layers): total &asymp; 3.84 &times; k GB</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Scaling rule of thumb:</strong> Doubling the sequence parallelism degree P halves the per-GPU activation
+        memory but doubles the number of communication steps. The crossover point where communication overhead exceeds 10%
+        of compute time is approximately P = S / (8192 &times; d_head / bandwidth_GB_s). On 8&times;H100 with NVSwitch
+        (900 GB/s bisection), this allows P up to ~32 for S = 128K.
+      </div>
+
+      <p><strong>Communication volume analysis:</strong></p>
+      <ul>
+        <li><strong>Ulysses all-to-all (per layer, forward + backward):</strong> 4 &times; 3 &times; S &times; h &times; 2 / P = 24Sh/P bytes. For S=128K, h=8192, P=8: <strong>3.1 GB per layer.</strong></li>
+        <li><strong>Ring attention (per layer, forward):</strong> (P&minus;1) &times; 2 &times; (S/P) &times; h &times; 2 = 4Sh(P&minus;1)/P bytes &asymp; 4Sh for large P. Effective bandwidth utilization is near 100% with overlap.</li>
+        <li><strong>Combined with TP (e.g., TP=8):</strong> Sequence parallelism comm uses NVLink within the node, while TP all-reduces also use NVLink. Careful scheduling avoids contention by alternating TP and SP communication phases.</li>
+      </ul>
+
+      <p>
+        The scaling behavior of sequence parallelism follows a predictable pattern. We define <strong>scaling efficiency</strong>
+        as the ratio of ideal speedup (P&times;) to actual speedup. For ring attention, efficiency is approximately
+        <code>1 / (1 + (P-1) &times; t_comm / t_compute)</code> where t_comm and t_compute are per-step times. On H100 NVLink
+        with FlashAttention-2, measured efficiencies are: P=2 (97%), P=4 (94%), P=8 (89%), P=16 (82%), P=32 (71%).
+      </p>
+
+      <!-- ==================== Section 6 ==================== -->
+      <h2 id="implementation-details">Implementation Details</h2>
+
+      <p>
+        Below is a detailed implementation of sequence-parallel ring attention. The core algorithm maintains running
+        log-sum-exp accumulators to correctly combine partial softmax results across ring steps without numerical instability.
+      </p>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+<span class="kw">from</span> torch <span class="kw">import</span> Tensor
+<span class="kw">from</span> typing <span class="kw">import</span> Optional, Tuple
+
+<span class="kw">class</span> RingAttention:
+    <span class="cm">    # Ring attention with overlapped P2P communication</span>
+    <span class="cm">    # Supports causal masking and FlashAttention-compatible interface</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, cp_group: dist.ProcessGroup, causal: bool = <span class="kw">True</span>):
+        self.cp_group = cp_group
+        self.cp_size = <span class="fn">dist.get_world_size</span>(group=cp_group)
+        self.cp_rank = <span class="fn">dist.get_rank</span>(group=cp_group)
+        self.causal = causal
+
+    <span class="kw">def</span> <span class="fn">_get_ring_neighbors</span>(self) -> Tuple[int, int]:
+        <span class="cm">        # Returns (send_to, recv_from) ranks in the ring</span>
+        send_to = (self.cp_rank + 1) % self.cp_size
+        recv_from = (self.cp_rank - 1) % self.cp_size
+        <span class="kw">return</span> send_to, recv_from
+
+    <span class="kw">def</span> <span class="fn">_async_send_recv</span>(self, send_buf: Tensor, recv_buf: Tensor):
+        <span class="cm">        # Non-blocking P2P send/recv for KV block exchange</span>
+        send_to, recv_from = self.<span class="fn">_get_ring_neighbors</span>()
+        ops = []
+        <span class="fn">ops.append</span>(<span class="fn">dist.isend</span>(send_buf, dst=send_to, group=self.cp_group))
+        <span class="fn">ops.append</span>(<span class="fn">dist.irecv</span>(recv_buf, src=recv_from, group=self.cp_group))
+        <span class="kw">return</span> ops
+
+    <span class="kw">def</span> <span class="fn">_update_running_softmax</span>(
+        self,
+        new_attn_out: Tensor,   <span class="cm"># [B, H, S/P, D]</span>
+        new_lse: Tensor,        <span class="cm"># [B, H, S/P]</span>
+        running_out: Tensor,    <span class="cm"># [B, H, S/P, D]</span>
+        running_lse: Tensor,    <span class="cm"># [B, H, S/P]</span>
+    ) -> Tuple[Tensor, Tensor]:
+        <span class="cm">        # Online softmax correction using log-sum-exp trick</span>
+        <span class="cm">        # new_lse and running_lse are in log-space</span>
+        max_lse = <span class="fn">torch.maximum</span>(new_lse, running_lse)
+        old_scale = <span class="fn">torch.exp</span>(running_lse - max_lse).unsqueeze(-1)
+        new_scale = <span class="fn">torch.exp</span>(new_lse - max_lse).unsqueeze(-1)
+
+        updated_out = old_scale * running_out + new_scale * new_attn_out
+        updated_lse = max_lse + <span class="fn">torch.log</span>(
+            <span class="fn">torch.exp</span>(running_lse - max_lse) + <span class="fn">torch.exp</span>(new_lse - max_lse)
+        )
+        <span class="kw">return</span> updated_out, updated_lse
+
+    <span class="kw">def</span> <span class="fn">forward</span>(
+        self,
+        q_local: Tensor,  <span class="cm"># [B, H, S/P, D] - local query chunk</span>
+        k_local: Tensor,  <span class="cm"># [B, H, S/P, D] - local key chunk</span>
+        v_local: Tensor,  <span class="cm"># [B, H, S/P, D] - local value chunk</span>
+        scale: Optional[float] = <span class="kw">None</span>,
+    ) -> Tensor:
+        B, H, Sp, D = q_local.shape  <span class="cm"># Sp = S / P</span>
+        <span class="kw">if</span> scale <span class="kw">is</span> <span class="kw">None</span>:
+            scale = D ** -0.5
+
+        <span class="cm">        # Step 0: compute local attention (Q_i attends to KV_i)</span>
+        attn_scores = <span class="fn">torch.matmul</span>(q_local, k_local.transpose(-2, -1)) * scale
+        <span class="kw">if</span> self.causal:
+            <span class="cm">            # Apply causal mask for local block (diagonal block)</span>
+            mask = <span class="fn">torch.triu</span>(
+                <span class="fn">torch.ones</span>(Sp, Sp, device=q_local.device), diagonal=1
+            ).bool()
+            <span class="fn">attn_scores.masked_fill_</span>(mask, float(<span class="cm">'-inf'</span>))
+
+        running_lse = <span class="fn">torch.logsumexp</span>(attn_scores, dim=-1)
+        running_out = <span class="fn">torch.matmul</span>(
+            <span class="fn">torch.softmax</span>(attn_scores, dim=-1), v_local
+        )
+
+        <span class="cm">        # Prepare double-buffered KV blocks for async P2P</span>
+        kv_send = <span class="fn">torch.cat</span>([k_local, v_local], dim=-1)  <span class="cm"># [B, H, Sp, 2D]</span>
+        kv_recv = <span class="fn">torch.empty_like</span>(kv_send)
+
+        <span class="cm">        # Ring steps 1 through P-1</span>
+        <span class="kw">for</span> step <span class="kw">in</span> <span class="fn">range</span>(1, self.cp_size):
+            <span class="cm">            # Launch async P2P (overlaps with previous step's compute)</span>
+            ops = self.<span class="fn">_async_send_recv</span>(kv_send, kv_recv)
+
+            <span class="cm">            # Wait for communication to complete</span>
+            <span class="kw">for</span> op <span class="kw">in</span> ops:
+                <span class="fn">op.wait</span>()
+
+            <span class="cm">            # Unpack received KV block</span>
+            k_block = kv_recv[..., :D]
+            v_block = kv_recv[..., D:]
+
+            <span class="cm">            # Compute partial attention for this KV block</span>
+            block_scores = <span class="fn">torch.matmul</span>(q_local, k_block.transpose(-2, -1)) * scale
+
+            <span class="kw">if</span> self.causal:
+                <span class="cm">                # Determine source rank of this KV block</span>
+                src_rank = (self.cp_rank - step) % self.cp_size
+                <span class="kw">if</span> src_rank > self.cp_rank:
+                    <span class="cm">                    # KV block is from future tokens: fully masked</span>
+                    <span class="fn">block_scores.fill_</span>(float(<span class="cm">'-inf'</span>))
+                <span class="cm">                # If src_rank < cp_rank: no mask (attend to all past)</span>
+                <span class="cm">                # If src_rank == cp_rank: handled in step 0</span>
+
+            block_lse = <span class="fn">torch.logsumexp</span>(block_scores, dim=-1)
+            block_out = <span class="fn">torch.matmul</span>(
+                <span class="fn">torch.softmax</span>(block_scores, dim=-1), v_block
+            )
+
+            <span class="cm">            # Merge partial results using online softmax</span>
+            running_out, running_lse = self.<span class="fn">_update_running_softmax</span>(
+                block_out, block_lse, running_out, running_lse
+            )
+
+            <span class="cm">            # Rotate buffers for next step</span>
+            kv_send, kv_recv = kv_recv, <span class="fn">torch.empty_like</span>(kv_send)
+
+        <span class="kw">return</span> running_out</div>
+
+      <div class="callout">
+        <strong>Numerical stability:</strong> The <code>_update_running_softmax</code> method is critical. Naive accumulation of
+        softmax outputs leads to catastrophic numerical errors because softmax denominators from different blocks are incompatible.
+        The log-sum-exp trick maintains a running maximum and rescales previous results, ensuring exact equivalence with
+        full-sequence attention up to floating-point precision. This is the same principle used in FlashAttention&rsquo;s tiled
+        implementation.
+      </div>
+
+      <p>
+        For production use, the above would be combined with FlashAttention-2&rsquo;s fused kernels for the per-block attention
+        computation (replacing the explicit matmul + softmax + matmul with a single CUDA kernel call). The CUDA kernel returns
+        both the attention output and the log-sum-exp values needed for the online correction.
+      </p>
+
+      <p><strong>Ulysses-style all-to-all implementation:</strong></p>
+
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">ulysses_sequence_parallel_attn</span>(
+    q: Tensor,  <span class="cm"># [B, S/P, num_heads, D] - sequence-partitioned</span>
+    k: Tensor,  <span class="cm"># [B, S/P, num_heads, D]</span>
+    v: Tensor,  <span class="cm"># [B, S/P, num_heads, D]</span>
+    sp_group: dist.ProcessGroup,
+) -> Tensor:
+    <span class="cm">    # DeepSpeed Ulysses: all-to-all to redistribute from</span>
+    <span class="cm">    # sequence-partitioned to head-partitioned layout</span>
+    P = <span class="fn">dist.get_world_size</span>(group=sp_group)
+
+    <span class="cm">    # Pre-attention: all-to-all scatter along seq, gather along heads</span>
+    <span class="cm">    # [B, S/P, H, D] -> [B, S, H/P, D]</span>
+    q_heads = <span class="fn">all_to_all</span>(q, scatter_dim=1, gather_dim=2, group=sp_group)
+    k_heads = <span class="fn">all_to_all</span>(k, scatter_dim=1, gather_dim=2, group=sp_group)
+    v_heads = <span class="fn">all_to_all</span>(v, scatter_dim=1, gather_dim=2, group=sp_group)
+
+    <span class="cm">    # Standard attention on full sequence, subset of heads</span>
+    <span class="cm">    # Each GPU now has [B, S, H/P, D]</span>
+    attn_out = <span class="fn">flash_attention</span>(q_heads, k_heads, v_heads, causal=<span class="kw">True</span>)
+
+    <span class="cm">    # Post-attention: all-to-all to restore sequence-partitioned layout</span>
+    <span class="cm">    # [B, S, H/P, D] -> [B, S/P, H, D]</span>
+    out = <span class="fn">all_to_all</span>(attn_out, scatter_dim=2, gather_dim=1, group=sp_group)
+    <span class="kw">return</span> out
+
+<span class="kw">def</span> <span class="fn">all_to_all</span>(
+    tensor: Tensor, scatter_dim: int, gather_dim: int,
+    group: dist.ProcessGroup,
+) -> Tensor:
+    <span class="cm">    # Wrapper for torch.distributed all-to-all with reshape</span>
+    world_size = <span class="fn">dist.get_world_size</span>(group=group)
+    chunks = <span class="fn">tensor.chunk</span>(world_size, dim=scatter_dim)
+    recv = [<span class="fn">torch.empty_like</span>(c) <span class="kw">for</span> c <span class="kw">in</span> chunks]
+    <span class="fn">dist.all_to_all</span>(recv, <span class="fn">list</span>(chunks), group=group)
+    <span class="kw">return</span> <span class="fn">torch.cat</span>(recv, dim=gather_dim)</div>
+
+      <p>
+        When combining these techniques in practice, modern frameworks like Megatron-LM allow you to specify the parallelism
+        configuration through a simple command-line interface. A typical launch for 128K context training on 1024 H100 GPUs:
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># Megatron-LM launch configuration for 128K context, 70B model</span>
+<span class="cm"># 1024 GPUs = TP=8 x PP=4 x CP=4 x DP=8</span>
+python -m torch.distributed.<span class="fn">launch</span> \
+    --nproc_per_node 8 \
+    --nnodes 128 \
+    pretrain_gpt.py \
+    --tensor-model-parallel-size 8 \
+    --pipeline-model-parallel-size 4 \
+    --context-parallel-size 4 \
+    --seq-length 131072 \
+    --num-layers 80 \
+    --hidden-size 8192 \
+    --num-attention-heads 64 \
+    --group-query-attention \
+    --num-query-groups 8 \
+    --micro-batch-size 1 \
+    --global-batch-size 512 \
+    --use-flash-attn \
+    --recompute-granularity selective \
+    --sequence-parallel</div>
+
+      <div class="callout warn">
+        <strong>Common pitfall:</strong> The <code>--sequence-parallel</code> flag in Megatron-LM activates the original
+        Megatron-SP (which partitions LayerNorm/Dropout along the sequence dimension within TP groups), while
+        <code>--context-parallel-size</code> activates ring-attention-style CP across a separate GPU group. Both can be enabled
+        simultaneously and operate on different axes. Confusing these two is a frequent source of bugs in distributed training
+        configurations.
+      </div>
+
+      <p>
+        In summary, sequence and context parallelism are essential techniques for training LLMs with long context windows.
+        Ulysses excels for moderate parallelism degrees with its straightforward all-to-all approach, while ring attention
+        scales to large degrees with overlapped communication. The choice between them depends on the model architecture
+        (number of KV heads), the hardware interconnect (NVLink vs. InfiniBand), and the target sequence length. For
+        production systems training at 128K+ tokens, combining both approaches&mdash;Ulysses within nodes and ring attention
+        across nodes&mdash;often yields the best balance of memory efficiency and throughput.
+      </p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

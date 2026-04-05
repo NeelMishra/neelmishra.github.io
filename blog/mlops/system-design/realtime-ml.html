@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="System design deep-dive: building a real-time ML inference platform — low-latency requirements, feature serving, model serving, and caching.">
+  <title>Design: Real-Time ML Inference Platform | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#requirements">Requirements</a></li>
+          <li><a href="#feature-serving">Feature Serving</a></li>
+          <li><a href="#model-serving">Model Serving</a></li>
+          <li><a href="#caching">Caching Strategies</a></li>
+          <li><a href="#optimisation">Latency Optimisation</a></li>
+          <li><a href="#architecture">System Architecture</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+
+      <div class="blog-post-header">
+        <h1>Design: Real-Time ML Inference Platform</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">ML System Design</span>
+        </div>
+      </div>
+
+      <!-- § 1 -->
+      <section id="requirements">
+        <h2>Requirements &amp; Scope</h2>
+        <p>
+          A real-time inference platform serves ML predictions to user-facing
+          applications with strict latency SLAs — typically sub-100 ms.
+        </p>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h4 style="color:#0a8f6a;margin-top:0">Functional</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Serve multiple model versions simultaneously</li>
+              <li>Canary and shadow deployments</li>
+              <li>Online feature computation</li>
+              <li>Prediction logging for offline analysis</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h4 style="color:#ff6b35;margin-top:0">Non-Functional</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>p99 latency &lt; 50 ms</li>
+              <li>Handle 100 K+ QPS</li>
+              <li>Zero-downtime model updates</li>
+              <li>Auto-scaling on traffic spikes</li>
+            </ul>
+          </div>
+        </div>
+
+        <svg id="sd-rt-overview" viewBox="0 0 700 170" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%;max-width:700px;margin:1rem auto;display:block"
+             aria-label="Real-time inference platform overview">
+          <rect x="5" y="60" width="100" height="50" rx="10" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="55" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Request</text>
+          <line x1="105" y1="85" x2="145" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-rt-arrow)"/>
+          <rect x="145" y="60" width="120" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="205" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Feature Fetch</text>
+          <line x1="265" y1="85" x2="305" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-rt-arrow)"/>
+          <rect x="305" y="60" width="130" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="370" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Model Inference</text>
+          <line x1="435" y1="85" x2="475" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-rt-arrow)"/>
+          <rect x="475" y="60" width="110" height="50" rx="10" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="530" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Post-Process</text>
+          <line x1="585" y1="85" x2="620" y2="85" stroke="#ccc" stroke-width="1.5" marker-end="url(#sd-rt-arrow)"/>
+          <rect x="620" y="60" width="75" height="50" rx="10" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="657" y="90" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">Response</text>
+
+          <defs>
+            <marker id="sd-rt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <path d="M0,0 L8,3 L0,6" fill="#ccc"/>
+            </marker>
+          </defs>
+        </svg>
+      </section>
+
+      <!-- § 2 -->
+      <section id="feature-serving">
+        <h2>Feature Serving</h2>
+        <p>
+          Feature retrieval often dominates the latency budget. A well-designed
+          feature service pre-computes and caches features for low-latency
+          access.
+        </p>
+
+        <h3>Online vs. Pre-Computed</h3>
+        <p>
+          Features fall into two categories: <strong>pre-computed</strong>
+          (user profile, historical aggregates — stored in Redis/DynamoDB)
+          and <strong>real-time</strong> (request context, session state —
+          computed on the fly).
+        </p>
+
+<pre class="pseudo-code"><span class="cm"># Feature serving with Redis</span>
+<span class="kw">import</span> redis, json
+
+feature_store = redis.<span class="fn">Redis</span>(host="features", port=6379, decode_responses=True)
+
+<span class="kw">def</span> <span class="fn">get_features</span>(user_id, item_id):
+    <span class="cm"># Pre-computed features (batch-updated)</span>
+    user_feat = json.<span class="fn">loads</span>(feature_store.<span class="fn">get</span>(f"user:{user_id}") <span class="kw">or</span> "{}")
+    item_feat = json.<span class="fn">loads</span>(feature_store.<span class="fn">get</span>(f"item:{item_id}") <span class="kw">or</span> "{}")
+
+    <span class="cm"># Real-time features (computed on request)</span>
+    rt_feat = {
+        "hour_of_day": <span class="fn">current_hour</span>(),
+        "user_session_len": <span class="fn">get_session_length</span>(user_id),
+    }
+    <span class="kw">return</span> {**user_feat, **item_feat, **rt_feat}</pre>
+
+        <div class="callout">
+          <strong>Feature consistency:</strong> Training and serving must use
+          the same feature computation logic. Feature stores (Feast, Tecton)
+          enforce this by sharing feature definitions.
+        </div>
+      </section>
+
+      <!-- § 3 -->
+      <section id="model-serving">
+        <h2>Model Serving</h2>
+        <p>
+          The model serving layer loads trained models, handles batching,
+          and manages model versions.
+        </p>
+
+        <h3>Serving Frameworks</h3>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h4 style="margin-top:0">TorchServe / TF Serving</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Native framework support</li>
+              <li>GPU batching built-in</li>
+              <li>gRPC + REST APIs</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h4 style="margin-top:0">Triton Inference Server</h4>
+            <ul style="margin:0;padding-left:1.2rem">
+              <li>Multi-framework (PyTorch, TF, ONNX)</li>
+              <li>Dynamic batching</li>
+              <li>Model ensemble pipelines</li>
+            </ul>
+          </div>
+        </div>
+
+<pre class="pseudo-code"><span class="cm"># Model serving with Triton (config.pbtxt)</span>
+<span class="cm"># name: "ranking_model"</span>
+<span class="cm"># platform: "onnxruntime_onnx"</span>
+<span class="cm"># max_batch_size: 64</span>
+<span class="cm"># dynamic_batching {</span>
+<span class="cm">#   preferred_batch_size: [16, 32, 64]</span>
+<span class="cm">#   max_queue_delay_microseconds: 5000</span>
+<span class="cm"># }</span>
+
+<span class="cm"># Python client</span>
+<span class="kw">import</span> tritonclient.grpc <span class="kw">as</span> grpcclient
+
+client = grpcclient.<span class="fn">InferenceServerClient</span>("triton:8001")
+inputs = [grpcclient.<span class="fn">InferInput</span>("features", [1, 128], "FP32")]
+inputs[0].<span class="fn">set_data_from_numpy</span>(feature_array)
+result = client.<span class="fn">infer</span>("ranking_model", inputs)
+score = result.<span class="fn">as_numpy</span>("output")[0]</pre>
+
+        <div class="callout warn">
+          <strong>Model warmup:</strong> The first request after loading a
+          model is 10–100× slower (JIT compilation, GPU memory allocation).
+          Always warm up models with dummy requests before routing traffic.
+        </div>
+      </section>
+
+      <!-- § 4 -->
+      <section id="caching">
+        <h2>Caching Strategies</h2>
+        <p>
+          Caching predictions can dramatically reduce compute costs and
+          latency, but only works for deterministic, repeatable queries.
+        </p>
+
+        <h3>Prediction Cache</h3>
+        <p>
+          Cache the full prediction result keyed by a hash of the input
+          features. Useful for item-level scores that don't change frequently.
+        </p>
+
+<pre class="pseudo-code"><span class="cm"># Prediction caching</span>
+<span class="kw">import</span> hashlib, json
+
+<span class="kw">def</span> <span class="fn">cached_predict</span>(model, features, cache, ttl=60):
+    key = hashlib.<span class="fn">md5</span>(json.<span class="fn">dumps</span>(features, sort_keys=True).encode()).<span class="fn">hexdigest</span>()
+    cached = cache.<span class="fn">get</span>(key)
+    <span class="kw">if</span> cached:
+        <span class="kw">return</span> json.<span class="fn">loads</span>(cached)
+    prediction = model.<span class="fn">predict</span>(features)
+    cache.<span class="fn">setex</span>(key, ttl, json.<span class="fn">dumps</span>(prediction))
+    <span class="kw">return</span> prediction</pre>
+
+        <h3>Embedding Cache</h3>
+        <p>
+          Caching intermediate embeddings (user embedding, item embedding) is
+          more effective than caching final predictions because embeddings
+          are reusable across many prediction requests.
+        </p>
+      </section>
+
+      <!-- § 5 -->
+      <section id="optimisation">
+        <h2>Latency Optimisation</h2>
+        <p>
+          Every millisecond matters. Here are the key optimisation levers:
+        </p>
+
+        <h3>Model Optimisation</h3>
+        <p>
+          Quantisation (FP16 / INT8), pruning, knowledge distillation, and
+          ONNX conversion reduce model size and inference time by 2–10×.
+        </p>
+
+<pre class="pseudo-code"><span class="cm"># ONNX export + quantisation</span>
+<span class="kw">import</span> torch, onnx
+<span class="kw">from</span> onnxruntime.quantization <span class="kw">import</span> quantize_dynamic
+
+<span class="cm"># Export to ONNX</span>
+torch.onnx.<span class="fn">export</span>(model, dummy_input, "model.onnx", opset_version=13)
+
+<span class="cm"># Dynamic quantisation (INT8)</span>
+<span class="fn">quantize_dynamic</span>("model.onnx", "model_quant.onnx")</pre>
+
+        <h3>Infrastructure</h3>
+        <p>
+          Co-locate feature store and model server in the same region / AZ.
+          Use connection pooling, keep-alive connections, and gRPC (not REST)
+          to minimise network overhead.
+        </p>
+
+        <div class="callout">
+          <strong>Latency budget:</strong> Feature fetch ≤ 15 ms, model
+          inference ≤ 20 ms, post-processing ≤ 5 ms, network overhead ≤ 10 ms
+          = 50 ms total.
+        </div>
+      </section>
+
+      <!-- § 6 -->
+      <section id="architecture">
+        <h2>System Architecture</h2>
+
+        <svg id="sd-rt-full" viewBox="0 0 700 280" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%;max-width:700px;margin:1rem auto;display:block"
+             aria-label="Full real-time inference architecture">
+          <rect x="270" y="5" width="160" height="40" rx="8" fill="#e8f5f0" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="350" y="30" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#1a1a2e">API Gateway / LB</text>
+          <line x1="350" y1="45" x2="350" y2="70" stroke="#ccc" stroke-width="1.2"/>
+
+          <rect x="270" y="70" width="160" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1.2"/>
+          <text x="350" y="95" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#1a1a2e">Prediction Service</text>
+          <line x1="310" y1="110" x2="150" y2="145" stroke="#ccc" stroke-width="1.2"/>
+          <line x1="390" y1="110" x2="550" y2="145" stroke="#ccc" stroke-width="1.2"/>
+
+          <rect x="60" y="140" width="160" height="40" rx="8" fill="#f0f0ff" stroke="#6b5bff" stroke-width="1.2"/>
+          <text x="140" y="165" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#6b5bff">Feature Service</text>
+
+          <rect x="480" y="140" width="160" height="40" rx="8" fill="#f0f0ff" stroke="#6b5bff" stroke-width="1.2"/>
+          <text x="560" y="165" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#6b5bff">Model Server (Triton)</text>
+
+          <rect x="60" y="210" width="160" height="35" rx="8" fill="#fff7ed" stroke="#ff6b35" stroke-width="1"/>
+          <text x="140" y="232" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#ff6b35">Redis Feature Cache</text>
+          <line x1="140" y1="180" x2="140" y2="210" stroke="#ff6b35" stroke-width="1" stroke-dasharray="4,3"/>
+
+          <rect x="480" y="210" width="160" height="35" rx="8" fill="#fff7ed" stroke="#ff6b35" stroke-width="1"/>
+          <text x="560" y="232" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#ff6b35">Model Registry (S3)</text>
+          <line x1="560" y1="180" x2="560" y2="210" stroke="#ff6b35" stroke-width="1" stroke-dasharray="4,3"/>
+
+          <!-- Logging -->
+          <rect x="270" y="140" width="160" height="40" rx="8" fill="#f5f5f5" stroke="#ccc" stroke-width="1"/>
+          <text x="350" y="165" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#1a1a2e">Prediction Logger</text>
+          <line x1="350" y1="110" x2="350" y2="140" stroke="#ccc" stroke-width="1" stroke-dasharray="4,3"/>
+        </svg>
+
+        <p>
+          The architecture separates concerns: the prediction service
+          orchestrates feature fetching and model inference, while the
+          model server handles GPU management and batching independently.
+        </p>
+      </section>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

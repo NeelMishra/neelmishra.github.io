@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into long-context methods: RoPE scaling (NTK-aware, YaRN, Dynamic NTK), ALiBi, Ring Attention, KV cache implications, and serving strategies for 200K–1M+ token windows.">
+  <title>Long Context: RoPE Scaling, ALiBi, Ring Attention | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#sf-position-encoding">Positional Encoding Foundations</a></li>
+        <li><a href="#sf-rope-internals">RoPE Internals</a></li>
+        <li><a href="#sf-rope-scaling">RoPE Scaling Methods</a></li>
+        <li><a href="#sf-alibi">ALiBi: Linear Bias Approach</a></li>
+        <li><a href="#sf-ring-attention">Ring Attention</a></li>
+        <li><a href="#sf-context-landscape">Context Window Landscape</a></li>
+        <li><a href="#sf-kv-memory">KV Cache Memory at Scale</a></li>
+        <li><a href="#sf-serving">Serving Long-Context Models</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Long Context: RoPE Scaling, ALiBi, Ring Attention</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">SOTA &amp; Frontiers</span>
+        </div>
+      </div>
+
+      <!-- ───────── Section 1: Positional Encoding Foundations ───────── -->
+      <h2 id="sf-position-encoding">Positional Encoding Foundations</h2>
+      <p>Transformers are permutation-invariant by design—without positional information, a self-attention layer produces the <em>same</em> output regardless of token order. Every modern LLM therefore injects position signals, but the choice of <strong>how</strong> dictates the model's ability to extrapolate beyond its training context length.</p>
+
+      <p>The original "Attention Is All You Need" paper used <strong>sinusoidal positional encodings</strong>: fixed sine and cosine functions of different frequencies added directly to token embeddings. Learned absolute position embeddings (used by GPT-2/3) replaced these but introduced the same hard ceiling—positions beyond the trained maximum have no meaningful representation.</p>
+
+      <div class="callout">
+        <strong>The core problem:</strong> Absolute position embeddings (sinusoidal or learned) create a fixed vocabulary of positions. A model trained with max_position = 2048 has literally never seen position 2049 during training. At inference, those positions produce out-of-distribution embeddings that degrade attention patterns catastrophically.
+      </div>
+
+      <p>This limitation drove the field toward <strong>relative position encodings</strong>—methods that encode the <em>distance</em> between tokens rather than their absolute index. The two dominant families today are <strong>RoPE</strong> (Rotary Position Embedding) and <strong>ALiBi</strong> (Attention with Linear Biases), each with fundamentally different philosophies on how to represent position.</p>
+
+      <!-- SVG: RoPE frequency extrapolation -->
+      <svg viewBox="0 0 720 260" style="width:100%;max-width:720px;margin:1.5rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="trainGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.05"/>
+          </linearGradient>
+          <linearGradient id="extGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#ff6b35" stop-opacity="0.12"/>
+            <stop offset="100%" stop-color="#ff6b35" stop-opacity="0.04"/>
+          </linearGradient>
+        </defs>
+        <!-- Background regions -->
+        <rect x="60" y="30" width="300" height="190" rx="6" fill="url(#trainGrad)" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="4,3"/>
+        <rect x="360" y="30" width="320" height="190" rx="6" fill="url(#extGrad)" stroke="#ff6b35" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="210" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a" font-weight="700">TRAINING REGION (0–4K)</text>
+        <text x="520" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#ff6b35" font-weight="700">EXTRAPOLATION REGION (4K–16K)</text>
+        <!-- Axes -->
+        <line x1="60" y1="220" x2="680" y2="220" stroke="#999" stroke-width="1"/>
+        <line x1="60" y1="30" x2="60" y2="220" stroke="#999" stroke-width="1"/>
+        <text x="370" y="250" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666">Position Index</text>
+        <text x="18" y="130" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#666" transform="rotate(-90,18,130)">Frequency θ</text>
+        <!-- High-freq dim (fast rotation) -->
+        <path d="M60,160 Q135,60 210,160 Q285,240 360,140" fill="none" stroke="#0a8f6a" stroke-width="2"/>
+        <path d="M360,140 Q435,40 510,180 Q560,260 620,100 L680,200" fill="none" stroke="#ff6b35" stroke-width="2" stroke-dasharray="6,3"/>
+        <!-- Low-freq dim (slow rotation) -->
+        <path d="M60,180 C160,160 260,170 360,165" fill="none" stroke="#0a8f6a" stroke-width="2" opacity="0.5"/>
+        <path d="M360,165 C460,158 560,140 680,120" fill="none" stroke="#ff6b35" stroke-width="2" stroke-dasharray="6,3" opacity="0.5"/>
+        <!-- Labels -->
+        <text x="310" y="100" font-family="Consolas,monospace" font-size="10" fill="#0a8f6a">high-freq dim</text>
+        <text x="310" y="185" font-family="Consolas,monospace" font-size="10" fill="#0a8f6a" opacity="0.6">low-freq dim</text>
+        <text x="540" y="90" font-family="Consolas,monospace" font-size="10" fill="#ff6b35">unstable beyond training</text>
+        <!-- Boundary line -->
+        <line x1="360" y1="30" x2="360" y2="220" stroke="#333" stroke-width="1.5" stroke-dasharray="3,3"/>
+        <text x="360" y="240" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#333" font-weight="600">4096 (train limit)</text>
+      </svg>
+
+      <p>The SVG above illustrates the core challenge. RoPE encodes position via rotation at different frequencies per dimension. Within the training window, all frequency bands are well-calibrated. Beyond it, high-frequency dimensions (which complete many rotations within the training range) encounter angular positions never seen during training, producing chaotic attention scores.</p>
+
+      <!-- ───────── Section 2: RoPE Internals ───────── -->
+      <h2 id="sf-rope-internals">RoPE Internals</h2>
+      <p>Rotary Position Embedding (RoPE), introduced in <em>RoFormer</em> (Su et al., 2021), encodes position by <strong>rotating</strong> query and key vectors in 2D subspaces. For a head dimension <code>d</code>, RoPE pairs up consecutive dimensions <code>(2i, 2i+1)</code> and applies a rotation by angle <code>m · θ_i</code>, where <code>m</code> is the token position and <code>θ_i</code> is the frequency for dimension pair <code>i</code>.</p>
+
+      <pre class="pseudo-code"><span class="cm"># RoPE: Rotary Position Embedding core computation</span>
+<span class="kw">import</span> torch
+
+<span class="kw">def</span> <span class="fn">compute_rope_freqs</span>(dim, max_pos, base=10000):
+    <span class="cm"># θ_i = base^(-2i/d) for i = 0, 1, ..., d/2 - 1</span>
+    freqs = 1.0 / (base ** (torch.<span class="fn">arange</span>(0, dim, 2).float() / dim))
+    <span class="cm"># positions: [0, 1, 2, ..., max_pos-1]</span>
+    positions = torch.<span class="fn">arange</span>(max_pos).float()
+    <span class="cm"># outer product → angles[m, i] = m * θ_i</span>
+    angles = torch.<span class="fn">outer</span>(positions, freqs)  <span class="cm"># [max_pos, d/2]</span>
+    <span class="kw">return</span> torch.<span class="fn">polar</span>(torch.<span class="fn">ones_like</span>(angles), angles)
+
+<span class="kw">def</span> <span class="fn">apply_rope</span>(x, freqs_cis):
+    <span class="cm"># x: [batch, seq_len, n_heads, head_dim]</span>
+    <span class="cm"># Reshape to complex: pair (2i, 2i+1) → complex number</span>
+    x_complex = torch.<span class="fn">view_as_complex</span>(
+        x.float().<span class="fn">reshape</span>(*x.shape[:-1], -1, 2)
+    )
+    <span class="cm"># Rotate by element-wise multiplication with unit complex numbers</span>
+    x_rotated = x_complex * freqs_cis
+    <span class="cm"># Convert back to real</span>
+    <span class="kw">return</span> torch.<span class="fn">view_as_real</span>(x_rotated).<span class="fn">flatten</span>(-2)</pre>
+
+      <p>The key mathematical property: when computing <code>q_m · k_n</code> (the dot product between query at position <code>m</code> and key at position <code>n</code>), the rotations compose such that the result depends only on the <strong>relative distance</strong> <code>m - n</code>. This gives RoPE its relative positional encoding behavior while being applied as an absolute rotation.</p>
+
+      <div class="callout">
+        <strong>Why the base matters:</strong> The base frequency (default 10,000) controls how quickly each dimension pair rotates. Dimension pair 0 rotates fastest (θ₀ = 1.0), while the last pair rotates slowest (θ_{d/2-1} ≈ 0.0001). Increasing the base <strong>stretches</strong> all frequencies, making rotations slower—this is the foundation of NTK-aware scaling.
+      </div>
+
+      <p>RoPE is used by virtually all modern open-weight LLMs: LLaMA 1/2/3, Mistral, Qwen, DeepSeek, Gemma, and Phi. Its simplicity (no learned parameters, applied only to Q and K) and clean mathematical properties make it the default choice. The challenge is <em>extending</em> it beyond the training window.</p>
+
+      <!-- ───────── Section 3: RoPE Scaling Methods ───────── -->
+      <h2 id="sf-rope-scaling">RoPE Scaling Methods</h2>
+      <p>When a RoPE-based model is trained with context length <code>L_train</code> and needs to operate at <code>L_target > L_train</code>, the high-frequency dimensions see rotation angles never encountered during training. Multiple scaling strategies have emerged to address this:</p>
+
+      <h3>Position Interpolation (PI)</h3>
+      <p>The simplest approach: linearly scale down all positions by a factor <code>s = L_train / L_target</code>. Position 8192 in a model trained on 4096 tokens becomes position 4096 (mapped back into the training range). This works but degrades resolution—tokens that were 1 position apart now appear 0.5 positions apart.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Position Interpolation (Chen et al., 2023)</span>
+<span class="kw">def</span> <span class="fn">position_interpolation</span>(positions, L_train, L_target):
+    scale = L_train / L_target  <span class="cm"># e.g. 4096/16384 = 0.25</span>
+    <span class="kw">return</span> positions * scale      <span class="cm"># compress all positions into [0, L_train)</span>
+
+<span class="cm"># Problem: position 100 and 101 now differ by only 0.25</span>
+<span class="cm"># → reduced ability to distinguish nearby tokens</span></pre>
+
+      <h3>NTK-Aware Scaling</h3>
+      <p><strong>Neural Tangent Kernel-aware</strong> scaling changes the RoPE base frequency instead of scaling positions. By increasing the base from 10,000 to a higher value, all rotation frequencies are reduced proportionally. The insight: high-frequency dimensions (which cause extrapolation failures) are slowed the most, while low-frequency dimensions (already well-behaved) are minimally affected.</p>
+
+      <pre class="pseudo-code"><span class="cm"># NTK-Aware Scaling (Reddit user "bloc97", 2023)</span>
+<span class="kw">def</span> <span class="fn">ntk_aware_rope</span>(dim, max_pos, base=10000, scale=4):
+    <span class="cm"># Increase base frequency proportionally</span>
+    new_base = base * scale ** (dim / (dim - 2))
+    <span class="cm"># Example: dim=128, scale=4 → new_base ≈ 160,000</span>
+    freqs = 1.0 / (new_base ** (torch.<span class="fn">arange</span>(0, dim, 2).float() / dim))
+    positions = torch.<span class="fn">arange</span>(max_pos).float()
+    <span class="kw">return</span> torch.<span class="fn">outer</span>(positions, freqs)
+
+<span class="cm"># Key insight: no position compression → nearby tokens stay distinguishable</span>
+<span class="cm"># High-freq dims slow down most, low-freq dims barely change</span></pre>
+
+      <h3>YaRN (Yet Another RoPE ExtensioN)</h3>
+      <p>YaRN combines the best of PI and NTK-aware scaling with a dimension-dependent strategy. It divides frequency dimensions into three bands and applies different treatments:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Low Frequencies</h4>
+          <p><strong>No modification.</strong> These dimensions rotate so slowly they never complete a full cycle within the training window. They naturally extrapolate well and should be left alone.</p>
+        </div>
+        <div class="compare-card">
+          <h4>High Frequencies</h4>
+          <p><strong>Position Interpolation.</strong> These dimensions complete many rotations during training. Scaling positions keeps them within the trained range at the cost of some resolution loss.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Medium Frequencies</h4>
+          <p><strong>Smooth interpolation</strong> between the two extremes using a ramp function. This avoids the sharp boundary that NTK-aware scaling creates.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Attention Scaling</h4>
+          <p><strong>Temperature correction.</strong> YaRN multiplies attention logits by a scale factor to compensate for the entropy increase from longer sequences. Without this, attention becomes too diffuse.</p>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm"># YaRN: dimension-dependent scaling (Peng et al., 2023)</span>
+<span class="kw">def</span> <span class="fn">yarn_rope</span>(dim, max_pos, base=10000, scale=4, beta_fast=32, beta_slow=1):
+    freqs = 1.0 / (base ** (torch.<span class="fn">arange</span>(0, dim, 2).float() / dim))
+
+    <span class="cm"># Classify each frequency dimension into low/mid/high</span>
+    low_freq_wavelen = max_pos / beta_slow  <span class="cm"># wavelength threshold</span>
+    high_freq_wavelen = max_pos / beta_fast
+    wavelens = 2 * math.pi / freqs
+
+    <span class="cm"># Ramp function: 0 for high-freq, 1 for low-freq, smooth in between</span>
+    ramp = (wavelens - high_freq_wavelen) / (low_freq_wavelen - high_freq_wavelen)
+    ramp = ramp.<span class="fn">clamp</span>(0, 1)
+
+    <span class="cm"># Blend: interpolated_freq for high-freq dims, original for low-freq</span>
+    scaled_freqs = freqs / scale               <span class="cm"># position interpolation</span>
+    blended = (1 - ramp) * scaled_freqs + ramp * freqs
+    <span class="kw">return</span> blended</pre>
+
+      <h3>Dynamic NTK Scaling</h3>
+      <p>Rather than choosing a fixed extension ratio, Dynamic NTK increases the RoPE base <em>on-the-fly</em> as the sequence grows. When the current sequence length is within the training window, no scaling is applied. Once it exceeds it, the base is adjusted proportionally to the overshoot. This is the default strategy in many vLLM deployments.</p>
+
+      <div class="callout warn">
+        <strong>Fine-tuning still helps:</strong> All RoPE scaling methods work best with a short fine-tuning phase on longer sequences (typically 1000–2000 steps). Position Interpolation without fine-tuning degrades significantly; NTK-aware and YaRN degrade more gracefully but still benefit from adaptation. LLaMA 3.1 was fine-tuned with a 128K context after initial pretraining at 8K.
+      </div>
+
+      <!-- ───────── Section 4: ALiBi ───────── -->
+      <h2 id="sf-alibi">ALiBi: Linear Bias Approach</h2>
+      <p>Attention with Linear Biases (ALiBi), introduced by Press et al. (2022), takes a radically different approach: <strong>no positional encoding at all</strong>. Instead, ALiBi adds a static, linear bias to the attention scores that penalizes distant tokens. No learned parameters, no rotations—just a slope that decays attention as distance increases.</p>
+
+      <pre class="pseudo-code"><span class="cm"># ALiBi: Attention with Linear Biases</span>
+<span class="kw">def</span> <span class="fn">alibi_attention</span>(Q, K, V, n_heads):
+    <span class="cm"># Standard attention scores</span>
+    attn = Q @ K.<span class="fn">transpose</span>(-1, -2) / <span class="fn">sqrt</span>(d_k)
+
+    <span class="cm"># ALiBi bias: -m * |i - j| for head m</span>
+    <span class="cm"># Slopes are head-specific, geometrically spaced</span>
+    slopes = <span class="fn">get_alibi_slopes</span>(n_heads)
+    <span class="cm"># slopes for 8 heads: [1/2, 1/4, 1/8, ..., 1/256]</span>
+    <span class="cm"># slopes for 16 heads: [1/2, 1/2^(3/2), 1/4, ..., 1/2^8]</span>
+
+    seq_len = Q.<span class="fn">size</span>(-2)
+    <span class="cm"># Distance matrix: position i attends to position j</span>
+    positions = torch.<span class="fn">arange</span>(seq_len)
+    bias = -slopes[:, <span class="kw">None</span>, <span class="kw">None</span>] * (positions[<span class="kw">None</span>, :, <span class="kw">None</span>] - positions[<span class="kw">None</span>, <span class="kw">None</span>, :]).<span class="fn">abs</span>()
+
+    <span class="cm"># Add bias directly to attention scores (before softmax)</span>
+    attn = attn + bias
+    <span class="kw">return</span> <span class="fn">softmax</span>(attn) @ V
+
+<span class="kw">def</span> <span class="fn">get_alibi_slopes</span>(n_heads):
+    <span class="cm"># Geometric sequence: 2^(-8/n_heads), 2^(-16/n_heads), ...</span>
+    ratio = 2 ** (-8.0 / n_heads)
+    <span class="kw">return</span> torch.<span class="fn">tensor</span>([ratio ** (i + 1) <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(n_heads)])</pre>
+
+      <div class="callout">
+        <strong>ALiBi's extrapolation advantage:</strong> Since the bias is a simple linear function of distance, it naturally extends to any sequence length. A token 100K positions away simply gets a larger penalty—there's no "unseen position" problem. ALiBi-trained models (like BLOOM and MPT) showed strong length generalization, often extrapolating 2–6× beyond training length without modification.
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>✅ ALiBi Strengths</h4>
+          <ul>
+            <li>Zero-cost extrapolation—no scaling needed</li>
+            <li>No added parameters or computation</li>
+            <li>Simple implementation</li>
+            <li>Different slopes let heads specialize (local vs. global attention)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>⚠️ ALiBi Limitations</h4>
+          <ul>
+            <li>Linear decay may be too aggressive for tasks needing long-range retrieval</li>
+            <li>Cannot learn position-dependent patterns (e.g., code indentation)</li>
+            <li>Less expressive than RoPE at short/medium ranges</li>
+            <li>Largely superseded by RoPE + scaling in most frontier models</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>In practice, the field has converged on RoPE as the dominant positional encoding. ALiBi's linear decay was too rigid—it couldn't represent the nuanced positional patterns that RoPE captures through its multi-frequency rotations. However, ALiBi's core insight (that simple biases can encode position) influenced later work on attention sinks and sliding window attention in Mistral.</p>
+
+      <!-- ───────── Section 5: Ring Attention ───────── -->
+      <h2 id="sf-ring-attention">Ring Attention for Distributed Long Context</h2>
+      <p>Even with perfect positional encoding, long-context models face a hard constraint: <strong>KV cache memory</strong>. A single 1M-token sequence with a 70B model would require hundreds of GB of KV cache—far beyond any single GPU. Ring Attention (Liu et al., 2023) solves this by distributing the sequence across multiple devices in a ring topology.</p>
+
+      <h3>How Ring Attention Works</h3>
+      <p>The input sequence of length <code>L</code> is split into <code>N</code> chunks across <code>N</code> devices. Each device holds its own chunk's Q, K, V tensors. The computation proceeds in <code>N</code> rounds:</p>
+
+      <ol>
+        <li><strong>Round 0:</strong> Each device computes local attention (its Q against its own K, V).</li>
+        <li><strong>Round 1:</strong> Each device sends its K, V to the next device in the ring and receives K, V from the previous device. It computes attention of its Q against the received K, V.</li>
+        <li><strong>Rounds 2 to N−1:</strong> Continue passing K, V around the ring. After N−1 rounds, every device has attended to every chunk's K, V.</li>
+        <li><strong>Combine:</strong> Use the online softmax trick (from Flash Attention) to merge partial attention outputs without storing full attention matrices.</li>
+      </ol>
+
+      <pre class="pseudo-code"><span class="cm"># Ring Attention: distributed long-context attention</span>
+<span class="kw">def</span> <span class="fn">ring_attention</span>(Q_local, K_local, V_local, n_devices):
+    <span class="cm"># Each device holds a chunk of the sequence</span>
+    <span class="cm"># Q_local: [batch, chunk_len, heads, dim]</span>
+
+    <span class="cm"># Initialize running numerator/denominator for online softmax</span>
+    out = torch.<span class="fn">zeros_like</span>(Q_local)
+    lse = torch.<span class="fn">full</span>((..., 1), float('-inf'))  <span class="cm"># log-sum-exp</span>
+
+    K_recv, V_recv = K_local, V_local
+
+    <span class="kw">for</span> round_idx <span class="kw">in</span> <span class="fn">range</span>(n_devices):
+        <span class="cm"># Overlap: start async send/recv for NEXT round</span>
+        <span class="kw">if</span> round_idx < n_devices - 1:
+            K_next, V_next = <span class="fn">async_ring_send_recv</span>(K_recv, V_recv)
+
+        <span class="cm"># Compute partial attention: local Q × received K,V</span>
+        partial_out, partial_lse = <span class="fn">flash_attention_fwd</span>(
+            Q_local, K_recv, V_recv
+        )
+
+        <span class="cm"># Online softmax merge (numerically stable)</span>
+        out, lse = <span class="fn">merge_attention_outputs</span>(
+            out, lse, partial_out, partial_lse
+        )
+
+        <span class="cm"># Wait for next K,V to arrive</span>
+        <span class="kw">if</span> round_idx < n_devices - 1:
+            K_recv, V_recv = K_next.<span class="fn">wait</span>(), V_next.<span class="fn">wait</span>()
+
+    <span class="kw">return</span> out</pre>
+
+      <div class="callout">
+        <strong>Communication hiding:</strong> Ring Attention overlaps computation with communication. While device <em>i</em> computes attention against the current K,V chunk, it simultaneously sends that chunk to device <em>i+1</em> and receives the next chunk from device <em>i−1</em>. If the chunk computation time ≥ transfer time, communication is fully hidden and the wall-clock time scales <strong>linearly</strong> with devices.
+      </div>
+
+      <p>Ring Attention enables context lengths that scale linearly with the number of devices. With 8 GPUs, you can handle 8× the context of a single GPU. Google's 1M-token Gemini models and Anthropic's 200K Claude models both employ variants of distributed attention for processing extremely long sequences.</p>
+
+      <!-- ───────── Section 6: Context Window Landscape ───────── -->
+      <h2 id="sf-context-landscape">Context Window Landscape</h2>
+      <p>The context window race has accelerated dramatically. Here is the current state of production context windows and the techniques each model family uses:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>LLaMA 3.1 (Meta)</h4>
+          <p><strong>128K tokens.</strong> RoPE with increased base frequency (500K). Pre-trained at 8K, then extended via gradual fine-tuning: 8K → 32K → 128K with progressive training steps. Uses GQA (8 KV heads) to manage KV cache.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Claude 3.5 (Anthropic)</h4>
+          <p><strong>200K tokens.</strong> Position encoding details undisclosed. Achieves near-perfect retrieval across the full window (needle-in-a-haystack). Likely uses distributed attention internally for long sequences.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Gemini 1.5 Pro (Google)</h4>
+          <p><strong>1M+ tokens (up to 2M in preview).</strong> Uses a MoE architecture with efficient attention. Ring Attention or similar distributed attention for cross-device sequence sharding. Demonstrated video and audio processing spanning hours.</p>
+        </div>
+        <div class="compare-card">
+          <h4>GPT-4 Turbo (OpenAI)</h4>
+          <p><strong>128K tokens.</strong> Details undisclosed. Known to struggle with retrieval in the middle of very long contexts ("lost in the middle" phenomenon). Likely uses sliding window + global attention hybrid.</p>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>"Lost in the middle" problem:</strong> Many models with large context windows show a U-shaped retrieval curve—they find information well at the beginning and end of the context but struggle with facts placed in the middle third. This is likely a training distribution artifact: during pre-training, documents rarely exceed a few thousand tokens, so the model has limited exposure to relevant information at position 50K.
+      </div>
+
+      <!-- ───────── Section 7: KV Cache Memory at Scale ───────── -->
+      <h2 id="sf-kv-memory">KV Cache Memory at Scale</h2>
+      <p>Long context fundamentally transforms the memory economics of LLM serving. The KV cache grows <strong>linearly</strong> with sequence length, and at 100K+ tokens, it often dominates total GPU memory—dwarfing the model weights themselves.</p>
+
+      <pre class="pseudo-code"><span class="cm"># KV cache memory formula:</span>
+<span class="cm"># memory = 2 × layers × kv_heads × head_dim × seq_len × bytes_per_elem</span>
+
+<span class="cm"># ────────────────────────────────────────────────────────────</span>
+<span class="cm"># LLaMA 3.1 70B (GQA: 8 KV heads, 80 layers, head_dim=128)</span>
+<span class="cm"># ────────────────────────────────────────────────────────────</span>
+kv_4k   = 2 * 80 * 8 * 128 * 4_096 * 2    <span class="cm"># =  1.34 GB</span>
+kv_32k  = 2 * 80 * 8 * 128 * 32_768 * 2   <span class="cm"># = 10.74 GB</span>
+kv_128k = 2 * 80 * 8 * 128 * 131_072 * 2  <span class="cm"># = 42.95 GB</span>
+
+<span class="cm"># With batch_size=8 at 128K context:</span>
+total   = 42.95 * 8                        <span class="cm"># = 343.6 GB (!)</span>
+
+<span class="cm"># ────────────────────────────────────────────────────────────</span>
+<span class="cm"># For comparison — model weights (FP16):</span>
+<span class="cm"># LLaMA 70B ≈ 140 GB</span>
+<span class="cm"># At 128K×8 batch, KV cache is 2.5× the model size!</span>
+<span class="cm"># ────────────────────────────────────────────────────────────</span>
+
+<span class="cm"># Gemini-scale: hypothetical 1M context, 64 layers, 16 KV heads</span>
+kv_1m = 2 * 64 * 16 * 128 * 1_000_000 * 2  <span class="cm"># = 524 GB per sequence</span></pre>
+
+      <div class="callout">
+        <strong>GQA is critical for long context:</strong> Grouped-Query Attention reduces KV heads from <code>n_heads</code> (e.g., 64) to a much smaller number (e.g., 8). For LLaMA 70B, GQA reduces KV cache by 8×. Without GQA, the 128K KV cache would be ~344 GB per sequence instead of 43 GB. Every modern long-context model uses GQA or MQA.
+      </div>
+
+      <p>This memory pressure has driven multiple innovations in KV cache management for long-context models:</p>
+
+      <ul>
+        <li><strong>Paged Attention (vLLM):</strong> Manages KV cache in non-contiguous pages, eliminating memory fragmentation that wastes 60–80% of GPU memory with naive allocation.</li>
+        <li><strong>KV Cache Quantization:</strong> Storing K and V in INT8 or even INT4 halves or quarters memory. FP8 KV cache is default in many vLLM deployments.</li>
+        <li><strong>KV Cache Eviction:</strong> Policies like H₂O (Heavy Hitter Oracle) keep only the most "important" KV entries, discarding tokens that receive low attention scores.</li>
+        <li><strong>Sliding Window + Sink Tokens:</strong> Mistral uses a fixed-size sliding window (4K) for local attention plus a small set of "sink" tokens (initial tokens that anchor attention), achieving infinite-length generation with bounded memory.</li>
+        <li><strong>KV Cache Offloading:</strong> Move older KV entries to CPU memory or NVMe, fetching them back on demand. InfiniGen and similar systems prefetch predicted KV cache blocks.</li>
+      </ul>
+
+      <!-- ───────── Section 8: Serving Long-Context Models ───────── -->
+      <h2 id="sf-serving">Serving Long-Context Models</h2>
+      <p>Serving models at 100K+ context lengths introduces unique engineering challenges that fundamentally differ from short-context serving:</p>
+
+      <h3>Prefill Bottleneck</h3>
+      <p>The prefill phase (processing the input prompt) is compute-bound and scales <strong>quadratically</strong> with sequence length for standard attention. A 128K-token prompt takes ~1,000× longer to prefill than a 4K prompt (not 32×). Flash Attention reduces the constant factor but doesn't change the O(n²) scaling. This means time-to-first-token (TTFT) can be <strong>30+ seconds</strong> for very long prompts.</p>
+
+      <h3>Disaggregated Prefill/Decode</h3>
+      <p>Long-context serving benefits enormously from separating prefill and decode onto different hardware. Prefill is compute-heavy (benefits from dense GPU clusters), while decode is memory-bandwidth-bound (benefits from high-bandwidth GPUs with large memory). Systems like DistServe and Splitwise route these phases to specialized pools.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Typical long-context serving architecture</span>
+
+<span class="cm"># Prefill cluster: optimized for compute throughput</span>
+<span class="cm"># - Dense A100/H100 nodes</span>
+<span class="cm"># - Process 128K prompt in parallel using tensor parallelism</span>
+<span class="cm"># - Generate KV cache, stream it to decode cluster</span>
+
+<span class="cm"># Decode cluster: optimized for memory bandwidth</span>
+<span class="cm"># - Nodes with large memory (8×H100 80GB)</span>
+<span class="cm"># - Receive KV cache from prefill</span>
+<span class="cm"># - Generate tokens one-by-one, memory-bandwidth bound</span>
+
+<span class="cm"># KV cache transfer between clusters:</span>
+<span class="cm"># 128K context, LLaMA 70B → ~43 GB KV cache</span>
+<span class="cm"># Over NVLink/IB at 400 Gbps → ~0.86 seconds transfer</span>
+<span class="cm"># Over PCIe Gen5 at 64 GBps → ~0.67 seconds transfer</span></pre>
+
+      <h3>Scheduling and Batching</h3>
+      <p>Long-context requests are hostile to naive batching. A single 128K request consumes the KV cache memory that could serve 32 × 4K requests. Sophisticated schedulers must balance:</p>
+
+      <ul>
+        <li><strong>Priority queuing:</strong> Separate queues for short and long requests to prevent head-of-line blocking.</li>
+        <li><strong>Preemption:</strong> Ability to pause a long-context decode (offloading its KV cache to CPU) to serve urgent short requests, then resume.</li>
+        <li><strong>Prefix caching:</strong> System prompts and shared context can be cached and reused across requests, amortizing the 128K prefill cost over many users.</li>
+        <li><strong>Chunked prefill:</strong> Split long prefills into chunks interleaved with decode steps from other requests, preventing latency spikes.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Cost reality:</strong> Serving a 128K-context request costs roughly 30–50× more than a 4K request (combining prefill compute, KV cache memory, and decode bandwidth). This is why API pricing for long-context models typically charges per-token for both input and output, with input tokens being significant cost drivers at long context lengths.
+      </div>
+
+      <h3>Interview Cheat Sheet</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>🎯 Key Questions</h4>
+          <ul>
+            <li><em>"How does RoPE differ from absolute positional encoding?"</em> — Encodes relative distance via rotation; extends via base frequency scaling.</li>
+            <li><em>"Why not just train on longer sequences?"</em> — O(n²) attention cost makes long pre-training prohibitively expensive; extension methods achieve 90%+ quality at &lt;1% training cost.</li>
+            <li><em>"What limits context length in practice?"</em> — KV cache memory, not positional encoding. A 1M-token KV cache can exceed 500 GB.</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4>📊 Numbers to Know</h4>
+          <ul>
+            <li>RoPE default base: 10,000 (LLaMA 3.1 uses 500,000)</li>
+            <li>KV cache at 128K (70B): ~43 GB per sequence</li>
+            <li>Prefill time 128K: 10–30 seconds on 8×H100</li>
+            <li>Ring Attention scales context ∝ number of GPUs</li>
+            <li>ALiBi slopes: geometric series 2^(-8/n_heads)</li>
+          </ul>
+        </div>
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

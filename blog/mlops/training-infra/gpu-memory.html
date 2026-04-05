@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Memory profiling, torch.cuda.memory_summary, gradient checkpointing, mixed precision for memory savings">
+  <title>GPU Memory Management: OOM Debugging | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#memory-anatomy">Anatomy of GPU Memory Usage</a></li>
+        <li><a href="#memory-profiling">Memory Profiling Tools</a></li>
+        <li><a href="#oom-debugging">OOM Debugging Strategies</a></li>
+        <li><a href="#gradient-checkpointing-mem">Gradient Checkpointing</a></li>
+        <li><a href="#mixed-precision-mem">Mixed Precision for Memory</a></li>
+        <li><a href="#optimization-techniques">Advanced Techniques</a></li>
+        <li><a href="#memory-budget">Memory Budget Calculator</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>GPU Memory Management: OOM Debugging</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ======== SECTION 1 ======== -->
+      <h2 id="memory-anatomy">Anatomy of GPU Memory Usage</h2>
+      <p>When you call <code>model.to("cuda")</code> and start training, GPU memory is consumed by four major categories. Understanding the relative size of each is the first step to solving OOM errors.</p>
+
+      <svg viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:500px;margin:1.2rem auto;display:block" aria-label="GPU memory breakdown pie chart">
+        <!-- Simplified stacked bar instead of pie for clarity -->
+        <rect id="ti-mem-params" x="50" y="20" width="400" height="35" rx="6" fill="#0a8f6a"/>
+        <text x="250" y="43" text-anchor="middle" font-size="12" font-family="Manrope" fill="#fff" font-weight="600">Parameters — ~P bytes</text>
+        <rect id="ti-mem-grads" x="50" y="60" width="400" height="35" rx="6" fill="#ff6b35"/>
+        <text x="250" y="83" text-anchor="middle" font-size="12" font-family="Manrope" fill="#fff" font-weight="600">Gradients — ~P bytes</text>
+        <rect id="ti-mem-optim" x="50" y="100" width="400" height="50" rx="6" fill="#9c27b0"/>
+        <text x="250" y="128" text-anchor="middle" font-size="12" font-family="Manrope" fill="#fff" font-weight="600">Optimizer States — 2P bytes (Adam: momentum + variance)</text>
+        <rect id="ti-mem-act" x="50" y="155" width="400" height="65" rx="6" fill="#1565c0"/>
+        <text x="250" y="185" text-anchor="middle" font-size="12" font-family="Manrope" fill="#fff" font-weight="600">Activations — scales with batch size &amp; sequence length</text>
+        <text x="250" y="205" text-anchor="middle" font-size="10" font-family="Manrope" fill="#ddd">Often the largest component for large models</text>
+        <rect id="ti-mem-workspace" x="50" y="225" width="400" height="25" rx="6" fill="#666"/>
+        <text x="250" y="242" text-anchor="middle" font-size="11" font-family="Manrope" fill="#fff">CUDA workspace, fragmentation, temp buffers</text>
+      </svg>
+
+      <p>For a model with <strong>P</strong> parameters in FP32, the baseline memory requirement is:</p>
+      <ul>
+        <li><strong>Parameters:</strong> 4P bytes (FP32) or 2P bytes (FP16/BF16)</li>
+        <li><strong>Gradients:</strong> Same size as parameters</li>
+        <li><strong>Adam optimizer states:</strong> 2 × parameter size (first &amp; second moments)</li>
+        <li><strong>Activations:</strong> Depends on batch size, sequence length, and model architecture</li>
+      </ul>
+      <p>A 7B parameter model in FP32 requires at minimum: 7B × 4 bytes × 4 (params + grads + 2 optimizer states) = <strong>112 GB</strong> just for static state—before a single activation is stored.</p>
+
+      <div class="callout">
+        <strong>The 4× Rule:</strong> With Adam in FP32, you need roughly 4× the model parameter memory just for training state. This is why a 7B model doesn't fit on a single 80 GB GPU without mixed precision or optimizer tricks.
+      </div>
+
+      <!-- ======== SECTION 2 ======== -->
+      <h2 id="memory-profiling">Memory Profiling Tools</h2>
+      <p>Before optimizing, you need to <em>measure</em>. PyTorch provides excellent built-in tools for GPU memory introspection.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Quick memory snapshot</span>
+<span class="fn">print</span>(torch.cuda.<span class="fn">memory_summary</span>(device="cuda:0"))
+
+<span class="cm"># Key metrics to watch:</span>
+allocated   = torch.cuda.<span class="fn">memory_allocated</span>()     <span class="cm"># currently used by tensors</span>
+reserved    = torch.cuda.<span class="fn">memory_reserved</span>()      <span class="cm"># held by caching allocator</span>
+max_alloc   = torch.cuda.<span class="fn">max_memory_allocated</span>()  <span class="cm"># peak usage (the OOM trigger)</span>
+
+<span class="cm"># Reset peak stats between experiments</span>
+torch.cuda.<span class="fn">reset_peak_memory_stats</span>()
+
+<span class="cm"># Memory snapshot for detailed analysis (PyTorch 2.1+)</span>
+torch.cuda.memory.<span class="fn">_record_memory_history</span>(max_entries=100000)
+<span class="cm"># ... run your training step ...</span>
+torch.cuda.memory.<span class="fn">_dump_snapshot</span>("memory_snapshot.pickle")
+torch.cuda.memory.<span class="fn">_record_memory_history</span>(enabled=<span class="kw">None</span>)</pre>
+
+      <p>The memory snapshot can be visualized with PyTorch's Memory Visualizer (<code>torch.cuda.memory._snapshot()</code>) which shows allocation timelines, identifies the largest tensors, and traces them back to the Python source code that created them.</p>
+
+      <div class="callout warn">
+        <strong>Important:</strong> <code>memory_reserved</code> is always ≥ <code>memory_allocated</code>. The difference is fragmentation—memory held by PyTorch's caching allocator but not currently used by tensors. If fragmentation is high, try <code>torch.cuda.empty_cache()</code> (frees reserved memory back to CUDA) or <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code>.
+      </div>
+
+      <!-- ======== SECTION 3 ======== -->
+      <h2 id="oom-debugging">OOM Debugging Strategies</h2>
+      <p>When you hit <code>CUDA out of memory</code>, resist the urge to immediately halve batch size. Instead, follow a systematic debugging approach:</p>
+
+      <p><strong>Step 1: Identify the peak.</strong> Use <code>max_memory_allocated()</code> to find peak usage. Run a single training step and check where the peak occurs—usually during the backward pass when both activations and gradients coexist.</p>
+
+      <pre class="pseudo-code"><span class="cm"># OOM debugging helper</span>
+<span class="kw">def</span> <span class="fn">debug_memory</span>(tag=""):
+    alloc = torch.cuda.<span class="fn">memory_allocated</span>() / 1e9
+    peak  = torch.cuda.<span class="fn">max_memory_allocated</span>() / 1e9
+    <span class="fn">print</span>(f"[{tag}] Allocated: {alloc:.2f} GB | Peak: {peak:.2f} GB")
+
+<span class="fn">debug_memory</span>("after model load")
+outputs = <span class="fn">model</span>(inputs)
+<span class="fn">debug_memory</span>("after forward")
+loss.<span class="fn">backward</span>()
+<span class="fn">debug_memory</span>("after backward")   <span class="cm"># usually the peak</span>
+optimizer.<span class="fn">step</span>()
+<span class="fn">debug_memory</span>("after optimizer step")</pre>
+
+      <p><strong>Step 2: Check for leaks.</strong> Memory should return to baseline after each step. If it grows monotonically, you have a leak—common causes:</p>
+      <ul>
+        <li>Appending loss tensors to a list without <code>.item()</code> (keeps entire computation graph alive)</li>
+        <li>Storing tensors in global scope or module attributes</li>
+        <li>Not detaching tensors used for logging: use <code>loss.detach().item()</code></li>
+      </ul>
+
+      <p><strong>Step 3: Reduce strategically.</strong> Apply techniques in this order of impact:</p>
+      <ol>
+        <li>Mixed precision (saves ~50% memory)</li>
+        <li>Gradient checkpointing (saves activation memory at ~33% compute cost)</li>
+        <li>Reduce batch size (linear memory savings)</li>
+        <li>Gradient accumulation (maintain effective batch size with smaller micro-batches)</li>
+        <li>CPU offloading for optimizer states</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Pro Tip:</strong> Use <code>CUDA_LAUNCH_BLOCKING=1</code> to get accurate stack traces for CUDA OOM errors. Without it, the error may point to the wrong line because CUDA operations are asynchronous.
+      </div>
+
+      <!-- ======== SECTION 4 ======== -->
+      <h2 id="gradient-checkpointing-mem">Gradient Checkpointing for Memory</h2>
+      <p>During the backward pass, PyTorch needs the activations from the forward pass to compute gradients. Normally, all activations are stored in memory. <strong>Gradient checkpointing</strong> trades compute for memory: instead of storing all activations, it stores only a subset (checkpoints) and recomputes the rest during backward.</p>
+
+      <p><strong>Memory savings formula:</strong> For a model with L layers, standard training stores O(L) activations. With checkpointing every √L layers, memory drops to O(√L) at the cost of one extra forward pass (~33% compute overhead).</p>
+
+      <pre class="pseudo-code"><span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint_sequential
+
+<span class="kw">class</span> <span class="fn">CheckpointedModel</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self):
+        <span class="kw">super</span>().__init__()
+        self.layers = nn.<span class="fn">ModuleList</span>([
+            <span class="fn">TransformerBlock</span>(d_model=4096) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(32)
+        ])
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="cm"># Checkpoint every 4 layers (8 segments for 32 layers)</span>
+        <span class="kw">return</span> <span class="fn">checkpoint_sequential</span>(self.layers, segments=8, input=x)
+
+<span class="cm"># Or per-layer checkpointing with use_reentrant=False (recommended)</span>
+<span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint
+
+<span class="kw">class</span> <span class="fn">TransformerBlock</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="kw">return</span> <span class="fn">checkpoint</span>(self._forward_impl, x, use_reentrant=<span class="kw">False</span>)
+
+    <span class="kw">def</span> <span class="fn">_forward_impl</span>(self, x):
+        x = x + self.<span class="fn">attention</span>(self.<span class="fn">norm1</span>(x))
+        x = x + self.<span class="fn">ffn</span>(self.<span class="fn">norm2</span>(x))
+        <span class="kw">return</span> x</pre>
+
+      <div class="callout warn">
+        <strong>Warning:</strong> Use <code>use_reentrant=False</code> (the new default in PyTorch 2.4+). The legacy <code>use_reentrant=True</code> has subtle bugs with <code>torch.autograd.grad()</code> and doesn't support all autograd features.
+      </div>
+
+      <!-- ======== SECTION 5 ======== -->
+      <h2 id="mixed-precision-mem">Mixed Precision for Memory Savings</h2>
+      <p>Mixed precision training stores model weights, activations, and gradients in FP16 or BF16 (2 bytes) instead of FP32 (4 bytes), roughly <strong>halving memory usage</strong> while maintaining training quality.</p>
+
+      <pre class="pseudo-code">scaler = torch.amp.<span class="fn">GradScaler</span>()  <span class="cm"># only needed for FP16, not BF16</span>
+
+<span class="kw">for</span> inputs, targets <span class="kw">in</span> train_loader:
+    optimizer.<span class="fn">zero_grad</span>(set_to_none=<span class="kw">True</span>)
+
+    <span class="cm"># Autocast: forward pass in FP16/BF16</span>
+    <span class="kw">with</span> torch.amp.<span class="fn">autocast</span>(device_type="cuda", dtype=torch.bfloat16):
+        outputs = <span class="fn">model</span>(inputs)
+        loss = <span class="fn">criterion</span>(outputs, targets)
+
+    <span class="cm"># BF16: just call backward directly (no scaler needed)</span>
+    loss.<span class="fn">backward</span>()
+    optimizer.<span class="fn">step</span>()
+
+    <span class="cm"># FP16 alternative: use GradScaler to prevent underflow</span>
+    <span class="cm"># scaler.scale(loss).backward()</span>
+    <span class="cm"># scaler.step(optimizer)</span>
+    <span class="cm"># scaler.update()</span></pre>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>FP16</h3>
+          <ul>
+            <li>Range: ±65,504</li>
+            <li>Requires GradScaler for loss scaling</li>
+            <li>Risk of overflow/underflow in gradients</li>
+            <li>Widely supported (V100+)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>BF16</h3>
+          <ul>
+            <li>Range: same as FP32 (±3.4×10³⁸)</li>
+            <li>No GradScaler needed — same exponent range as FP32</li>
+            <li>Less precision (7-bit mantissa vs 10-bit)</li>
+            <li>Ampere+ (A100, H100)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Recommendation:</strong> If your hardware supports BF16 (A100+), prefer it over FP16. BF16 has the same dynamic range as FP32, eliminating the need for loss scaling and reducing the risk of training instability.
+      </div>
+
+      <!-- ======== SECTION 6 ======== -->
+      <h2 id="optimization-techniques">Advanced Techniques</h2>
+      <p>When mixed precision and gradient checkpointing aren't enough, these advanced techniques can push the boundary further:</p>
+
+      <p><strong>1. CPU Offloading:</strong> Move optimizer states to CPU RAM. With ZeRO-Offload (DeepSpeed), optimizer steps run on CPU while forward/backward stay on GPU. Trades PCIe bandwidth for GPU memory.</p>
+
+      <pre class="pseudo-code"><span class="cm"># DeepSpeed ZeRO-Offload config</span>
+{
+    "zero_optimization": {
+        "stage": 2,
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": <span class="kw">true</span>
+        }
+    }
+}</pre>
+
+      <p><strong>2. 8-bit Optimizers:</strong> bitsandbytes provides 8-bit Adam that stores optimizer states in INT8, reducing optimizer memory by 75% with minimal quality loss.</p>
+
+      <pre class="pseudo-code"><span class="kw">import</span> bitsandbytes <span class="kw">as</span> bnb
+
+optimizer = bnb.optim.<span class="fn">Adam8bit</span>(
+    model.<span class="fn">parameters</span>(),
+    lr=1e-4,
+    betas=(0.9, 0.999)
+)
+<span class="cm"># Drop-in replacement — same API as torch.optim.Adam</span>
+<span class="cm"># Optimizer states: 2 bytes/param instead of 8 bytes/param</span></pre>
+
+      <p><strong>3. Activation Offloading:</strong> Move activations to CPU during forward pass, fetch them back during backward. Effective when PCIe bandwidth isn't the bottleneck (large models with slow backward).</p>
+
+      <p><strong>4. Memory-Efficient Attention:</strong> FlashAttention computes attention without materializing the full N×N attention matrix, reducing memory from O(N²) to O(N). This is now the default in PyTorch 2.0+ via <code>torch.nn.functional.scaled_dot_product_attention</code>.</p>
+
+      <!-- ======== SECTION 7 ======== -->
+      <h2 id="memory-budget">Memory Budget Calculator</h2>
+      <p>Use these formulas to estimate GPU memory requirements before running a single experiment:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Memory estimation formulas</span>
+<span class="kw">def</span> <span class="fn">estimate_training_memory</span>(
+    num_params_billions,
+    batch_size,
+    seq_len,
+    hidden_dim,
+    num_layers,
+    precision="bf16",   <span class="cm"># "fp32", "bf16", "fp16"</span>
+    optimizer="adam",    <span class="cm"># "adam", "sgd", "adam8bit"</span>
+    gradient_checkpointing=<span class="kw">False</span>
+):
+    P = num_params_billions * 1e9
+    bytes_per_param = 2 <span class="kw">if</span> precision <span class="kw">in</span> ("bf16", "fp16") <span class="kw">else</span> 4
+
+    <span class="cm"># Static memory</span>
+    param_mem   = P * bytes_per_param
+    grad_mem    = P * bytes_per_param
+    <span class="kw">if</span> optimizer == "adam":
+        optim_mem = P * 8                  <span class="cm"># FP32 momentum + variance</span>
+    <span class="kw">elif</span> optimizer == "adam8bit":
+        optim_mem = P * 2                  <span class="cm"># INT8 states</span>
+    <span class="kw">else</span>:
+        optim_mem = P * 4                  <span class="cm"># SGD momentum</span>
+
+    <span class="cm"># Activation memory (rough estimate for transformers)</span>
+    act_per_layer = batch_size * seq_len * hidden_dim * bytes_per_param * 12
+    <span class="kw">if</span> gradient_checkpointing:
+        act_mem = act_per_layer * (num_layers ** 0.5)  <span class="cm"># √L layers stored</span>
+    <span class="kw">else</span>:
+        act_mem = act_per_layer * num_layers
+
+    total_gb = (param_mem + grad_mem + optim_mem + act_mem) / 1e9
+    <span class="kw">return</span> total_gb</pre>
+
+      <p><strong>Quick Reference Table (approximate):</strong></p>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Model Size → Min GPU Memory</h3>
+          <ul>
+            <li><strong>1B params:</strong> ~20 GB (BF16 + Adam)</li>
+            <li><strong>7B params:</strong> ~70 GB (BF16 + Adam) — fits 1× A100 80GB with checkpointing</li>
+            <li><strong>13B params:</strong> ~130 GB — needs 2× A100 or ZeRO</li>
+            <li><strong>70B params:</strong> ~700 GB — needs 8+ GPUs with ZeRO Stage 3</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Savings per Technique</h3>
+          <ul>
+            <li><strong>BF16 mixed precision:</strong> ~50% savings on params/grads/activations</li>
+            <li><strong>Gradient checkpointing:</strong> ~60% savings on activations</li>
+            <li><strong>8-bit Adam:</strong> ~75% savings on optimizer states</li>
+            <li><strong>FlashAttention:</strong> O(N) vs O(N²) attention memory</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Interview Formula:</strong> For a transformer with P parameters in BF16 with Adam: total ≈ 2P (params) + 2P (grads) + 8P (Adam FP32 states) + activations = <strong>12P bytes + activations</strong>. For P = 7B, that's 84 GB + activations—right at the limit of an 80 GB A100.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

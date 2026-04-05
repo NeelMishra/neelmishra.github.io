@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Checkpoint strategies, distributed checkpointing, async I/O, and elastic checkpoint formats">
+  <title>Checkpointing: Frequency, Async, Elastic | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-checkpoint">Why Checkpointing Matters</a></li>
+        <li><a href="#checkpoint-contents">What's in a Checkpoint</a></li>
+        <li><a href="#frequency-strategies">Frequency Strategies</a></li>
+        <li><a href="#async-checkpointing">Asynchronous Checkpointing</a></li>
+        <li><a href="#distributed-checkpointing">Distributed Checkpointing</a></li>
+        <li><a href="#elastic-checkpoints">Elastic Checkpoints</a></li>
+        <li><a href="#storage-optimization">Storage Optimization</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Checkpointing: Frequency, Async, Elastic</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="why-checkpoint">Why Checkpointing Matters</h2>
+      <p>Checkpointing is the foundation of reliable training infrastructure. Without checkpoints, a single hardware failure, OOM event, or preemption wipes out hours or days of compute. For a 70B parameter model training on 256 GPUs at $40/hr per node, a lost 12-hour segment costs <strong>$15,000+</strong> in wasted compute.</p>
+      <p>Checkpoints serve three critical purposes:</p>
+      <ul>
+        <li><strong>Crash Recovery:</strong> Resume training from the last saved state after hardware failures, preemptions, or software bugs</li>
+        <li><strong>Experiment Resumption:</strong> Pause and resume runs for cluster maintenance, hyperparameter adjustments, or debugging</li>
+        <li><strong>Model Selection:</strong> Save multiple checkpoints to pick the best model (lowest validation loss, highest downstream metric) after training completes</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Interview Context:</strong> "How do you ensure a 2-week training run isn't lost to a single GPU failure?" touches on checkpointing, distributed resilience, and monitoring—three pillars of production ML infrastructure.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="checkpoint-contents">What's in a Checkpoint</h2>
+      <p>A complete checkpoint contains everything needed to resume training from the exact state where it was saved. Missing any component causes subtle bugs—training may resume but converge to a worse result.</p>
+
+<pre class="pseudo-code"><span class="kw">def</span> <span class="fn">save_full_checkpoint</span>(model, optimizer, scheduler, scaler, step, epoch, config, path):
+    checkpoint = {
+        <span class="cm"># Model weights — the primary artifact</span>
+        "model_state_dict": model.<span class="fn">state_dict</span>(),
+
+        <span class="cm"># Optimizer state: momentum buffers, Adam running averages</span>
+        <span class="cm"># Often 2-3× the size of model weights for Adam</span>
+        "optimizer_state_dict": optimizer.<span class="fn">state_dict</span>(),
+
+        <span class="cm"># LR scheduler state (current step, warmup phase, etc.)</span>
+        "scheduler_state_dict": scheduler.<span class="fn">state_dict</span>(),
+
+        <span class="cm"># GradScaler state for mixed-precision training</span>
+        "scaler_state_dict": scaler.<span class="fn">state_dict</span>(),
+
+        <span class="cm"># RNG states for exact reproducibility</span>
+        "rng_states": {
+            "python": random.<span class="fn">getstate</span>(),
+            "numpy": np.random.<span class="fn">get_state</span>(),
+            "torch": torch.<span class="fn">get_rng_state</span>(),
+            "cuda": torch.cuda.<span class="fn">get_rng_state_all</span>(),
+        },
+
+        <span class="cm"># Training progress metadata</span>
+        "global_step": step,
+        "epoch": epoch,
+        "best_val_loss": best_val_loss,
+        "config": config,
+        "timestamp": <span class="fn">time.time</span>(),
+    }
+    torch.<span class="fn">save</span>(checkpoint, path)</pre>
+
+      <div class="callout warn">
+        <strong>Common Mistake:</strong> Forgetting to save optimizer state. Without it, Adam's running mean/variance estimates reset to zero on resume, causing a transient loss spike and potentially divergence. This is especially damaging late in training when these estimates are well-tuned.
+      </div>
+
+      <p>Size considerations for a 7B parameter model (fp16):</p>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0">
+        <thead><tr style="border-bottom:2px solid var(--line)">
+          <th style="text-align:left;padding:0.5rem">Component</th>
+          <th style="text-align:right;padding:0.5rem">Size</th>
+          <th style="text-align:left;padding:0.5rem">Notes</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="padding:0.4rem">Model weights</td><td style="text-align:right">~14 GB</td><td>7B × 2 bytes (fp16)</td></tr>
+          <tr><td style="padding:0.4rem">Optimizer (AdamW)</td><td style="text-align:right">~42 GB</td><td>3× model: params + mean + variance (fp32)</td></tr>
+          <tr><td style="padding:0.4rem">Gradient buffers</td><td style="text-align:right">~14 GB</td><td>Same shape as model</td></tr>
+          <tr><td style="padding:0.4rem">Metadata + RNG</td><td style="text-align:right">&lt; 1 MB</td><td>Negligible</td></tr>
+          <tr style="border-top:2px solid var(--line);font-weight:700"><td style="padding:0.4rem">Total</td><td style="text-align:right">~70 GB</td><td>Per full checkpoint</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Section 3 -->
+      <h2 id="frequency-strategies">Frequency Strategies</h2>
+      <p>How often to checkpoint depends on your compute cost, storage budget, and preemption risk. There is no single correct answer—it's an optimization problem.</p>
+
+      <svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px;margin:1.2rem auto;display:block">
+        <defs>
+          <marker id="ti-ckpt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#888"/></marker>
+        </defs>
+        <!-- Time-based -->
+        <text id="ti-ckpt-label1" x="10" y="30" font-size="11" fill="#0a8f6a" font-weight="600">Time-based (every 30 min)</text>
+        <rect x="10" y="38" width="730" height="4" rx="2" fill="#e8e8e8"/>
+        <rect x="110" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/><rect x="210" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/>
+        <rect x="310" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/><rect x="410" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/>
+        <rect x="510" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/><rect x="610" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/>
+        <rect x="710" y="34" width="3" height="12" rx="1" fill="#0a8f6a"/>
+        <!-- Step-based -->
+        <text id="ti-ckpt-label2" x="10" y="80" font-size="11" fill="#ff6b35" font-weight="600">Step-based (every 500 steps)</text>
+        <rect x="10" y="88" width="730" height="4" rx="2" fill="#e8e8e8"/>
+        <rect x="80" y="84" width="3" height="12" rx="1" fill="#ff6b35"/><rect x="180" y="84" width="3" height="12" rx="1" fill="#ff6b35"/>
+        <rect x="330" y="84" width="3" height="12" rx="1" fill="#ff6b35"/><rect x="430" y="84" width="3" height="12" rx="1" fill="#ff6b35"/>
+        <rect x="580" y="84" width="3" height="12" rx="1" fill="#ff6b35"/><rect x="680" y="84" width="3" height="12" rx="1" fill="#ff6b35"/>
+        <!-- Loss-based -->
+        <text id="ti-ckpt-label3" x="10" y="130" font-size="11" fill="#6c5ce7" font-weight="600">Loss-based (on improvement)</text>
+        <rect x="10" y="138" width="730" height="4" rx="2" fill="#e8e8e8"/>
+        <rect x="50" y="134" width="3" height="12" rx="1" fill="#6c5ce7"/><rect x="150" y="134" width="3" height="12" rx="1" fill="#6c5ce7"/>
+        <rect x="300" y="134" width="3" height="12" rx="1" fill="#6c5ce7"/>
+        <rect x="550" y="134" width="3" height="12" rx="1" fill="#6c5ce7"/>
+        <!-- Legend -->
+        <text id="ti-ckpt-note" x="10" y="180" font-size="10" fill="#888">Note: Step-based spacing varies with data loading speed; loss-based saves become rarer as training plateaus</text>
+        <text x="690" y="180" font-size="10" fill="#888" text-anchor="end">time →</text>
+      </svg>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Time-Based</h3>
+          <p>Checkpoint every N minutes. Simple, predictable storage usage. Best for spot instances where preemption risk is constant over time.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Step-Based</h3>
+          <p>Checkpoint every N training steps. Most common approach. Easy to reason about training progress but wall-clock time between checkpoints varies.</p>
+        </div>
+      </div>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Loss-Based</h3>
+          <p>Save when validation loss improves. Efficient storage but risky—long gaps without a checkpoint if loss plateaus. Combine with a step-based fallback.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Keep-Last-K</h3>
+          <p>Maintain only the K most recent checkpoints. Prevents storage explosion. Typically K=3–5, plus a "best" checkpoint based on validation metric.</p>
+        </div>
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="async-checkpointing">Asynchronous Checkpointing</h2>
+      <p>Synchronous checkpointing stalls training while tensors are serialized and written to disk. For a 70B model, this can take <strong>2–5 minutes</strong> per checkpoint. Asynchronous checkpointing eliminates this stall by offloading the I/O to a background thread.</p>
+
+<pre class="pseudo-code"><span class="kw">import</span> torch, threading, copy
+<span class="kw">from</span> concurrent.futures <span class="kw">import</span> ThreadPoolExecutor
+
+<span class="kw">class</span> <span class="fn">AsyncCheckpointer</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, max_concurrent=1):
+        self.executor = <span class="fn">ThreadPoolExecutor</span>(max_workers=max_concurrent)
+        self.pending_future = <span class="kw">None</span>
+
+    <span class="kw">def</span> <span class="fn">save</span>(self, state_dict, path):
+        <span class="cm"># Wait for any previous checkpoint to finish</span>
+        <span class="kw">if</span> self.pending_future <span class="kw">and not</span> self.pending_future.<span class="fn">done</span>():
+            self.pending_future.<span class="fn">result</span>()  <span class="cm"># block if still writing</span>
+
+        <span class="cm"># Stage 1: Copy tensors to CPU pinned memory (fast, ~1s)</span>
+        <span class="cm"># This is the only part that blocks the training loop</span>
+        cpu_state = {}
+        <span class="kw">for</span> key, tensor <span class="kw">in</span> state_dict.items():
+            <span class="kw">if</span> <span class="fn">isinstance</span>(tensor, torch.Tensor):
+                cpu_state[key] = tensor.<span class="fn">to</span>("cpu", non_blocking=<span class="kw">True</span>).<span class="fn">clone</span>()
+            <span class="kw">else</span>:
+                cpu_state[key] = copy.<span class="fn">deepcopy</span>(tensor)
+
+        torch.cuda.<span class="fn">synchronize</span>()  <span class="cm"># ensure D2H copies complete</span>
+
+        <span class="cm"># Stage 2: Serialize + write to disk in background thread</span>
+        self.pending_future = self.executor.<span class="fn">submit</span>(
+            torch.save, cpu_state, path
+        )
+
+    <span class="kw">def</span> <span class="fn">finalize</span>(self):
+        <span class="cm"># Call at training end to ensure last checkpoint is saved</span>
+        <span class="kw">if</span> self.pending_future:
+            self.pending_future.<span class="fn">result</span>()</pre>
+
+      <div class="callout">
+        <strong>Key Insight:</strong> The GPU→CPU copy (Stage 1) takes ~1s even for large models thanks to pinned memory and async DMA. The serialization + disk write (Stage 2) takes minutes but runs in the background while training continues on GPU.
+      </div>
+
+      <p>PyTorch 2.3+ includes <code>torch.distributed.checkpoint.async_save</code>, which implements this pattern with additional distributed coordination.</p>
+
+      <!-- Section 5 -->
+      <h2 id="distributed-checkpointing">Distributed Checkpointing</h2>
+      <p>When using FSDP or DeepSpeed, model parameters are <strong>sharded across GPUs</strong>. Each rank holds only a fraction of the full model. This fundamentally changes checkpointing.</p>
+
+      <h3>Approach 1: Gather-then-Save (Full State Dict)</h3>
+      <p>All shards are gathered to rank 0, which saves a single complete checkpoint. Simple to load but creates a memory bottleneck on rank 0 and doesn't scale beyond ~30B parameters.</p>
+
+      <h3>Approach 2: Sharded Checkpoint (Distributed Save)</h3>
+      <p>Each rank saves its own shard independently. No gathering, no memory bottleneck, and linear write throughput. The checkpoint is a directory of shard files.</p>
+
+<pre class="pseudo-code"><span class="kw">import</span> torch.distributed.checkpoint <span class="kw">as</span> dcp
+<span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> FullyShardedDataParallel <span class="kw">as</span> FSDP
+<span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> StateDictType
+
+<span class="cm"># Save sharded checkpoint — each rank writes its own shard</span>
+<span class="kw">with</span> FSDP.<span class="fn">state_dict_type</span>(model, StateDictType.SHARDED_STATE_DICT):
+    state_dict = {
+        "model": model.<span class="fn">state_dict</span>(),
+        "optimizer": FSDP.<span class="fn">optim_state_dict</span>(model, optimizer),
+    }
+    dcp.<span class="fn">save</span>(state_dict, checkpoint_id=f"ckpt/step_{step}")
+
+<span class="cm"># Load with potentially different world_size (resharding)</span>
+<span class="kw">with</span> FSDP.<span class="fn">state_dict_type</span>(model, StateDictType.SHARDED_STATE_DICT):
+    state_dict = {
+        "model": model.<span class="fn">state_dict</span>(),
+        "optimizer": FSDP.<span class="fn">optim_state_dict</span>(model, optimizer),
+    }
+    dcp.<span class="fn">load</span>(state_dict, checkpoint_id=f"ckpt/step_{step}")
+    model.<span class="fn">load_state_dict</span>(state_dict["model"])
+    <span class="cm"># Optimizer state is automatically resharded to match new topology</span></pre>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Full State Dict</h3>
+          <ul>
+            <li>Single file, easy to manage</li>
+            <li>Memory bottleneck on rank 0</li>
+            <li>Doesn't scale past ~30B</li>
+            <li>No resharding needed on load</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Sharded State Dict</h3>
+          <ul>
+            <li>Directory of shard files</li>
+            <li>No memory bottleneck</li>
+            <li>Scales to any model size</li>
+            <li>Supports elastic resharding on load</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="elastic-checkpoints">Elastic Checkpoints</h2>
+      <p>Elastic checkpoints handle <strong>topology changes</strong>—loading a checkpoint saved on N GPUs into a training run on M GPUs. This is essential for elastic training on spot instances, where the number of available nodes changes between restarts.</p>
+
+      <p>The challenge: optimizer state (Adam moments) is sharded differently on 8 GPUs vs 16 GPUs. The checkpoint format must encode enough metadata to reshape these tensors at load time.</p>
+
+<pre class="pseudo-code"><span class="cm"># DTensor-based resharding (PyTorch 2.x)</span>
+<span class="cm"># The checkpoint stores tensor metadata (shape, sharding spec)</span>
+<span class="cm"># On load, the runtime figures out how to redistribute shards</span>
+
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> FileSystemReader
+
+<span class="kw">def</span> <span class="fn">load_elastic_checkpoint</span>(model, optimizer, ckpt_dir):
+    <span class="cm"># Create empty state dicts with current topology's sharding</span>
+    model_sd = model.<span class="fn">state_dict</span>()   <span class="cm"># sharded for current world_size</span>
+    optim_sd = FSDP.<span class="fn">optim_state_dict</span>(model, optimizer)
+
+    <span class="cm"># DCP reads checkpoint metadata, reshards tensors to match</span>
+    <span class="cm"># current topology, and fills in the state dicts</span>
+    dcp.<span class="fn">load</span>(
+        {"model": model_sd, "optimizer": optim_sd},
+        checkpoint_id=ckpt_dir,
+    )
+
+    <span class="cm"># Apply resharded state</span>
+    model.<span class="fn">load_state_dict</span>(model_sd)
+    <span class="fn">load_optim_state_dict</span>(model, optimizer, optim_sd)</pre>
+
+      <div class="callout">
+        <strong>DeepSpeed Elastic Checkpoints:</strong> DeepSpeed uses a "universal checkpoint" format that stores tensors in a topology-independent layout. On load, the runtime re-partitions for the target parallelism configuration (TP, PP, DP degrees can all change).
+      </div>
+
+      <h3>What Can Change Between Save and Load</h3>
+      <ul>
+        <li><strong>Data Parallelism degree:</strong> Most common change—different number of nodes. Fully supported by DCP and DeepSpeed.</li>
+        <li><strong>Tensor Parallelism degree:</strong> Supported by DeepSpeed universal checkpoints and Megatron-LM's resharding tools.</li>
+        <li><strong>Pipeline Parallelism depth:</strong> Requires re-mapping layers to pipeline stages. More complex but supported.</li>
+        <li><strong>Precision change:</strong> Load fp32 checkpoint into bf16 run or vice versa. Usually straightforward with casting.</li>
+      </ul>
+
+      <!-- Section 7 -->
+      <h2 id="storage-optimization">Storage Optimization</h2>
+      <p>A 70B model produces ~200 GB per checkpoint. With keep-last-5, that's 1 TB of checkpoint storage. Training for weeks generates tens of TB. Storage optimization is critical.</p>
+
+      <h3>Compression</h3>
+      <p>Neural network weights have low entropy and compress well. <strong>gzip</strong> typically achieves 40–60% reduction; <strong>zstd</strong> is faster with similar ratios. Trade compute for storage.</p>
+
+      <h3>Incremental Checkpoints</h3>
+      <p>Save only tensors that changed since the last checkpoint. Model weights barely change between steps, but optimizer moments drift significantly. In practice, incremental saves reduce I/O by 30–50%.</p>
+
+      <h3>Deduplication</h3>
+      <p>When using keep-last-K, many tensors are identical across consecutive checkpoints (especially frozen layers). Content-addressable storage deduplicates these automatically.</p>
+
+<pre class="pseudo-code"><span class="kw">import</span> hashlib, torch
+
+<span class="kw">class</span> <span class="fn">DeduplicatingCheckpointer</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, storage_dir):
+        self.storage_dir = storage_dir
+        self.manifest = {}  <span class="cm"># maps tensor_name → content_hash</span>
+
+    <span class="kw">def</span> <span class="fn">save_tensor</span>(self, name, tensor):
+        <span class="cm"># Hash the tensor content</span>
+        content_hash = hashlib.<span class="fn">sha256</span>(
+            tensor.<span class="fn">numpy</span>().<span class="fn">tobytes</span>()
+        ).<span class="fn">hexdigest</span>()[:16]
+
+        blob_path = f"{self.storage_dir}/blobs/{content_hash}.pt"
+        <span class="kw">if not</span> <span class="fn">exists</span>(blob_path):
+            torch.<span class="fn">save</span>(tensor, blob_path)  <span class="cm"># only write if new</span>
+
+        self.manifest[name] = content_hash
+
+    <span class="kw">def</span> <span class="fn">save_checkpoint</span>(self, state_dict, step):
+        <span class="kw">for</span> name, tensor <span class="kw">in</span> state_dict.items():
+            self.<span class="fn">save_tensor</span>(name, tensor)
+        <span class="cm"># Save lightweight manifest (just name → hash mappings)</span>
+        <span class="fn">save_json</span>(self.manifest, f"{self.storage_dir}/step_{step}.json")</pre>
+
+      <div class="callout">
+        <strong>Cloud Storage Integration:</strong> Use S3/GCS multi-part upload for large checkpoints. Each shard can upload in parallel, achieving 5–10 GB/s aggregate throughput. Set lifecycle policies to auto-delete old checkpoints after N days.
+      </div>
+
+      <h3>Storage Cost Summary</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Without Optimization</h3>
+          <ul>
+            <li>200 GB × 5 kept = 1 TB active</li>
+            <li>200 GB × 100 total = 20 TB archived</li>
+            <li>S3 cost: ~$460/month</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>With Optimization</h3>
+          <ul>
+            <li>Compression: 1 TB → 500 GB</li>
+            <li>Dedup: 20 TB → 5 TB archived</li>
+            <li>S3 Glacier: ~$25/month for archive</li>
+          </ul>
+        </div>
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

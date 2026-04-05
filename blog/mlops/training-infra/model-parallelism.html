@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Tensor parallelism (Megatron-style), pipeline parallelism, strategies when model doesn't fit on one GPU">
+  <title>Model Parallelism: Tensor and Pipeline | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-model-parallel">Why Model Parallelism</a></li>
+        <li><a href="#tensor-parallelism">Tensor Parallelism</a></li>
+        <li><a href="#pipeline-parallelism-intro">Pipeline Parallelism Overview</a></li>
+        <li><a href="#hybrid-parallelism">Hybrid Parallelism (3D)</a></li>
+        <li><a href="#implementation">Implementation with PyTorch</a></li>
+        <li><a href="#communication-cost">Communication Analysis</a></li>
+        <li><a href="#when-to-use">Decision Framework</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Model Parallelism: Tensor and Pipeline</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="why-model-parallel">Why Model Parallelism</h2>
+      <p>Data parallelism replicates the entire model on each GPU and splits the batch. This works when the model fits in a single GPU's memory. But modern LLMs blow past that limit: a 70B parameter model in FP16 requires <strong>~140 GB</strong> just for parameters — far exceeding the 80 GB of an A100. Model parallelism splits the model itself across devices so training can proceed even when no single accelerator can hold the full model state.</p>
+
+      <h3>Memory Breakdown for a Transformer</h3>
+      <p>For a model with &Psi; parameters trained with Adam in mixed precision, the memory per GPU under data parallelism is:</p>
+      <pre class="pseudo-code"><span class="cm"># Per-GPU memory in data parallelism (mixed precision + Adam)</span>
+parameters:       2&Psi; bytes   <span class="cm"># FP16 weights</span>
+gradients:        2&Psi; bytes   <span class="cm"># FP16 gradients</span>
+optimizer_states: 12&Psi; bytes  <span class="cm"># FP32 copy + momentum + variance (Adam)</span>
+activations:      variable      <span class="cm"># depends on batch size, sequence length, hidden dim</span>
+<span class="cm"># Total ≈ 16&Psi; + activations</span>
+<span class="cm"># For 70B params: 16 × 70B = 1,120 GB just for model state!</span></pre>
+
+      <div class="callout">
+        <strong>Interview Tip:</strong> When asked "Why not just use data parallelism for 70B models?", the answer is memory — you cannot fit 16&Psi; bytes on one GPU. Model parallelism is about distributing model state, not data.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="tensor-parallelism">Tensor Parallelism</h2>
+      <p>Tensor parallelism (TP) splits individual weight matrices across GPUs. Rather than placing different layers on different devices, TP partitions the computation within a single layer. The seminal approach is <strong>Megatron-LM</strong> style column-parallel and row-parallel linear layers.</p>
+
+      <h3>Column-Parallel Linear Layer</h3>
+      <p>For a linear layer <code>Y = XA</code>, column parallelism splits <code>A</code> along its columns across <em>N</em> GPUs. Each GPU computes a partial output with its shard of A, then results are concatenated (or used directly by the next row-parallel layer).</p>
+
+      <h3>Row-Parallel Linear Layer</h3>
+      <p>Row parallelism splits <code>A</code> along rows. Each GPU holds a portion of the input and computes a partial sum. An <strong>AllReduce</strong> combines partial results into the full output.</p>
+
+      <svg viewBox="0 0 700 280" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:700px;margin:1.2rem auto;display:block">
+        <defs>
+          <linearGradient id="ti-tp-grad1" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.05"/>
+          </linearGradient>
+        </defs>
+        <text x="350" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="14" fill="#333">Megatron-LM Column-Parallel Split</text>
+        <!-- Full matrix A -->
+        <rect id="ti-full-matrix" x="20" y="40" width="160" height="200" rx="8" fill="url(#ti-tp-grad1)" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="100" y="135" text-anchor="middle" font-family="Consolas,monospace" font-size="13" fill="#333">A [H, 4H]</text>
+        <text x="100" y="155" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Full Weight Matrix</text>
+        <!-- Arrow -->
+        <text x="220" y="140" text-anchor="middle" font-family="Manrope,sans-serif" font-size="22" fill="#0a8f6a">&#8594;</text>
+        <!-- Split columns -->
+        <rect id="ti-col-shard0" x="270" y="40" width="95" height="95" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="317" y="80" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">A₁ [H, 2H]</text>
+        <text x="317" y="100" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a">GPU 0</text>
+        <rect id="ti-col-shard1" x="270" y="145" width="95" height="95" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="317" y="185" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">A₂ [H, 2H]</text>
+        <text x="317" y="205" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#ff6b35">GPU 1</text>
+        <!-- Compute -->
+        <text x="408" y="92" text-anchor="middle" font-family="Manrope,sans-serif" font-size="16" fill="#0a8f6a">&#8594;</text>
+        <text x="408" y="195" text-anchor="middle" font-family="Manrope,sans-serif" font-size="16" fill="#ff6b35">&#8594;</text>
+        <rect id="ti-out0" x="445" y="55" width="110" height="60" rx="6" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="500" y="82" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Y₁ = X·A₁</text>
+        <rect id="ti-out1" x="445" y="160" width="110" height="60" rx="6" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="500" y="187" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">Y₂ = X·A₂</text>
+        <!-- Concat -->
+        <text x="595" y="140" text-anchor="middle" font-family="Manrope,sans-serif" font-size="16" fill="#333">&#8594;</text>
+        <rect id="ti-concat-out" x="620" y="80" width="70" height="110" rx="6" fill="#e0f2f1" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="655" y="132" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">[Y₁;Y₂]</text>
+        <text x="655" y="150" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#666">Concat</text>
+      </svg>
+
+      <div class="callout">
+        <strong>Key Insight:</strong> In Megatron-LM, the MLP uses column-parallel for the first linear and row-parallel for the second. The self-attention heads are naturally split across GPUs (each GPU owns a subset of heads). This means only <strong>two AllReduce operations per transformer layer</strong> — one in the MLP and one in the attention.
+      </div>
+
+      <h3>Communication Pattern</h3>
+      <p>Tensor parallelism requires <strong>AllReduce</strong> within each layer (forward and backward). This means it is latency-sensitive and works best when GPUs are connected via high-bandwidth interconnects like <strong>NVLink</strong> (600 GB/s on A100) rather than cross-node PCIe or InfiniBand.</p>
+
+      <!-- Section 3 -->
+      <h2 id="pipeline-parallelism-intro">Pipeline Parallelism Overview</h2>
+      <p>Pipeline parallelism (PP) assigns different <em>groups of layers</em> to different GPUs. GPU 0 runs layers 0–15, GPU 1 runs layers 16–31, and so on. The forward pass flows sequentially through stages, and the backward pass flows in reverse.</p>
+
+      <h3>Naive Pipeline: The Bubble Problem</h3>
+      <p>With naive pipelining, only one GPU is active at a time. While GPU 0 computes forward for micro-batch 1, GPUs 1–3 are idle. This creates <strong>pipeline bubbles</strong> — wasted GPU time.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Naive pipeline schedule for 4 stages, 1 micro-batch</span>
+<span class="cm"># Time ─────────────────────────────────────────────►</span>
+<span class="cm"># GPU 0: [  F  ] [       ] [       ] [  B  ]</span>
+<span class="cm"># GPU 1: [     ] [  F   ] [  B   ] [     ]</span>
+<span class="cm"># GPU 2: [     ] [      ] [F / B ] [     ]</span>
+<span class="cm"># GPU 3: [     ] [      ] [ F ][B] [     ]</span>
+<span class="cm">#</span>
+<span class="cm"># Bubble ratio ≈ (p-1) / p  where p = number of stages</span>
+<span class="cm"># For p=4: 75% of GPU time is wasted!</span></pre>
+
+      <p>The solution is <strong>micro-batching</strong>: split each mini-batch into <em>m</em> micro-batches and pipeline them through the stages. This shrinks the bubble ratio to <code>(p-1) / (m + p - 1)</code>. See the dedicated <a href="pipeline-parallelism.html">Pipeline Parallelism deep dive</a> for GPipe and PipeDream schedules.</p>
+
+      <!-- Section 4 -->
+      <h2 id="hybrid-parallelism">Hybrid Parallelism (3D)</h2>
+      <p>Real-world large model training combines all three strategies into <strong>3D parallelism</strong>: Data Parallelism (DP) × Tensor Parallelism (TP) × Pipeline Parallelism (PP). Megatron-Turing NLG (530B) used TP=8, PP=35, DP=48 across 280 DGX A100 nodes.</p>
+
+      <svg viewBox="0 0 620 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:620px;margin:1.2rem auto;display:block">
+        <text x="310" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="14" fill="#333">3D Parallelism: DP × TP × PP</text>
+        <!-- DP axis -->
+        <line id="ti-dp-axis" x1="60" y1="300" x2="60" y2="60" stroke="#0a8f6a" stroke-width="2" marker-end="url(#ti-arrow-g)"/>
+        <text x="30" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="12" fill="#0a8f6a" transform="rotate(-90,30,180)">Data Parallel</text>
+        <!-- TP axis -->
+        <line id="ti-tp-axis" x1="60" y1="300" x2="560" y2="300" stroke="#ff6b35" stroke-width="2" marker-end="url(#ti-arrow-o)"/>
+        <text x="310" y="335" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="12" fill="#ff6b35">Tensor Parallel</text>
+        <!-- PP axis (diagonal) -->
+        <line id="ti-pp-axis" x1="60" y1="300" x2="200" y2="180" stroke="#6c63ff" stroke-width="2" stroke-dasharray="6,3"/>
+        <text x="155" y="225" font-family="Manrope,sans-serif" font-weight="700" font-size="12" fill="#6c63ff" transform="rotate(-40,155,225)">Pipeline Parallel</text>
+        <!-- Cube front face -->
+        <rect id="ti-cube-front" x="100" y="200" width="200" height="80" rx="4" fill="rgba(10,143,106,0.08)" stroke="#0a8f6a" stroke-width="1.2"/>
+        <!-- Cube top face (skewed) -->
+        <polygon id="ti-cube-top" points="100,200 150,160 350,160 300,200" fill="rgba(108,99,255,0.08)" stroke="#6c63ff" stroke-width="1.2"/>
+        <!-- Cube side face -->
+        <polygon id="ti-cube-side" points="300,200 350,160 350,240 300,280" fill="rgba(255,107,53,0.08)" stroke="#ff6b35" stroke-width="1.2"/>
+        <!-- GPU grid on front -->
+        <rect x="110" y="210" width="42" height="28" rx="3" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="131" y="228" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G0</text>
+        <rect x="158" y="210" width="42" height="28" rx="3" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="179" y="228" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G1</text>
+        <rect x="206" y="210" width="42" height="28" rx="3" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="227" y="228" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G2</text>
+        <rect x="254" y="210" width="42" height="28" rx="3" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="275" y="228" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G3</text>
+        <rect x="110" y="245" width="42" height="28" rx="3" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="131" y="263" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G4</text>
+        <rect x="158" y="245" width="42" height="28" rx="3" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="179" y="263" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G5</text>
+        <rect x="206" y="245" width="42" height="28" rx="3" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="227" y="263" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G6</text>
+        <rect x="254" y="245" width="42" height="28" rx="3" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="275" y="263" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#333">G7</text>
+        <!-- Labels -->
+        <text x="440" y="185" font-family="Manrope,sans-serif" font-size="11" fill="#333">TP=2 (within node, NVLink)</text>
+        <text x="440" y="205" font-family="Manrope,sans-serif" font-size="11" fill="#333">PP=2 (cross-node, IB)</text>
+        <text x="440" y="225" font-family="Manrope,sans-serif" font-size="11" fill="#333">DP=2 (cross-node, IB)</text>
+        <text x="440" y="250" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a">Total: 2×2×2 = 8 GPUs</text>
+        <defs>
+          <marker id="ti-arrow-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#0a8f6a"/></marker>
+          <marker id="ti-arrow-o" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#ff6b35"/></marker>
+        </defs>
+      </svg>
+
+      <h3>Placement Strategy</h3>
+      <p>The key principle: <strong>tensor parallelism within a node, pipeline and data parallelism across nodes</strong>. TP requires high bandwidth (AllReduce every layer) while PP only needs point-to-point communication between stages. DP communicates gradient AllReduce once per step.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Typical 3D parallelism placement for 64 GPUs</span>
+<span class="cm"># 8 nodes × 8 GPUs per node</span>
+
+tp_size = 8        <span class="cm"># Intra-node (NVLink, 600 GB/s per A100 pair)</span>
+pp_size = 4        <span class="cm"># Cross-node (InfiniBand, 200 Gb/s)</span>
+dp_size = 2        <span class="cm"># Cross-node (InfiniBand)</span>
+
+<span class="cm"># Total GPUs = 8 × 4 × 2 = 64</span>
+<span class="cm"># Each TP group = 1 node (8 GPUs with NVLink)</span>
+<span class="cm"># Each PP group spans 4 nodes (point-to-point between stages)</span>
+<span class="cm"># DP groups span remaining 2 copies (AllReduce for gradients)</span></pre>
+
+      <!-- Section 5 -->
+      <h2 id="implementation">Implementation with PyTorch</h2>
+      <p>PyTorch provides several primitives for model parallelism. Below is a practical implementation showing tensor parallelism for a linear layer and a device map for pipeline placement.</p>
+
+      <h3>Manual Tensor Parallelism</h3>
+      <pre class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.distributed <span class="kw">as</span> dist
+
+<span class="kw">class</span> <span class="fn">ColumnParallelLinear</span>(torch.nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, in_features, out_features, tp_group):
+        <span class="fn">super</span>().__init__()
+        self.tp_world = <span class="fn">dist.get_world_size</span>(group=tp_group)
+        self.tp_rank = <span class="fn">dist.get_rank</span>(group=tp_group)
+        <span class="cm"># Each GPU holds out_features / tp_world columns</span>
+        self.local_out = out_features // self.tp_world
+        self.weight = torch.nn.<span class="fn">Parameter</span>(
+            torch.<span class="fn">empty</span>(self.local_out, in_features)
+        )
+        torch.nn.init.<span class="fn">kaiming_uniform_</span>(self.weight)
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="cm"># x: [batch, seq, hidden] — replicated on all TP ranks</span>
+        local_out = torch.nn.functional.<span class="fn">linear</span>(x, self.weight)
+        <span class="cm"># local_out: [batch, seq, local_out_features]</span>
+        <span class="cm"># Next layer (RowParallel) consumes this directly</span>
+        <span class="kw">return</span> local_out
+
+<span class="kw">class</span> <span class="fn">RowParallelLinear</span>(torch.nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, in_features, out_features, tp_group):
+        <span class="fn">super</span>().__init__()
+        self.tp_group = tp_group
+        self.local_in = in_features // <span class="fn">dist.get_world_size</span>(group=tp_group)
+        self.weight = torch.nn.<span class="fn">Parameter</span>(
+            torch.<span class="fn">empty</span>(out_features, self.local_in)
+        )
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        local_out = torch.nn.functional.<span class="fn">linear</span>(x, self.weight)
+        <span class="cm"># AllReduce to sum partial results across TP group</span>
+        <span class="fn">dist.all_reduce</span>(local_out, group=self.tp_group)
+        <span class="kw">return</span> local_out</pre>
+
+      <h3>Pipeline Placement with device_map</h3>
+      <pre class="pseudo-code"><span class="kw">from</span> accelerate <span class="kw">import</span> <span class="fn">infer_auto_device_map</span>, <span class="fn">dispatch_model</span>
+
+<span class="cm"># Automatically partition layers across GPUs based on memory</span>
+device_map = <span class="fn">infer_auto_device_map</span>(
+    model,
+    max_memory={0: "20GB", 1: "20GB", 2: "20GB", 3: "20GB"},
+    no_split_module_classes=["TransformerBlock"]  <span class="cm"># Don't split within a block</span>
+)
+
+<span class="cm"># device_map example: {'embed': 0, 'layers.0-7': 0, 'layers.8-15': 1,</span>
+<span class="cm">#                      'layers.16-23': 2, 'layers.24-31': 3, 'lm_head': 3}</span>
+
+model = <span class="fn">dispatch_model</span>(model, device_map=device_map)</pre>
+
+      <div class="callout warn">
+        <strong>Warning:</strong> <code>device_map</code> with Accelerate gives you naive pipeline parallelism without micro-batching — no schedule overlap. For production training use Megatron-LM or DeepSpeed's pipeline engine which implements proper 1F1B or interleaved schedules.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="communication-cost">Communication Analysis</h2>
+      <p>Understanding communication costs is critical for choosing parallelism strategies and hardware topology.</p>
+
+      <h3>Communication Primitives</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead>
+          <tr style="border-bottom:2px solid var(--line)">
+            <th style="text-align:left;padding:0.5rem">Primitive</th>
+            <th style="text-align:left;padding:0.5rem">Used By</th>
+            <th style="text-align:left;padding:0.5rem">Volume</th>
+            <th style="text-align:left;padding:0.5rem">Pattern</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><strong>AllReduce</strong></td>
+            <td style="padding:0.5rem">TP (per layer), DP (per step)</td>
+            <td style="padding:0.5rem">2(N-1)/N × tensor_size</td>
+            <td style="padding:0.5rem">Collective (all-to-all)</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><strong>Send/Recv</strong></td>
+            <td style="padding:0.5rem">PP (between stages)</td>
+            <td style="padding:0.5rem">activation_size</td>
+            <td style="padding:0.5rem">Point-to-point</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--line)">
+            <td style="padding:0.5rem"><strong>AllGather</strong></td>
+            <td style="padding:0.5rem">FSDP, ZeRO-3</td>
+            <td style="padding:0.5rem">(N-1)/N × tensor_size</td>
+            <td style="padding:0.5rem">Collective</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem"><strong>ReduceScatter</strong></td>
+            <td style="padding:0.5rem">FSDP, ZeRO-2/3</td>
+            <td style="padding:0.5rem">(N-1)/N × tensor_size</td>
+            <td style="padding:0.5rem">Collective</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Bandwidth Requirements</h3>
+      <pre class="pseudo-code"><span class="cm"># Tensor Parallelism communication per transformer layer (forward + backward)</span>
+<span class="cm"># 2 AllReduce ops per layer (attention + MLP), each 2× in backward</span>
+tp_comm_per_layer = 4 * allreduce_volume
+allreduce_volume  = 2 * (tp_size - 1) / tp_size * hidden_size * batch * seq
+
+<span class="cm"># Pipeline Parallelism communication per micro-batch</span>
+pp_comm_per_microbatch = 2 * hidden_size * micro_batch * seq  <span class="cm"># Send + Recv</span>
+
+<span class="cm"># Data Parallelism communication per step (once after all micro-batches)</span>
+dp_comm_per_step = 2 * (dp_size - 1) / dp_size * total_params * 2  <span class="cm"># FP16 grads</span></pre>
+
+      <div class="callout">
+        <strong>Optimal Placement Rule:</strong> Place tensor-parallel groups on GPUs connected by NVLink (intra-node, 600+ GB/s). Place pipeline stages on adjacent nodes connected by InfiniBand (200 Gb/s). Data-parallel communication is less frequent and more tolerant of lower bandwidth.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="when-to-use">Decision Framework</h2>
+      <p>Choosing the right parallelism strategy depends on model size, available hardware, and training objectives.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4 style="color:#0a8f6a;margin-top:0">Tensor Parallelism</h4>
+          <ul>
+            <li><strong>Best for:</strong> Very wide layers, attention heads</li>
+            <li><strong>Requires:</strong> NVLink / high-BW interconnect</li>
+            <li><strong>Typical TP size:</strong> 2, 4, or 8 (within one node)</li>
+            <li><strong>Pro:</strong> Balanced memory, no pipeline bubbles</li>
+            <li><strong>Con:</strong> AllReduce every layer = latency sensitive</li>
+            <li><strong>Use when:</strong> Model fits in 1 node with TP splitting</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4 style="color:#ff6b35;margin-top:0">Pipeline Parallelism</h4>
+          <ul>
+            <li><strong>Best for:</strong> Deep models with many layers</li>
+            <li><strong>Requires:</strong> Only point-to-point links (IB is fine)</li>
+            <li><strong>Typical PP size:</strong> 4–64 stages</li>
+            <li><strong>Pro:</strong> Low bandwidth requirement, cross-node friendly</li>
+            <li><strong>Con:</strong> Pipeline bubbles, memory imbalance at edges</li>
+            <li><strong>Use when:</strong> Model spans multiple nodes</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4 style="color:#6c63ff;margin-top:0">Hybrid 3D Parallelism</h4>
+          <ul>
+            <li><strong>Best for:</strong> 100B+ parameter models</li>
+            <li><strong>Strategy:</strong> TP within node → PP across nodes → DP for throughput</li>
+            <li><strong>Pro:</strong> Scales to thousands of GPUs</li>
+            <li><strong>Con:</strong> Complex configuration and debugging</li>
+            <li><strong>Use when:</strong> Neither TP nor PP alone suffices</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h4 style="color:#333;margin-top:0">Data Parallelism Only</h4>
+          <ul>
+            <li><strong>Best for:</strong> Model fits in one GPU</li>
+            <li><strong>Requires:</strong> Any interconnect</li>
+            <li><strong>Pro:</strong> Simplest to implement, near-linear scaling</li>
+            <li><strong>Con:</strong> Cannot train models larger than GPU memory</li>
+            <li><strong>Use when:</strong> Model + optimizer state &lt; GPU memory</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Interview Decision Tree:</strong> (1) Does the model fit on one GPU? → Use DP. (2) Does it fit on one node with TP? → Use TP + DP. (3) Too large for one node? → Use TP (intra-node) + PP (inter-node) + DP. (4) Still OOM? → Add ZeRO-3/FSDP for parameter sharding.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

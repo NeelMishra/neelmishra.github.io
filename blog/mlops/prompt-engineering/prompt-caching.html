@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Prompt caching strategies for reducing latency and cost: Anthropic cache_control, OpenAI automatic caching, KV cache reuse mechanics, vLLM prefix caching, SGLang RadixAttention, and cost optimization patterns.">
+  <title>Prompt Caching: Reducing Latency and Cost | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#why-cache">Why Cache Prompts</a></li>
+          <li><a href="#kv-mechanics">KV Cache Reuse Mechanics</a></li>
+          <li><a href="#anthropic-caching">Anthropic Prompt Caching</a></li>
+          <li><a href="#openai-caching">OpenAI Prompt Caching</a></li>
+          <li><a href="#self-hosted">Self-Hosted Caching</a></li>
+          <li><a href="#cost-optimization">Cost Optimization Strategies</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+
+      <span class="blog-category-tag">Prompt Engineering</span>
+      <h1>Prompt Caching: Reducing Latency and Cost</h1>
+      <p class="blog-subtitle">KV cache reuse across Anthropic, OpenAI, and self-hosted engines — mechanics, pricing models, and strategies for maximizing cache hit rates in production.</p>
+      <time datetime="2025-07-27">July 27, 2025</time>
+
+      <!-- ======== Section 1 ======== -->
+      <h2 id="why-cache">Why Cache Prompts</h2>
+
+      <p>Modern LLM applications repeatedly send near-identical prompts. A customer-support chatbot prepends the same 4,000-token system prompt to every user query. A RAG pipeline prefixes the same retrieval context across a batch of follow-up questions. A coding assistant re-sends the same repository context on each edit. Without caching, the model recomputes the KV projections for these shared tokens on every single request — wasting both compute and money.</p>
+
+      <!-- SVG: Repeated prompt cost diagram -->
+      <svg id="pr-repeated-cost" viewBox="0 0 700 200" style="width:100%;margin:1rem 0">
+        <defs>
+          <linearGradient id="pr-grad-sys" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.05"/>
+          </linearGradient>
+          <linearGradient id="pr-grad-usr" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#ff6b35" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#ff6b35" stop-opacity="0.05"/>
+          </linearGradient>
+        </defs>
+        <!-- Request 1 -->
+        <rect x="10" y="20" width="300" height="34" rx="6" fill="url(#pr-grad-sys)" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="160" y="42" text-anchor="middle" font-size="12" font-family="Manrope" fill="#0a8f6a" font-weight="600">System prompt (4,000 tokens)</text>
+        <rect x="315" y="20" width="100" height="34" rx="6" fill="url(#pr-grad-usr)" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="365" y="42" text-anchor="middle" font-size="11" font-family="Manrope" fill="#ff6b35" font-weight="600">User Q₁</text>
+        <text x="440" y="42" font-size="11" font-family="Manrope" fill="#666">→ prefill 4,100 tok</text>
+        <!-- Request 2 -->
+        <rect x="10" y="68" width="300" height="34" rx="6" fill="url(#pr-grad-sys)" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="160" y="90" text-anchor="middle" font-size="12" font-family="Manrope" fill="#0a8f6a" font-weight="600">System prompt (4,000 tokens)</text>
+        <rect x="315" y="68" width="100" height="34" rx="6" fill="url(#pr-grad-usr)" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="365" y="90" text-anchor="middle" font-size="11" font-family="Manrope" fill="#ff6b35" font-weight="600">User Q₂</text>
+        <text x="440" y="90" font-size="11" font-family="Manrope" fill="#666">→ prefill 4,150 tok</text>
+        <!-- Request 3 -->
+        <rect x="10" y="116" width="300" height="34" rx="6" fill="url(#pr-grad-sys)" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="160" y="138" text-anchor="middle" font-size="12" font-family="Manrope" fill="#0a8f6a" font-weight="600">System prompt (4,000 tokens)</text>
+        <rect x="315" y="116" width="100" height="34" rx="6" fill="url(#pr-grad-usr)" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="365" y="138" text-anchor="middle" font-size="11" font-family="Manrope" fill="#ff6b35" font-weight="600">User Q₃</text>
+        <text x="440" y="138" font-size="11" font-family="Manrope" fill="#666">→ prefill 4,200 tok</text>
+        <!-- Cost label -->
+        <text x="350" y="180" text-anchor="middle" font-size="13" font-family="Manrope" fill="#c0392b" font-weight="700">12,000+ tokens recomputed across 3 requests</text>
+      </svg>
+
+      <p>The three main motivations for prompt caching:</p>
+      <ul>
+        <li><strong>Cost reduction:</strong> Cached input tokens cost 50–90% less than fresh tokens across major API providers. For high-volume workloads, this translates to thousands of dollars in monthly savings.</li>
+        <li><strong>Latency reduction:</strong> Prefill is the dominant phase for long-context requests. Skipping prefill on cached tokens reduces time-to-first-token (TTFT) proportional to the cached prefix length.</li>
+        <li><strong>Throughput improvement:</strong> Fewer FLOPs per request means the same GPU fleet handles more concurrent requests.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>When caching matters most:</strong> The benefit scales with the ratio of cached-to-total tokens. A 4,000-token system prompt with a 100-token user query gives a 97% cache ratio — extremely effective. A 100-token system prompt with a 2,000-token document gives only 5% — barely worth optimizing.
+      </div>
+
+      <!-- ======== Section 2 ======== -->
+      <h2 id="kv-mechanics">KV Cache Reuse Mechanics</h2>
+
+      <p>Prompt caching fundamentally reuses the Key-Value projections computed during the prefill phase. In a transformer decoder, each layer produces K and V matrices for every input token. These matrices are stored in GPU memory and reused during autoregressive generation. Prompt caching extends this principle across requests — if two requests share an identical token prefix, the KV entries for that prefix are computed once and shared.</p>
+
+      <!-- SVG: KV cache reuse flow -->
+      <svg id="pr-kv-reuse" viewBox="0 0 700 240" style="width:100%;margin:1rem 0">
+        <!-- Request A -->
+        <rect x="10" y="10" width="200" height="40" rx="8" fill="#0a8f6a" fill-opacity="0.12" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="110" y="35" text-anchor="middle" font-size="12" font-family="Manrope" fill="#0a8f6a" font-weight="700">Request A: prefill</text>
+        <line x1="210" y1="30" x2="260" y2="30" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#pr-arrow)"/>
+        <rect x="260" y="10" width="160" height="40" rx="8" fill="#0a8f6a" fill-opacity="0.08" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="340" y="35" text-anchor="middle" font-size="11" font-family="Manrope" fill="#0a8f6a">KV₁ KV₂ … KVₙ stored</text>
+
+        <!-- Cache storage -->
+        <rect x="260" y="70" width="160" height="44" rx="10" fill="#1a1a2e" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="340" y="87" text-anchor="middle" font-size="11" font-family="Manrope" fill="#0a8f6a" font-weight="700">Prefix Cache</text>
+        <text x="340" y="104" text-anchor="middle" font-size="10" font-family="Manrope" fill="#999">hash(tokens) → KV pages</text>
+        <line x1="340" y1="50" x2="340" y2="70" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="4,3"/>
+
+        <!-- Request B — cache hit -->
+        <rect x="10" y="136" width="200" height="40" rx="8" fill="#ff6b35" fill-opacity="0.12" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="110" y="161" text-anchor="middle" font-size="12" font-family="Manrope" fill="#ff6b35" font-weight="700">Request B: same prefix</text>
+        <line x1="210" y1="156" x2="260" y2="92" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="228" y="118" font-size="10" font-family="Manrope" fill="#ff6b35" transform="rotate(-30,228,118)">lookup</text>
+
+        <!-- Cache hit result -->
+        <rect x="450" y="136" width="220" height="40" rx="8" fill="#0a8f6a" fill-opacity="0.08" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="560" y="155" text-anchor="middle" font-size="11" font-family="Manrope" fill="#0a8f6a" font-weight="600">✓ Cache HIT — skip prefill</text>
+        <text x="560" y="170" text-anchor="middle" font-size="10" font-family="Manrope" fill="#666">Only prefill unique suffix</text>
+        <line x1="340" y1="114" x2="450" y2="150" stroke="#0a8f6a" stroke-width="1.2"/>
+
+        <!-- Request C — cache miss -->
+        <rect x="10" y="194" width="200" height="40" rx="8" fill="#c0392b" fill-opacity="0.12" stroke="#c0392b" stroke-width="1.2"/>
+        <text x="110" y="219" text-anchor="middle" font-size="12" font-family="Manrope" fill="#c0392b" font-weight="700">Request C: different prefix</text>
+        <rect x="450" y="194" width="220" height="40" rx="8" fill="#c0392b" fill-opacity="0.08" stroke="#c0392b" stroke-width="1"/>
+        <text x="560" y="213" text-anchor="middle" font-size="11" font-family="Manrope" fill="#c0392b" font-weight="600">✗ Cache MISS — full prefill</text>
+        <text x="560" y="228" text-anchor="middle" font-size="10" font-family="Manrope" fill="#666">Compute all KV from scratch</text>
+        <line x1="210" y1="214" x2="450" y2="214" stroke="#c0392b" stroke-width="1.2" stroke-dasharray="5,3"/>
+
+        <defs>
+          <marker id="pr-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="#0a8f6a"/>
+          </marker>
+        </defs>
+      </svg>
+
+      <h3>Prefix Matching Rules</h3>
+      <p>Caching works via <strong>exact prefix matching</strong>. The token sequence from position 0 up to some boundary must be byte-identical between requests. A single different token at position <em>k</em> invalidates the cache for all positions ≥ <em>k</em>. This has practical implications:</p>
+      <ul>
+        <li>Timestamps, request IDs, or per-request metadata injected into the system prompt destroy cache hits.</li>
+        <li>Ordering of few-shot examples must be deterministic — shuffling examples means different token prefixes.</li>
+        <li>Even whitespace differences (trailing newline vs. no newline) break the prefix match.</li>
+      </ul>
+
+      <h3>Cache Invalidation</h3>
+      <p>Providers use time-based TTLs. Anthropic caches last 5 minutes (extended on each hit). OpenAI caches persist 5–60 minutes depending on traffic. Self-hosted engines evict via LRU when GPU memory pressure rises. There is no explicit invalidation API — you rely on TTL expiry and natural eviction.</p>
+
+      <div class="callout warn">
+        <strong>Token-level identity:</strong> Caching operates on token IDs, not on text strings. Two semantically identical prompts that tokenize differently (due to Unicode normalization, encoding, or model-specific tokenizer behavior) will NOT share a cache entry.
+      </div>
+
+      <!-- ======== Section 3 ======== -->
+      <h2 id="anthropic-caching">Anthropic Prompt Caching</h2>
+
+      <p>Anthropic provides explicit, developer-controlled prompt caching via the <code>cache_control</code> parameter. You mark specific message blocks as cache breakpoints, and the API caches KV state up to those breakpoints. This gives fine-grained control over what gets cached and when.</p>
+
+      <h3>Setting Cache Breakpoints</h3>
+<pre class="pseudo-code"><span class="cm"># Anthropic prompt caching — explicit breakpoints</span>
+<span class="kw">import</span> anthropic
+
+client = anthropic.<span class="fn">Anthropic</span>()
+
+<span class="cm"># The system prompt is cached at the breakpoint</span>
+response = client.messages.<span class="fn">create</span>(
+    model=<span class="fn">"claude-sonnet-4-20250514"</span>,
+    max_tokens=1024,
+    system=[
+        {
+            <span class="fn">"type"</span>: <span class="fn">"text"</span>,
+            <span class="fn">"text"</span>: LARGE_SYSTEM_PROMPT,   <span class="cm"># 3,000+ tokens</span>
+            <span class="fn">"cache_control"</span>: {<span class="fn">"type"</span>: <span class="fn">"ephemeral"</span>}
+        }
+    ],
+    messages=[
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: user_query}
+    ]
+)
+
+<span class="cm"># Check cache performance in response headers</span>
+usage = response.usage
+<span class="fn">print</span>(f<span class="fn">"Cache read tokens:  {usage.cache_read_input_tokens}"</span>)
+<span class="fn">print</span>(f<span class="fn">"Cache write tokens: {usage.cache_creation_input_tokens}"</span>)
+<span class="fn">print</span>(f<span class="fn">"Uncached tokens:    {usage.input_tokens}"</span>)</pre>
+
+      <h3>Multi-Turn Caching with Multiple Breakpoints</h3>
+<pre class="pseudo-code"><span class="cm"># Cache system prompt + few-shot examples + conversation history</span>
+response = client.messages.<span class="fn">create</span>(
+    model=<span class="fn">"claude-sonnet-4-20250514"</span>,
+    max_tokens=1024,
+    system=[
+        {
+            <span class="fn">"type"</span>: <span class="fn">"text"</span>,
+            <span class="fn">"text"</span>: SYSTEM_PROMPT,
+            <span class="fn">"cache_control"</span>: {<span class="fn">"type"</span>: <span class="fn">"ephemeral"</span>}  <span class="cm"># Breakpoint 1</span>
+        }
+    ],
+    messages=[
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: [
+            {<span class="fn">"type"</span>: <span class="fn">"text"</span>, <span class="fn">"text"</span>: FEW_SHOT_EXAMPLES,
+             <span class="fn">"cache_control"</span>: {<span class="fn">"type"</span>: <span class="fn">"ephemeral"</span>}}  <span class="cm"># Breakpoint 2</span>
+        ]},
+        {<span class="fn">"role"</span>: <span class="fn">"assistant"</span>, <span class="fn">"content"</span>: assistant_reply_1},
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: [
+            {<span class="fn">"type"</span>: <span class="fn">"text"</span>, <span class="fn">"text"</span>: conversation_history,
+             <span class="fn">"cache_control"</span>: {<span class="fn">"type"</span>: <span class="fn">"ephemeral"</span>}}  <span class="cm"># Breakpoint 3</span>
+        ]},
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: current_question}
+    ]
+)</pre>
+
+      <h3>Anthropic Pricing &amp; TTL</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Pricing Model</h3>
+          <p><strong>Cache write:</strong> 25% more than base input price (one-time cost to store KV state).</p>
+          <p><strong>Cache read:</strong> 90% discount on base input price (subsequent hits).</p>
+          <p><strong>Example (Claude Sonnet):</strong></p>
+          <p>Base input: $3/M tokens<br>
+          Cache write: $3.75/M tokens<br>
+          Cache read: $0.30/M tokens</p>
+          <p>Break-even: cache hit on <strong>2nd request</strong>.</p>
+        </div>
+        <div class="compare-card">
+          <h3>TTL &amp; Constraints</h3>
+          <p><strong>TTL:</strong> 5 minutes, refreshed on each cache hit.</p>
+          <p><strong>Min cacheable tokens:</strong> 1,024 for Claude Sonnet/Opus, 2,048 for Claude Haiku.</p>
+          <p><strong>Max breakpoints:</strong> 4 per request.</p>
+          <p><strong>Scope:</strong> Per-organization — different API keys in the same org share cache.</p>
+          <p><strong>Eviction:</strong> LRU after TTL expires; no manual flush.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Cost calculation:</strong> For a workload sending 10,000 requests/hour with a 4,000-token system prompt (Claude Sonnet): Without caching: 40M input tokens × $3/M = <strong>$120/hr</strong>. With caching (95% hit rate): write cost $0.15 + read cost 38M × $0.30/M + miss cost 2M × $3/M = <strong>$17.55/hr</strong>. Savings: <strong>85%</strong>.
+      </div>
+
+      <!-- ======== Section 4 ======== -->
+      <h2 id="openai-caching">OpenAI Prompt Caching</h2>
+
+      <p>OpenAI implements <strong>automatic prompt caching</strong> — no code changes required. The API detects matching prefixes and serves cached KV state transparently. This simplifies adoption but gives less control over caching behavior.</p>
+
+      <h3>How Automatic Caching Works</h3>
+<pre class="pseudo-code"><span class="cm"># OpenAI automatic caching — no special parameters needed</span>
+<span class="kw">from</span> openai <span class="kw">import</span> OpenAI
+
+client = <span class="fn">OpenAI</span>()
+
+<span class="cm"># First request — computes and caches KV</span>
+response_1 = client.chat.completions.<span class="fn">create</span>(
+    model=<span class="fn">"gpt-4o"</span>,
+    messages=[
+        {<span class="fn">"role"</span>: <span class="fn">"system"</span>, <span class="fn">"content"</span>: LARGE_SYSTEM_PROMPT},
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: <span class="fn">"What is prompt caching?"</span>}
+    ]
+)
+
+<span class="cm"># Second request — same prefix triggers cache hit</span>
+response_2 = client.chat.completions.<span class="fn">create</span>(
+    model=<span class="fn">"gpt-4o"</span>,
+    messages=[
+        {<span class="fn">"role"</span>: <span class="fn">"system"</span>, <span class="fn">"content"</span>: LARGE_SYSTEM_PROMPT},  <span class="cm"># identical</span>
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: <span class="fn">"How does it reduce costs?"</span>}
+    ]
+)
+
+<span class="cm"># Check cache usage in response</span>
+usage = response_2.usage
+<span class="fn">print</span>(f<span class="fn">"Total tokens:         {usage.total_tokens}"</span>)
+<span class="fn">print</span>(f<span class="fn">"Cached input tokens:  {usage.prompt_tokens_details.cached_tokens}"</span>)</pre>
+
+      <h3>OpenAI Caching Rules</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Prefix Matching</h3>
+          <p><strong>Granularity:</strong> 128-token blocks. The longest matching prefix (rounded down to 128-token boundary) is cached.</p>
+          <p><strong>Minimum:</strong> 1,024 tokens for cache eligibility.</p>
+          <p><strong>Matching scope:</strong> Messages are concatenated in order. Matching starts from the beginning and extends as far as tokens are identical.</p>
+          <p><strong>Cross-request:</strong> Caching works across different API calls sharing the same prefix.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Pricing &amp; TTL</h3>
+          <p><strong>Cache read discount:</strong> 50% off input token price.</p>
+          <p><strong>Cache write:</strong> No additional charge (included in normal input pricing).</p>
+          <p><strong>Example (GPT-4o):</strong></p>
+          <p>Base input: $2.50/M tokens<br>
+          Cached read: $1.25/M tokens</p>
+          <p><strong>TTL:</strong> 5–60 minutes, depending on traffic volume. High-traffic prompts stay cached longer.</p>
+          <p><strong>Scope:</strong> Per-organization, same model only.</p>
+        </div>
+      </div>
+
+      <h3>Anthropic vs OpenAI Comparison</h3>
+      <!-- SVG: comparison table -->
+      <svg id="pr-provider-cmp" viewBox="0 0 700 220" style="width:100%;margin:1rem 0">
+        <rect x="5" y="5" width="690" height="210" rx="12" fill="#fafafa" stroke="var(--line)" stroke-width="1"/>
+        <!-- Headers -->
+        <text x="120" y="32" text-anchor="middle" font-size="13" font-family="Manrope" fill="#333" font-weight="700">Feature</text>
+        <text x="350" y="32" text-anchor="middle" font-size="13" font-family="Manrope" fill="#0a8f6a" font-weight="700">Anthropic</text>
+        <text x="580" y="32" text-anchor="middle" font-size="13" font-family="Manrope" fill="#ff6b35" font-weight="700">OpenAI</text>
+        <line x1="15" y1="42" x2="685" y2="42" stroke="var(--line)" stroke-width="1"/>
+        <!-- Row 1 -->
+        <text x="120" y="64" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Control</text>
+        <text x="350" y="64" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Explicit (cache_control)</text>
+        <text x="580" y="64" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Automatic</text>
+        <!-- Row 2 -->
+        <text x="120" y="88" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Write cost</text>
+        <text x="350" y="88" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">+25% surcharge</text>
+        <text x="580" y="88" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Free (normal pricing)</text>
+        <!-- Row 3 -->
+        <text x="120" y="112" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Read discount</text>
+        <text x="350" y="112" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">90%</text>
+        <text x="580" y="112" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">50%</text>
+        <!-- Row 4 -->
+        <text x="120" y="136" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Min tokens</text>
+        <text x="350" y="136" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">1,024 (Sonnet/Opus)</text>
+        <text x="580" y="136" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">1,024</text>
+        <!-- Row 5 -->
+        <text x="120" y="160" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">TTL</text>
+        <text x="350" y="160" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">5 min (refreshes on hit)</text>
+        <text x="580" y="160" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">5–60 min (traffic-based)</text>
+        <!-- Row 6 -->
+        <text x="120" y="184" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Breakpoints</text>
+        <text x="350" y="184" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Up to 4 explicit</text>
+        <text x="580" y="184" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">N/A (auto at 128-tok blocks)</text>
+        <!-- Row 7 -->
+        <text x="120" y="208" text-anchor="middle" font-size="11" font-family="Manrope" fill="#555">Best for</text>
+        <text x="350" y="208" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">High-volume, cost-sensitive</text>
+        <text x="580" y="208" text-anchor="middle" font-size="11" font-family="Manrope" fill="#333">Simplicity, drop-in savings</text>
+        <!-- Separator lines -->
+        <line x1="230" y1="20" x2="230" y2="210" stroke="var(--line)" stroke-width="0.5" stroke-dasharray="3,3"/>
+        <line x1="465" y1="20" x2="465" y2="210" stroke="var(--line)" stroke-width="0.5" stroke-dasharray="3,3"/>
+      </svg>
+
+      <div class="callout">
+        <strong>Break-even analysis:</strong> Anthropic's 90% read discount makes it cheaper at scale despite the 25% write surcharge. At ≥2 requests sharing the same prefix, Anthropic caching is cost-positive. OpenAI's free writes and 50% discount make it simpler — every request benefits without any code changes, but the per-token savings are lower.
+      </div>
+
+      <!-- ======== Section 5 ======== -->
+      <h2 id="self-hosted">Self-Hosted Caching</h2>
+
+      <p>When running models on your own infrastructure, you control the caching layer directly. Two major engines support prefix caching: vLLM (automatic prefix caching) and SGLang (RadixAttention). Both eliminate redundant prefill computation for shared prefixes.</p>
+
+      <h3>vLLM Prefix Caching</h3>
+<pre class="pseudo-code"><span class="cm"># Enable prefix caching in vLLM</span>
+<span class="cm"># Command-line flag — no code changes needed</span>
+<span class="cm">#   python -m vllm.entrypoints.openai.api_server \</span>
+<span class="cm">#       --model meta-llama/Llama-3-70B \</span>
+<span class="cm">#       --enable-prefix-caching \</span>
+<span class="cm">#       --gpu-memory-utilization 0.90</span>
+
+<span class="cm"># Programmatic usage with the LLM engine</span>
+<span class="kw">from</span> vllm <span class="kw">import</span> LLM, SamplingParams
+
+llm = <span class="fn">LLM</span>(
+    model=<span class="fn">"meta-llama/Llama-3-70B"</span>,
+    enable_prefix_caching=<span class="kw">True</span>,
+    gpu_memory_utilization=0.90
+)
+
+system_prompt = <span class="fn">"You are a helpful coding assistant..."</span>  <span class="cm"># 3,000 tokens</span>
+
+<span class="cm"># All requests sharing this prefix reuse cached KV blocks</span>
+prompts = [
+    f<span class="fn">"{system_prompt}\nUser: Explain decorators\nAssistant:"</span>,
+    f<span class="fn">"{system_prompt}\nUser: What is asyncio?\nAssistant:"</span>,
+    f<span class="fn">"{system_prompt}\nUser: Explain generators\nAssistant:"</span>,
+]
+
+params = <span class="fn">SamplingParams</span>(temperature=0.7, max_tokens=512)
+outputs = llm.<span class="fn">generate</span>(prompts, params)
+
+<span class="cm"># First request computes prefix KV (cache miss)</span>
+<span class="cm"># Subsequent requests skip prefix prefill (cache hit)</span></pre>
+
+      <h3>SGLang RadixAttention</h3>
+<pre class="pseudo-code"><span class="cm"># SGLang uses RadixAttention for prefix caching</span>
+<span class="cm"># It stores prefixes in a radix tree for efficient matching</span>
+
+<span class="cm"># Launch with prefix caching enabled (default in SGLang)</span>
+<span class="cm">#   python -m sglang.launch_server \</span>
+<span class="cm">#       --model meta-llama/Llama-3-70B \</span>
+<span class="cm">#       --port 30000</span>
+
+<span class="kw">import</span> sglang <span class="kw">as</span> sgl
+
+@sgl.<span class="fn">function</span>
+<span class="kw">def</span> <span class="fn">cached_qa</span>(s, system_prompt, question):
+    s += sgl.<span class="fn">system</span>(system_prompt)     <span class="cm"># Cached via radix tree</span>
+    s += sgl.<span class="fn">user</span>(question)
+    s += sgl.<span class="fn">assistant</span>(sgl.<span class="fn">gen</span>(<span class="fn">"answer"</span>, max_tokens=512))
+
+<span class="cm"># RadixAttention automatically detects shared prefixes</span>
+<span class="cm"># across requests and reuses KV cache entries</span>
+<span class="cm"># Key difference from vLLM: uses radix tree (trie) data structure</span>
+<span class="cm"># — supports partial prefix matching, not just full prefix</span>
+
+questions = [<span class="fn">"What is RLHF?"</span>, <span class="fn">"Explain DPO"</span>, <span class="fn">"Define PPO"</span>]
+states = <span class="fn">cached_qa</span>.<span class="fn">run_batch</span>(
+    [{<span class="fn">"system_prompt"</span>: SYSTEM, <span class="fn">"question"</span>: q} <span class="kw">for</span> q <span class="kw">in</span> questions],
+    num_threads=3
+)</pre>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>vLLM Automatic Prefix Caching</h3>
+          <p><strong>Data structure:</strong> Hash table mapping token-block hashes to KV pages.</p>
+          <p><strong>Granularity:</strong> Block-level (default 16 tokens). Prefix matching is quantized to block boundaries.</p>
+          <p><strong>Eviction:</strong> LRU. Cached blocks are evicted when GPU memory is under pressure.</p>
+          <p><strong>Overhead:</strong> Near-zero — hash computation is negligible relative to attention FLOPs.</p>
+          <p><strong>Enable:</strong> <code>--enable-prefix-caching</code> flag.</p>
+        </div>
+        <div class="compare-card">
+          <h3>SGLang RadixAttention</h3>
+          <p><strong>Data structure:</strong> Radix tree (compressed trie) mapping token sequences to KV cache entries.</p>
+          <p><strong>Granularity:</strong> Token-level. Matches the longest common prefix in the radix tree.</p>
+          <p><strong>Advantage:</strong> Handles tree-structured sharing (e.g., multi-turn conversations branching from the same root).</p>
+          <p><strong>Eviction:</strong> LRU on tree nodes. Leaf nodes evicted first.</p>
+          <p><strong>Enable:</strong> On by default in SGLang.</p>
+        </div>
+      </div>
+
+      <h3>Monitoring Cache Performance</h3>
+<pre class="pseudo-code"><span class="cm"># Monitor vLLM prefix cache hit rates via metrics endpoint</span>
+<span class="kw">import</span> requests
+
+metrics = requests.<span class="fn">get</span>(<span class="fn">"http://localhost:8000/metrics"</span>).text
+
+<span class="cm"># Key metrics to track</span>
+<span class="cm"># vllm:prefix_cache_hit_rate        — fraction of blocks served from cache</span>
+<span class="cm"># vllm:prefix_cache_total_blocks     — total blocks in cache</span>
+<span class="cm"># vllm:prefix_cache_used_blocks      — blocks currently referenced</span>
+<span class="cm"># vllm:prefix_cache_evictions_total  — cumulative evictions</span>
+
+<span class="kw">def</span> <span class="fn">parse_cache_metrics</span>(metrics_text):
+    hit_rate = <span class="kw">None</span>
+    <span class="kw">for</span> line <span class="kw">in</span> metrics_text.<span class="fn">splitlines</span>():
+        <span class="kw">if</span> <span class="fn">"prefix_cache_hit_rate"</span> <span class="kw">in</span> line <span class="kw">and not</span> line.<span class="fn">startswith</span>(<span class="fn">"#"</span>):
+            hit_rate = <span class="fn">float</span>(line.<span class="fn">split</span>()[-1])
+    <span class="kw">return</span> hit_rate
+
+hit_rate = <span class="fn">parse_cache_metrics</span>(metrics)
+<span class="fn">print</span>(f<span class="fn">"Cache hit rate: {hit_rate:.1%}"</span>)
+
+<span class="cm"># Alert if hit rate drops below threshold</span>
+<span class="kw">if</span> hit_rate <span class="kw">is not None and</span> hit_rate &lt; 0.70:
+    <span class="fn">print</span>(<span class="fn">"⚠ Low cache hit rate — check prompt ordering"</span>)</pre>
+
+      <div class="callout warn">
+        <strong>GPU memory tradeoff:</strong> Prefix caching reserves GPU memory for cached KV blocks that could otherwise serve additional concurrent requests. If your workload has low prefix overlap (diverse RAG contexts), the memory reserved for caching may reduce throughput. Profile with <code>--enable-prefix-caching</code> on and off to measure net impact.
+      </div>
+
+      <!-- ======== Section 6 ======== -->
+      <h2 id="cost-optimization">Cost Optimization Strategies</h2>
+
+      <p>Maximizing the return from prompt caching requires deliberate prompt design. The goal is to maximize the ratio of cached-to-total tokens while maintaining prompt quality.</p>
+
+      <h3>Strategy 1: Prompt Ordering</h3>
+      <p>Place static, shared content at the <strong>beginning</strong> of the prompt. Variable, per-request content goes at the <strong>end</strong>. This maximizes the cacheable prefix length.</p>
+
+      <!-- SVG: Ordering diagram -->
+      <svg id="pr-ordering" viewBox="0 0 700 140" style="width:100%;margin:1rem 0">
+        <!-- Bad ordering -->
+        <text x="10" y="18" font-size="12" font-family="Manrope" fill="#c0392b" font-weight="700">✗ Bad ordering</text>
+        <rect x="10" y="26" width="90" height="30" rx="6" fill="#ff6b35" fill-opacity="0.12" stroke="#ff6b35" stroke-width="1"/>
+        <text x="55" y="46" text-anchor="middle" font-size="10" font-family="Manrope" fill="#ff6b35">User query</text>
+        <rect x="108" y="26" width="200" height="30" rx="6" fill="#0a8f6a" fill-opacity="0.08" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="208" y="46" text-anchor="middle" font-size="10" font-family="Manrope" fill="#0a8f6a">System prompt</text>
+        <rect x="316" y="26" width="130" height="30" rx="6" fill="#0a8f6a" fill-opacity="0.08" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="381" y="46" text-anchor="middle" font-size="10" font-family="Manrope" fill="#0a8f6a">Few-shot examples</text>
+        <text x="470" y="46" font-size="10" font-family="Manrope" fill="#c0392b">← Variable data first = 0% cache</text>
+
+        <!-- Good ordering -->
+        <text x="10" y="88" font-size="12" font-family="Manrope" fill="#0a8f6a" font-weight="700">✓ Good ordering</text>
+        <rect x="10" y="96" width="200" height="30" rx="6" fill="#0a8f6a" fill-opacity="0.15" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="110" y="116" text-anchor="middle" font-size="10" font-family="Manrope" fill="#0a8f6a" font-weight="600">System prompt</text>
+        <rect x="218" y="96" width="130" height="30" rx="6" fill="#0a8f6a" fill-opacity="0.10" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="283" y="116" text-anchor="middle" font-size="10" font-family="Manrope" fill="#0a8f6a">Few-shot examples</text>
+        <rect x="356" y="96" width="90" height="30" rx="6" fill="#ff6b35" fill-opacity="0.12" stroke="#ff6b35" stroke-width="1"/>
+        <text x="401" y="116" text-anchor="middle" font-size="10" font-family="Manrope" fill="#ff6b35">User query</text>
+        <text x="470" y="116" font-size="10" font-family="Manrope" fill="#0a8f6a">← Static prefix = 85%+ cache</text>
+      </svg>
+
+      <h3>Strategy 2: Maximize Cache Hit Rates</h3>
+<pre class="pseudo-code"><span class="cm"># Build prompts with a stable, cacheable prefix</span>
+<span class="kw">class</span> <span class="fn">CacheOptimizedPromptBuilder</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, system_prompt, few_shot_examples):
+        <span class="cm"># Static components — deterministic order, no timestamps</span>
+        self.system_prompt = system_prompt
+        self.few_shot_examples = <span class="fn">sorted</span>(few_shot_examples, key=<span class="kw">lambda</span> x: x[<span class="fn">"id"</span>])
+
+    <span class="kw">def</span> <span class="fn">build_messages</span>(self, user_query, conversation_history=<span class="kw">None</span>):
+        messages = []
+
+        <span class="cm"># Layer 1: System prompt (always first, always identical)</span>
+        messages.<span class="fn">append</span>({
+            <span class="fn">"role"</span>: <span class="fn">"system"</span>,
+            <span class="fn">"content"</span>: self.system_prompt
+        })
+
+        <span class="cm"># Layer 2: Few-shot examples (sorted, deterministic)</span>
+        <span class="kw">for</span> ex <span class="kw">in</span> self.few_shot_examples:
+            messages.<span class="fn">append</span>({<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: ex[<span class="fn">"input"</span>]})
+            messages.<span class="fn">append</span>({<span class="fn">"role"</span>: <span class="fn">"assistant"</span>, <span class="fn">"content"</span>: ex[<span class="fn">"output"</span>]})
+
+        <span class="cm"># Layer 3: Conversation history (grows per turn)</span>
+        <span class="kw">if</span> conversation_history:
+            messages.<span class="fn">extend</span>(conversation_history)
+
+        <span class="cm"># Layer 4: Current query (variable, uncached)</span>
+        messages.<span class="fn">append</span>({<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: user_query})
+
+        <span class="kw">return</span> messages</pre>
+
+      <h3>Strategy 3: Monitor and Tune</h3>
+<pre class="pseudo-code"><span class="cm"># Track caching efficiency across requests</span>
+<span class="kw">class</span> <span class="fn">CacheMonitor</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self):
+        self.total_input_tokens = 0
+        self.cached_tokens = 0
+        self.cache_write_tokens = 0
+        self.request_count = 0
+
+    <span class="kw">def</span> <span class="fn">record_anthropic</span>(self, usage):
+        self.request_count += 1
+        self.total_input_tokens += usage.input_tokens
+        self.cached_tokens += <span class="fn">getattr</span>(usage, <span class="fn">"cache_read_input_tokens"</span>, 0)
+        self.cache_write_tokens += <span class="fn">getattr</span>(usage, <span class="fn">"cache_creation_input_tokens"</span>, 0)
+
+    <span class="kw">def</span> <span class="fn">record_openai</span>(self, usage):
+        self.request_count += 1
+        self.total_input_tokens += usage.prompt_tokens
+        details = <span class="fn">getattr</span>(usage, <span class="fn">"prompt_tokens_details"</span>, <span class="kw">None</span>)
+        <span class="kw">if</span> details:
+            self.cached_tokens += <span class="fn">getattr</span>(details, <span class="fn">"cached_tokens"</span>, 0)
+
+    @<span class="fn">property</span>
+    <span class="kw">def</span> <span class="fn">hit_rate</span>(self):
+        <span class="kw">if</span> self.total_input_tokens == 0:
+            <span class="kw">return</span> 0.0
+        <span class="kw">return</span> self.cached_tokens / self.total_input_tokens
+
+    <span class="kw">def</span> <span class="fn">report</span>(self):
+        <span class="fn">print</span>(f<span class="fn">"Requests:       {self.request_count}"</span>)
+        <span class="fn">print</span>(f<span class="fn">"Cache hit rate: {self.hit_rate:.1%}"</span>)
+        <span class="fn">print</span>(f<span class="fn">"Cached tokens:  {self.cached_tokens:,}"</span>)
+        <span class="fn">print</span>(f<span class="fn">"Total input:    {self.total_input_tokens:,}"</span>)
+        <span class="cm"># Estimate savings (Anthropic Sonnet pricing)</span>
+        base_cost = self.total_input_tokens * 3.0 / 1_000_000
+        actual_cost = (
+            (self.total_input_tokens - self.cached_tokens) * 3.0 / 1_000_000
+            + self.cached_tokens * 0.30 / 1_000_000
+            + self.cache_write_tokens * 3.75 / 1_000_000
+        )
+        <span class="fn">print</span>(f<span class="fn">"Est. savings:   ${base_cost - actual_cost:.2f}"</span>)</pre>
+
+      <h3>Common Anti-Patterns</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>❌ Anti-Patterns</h3>
+          <ul>
+            <li><strong>Injecting timestamps:</strong> Adding <code>Current time: 2025-07-27T14:30:00Z</code> into the system prompt destroys cache hits every second.</li>
+            <li><strong>Random few-shot ordering:</strong> Shuffling examples per request means every request has a unique prefix.</li>
+            <li><strong>Per-request UUIDs:</strong> Request-tracing IDs in the prompt break prefix matching.</li>
+            <li><strong>Long variable preambles:</strong> Putting user-specific data before the system prompt.</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>✅ Best Practices</h3>
+          <ul>
+            <li><strong>Fixed system prompt:</strong> Keep the system prompt identical across all requests in a use case.</li>
+            <li><strong>Sorted examples:</strong> Sort few-shot examples by a stable key (ID, alphabetical).</li>
+            <li><strong>Metadata at the end:</strong> Move request IDs, timestamps, and user context to the final user message.</li>
+            <li><strong>Batch similar requests:</strong> Group requests sharing a prefix within the same time window to maximize cache retention.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Key Takeaway:</strong> Prompt caching is one of the highest-leverage optimizations for production LLM applications. Anthropic's explicit <code>cache_control</code> delivers up to 90% cost savings for high-volume workloads. OpenAI's automatic caching requires zero code changes for a 50% discount. Self-hosted engines like vLLM and SGLang provide the same benefit at the inference layer. The critical pattern is consistent: put static content first, keep prefixes deterministic, monitor cache hit rates, and let the math compound across millions of requests.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

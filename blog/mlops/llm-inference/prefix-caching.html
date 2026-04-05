@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Prefix caching for LLM inference: RadixAttention, radix tree prefix matching, system prompt caching, KV cache reuse strategies, vLLM automatic prefix caching, and production cache hit rate analysis.">
+  <title>Prefix Caching: Reusing KV Cache | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+    .bench-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .bench-table th,.bench-table td{padding:0.6rem 0.8rem;border:1px solid var(--line);text-align:left}
+    .bench-table th{background:rgba(10,143,106,0.08);font-weight:700}
+    .bench-table tr:nth-child(even){background:rgba(0,0,0,0.02)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#kv-cache-cost">The KV Cache Cost Problem</a></li>
+          <li><a href="#prefix-caching-concept">Prefix Caching Concept</a></li>
+          <li><a href="#radix-attention">RadixAttention &amp; Radix Trees</a></li>
+          <li><a href="#prefix-matching">Automatic Prefix Matching</a></li>
+          <li><a href="#production-hit-rates">Production Cache Hit Rates</a></li>
+          <li><a href="#vllm-prefix-caching">vLLM Automatic Prefix Caching</a></li>
+          <li><a href="#memory-savings">Memory Savings &amp; Design Tradeoffs</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Prefix Caching: Reusing KV Cache</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="kv-cache-cost">The KV Cache Cost Problem</h2>
+      <p>Every LLM request begins with a <strong>prefill phase</strong> that processes the entire prompt through all transformer layers, computing Key and Value tensors at each layer. For a Llama-2 70B model with a 2,000-token system prompt, this prefill takes <strong>~800ms on an A100</strong> and consumes significant compute. In a chatbot scenario where every request shares the same system prompt, this identical computation is repeated for every single request.</p>
+
+      <pre class="pseudo-code"><span class="cm"># KV cache memory per token per layer (Llama-2 70B)</span>
+<span class="cm"># K: [num_kv_heads × head_dim] = [8 × 128] = 1024 values</span>
+<span class="cm"># V: [num_kv_heads × head_dim] = [8 × 128] = 1024 values</span>
+<span class="cm"># Per token per layer: 2 × 1024 × 2 bytes (FP16) = 4 KB</span>
+<span class="cm"># Per token all layers: 4 KB × 80 layers = 320 KB</span>
+<span class="cm"># 2000-token system prompt: 320 KB × 2000 = 640 MB</span>
+
+num_kv_heads = 8      <span class="cm"># GQA groups for Llama-2 70B</span>
+head_dim = 128
+num_layers = 80
+bytes_per_param = 2   <span class="cm"># FP16</span>
+
+kv_per_token = 2 * num_kv_heads * head_dim * bytes_per_param * num_layers
+<span class="cm"># = 2 × 8 × 128 × 2 × 80 = 327,680 bytes ≈ 320 KB per token</span>
+
+system_prompt_tokens = 2000
+system_prompt_kv = kv_per_token * system_prompt_tokens
+<span class="cm"># = 320 KB × 2000 = 640 MB of KV cache for the system prompt alone</span></pre>
+
+      <div class="callout">
+        <strong>The Redundancy:</strong> If you serve 100 concurrent requests with the same system prompt, you're computing 640 MB × 100 = 64 GB of identical KV cache data. Prefix caching computes it <em>once</em> and shares the cached KV tensors across all requests, saving both compute (prefill latency) and memory.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="prefix-caching-concept">Prefix Caching Concept</h2>
+      <p>Prefix caching exploits the autoregressive property of transformers: the KV cache for tokens 0 through N depends <em>only</em> on those tokens, regardless of what follows. If two requests share the same first N tokens, their KV caches for those positions are identical and can be reused.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Without Prefix Caching</h3>
+          <p><strong>Request 1:</strong> [system_prompt + "What is ML?"]</p>
+          <p>→ Prefill all 2,010 tokens from scratch: ~810ms</p>
+          <p><strong>Request 2:</strong> [system_prompt + "Explain CNNs"]</p>
+          <p>→ Prefill all 2,012 tokens from scratch: ~812ms</p>
+          <p><strong>Total prefill compute:</strong> ~1,622ms</p>
+        </div>
+        <div class="compare-card">
+          <h3>With Prefix Caching</h3>
+          <p><strong>Request 1:</strong> [system_prompt + "What is ML?"]</p>
+          <p>→ Prefill all 2,010 tokens (cache miss): ~810ms</p>
+          <p><strong>Request 2:</strong> [system_prompt + "Explain CNNs"]</p>
+          <p>→ Reuse 2,000 cached tokens + prefill 12 new: <strong>~5ms</strong></p>
+          <p><strong>Total prefill compute:</strong> ~815ms (2× speedup)</p>
+        </div>
+      </div>
+
+      <p>The savings compound dramatically at scale. With 1,000 requests sharing a system prompt, prefix caching saves ~799,000ms of cumulative prefill time. But the real challenge is <em>efficiently matching</em> shared prefixes across diverse request streams. This is where RadixAttention comes in.</p>
+
+      <!-- Section 3 -->
+      <h2 id="radix-attention">RadixAttention &amp; Radix Trees</h2>
+      <p>RadixAttention (Zheng et al., 2023, SGLang) uses a <strong>radix tree</strong> (compact trie) to index all cached KV sequences. Each edge in the tree represents a sequence of token IDs, and each node points to the corresponding KV cache pages in GPU memory. Prefix matching becomes a tree traversal — O(n) in the length of the query prefix.</p>
+
+      <svg viewBox="0 0 700 420" style="width:100%;max-width:700px;margin:1.2rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="li-pc-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+          </marker>
+        </defs>
+
+        <!-- Title -->
+        <text x="350" y="25" font-size="14" font-weight="700" fill="#333" text-anchor="middle">Radix Tree for KV Cache Prefix Matching</text>
+
+        <!-- Root Node -->
+        <circle id="li-pc-root" cx="350" cy="70" r="20" fill="#1a1a2e" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="350" y="75" font-size="11" fill="#e0e0e0" text-anchor="middle" font-weight="700">root</text>
+
+        <!-- System Prompt A edge -->
+        <line x1="330" y1="87" x2="200" y2="140" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-pc-arrow)"/>
+        <text x="250" y="108" font-size="10" fill="#0a8f6a" font-weight="600" transform="rotate(-25 250 108)">sys_prompt_A [2000 tokens]</text>
+
+        <!-- System Prompt B edge -->
+        <line x1="370" y1="87" x2="500" y2="140" stroke="#3b82f6" stroke-width="2" marker-end="url(#li-pc-arrow)"/>
+        <text x="450" y="108" font-size="10" fill="#3b82f6" font-weight="600" transform="rotate(25 450 108)">sys_prompt_B [1500 tokens]</text>
+
+        <!-- Node A -->
+        <circle cx="200" cy="155" r="16" fill="rgba(10,143,106,0.15)" stroke="#0a8f6a" stroke-width="2"/>
+        <text x="200" y="160" font-size="10" fill="#0a8f6a" text-anchor="middle" font-weight="700">A</text>
+
+        <!-- Node B -->
+        <circle cx="500" cy="155" r="16" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="2"/>
+        <text x="500" y="160" font-size="10" fill="#3b82f6" text-anchor="middle" font-weight="700">B</text>
+
+        <!-- From A: three children -->
+        <line x1="186" y1="168" x2="100" y2="225" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-pc-arrow)"/>
+        <text x="130" y="195" font-size="9" fill="#666" transform="rotate(-30 130 195)">"What is ML?" [10 tok]</text>
+
+        <line x1="200" y1="171" x2="200" y2="225" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-pc-arrow)"/>
+        <text x="215" y="200" font-size="9" fill="#666">"Explain CNNs" [12 tok]</text>
+
+        <line x1="214" y1="168" x2="310" y2="225" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-pc-arrow)"/>
+        <text x="270" y="195" font-size="9" fill="#666" transform="rotate(27 270 195)">"Summarize" [8 tok]</text>
+
+        <!-- Leaf nodes from A -->
+        <rect x="60" y="230" width="80" height="32" rx="8" fill="rgba(10,143,106,0.08)" stroke="#0a8f6a"/>
+        <text x="100" y="250" font-size="9" fill="#0a8f6a" text-anchor="middle">KV pages 0-64</text>
+
+        <rect x="160" y="230" width="80" height="32" rx="8" fill="rgba(10,143,106,0.08)" stroke="#0a8f6a"/>
+        <text x="200" y="250" font-size="9" fill="#0a8f6a" text-anchor="middle">KV pages 0-65</text>
+
+        <rect x="270" y="230" width="80" height="32" rx="8" fill="rgba(10,143,106,0.08)" stroke="#0a8f6a"/>
+        <text x="310" y="250" font-size="9" fill="#0a8f6a" text-anchor="middle">KV pages 0-63</text>
+
+        <!-- From B: two children -->
+        <line x1="490" y1="170" x2="440" y2="225" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#li-pc-arrow)"/>
+        <text x="450" y="200" font-size="9" fill="#666" transform="rotate(-25 450 200)">"Write code" [9 tok]</text>
+
+        <line x1="510" y1="170" x2="570" y2="225" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#li-pc-arrow)"/>
+        <text x="555" y="200" font-size="9" fill="#666" transform="rotate(25 555 200)">"Translate" [7 tok]</text>
+
+        <!-- Leaf nodes from B -->
+        <rect x="400" y="230" width="80" height="32" rx="8" fill="rgba(59,130,246,0.08)" stroke="#3b82f6"/>
+        <text x="440" y="250" font-size="9" fill="#3b82f6" text-anchor="middle">KV pages 0-48</text>
+
+        <rect x="530" y="230" width="80" height="32" rx="8" fill="rgba(59,130,246,0.08)" stroke="#3b82f6"/>
+        <text x="570" y="250" font-size="9" fill="#3b82f6" text-anchor="middle">KV pages 0-47</text>
+
+        <!-- Shared prefix annotation -->
+        <rect x="50" y="280" width="610" height="55" rx="10" fill="rgba(10,143,106,0.04)" stroke="#0a8f6a" stroke-dasharray="4 2"/>
+        <text x="355" y="300" font-size="11" fill="#0a8f6a" text-anchor="middle" font-weight="600">Shared KV cache pages (reference counted)</text>
+        <text x="355" y="318" font-size="10" fill="#666" text-anchor="middle">Node A's 2000-token prefix: 64 pages × 256 tokens/page = shared by 3 leaf sequences</text>
+        <text x="355" y="332" font-size="10" fill="#666" text-anchor="middle">Node B's 1500-token prefix: 47 pages × 256 tokens/page = shared by 2 leaf sequences</text>
+
+        <!-- New request annotation -->
+        <rect x="100" y="355" width="500" height="55" rx="10" fill="rgba(255,107,53,0.06)" stroke="#ff6b35" stroke-dasharray="4 2"/>
+        <text x="350" y="375" font-size="11" fill="#ff6b35" text-anchor="middle" font-weight="600">New request: [sys_prompt_A + "Define transformers"]</text>
+        <text x="350" y="395" font-size="10" fill="#666" text-anchor="middle">Radix tree traversal → match at Node A (2000 tokens) → reuse 64 pages → prefill only 11 new tokens</text>
+      </svg>
+
+      <p>The radix tree stores <strong>compressed edges</strong>: instead of one node per token (as in a naive trie), long shared sequences are represented as a single edge. This keeps the tree compact even with thousands of cached sequences. When a new request arrives, the tree is traversed to find the longest matching prefix.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Radix tree node for KV cache prefix matching</span>
+<span class="kw">class</span> <span class="fn">RadixNode</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self):
+        self.children = {}       <span class="cm"># first_token → (edge_tokens, child_node)</span>
+        self.kv_page_ids = []    <span class="cm"># Pages storing KV cache for this prefix</span>
+        self.ref_count = 0       <span class="cm"># Number of active sequences using this prefix</span>
+        self.last_access = 0     <span class="cm"># For LRU eviction</span>
+
+<span class="kw">class</span> <span class="fn">RadixTree</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self):
+        self.root = <span class="fn">RadixNode</span>()
+
+    <span class="kw">def</span> <span class="fn">match_prefix</span>(self, token_ids):
+        <span class="cm">"""Find longest cached prefix. Returns (matched_length, kv_pages)."""</span>
+        node = self.root
+        matched = 0
+        matched_pages = []
+
+        <span class="kw">while</span> matched &lt; len(token_ids):
+            first_tok = token_ids[matched]
+            <span class="kw">if</span> first_tok <span class="kw">not in</span> node.children:
+                <span class="kw">break</span>  <span class="cm"># No further match</span>
+
+            edge_tokens, child = node.children[first_tok]
+            <span class="cm"># Compare edge tokens with query tokens</span>
+            match_len = 0
+            <span class="kw">for</span> i, etok <span class="kw">in</span> <span class="fn">enumerate</span>(edge_tokens):
+                <span class="kw">if</span> matched + i &gt;= len(token_ids):
+                    <span class="kw">break</span>
+                <span class="kw">if</span> token_ids[matched + i] != etok:
+                    <span class="kw">break</span>
+                match_len += 1
+
+            <span class="kw">if</span> match_len == 0:
+                <span class="kw">break</span>
+
+            matched += match_len
+            matched_pages.extend(child.kv_page_ids[:match_len // page_size])
+            child.ref_count += 1
+            child.last_access = <span class="fn">time</span>()
+
+            <span class="kw">if</span> match_len &lt; len(edge_tokens):
+                <span class="kw">break</span>  <span class="cm"># Partial edge match</span>
+            node = child
+
+        <span class="kw">return</span> matched, matched_pages</pre>
+
+      <!-- Section 4 -->
+      <h2 id="prefix-matching">Automatic Prefix Matching</h2>
+      <p>Automatic prefix caching (APC) transparently detects shared prefixes without requiring users to explicitly declare them. The system hashes token sequences at page-granularity (typically 256 tokens per page) and uses a hash table for O(1) page lookup.</p>
+
+      <pre class="pseudo-code"><span class="cm"># vLLM-style automatic prefix caching using content-hash</span>
+<span class="kw">class</span> <span class="fn">AutoPrefixCache</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, page_size=256):
+        self.page_size = page_size
+        self.hash_to_page = {}   <span class="cm"># hash(token_block) → gpu_page_id</span>
+        self.page_ref_count = {} <span class="cm"># gpu_page_id → reference count</span>
+
+    <span class="kw">def</span> <span class="fn">compute_block_hash</span>(self, token_ids, block_idx):
+        <span class="cm">"""Hash includes all preceding tokens for correctness.</span>
+<span class="cm">        Block N's KV depends on tokens 0...(N+1)*page_size."""</span>
+        prefix_end = (block_idx + 1) * self.page_size
+        <span class="kw">return</span> <span class="fn">hash</span>(<span class="fn">tuple</span>(token_ids[:prefix_end]))
+
+    <span class="kw">def</span> <span class="fn">allocate_with_cache</span>(self, token_ids):
+        <span class="cm">"""Allocate KV pages, reusing cached pages where possible."""</span>
+        num_blocks = <span class="fn">ceil</span>(len(token_ids) / self.page_size)
+        pages = []
+        cache_hit_blocks = 0
+
+        <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(num_blocks):
+            block_hash = self.<span class="fn">compute_block_hash</span>(token_ids, i)
+
+            <span class="kw">if</span> block_hash <span class="kw">in</span> self.hash_to_page:
+                <span class="cm"># Cache hit: reuse existing KV page</span>
+                page_id = self.hash_to_page[block_hash]
+                self.page_ref_count[page_id] += 1
+                pages.<span class="fn">append</span>(page_id)
+                cache_hit_blocks += 1
+            <span class="kw">else</span>:
+                <span class="cm"># Cache miss: allocate new page, will be filled during prefill</span>
+                page_id = self.<span class="fn">allocate_new_page</span>()
+                self.hash_to_page[block_hash] = page_id
+                self.page_ref_count[page_id] = 1
+                pages.<span class="fn">append</span>(page_id)
+
+        <span class="kw">return</span> pages, cache_hit_blocks</pre>
+
+      <div class="callout">
+        <strong>Critical detail:</strong> The hash for block N must include <em>all tokens from 0 to (N+1)×page_size</em>, not just the tokens in that block. This is because KV values at position P depend on all preceding tokens (causal attention). Two blocks with the same local tokens but different preceding context produce different KV values. The full-prefix hash ensures correctness.
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="production-hit-rates">Production Cache Hit Rates</h2>
+      <p>Cache hit rates vary dramatically by workload. The key factor is <strong>prefix diversity</strong> — how many distinct prefixes exist and how frequently they recur.</p>
+
+      <table class="bench-table">
+        <thead>
+          <tr>
+            <th>Workload</th>
+            <th>Typical Prefix Length</th>
+            <th>Cache Hit Rate</th>
+            <th>TTFT Reduction</th>
+            <th>Memory Savings</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Chatbot (shared system prompt)</td><td>1,000-4,000 tokens</td><td>85-98%</td><td>60-95%</td><td>~40% KV memory</td></tr>
+          <tr><td>RAG (shared retrieval context)</td><td>500-2,000 tokens</td><td>20-60%</td><td>15-50%</td><td>~15% KV memory</td></tr>
+          <tr><td>Multi-turn chat (conversation history)</td><td>200-8,000 tokens</td><td>70-90%</td><td>50-85%</td><td>~30% KV memory</td></tr>
+          <tr><td>Code completion (file context)</td><td>1,000-6,000 tokens</td><td>40-75%</td><td>30-65%</td><td>~25% KV memory</td></tr>
+          <tr><td>Unique prompts (no sharing)</td><td>0 tokens</td><td>0-5%</td><td>~0%</td><td>~0%</td></tr>
+        </tbody>
+      </table>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>High-Hit Workload: Chatbot</h3>
+          <p>All requests share an identical system prompt (e.g., "You are a helpful assistant..."). With a 2,000-token system prompt and 100 concurrent requests, prefix caching saves:</p>
+          <p><strong>Compute:</strong> 99 × 800ms prefill = ~79.2 seconds of GPU time saved per batch</p>
+          <p><strong>Memory:</strong> 99 × 640 MB avoided = ~63 GB of redundant KV cache eliminated</p>
+        </div>
+        <div class="compare-card">
+          <h3>Low-Hit Workload: RAG</h3>
+          <p>RAG pipelines retrieve different documents per query, so prefix overlap is limited to the system instruction (typically short). Caching helps only when multiple users query the same document chunk within the cache TTL.</p>
+          <p><strong>Optimization:</strong> Prepend shared instructions before per-query context to maximize cacheable prefix length.</p>
+        </div>
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="vllm-prefix-caching">vLLM Automatic Prefix Caching</h2>
+      <p>vLLM implements automatic prefix caching (APC) that works transparently with PagedAttention. Enable it with a single flag:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Enable automatic prefix caching in vLLM</span>
+<span class="cm"># CLI: vllm serve meta-llama/Llama-2-7b-hf --enable-prefix-caching</span>
+
+<span class="kw">from</span> vllm <span class="kw">import</span> LLM, SamplingParams
+
+llm = LLM(
+    model=<span class="fn">"meta-llama/Llama-2-7b-hf"</span>,
+    enable_prefix_caching=<span class="kw">True</span>,    <span class="cm"># This is all you need</span>
+    gpu_memory_utilization=0.9,
+    max_model_len=8192,
+)
+
+<span class="cm"># These two requests share the system prompt prefix</span>
+<span class="cm"># vLLM automatically detects and caches the shared KV blocks</span>
+system = <span class="fn">"You are a legal analysis assistant. Always cite relevant case law..."</span>
+
+prompts = [
+    system + <span class="fn">"\n\nAnalyze this contract clause..."</span>,
+    system + <span class="fn">"\n\nIs this NDA enforceable in California?"</span>,
+    system + <span class="fn">"\n\nWhat are the liability limitations here?"</span>,
+]
+
+<span class="cm"># First request: cache miss, full prefill (~800ms for 2K system prompt)</span>
+<span class="cm"># Second request: cache hit on system prompt, prefill only user query (~5ms)</span>
+<span class="cm"># Third request: cache hit again (~5ms)</span>
+outputs = llm.<span class="fn">generate</span>(prompts, SamplingParams(temperature=0.3))</pre>
+
+      <h3>How vLLM APC Works Internally</h3>
+      <pre class="pseudo-code"><span class="cm"># Simplified vLLM APC flow</span>
+<span class="kw">def</span> <span class="fn">schedule_request</span>(request):
+    token_ids = <span class="fn">tokenize</span>(request.prompt)
+    num_blocks = <span class="fn">ceil</span>(len(token_ids) / block_size)
+
+    allocated_pages = []
+    prefill_start_pos = 0
+
+    <span class="kw">for</span> block_idx <span class="kw">in</span> <span class="fn">range</span>(num_blocks):
+        <span class="cm"># Hash includes full prefix up to this block</span>
+        content_hash = <span class="fn">hash_token_block</span>(
+            token_ids[: (block_idx + 1) * block_size]
+        )
+
+        cached_page = block_manager.<span class="fn">lookup_cached</span>(content_hash)
+        <span class="kw">if</span> cached_page <span class="kw">is not None</span>:
+            <span class="cm"># Reuse cached KV page — no prefill computation needed</span>
+            allocated_pages.<span class="fn">append</span>(cached_page)
+            prefill_start_pos = (block_idx + 1) * block_size
+        <span class="kw">else</span>:
+            <span class="cm"># Allocate fresh page — will be computed during prefill</span>
+            new_page = block_manager.<span class="fn">allocate</span>()
+            allocated_pages.<span class="fn">append</span>(new_page)
+            <span class="cm"># Register in cache for future requests</span>
+            block_manager.<span class="fn">register_cached</span>(content_hash, new_page)
+
+    <span class="cm"># Only prefill tokens after the cached prefix</span>
+    request.prefill_tokens = token_ids[prefill_start_pos:]
+    request.page_table = allocated_pages</pre>
+
+      <div class="callout">
+        <strong>Block granularity:</strong> vLLM caches at the block level (default 16 tokens per block). This means prefix matching is quantized to block boundaries — a 2,001-token shared prefix caches 125 full blocks (2,000 tokens), and the 1 remaining token starts a new block that may not match. For maximum hit rates, keep shared prefixes aligned to block boundaries.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="memory-savings">Memory Savings &amp; Design Tradeoffs</h2>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Memory Savings Calculation</h3>
+          <p><strong>Scenario:</strong> 64 concurrent requests, 2,048-token system prompt, Llama-2 7B</p>
+          <p>KV per token: 2 × 32 × 128 × 2 bytes × 32 layers = 1 MB per token (all layers)</p>
+          <p>System prompt KV: 2,048 × 1 MB = <strong>2 GB per request</strong></p>
+          <p>Without caching: 64 × 2 GB = <strong>128 GB</strong></p>
+          <p>With caching: 2 GB (shared) + 64 × ~50 KB (unique suffixes) ≈ <strong>2.003 GB</strong></p>
+          <p><strong>Savings: ~98.4% (126 GB)</strong></p>
+        </div>
+        <div class="compare-card">
+          <h3>TTFT Improvement</h3>
+          <p><strong>Scenario:</strong> Same as left, A100-80GB</p>
+          <p>Prefill throughput: ~2,500 tokens/second (Llama-7B, batch=1)</p>
+          <p>Without caching: 2,048 / 2,500 = <strong>~820ms TTFT</strong></p>
+          <p>With caching (hit): 50 / 2,500 = <strong>~20ms TTFT</strong></p>
+          <p><strong>41× TTFT reduction</strong></p>
+          <p>This is the difference between "sluggish" and "instant" in user perception.</p>
+        </div>
+      </div>
+
+      <h3>Design Tradeoffs</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Cache Eviction Strategy</h3>
+          <p><strong>LRU (Least Recently Used):</strong> Default in vLLM. Simple, works well for steady-state workloads. Risk: popular prefixes evicted during traffic spikes.</p>
+          <p><strong>LFU (Least Frequently Used):</strong> Better for skewed distributions (few hot prefixes, many cold). More memory overhead for frequency counters.</p>
+          <p><strong>Reference-counted:</strong> Pages are only evictable when ref_count drops to 0 (no active sequences use them). Prevents evicting in-use pages.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Cache Size vs. Throughput</h3>
+          <p>Larger cache → more prefixes retained → higher hit rate → better TTFT. But cache consumes GPU memory that could serve more concurrent requests.</p>
+          <p><strong>Optimal split:</strong> Profile your workload's prefix distribution. If 90% of requests share 5 system prompts, a small cache suffices. If prefix diversity is high (RAG), allocate more memory to cache.</p>
+          <p><strong>Rule of thumb:</strong> Reserve 10-20% of GPU memory for prefix cache in chatbot workloads.</p>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>Correctness Warning:</strong> Prefix caching assumes causal (left-to-right) attention. If your model uses bidirectional attention (e.g., encoder models, prefix-tuned models with bidirectional prefix), KV values at position P depend on <em>all</em> tokens, not just preceding ones. Prefix caching is invalid for such architectures — it will produce silently incorrect outputs.
+      </div>
+
+      <div class="callout">
+        <strong>Key Takeaway:</strong> Prefix caching is the single highest-impact optimization for chatbot and multi-turn conversation workloads. With a shared system prompt, it eliminates 60-95% of prefill compute, reduces TTFT by 10-40×, and cuts KV cache memory by 30-98%. It's essentially free — vLLM's <code>--enable-prefix-caching</code> flag has negligible overhead and should be enabled by default for any workload with repeated prefixes.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

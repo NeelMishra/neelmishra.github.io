@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into function calling infrastructure for LLMs: tool-use serving, special tokens, parallel function calls, streaming with tools, OpenAI function calling API, and latency considerations.">
+  <title>Function Calling Infrastructure | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#how-fc-works">How Function Calling Works</a></li>
+          <li><a href="#special-tokens">Special Tokens &amp; Formats</a></li>
+          <li><a href="#serving-flow">Serving Flow</a></li>
+          <li><a href="#parallel-calls">Parallel Function Calls</a></li>
+          <li><a href="#streaming-tools">Streaming with Tools</a></li>
+          <li><a href="#latency-optimization">Latency Optimization</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Function Calling Infrastructure</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <p>Function calling (tool use) transforms LLMs from text generators into action-taking agents. But behind the clean API surface — <code>tools=[...]</code> in the OpenAI API — lies significant serving infrastructure: special token handling, constrained decoding for tool call arguments, multi-turn context management, and streaming complications. This post covers the end-to-end infrastructure that makes function calling work at scale.</p>
+
+      <!-- ================================================================ -->
+      <h2 id="how-fc-works">How Function Calling Works</h2>
+
+      <p>At the inference level, function calling is <strong>not</strong> a separate model capability — it's structured output with special tokens. The model has been fine-tuned to recognize tool definitions in the system prompt and emit structured tool call blocks when it decides a tool is needed.</p>
+
+      <p>The lifecycle of a function call:</p>
+      <ol>
+        <li><strong>Tool definitions</strong> are serialized into the system prompt as structured text (JSON schemas describing each function's name, parameters, and descriptions).</li>
+        <li>The model generates text and, when it decides to invoke a tool, emits a <strong>special token sequence</strong> that marks the start of a tool call.</li>
+        <li>The serving infrastructure <strong>detects</strong> the tool call token, switches to constrained decoding to ensure valid JSON arguments, and stops generation at the end-of-tool-call token.</li>
+        <li>The tool call is <strong>returned to the client</strong> with <code>finish_reason: "tool_calls"</code>.</li>
+        <li>The client <strong>executes the function</strong> and sends the result back as a <code>tool</code> message.</li>
+        <li>The model continues generation with the tool result <strong>injected into context</strong>.</li>
+      </ol>
+
+      <!-- SVG: Function Calling Flow -->
+      <svg id="li-fc-flow-svg" viewBox="0 0 750 420" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:750px;margin:1.2rem auto;display:block" role="img" aria-label="Function calling flow diagram">
+        <defs>
+          <marker id="li-fc-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#0a8f6a"/>
+          </marker>
+          <marker id="li-fc-arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6 Z" fill="#ff6b35"/>
+          </marker>
+        </defs>
+
+        <text x="375" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="13" fill="#1a1a2e">Function Calling: End-to-End Flow</text>
+
+        <!-- Client -->
+        <rect x="30" y="50" width="120" height="350" rx="10" fill="#f5f5f5" stroke="#ddd" stroke-width="1"/>
+        <text x="90" y="72" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#555">Client App</text>
+
+        <!-- Inference Server -->
+        <rect x="240" y="50" width="180" height="350" rx="10" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="330" y="72" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#0a8f6a">Inference Server</text>
+
+        <!-- Model -->
+        <rect x="510" y="50" width="120" height="350" rx="10" fill="#fff3e0" stroke="#ff6b35" stroke-width="1"/>
+        <text x="570" y="72" text-anchor="middle" font-family="Manrope,sans-serif" font-weight="700" font-size="11" fill="#ff6b35">LLM</text>
+
+        <!-- External Tool -->
+        <rect x="680" y="175" width="60" height="60" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1.5"/>
+        <text x="710" y="200" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#1976d2">Tool</text>
+        <text x="710" y="212" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#1976d2">API</text>
+
+        <!-- Step 1: User sends request with tools -->
+        <text x="90" y="105" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">messages +</text>
+        <text x="90" y="116" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">tools=[...]</text>
+        <line x1="150" y1="108" x2="238" y2="108" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-fc-arrow)"/>
+        <text x="194" y="100" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#0a8f6a">①</text>
+
+        <!-- Step 2: Server formats prompt with tool schemas -->
+        <text x="330" y="105" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">Format prompt</text>
+        <text x="330" y="116" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">+ tool defs</text>
+        <line x1="420" y1="108" x2="508" y2="108" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#li-fc-arrow-orange)"/>
+        <text x="464" y="100" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">②</text>
+
+        <!-- Step 3: Model generates tool call -->
+        <text x="570" y="155" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35">&lt;tool_call&gt;</text>
+        <text x="570" y="166" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35">{"name":...}</text>
+        <line x1="510" y1="158" x2="422" y2="158" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#li-fc-arrow-orange)"/>
+        <text x="464" y="150" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">③</text>
+
+        <!-- Step 4: Server parses, returns to client -->
+        <text x="330" y="158" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">Parse tool</text>
+        <text x="330" y="169" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">call JSON</text>
+        <line x1="240" y1="161" x2="152" y2="161" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-fc-arrow)"/>
+        <text x="194" y="153" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#0a8f6a">④</text>
+
+        <!-- Step 5: Client executes tool -->
+        <text x="90" y="205" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">Execute</text>
+        <line x1="150" y1="203" x2="678" y2="203" stroke="#1976d2" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#li-fc-arrow)"/>
+        <text x="400" y="196" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#1976d2">⑤ Call external API</text>
+
+        <!-- Step 6: Tool result back -->
+        <line x1="678" y1="218" x2="152" y2="218" stroke="#1976d2" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#li-fc-arrow)"/>
+        <text x="400" y="232" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#1976d2">⑥ Tool result</text>
+
+        <!-- Step 7: Client sends tool result to server -->
+        <text x="90" y="270" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">role: tool</text>
+        <text x="90" y="281" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">content: result</text>
+        <line x1="150" y1="273" x2="238" y2="273" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-fc-arrow)"/>
+        <text x="194" y="265" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#0a8f6a">⑦</text>
+
+        <!-- Step 8: Server injects result, resumes -->
+        <text x="330" y="273" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">Inject into</text>
+        <text x="330" y="284" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#0a8f6a">context</text>
+        <line x1="420" y1="276" x2="508" y2="276" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#li-fc-arrow-orange)"/>
+        <text x="464" y="268" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">⑧</text>
+
+        <!-- Step 9: Model generates final response -->
+        <text x="570" y="325" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35">Final text</text>
+        <text x="570" y="336" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#ff6b35">response</text>
+        <line x1="510" y1="328" x2="422" y2="328" stroke="#ff6b35" stroke-width="1.5" marker-end="url(#li-fc-arrow-orange)"/>
+        <text x="464" y="320" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#ff6b35">⑨</text>
+
+        <!-- Step 10: Return to client -->
+        <line x1="240" y1="331" x2="152" y2="331" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-fc-arrow)"/>
+        <text x="194" y="323" text-anchor="middle" font-family="Manrope,sans-serif" font-size="8" fill="#0a8f6a">⑩</text>
+        <text x="90" y="345" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#555">finish: stop</text>
+
+        <text x="375" y="412" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">Total latency = prefill₁ + decode₁ + tool_execution + prefill₂ + decode₂</text>
+      </svg>
+
+      <!-- ================================================================ -->
+      <h2 id="special-tokens">Special Tokens &amp; Formats</h2>
+
+      <p>Different model families use different special tokens to delimit tool calls. The serving infrastructure must recognize these and handle them correctly.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Llama 3.1 / 3.2 Format</h3>
+          <pre class="pseudo-code" style="font-size:0.8rem"><span class="cm"># Special tokens:</span>
+<span class="fn">&lt;|python_tag|&gt;</span>  <span class="cm"># code interpreter</span>
+<span class="fn">&lt;|eom_id|&gt;</span>     <span class="cm"># end of tool call</span>
+
+<span class="cm"># Tool call output format:</span>
+&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;
+
+<span class="fn">&lt;|python_tag|&gt;</span>
+{"name": "get_weather",
+ "parameters": {"city": "SF"}}
+<span class="fn">&lt;|eom_id|&gt;</span></pre>
+        </div>
+        <div class="compare-card">
+          <h3>Mistral / Mixtral Format</h3>
+          <pre class="pseudo-code" style="font-size:0.8rem"><span class="cm"># Special tokens:</span>
+<span class="fn">[TOOL_CALLS]</span>  <span class="cm"># start of tool calls</span>
+<span class="fn">[TOOL_RESULTS]</span>  <span class="cm"># tool result marker</span>
+
+<span class="cm"># Tool call output format:</span>
+[TOOL_CALLS]
+[{"name": "get_weather",
+  "arguments": {"city": "SF"},
+  "id": "call_abc123"}]
+
+<span class="cm"># Tool result injection:</span>
+[TOOL_RESULTS]
+{"call_id":"call_abc123",
+ "content":"72°F, sunny"}
+[/TOOL_RESULTS]</pre>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm">## OpenAI API format — the industry standard</span>
+<span class="cm">## This is what clients send/receive regardless of the underlying model format</span>
+
+<span class="cm">## Request: define available tools</span>
+tools = [
+    {
+        <span class="fn">"type"</span>: <span class="fn">"function"</span>,
+        <span class="fn">"function"</span>: {
+            <span class="fn">"name"</span>: <span class="fn">"get_weather"</span>,
+            <span class="fn">"description"</span>: <span class="fn">"Get current weather for a city"</span>,
+            <span class="fn">"parameters"</span>: {
+                <span class="fn">"type"</span>: <span class="fn">"object"</span>,
+                <span class="fn">"properties"</span>: {
+                    <span class="fn">"city"</span>: {<span class="fn">"type"</span>: <span class="fn">"string"</span>},
+                    <span class="fn">"units"</span>: {<span class="fn">"type"</span>: <span class="fn">"string"</span>, <span class="fn">"enum"</span>: [<span class="fn">"celsius"</span>, <span class="fn">"fahrenheit"</span>]}
+                },
+                <span class="fn">"required"</span>: [<span class="fn">"city"</span>]
+            }
+        }
+    }
+]
+
+<span class="cm">## Response: model decides to call a tool</span>
+{
+    <span class="fn">"choices"</span>: [{
+        <span class="fn">"message"</span>: {
+            <span class="fn">"role"</span>: <span class="fn">"assistant"</span>,
+            <span class="fn">"content"</span>: <span class="kw">null</span>,
+            <span class="fn">"tool_calls"</span>: [{
+                <span class="fn">"id"</span>: <span class="fn">"call_abc123"</span>,
+                <span class="fn">"type"</span>: <span class="fn">"function"</span>,
+                <span class="fn">"function"</span>: {
+                    <span class="fn">"name"</span>: <span class="fn">"get_weather"</span>,
+                    <span class="fn">"arguments"</span>: <span class="fn">"{\"city\": \"San Francisco\", \"units\": \"fahrenheit\"}"</span>
+                }
+            }]
+        },
+        <span class="fn">"finish_reason"</span>: <span class="fn">"tool_calls"</span>
+    }]
+}</pre>
+
+      <div class="callout">
+        <strong>Key serving infrastructure role:</strong> The inference server must translate between the model-specific token format (Llama's <code>&lt;|python_tag|&gt;</code>, Mistral's <code>[TOOL_CALLS]</code>) and the standardized OpenAI API format. This is done in the chat template processor, typically via Jinja2 templates that ship with each model. vLLM, TGI, and SGLang all handle this translation layer.
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="serving-flow">Serving Flow</h2>
+
+      <p>The serving infrastructure handles several non-trivial tasks during function calling:</p>
+
+      <pre class="pseudo-code"><span class="cm">## Serving infrastructure for function calls</span>
+<span class="kw">class</span> <span class="fn">ToolCallHandler</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model_config):
+        self.tool_start_token = model_config.tool_start_token
+        self.tool_end_token = model_config.tool_end_token
+        <span class="cm"># Optional: constrained decoding for tool args</span>
+        self.arg_decoder = <span class="fn">ConstrainedDecoder</span>()
+
+    <span class="kw">def</span> <span class="fn">process_generation</span>(self, token_ids, tool_schemas):
+        <span class="cm">"""Called after each generated token."""</span>
+        decoded = self.tokenizer.<span class="fn">decode</span>(token_ids)
+
+        <span class="kw">if</span> self.<span class="fn">detected_tool_start</span>(token_ids):
+            <span class="cm"># Switch to constrained decoding mode</span>
+            <span class="cm"># Build a JSON schema from the tool definitions</span>
+            tool_call_schema = self.<span class="fn">build_tool_call_schema</span>(tool_schemas)
+            self.arg_decoder.<span class="fn">activate</span>(tool_call_schema)
+            <span class="kw">return</span> {<span class="fn">"state"</span>: <span class="fn">"tool_call"</span>, <span class="fn">"constrained"</span>: <span class="kw">True</span>}
+
+        <span class="kw">if</span> self.<span class="fn">detected_tool_end</span>(token_ids):
+            <span class="cm"># Parse the completed tool call</span>
+            tool_json = self.<span class="fn">extract_tool_json</span>(decoded)
+            self.arg_decoder.<span class="fn">deactivate</span>()
+            <span class="kw">return</span> {
+                <span class="fn">"state"</span>: <span class="fn">"tool_call_complete"</span>,
+                <span class="fn">"tool_call"</span>: tool_json,
+                <span class="fn">"finish_reason"</span>: <span class="fn">"tool_calls"</span>
+            }
+
+        <span class="kw">return</span> {<span class="fn">"state"</span>: <span class="fn">"generating"</span>}
+
+    <span class="kw">def</span> <span class="fn">inject_tool_result</span>(self, conversation, tool_call_id, result):
+        <span class="cm">"""Add tool result back into the conversation context."""</span>
+        conversation.<span class="fn">append</span>({
+            <span class="fn">"role"</span>: <span class="fn">"tool"</span>,
+            <span class="fn">"tool_call_id"</span>: tool_call_id,
+            <span class="fn">"content"</span>: <span class="fn">str</span>(result)
+        })
+        <span class="cm"># Re-tokenize and continue generation</span>
+        <span class="cm"># The KV cache from the previous turn can be reused!</span>
+        <span class="kw">return</span> self.<span class="fn">resume_generation</span>(conversation)</pre>
+
+      <div class="callout warn">
+        <strong>KV cache reuse across tool calls:</strong> When the tool result comes back, the server can reuse the KV cache from the first generation turn. It only needs to process the new tool result tokens through prefill, not the entire conversation history. This is why prefix caching is essential for tool-use workloads — a 3-turn tool interaction reuses most of the KV cache from turn 1.
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="parallel-calls">Parallel Function Calls</h2>
+
+      <p>Modern models can emit multiple tool calls in a single generation turn. The model generates multiple tool call blocks sequentially, and the client can execute them in parallel:</p>
+
+      <pre class="pseudo-code"><span class="cm">## Parallel tool call handling</span>
+<span class="kw">import</span> asyncio
+<span class="kw">from</span> openai <span class="kw">import</span> AsyncOpenAI
+
+client = AsyncOpenAI(base_url=<span class="fn">"http://localhost:8000/v1"</span>)
+
+<span class="kw">async def</span> <span class="fn">handle_tool_calls</span>(response):
+    tool_calls = response.choices[0].message.tool_calls
+    <span class="kw">if not</span> tool_calls:
+        <span class="kw">return</span> response.choices[0].message.content
+
+    <span class="cm"># Execute all tool calls in parallel</span>
+    tasks = []
+    <span class="kw">for</span> tc <span class="kw">in</span> tool_calls:
+        func = TOOL_REGISTRY[tc.function.name]
+        args = json.<span class="fn">loads</span>(tc.function.arguments)
+        tasks.<span class="fn">append</span>(<span class="fn">execute_tool</span>(tc.id, func, args))
+
+    results = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(*tasks)
+
+    <span class="cm"># Send all results back in one request</span>
+    messages = conversation + [response.choices[0].message]
+    <span class="kw">for</span> tool_call_id, result <span class="kw">in</span> results:
+        messages.<span class="fn">append</span>({
+            <span class="fn">"role"</span>: <span class="fn">"tool"</span>,
+            <span class="fn">"tool_call_id"</span>: tool_call_id,
+            <span class="fn">"content"</span>: <span class="fn">json.dumps</span>(result)
+        })
+
+    <span class="cm"># Resume generation with all tool results</span>
+    continuation = <span class="kw">await</span> client.chat.completions.<span class="fn">create</span>(
+        model=<span class="fn">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+        messages=messages
+    )
+    <span class="kw">return</span> <span class="kw">await</span> <span class="fn">handle_tool_calls</span>(continuation)  <span class="cm"># recursive for multi-hop</span>
+
+<span class="cm">## Example: model calls get_weather("NYC") AND get_weather("SF") in parallel</span>
+<span class="cm">## Client executes both API calls concurrently → ~1 RTT instead of 2</span></pre>
+
+      <div class="callout">
+        <strong>Parallel calls reduce latency significantly.</strong> If a model needs data from 3 independent APIs (each taking ~200ms), sequential execution takes ~600ms for tool execution. Parallel execution takes ~200ms. Combined with the model generation time (~500ms per turn), this cuts total latency from ~2.1s to ~1.3s for a typical tool-use interaction.
+      </div>
+
+      <!-- ================================================================ -->
+      <h2 id="streaming-tools">Streaming with Tools</h2>
+
+      <p>Streaming function calls is one of the trickiest parts of the infrastructure. The challenge: the client doesn't know if the model will emit text or a tool call until it starts generating. And tool call arguments arrive token by token.</p>
+
+      <pre class="pseudo-code"><span class="cm">## Streaming tool calls — partial argument accumulation</span>
+<span class="kw">async def</span> <span class="fn">stream_with_tools</span>(client, messages, tools):
+    stream = <span class="kw">await</span> client.chat.completions.<span class="fn">create</span>(
+        model=<span class="fn">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+        messages=messages,
+        tools=tools,
+        stream=<span class="kw">True</span>
+    )
+
+    tool_calls_buffer = {}  <span class="cm"># id → accumulated arguments</span>
+    text_buffer = <span class="fn">""</span>
+
+    <span class="kw">async for</span> chunk <span class="kw">in</span> stream:
+        delta = chunk.choices[0].delta
+
+        <span class="cm"># Case 1: Regular text content</span>
+        <span class="kw">if</span> delta.content:
+            text_buffer += delta.content
+            <span class="fn">yield_text</span>(delta.content)
+
+        <span class="cm"># Case 2: Tool call chunks</span>
+        <span class="kw">if</span> delta.tool_calls:
+            <span class="kw">for</span> tc_chunk <span class="kw">in</span> delta.tool_calls:
+                idx = tc_chunk.index
+                <span class="kw">if</span> idx <span class="kw">not in</span> tool_calls_buffer:
+                    tool_calls_buffer[idx] = {
+                        <span class="fn">"id"</span>: tc_chunk.id,
+                        <span class="fn">"name"</span>: tc_chunk.function.name <span class="kw">or</span> <span class="fn">""</span>,
+                        <span class="fn">"arguments"</span>: <span class="fn">""</span>
+                    }
+                <span class="kw">if</span> tc_chunk.function.name:
+                    tool_calls_buffer[idx][<span class="fn">"name"</span>] += tc_chunk.function.name
+                <span class="kw">if</span> tc_chunk.function.arguments:
+                    tool_calls_buffer[idx][<span class="fn">"arguments"</span>] += tc_chunk.function.arguments
+
+        <span class="cm"># Case 3: Stream ended</span>
+        <span class="kw">if</span> chunk.choices[0].finish_reason == <span class="fn">"tool_calls"</span>:
+            <span class="cm"># All tool calls fully accumulated — execute them</span>
+            <span class="kw">for</span> tc <span class="kw">in</span> tool_calls_buffer.<span class="fn">values</span>():
+                <span class="fn">yield_tool_call</span>(tc)
+
+<span class="cm">## The tricky part: arguments arrive as fragments</span>
+<span class="cm">## Chunk 1: {"function": {"arguments": '{"ci'}}</span>
+<span class="cm">## Chunk 2: {"function": {"arguments": 'ty": "'}}</span>
+<span class="cm">## Chunk 3: {"function": {"arguments": 'San Fra'}}</span>
+<span class="cm">## Chunk 4: {"function": {"arguments": 'ncisco"}'}}</span></pre>
+
+      <!-- ================================================================ -->
+      <h2 id="latency-optimization">Latency Optimization</h2>
+
+      <p>Function calling adds significant latency due to multiple model invocations and external API calls. Here are the key optimization strategies:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Server-Side Optimizations</h3>
+          <ul>
+            <li><strong>Prefix caching:</strong> Reuse KV cache from system prompt + tool definitions across all requests (saves 200-500ms per turn)</li>
+            <li><strong>Constrained decoding:</strong> Enforce valid tool call JSON → fewer retries, shorter output</li>
+            <li><strong>Speculative decoding:</strong> Use small model draft for tool call args (highly predictable tokens)</li>
+            <li><strong>Batched tool results:</strong> Process all tool results in one prefill pass</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Client-Side Optimizations</h3>
+          <ul>
+            <li><strong>Parallel execution:</strong> Run independent tool calls concurrently</li>
+            <li><strong>Speculative execution:</strong> Pre-fetch likely tool results before model decides</li>
+            <li><strong>Tool result caching:</strong> Cache deterministic tool results (e.g., math operations)</li>
+            <li><strong>Timeout + fallback:</strong> Return partial results if tool takes &gt;2s</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm">## Latency breakdown for typical tool-use interaction</span>
+<span class="cm">## Model: Llama-3.1-70B on 8×H100, 4K context</span>
+
+<span class="cm">## Turn 1: User query → tool call decision</span>
+<span class="cm">##   Prefill (system + tools + user msg, ~2K tokens):  120ms</span>
+<span class="cm">##   Decode tool call (~50 tokens, 30 tok/s):            ~1.7s</span>
+<span class="cm">##   Subtotal:                                           ~1.8s</span>
+
+<span class="cm">## Tool execution (external API):</span>
+<span class="cm">##   Network RTT + processing:                           ~200ms</span>
+
+<span class="cm">## Turn 2: Tool result → final response</span>
+<span class="cm">##   Prefill (tool result, ~100 tokens, KV cache reused): 15ms</span>
+<span class="cm">##   Decode response (~100 tokens, 30 tok/s):             ~3.3s</span>
+<span class="cm">##   Subtotal:                                            ~3.3s</span>
+
+<span class="cm">## Total end-to-end: ~5.3s</span>
+<span class="cm">## With optimizations (prefix cache + parallel tools): ~3.8s</span></pre>
+
+      <div class="callout">
+        <strong>Production tip:</strong> Tool definitions expand the system prompt significantly (each tool adds ~200-500 tokens). With 20+ tools, the system prompt alone can be 10K+ tokens. Prefix caching is not optional here — it turns a 500ms prefill into a 5ms cache hit for every request after the first. Always enable <code>--enable-prefix-caching</code> in vLLM for tool-use workloads.
+      </div>
+
+      <p><strong>Key takeaway:</strong> Function calling infrastructure bridges the gap between LLM text generation and programmatic tool execution. The critical components are: chat template translation (model-specific → OpenAI format), constrained decoding for tool arguments, KV cache reuse across multi-turn tool interactions, and parallel tool execution on the client side. Getting this right can reduce end-to-end tool-use latency by 30-40%.</p>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

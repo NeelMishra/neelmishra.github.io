@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into vLLM architecture, PagedAttention, continuous batching, tensor parallelism, and deployment for high-throughput LLM serving.">
+  <title>vLLM: High-Throughput LLM Serving | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#why-vllm">Why vLLM?</a></li>
+          <li><a href="#paged-attention">PagedAttention Deep Dive</a></li>
+          <li><a href="#continuous-batching">Continuous Batching</a></li>
+          <li><a href="#architecture">Architecture &amp; Parallelism</a></li>
+          <li><a href="#deployment">Deployment &amp; Configuration</a></li>
+          <li><a href="#api-usage">API Usage &amp; Client Code</a></li>
+          <li><a href="#benchmarks">Benchmarks &amp; Performance</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>vLLM: High-Throughput LLM Serving</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="why-vllm">Why vLLM?</h2>
+      <p>Autoregressive LLM inference is fundamentally memory-bound. A 70B-parameter model in FP16 requires <strong>140 GB</strong> of GPU memory just for weights—before a single KV-cache entry is allocated. Naive serving wastes 60–80% of allocated KV-cache memory due to fragmentation and over-reservation, leaving expensive GPU cycles idle while memory sits unused.</p>
+      <p>vLLM, developed at UC Berkeley's Sky Computing Lab, solves this with a radical insight: treat GPU KV-cache memory like an operating system manages virtual memory. The result is <strong>PagedAttention</strong>, which eliminates fragmentation and enables near-optimal memory utilization.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Traditional serving frameworks pre-allocate a contiguous KV-cache per sequence based on the <em>maximum possible</em> length. A 2048-token max length reserves 2048 slots even for a 50-token prompt, wasting ~97% of memory. PagedAttention allocates on demand, block by block.
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Naive KV-Cache</h3>
+          <ul>
+            <li>Contiguous allocation per sequence</li>
+            <li>Reserved for max_seq_len upfront</li>
+            <li>Internal fragmentation: 60–80%</li>
+            <li>Cannot share across sequences</li>
+            <li>Limits batch size severely</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>vLLM PagedAttention</h3>
+          <ul>
+            <li>Non-contiguous block allocation</li>
+            <li>Allocates on demand per token</li>
+            <li>Waste &lt; 4% (last-block only)</li>
+            <li>Copy-on-write sharing (beam search)</li>
+            <li>2–4× larger batch sizes</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="paged-attention">PagedAttention Deep Dive</h2>
+      <p>PagedAttention partitions each sequence's KV-cache into fixed-size <strong>blocks</strong> (default: 16 tokens per block). A block table maps each sequence's logical blocks to physical blocks in GPU memory, exactly like a page table in virtual memory systems.</p>
+
+      <svg viewBox="0 0 700 280" style="width:100%;max-width:700px;margin:1.2rem auto;display:block" aria-label="PagedAttention block table diagram">
+        <defs>
+          <marker id="li-vllm-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+        </defs>
+        <rect x="10" y="10" width="200" height="40" rx="8" fill="#0a8f6a" opacity="0.15" stroke="#0a8f6a"/>
+        <text x="110" y="35" text-anchor="middle" font-size="13" font-weight="700" fill="#0a8f6a">Sequence A (Logical)</text>
+        <rect x="10" y="60" width="60" height="35" rx="6" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="40" y="82" text-anchor="middle" font-size="11" fill="#333">Block 0</text>
+        <rect x="80" y="60" width="60" height="35" rx="6" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="110" y="82" text-anchor="middle" font-size="11" fill="#333">Block 1</text>
+        <rect x="150" y="60" width="60" height="35" rx="6" fill="#e8f5e9" stroke="#0a8f6a"/>
+        <text x="180" y="82" text-anchor="middle" font-size="11" fill="#333">Block 2</text>
+
+        <rect x="400" y="10" width="280" height="40" rx="8" fill="#ff6b35" opacity="0.15" stroke="#ff6b35"/>
+        <text x="540" y="35" text-anchor="middle" font-size="13" font-weight="700" fill="#ff6b35">Physical GPU Memory</text>
+        <rect x="400" y="60" width="60" height="35" rx="6" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="430" y="82" text-anchor="middle" font-size="11" fill="#333">Phys 7</text>
+        <rect x="470" y="60" width="60" height="35" rx="6" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="500" y="82" text-anchor="middle" font-size="11" fill="#333">Phys 2</text>
+        <rect x="540" y="60" width="60" height="35" rx="6" fill="#fff3e0" stroke="#ff6b35"/>
+        <text x="570" y="82" text-anchor="middle" font-size="11" fill="#333">Phys 11</text>
+        <rect x="610" y="60" width="60" height="35" rx="6" fill="#ddd" stroke="#999"/>
+        <text x="640" y="82" text-anchor="middle" font-size="11" fill="#999">Free</text>
+
+        <line x1="210" y1="77" x2="395" y2="77" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#li-vllm-arrow)"/>
+        <text x="300" y="70" text-anchor="middle" font-size="11" fill="#666">Block Table</text>
+
+        <rect x="10" y="130" width="200" height="40" rx="8" fill="#1a73e8" opacity="0.15" stroke="#1a73e8"/>
+        <text x="110" y="155" text-anchor="middle" font-size="13" font-weight="700" fill="#1a73e8">Sequence B (Logical)</text>
+        <rect x="10" y="180" width="60" height="35" rx="6" fill="#e3f2fd" stroke="#1a73e8"/>
+        <text x="40" y="202" text-anchor="middle" font-size="11" fill="#333">Block 0</text>
+        <rect x="80" y="180" width="60" height="35" rx="6" fill="#e3f2fd" stroke="#1a73e8"/>
+        <text x="110" y="202" text-anchor="middle" font-size="11" fill="#333">Block 1</text>
+
+        <rect x="400" y="130" width="280" height="35" rx="6" fill="#e3f2fd" stroke="#1a73e8"/>
+        <text x="540" y="152" text-anchor="middle" font-size="11" fill="#1a73e8">Maps to Phys 4, Phys 9 (non-contiguous)</text>
+
+        <text x="350" y="250" text-anchor="middle" font-size="12" fill="#666" font-style="italic">Blocks are scattered across GPU memory — no contiguous allocation needed</text>
+      </svg>
+
+      <p>Each physical block stores KV tensors for exactly <code>block_size</code> tokens. For a model with 80 layers and 64 heads of dimension 128, each FP16 block of 16 tokens uses:</p>
+      <p style="text-align:center;font-weight:600">2 (K+V) × 80 layers × 64 heads × 128 dim × 16 tokens × 2 bytes = <strong>~40 MB per block</strong></p>
+
+      <p>The attention kernel is modified to fetch KV data from non-contiguous physical blocks using the block table as a lookup. The overhead is negligible because GPU memory access is already random for attention computations.</p>
+
+      <div class="callout">
+        <strong>Copy-on-Write for Beam Search:</strong> When multiple beams share a common prefix, their block table entries point to the same physical blocks. A block is only copied when one beam diverges—reducing memory by up to <strong>55%</strong> for beam search with width 4.
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="continuous-batching">Continuous Batching</h2>
+      <p>Static batching pads all sequences to the longest one and waits for the entire batch to finish. With 32 sequences and a mean length of 100 but max of 2000, this wastes ~95% of compute. vLLM implements <strong>iteration-level scheduling</strong>:</p>
+
+      <ol>
+        <li><strong>Each decode step</strong>, the scheduler evaluates which sequences have finished (hit EOS or max length).</li>
+        <li><strong>Finished sequences</strong> are evicted immediately, freeing their KV-cache blocks.</li>
+        <li><strong>Waiting requests</strong> are admitted into the running batch if enough blocks are available.</li>
+        <li>The engine executes a single forward pass for all running sequences, regardless of their individual progress.</li>
+      </ol>
+
+      <p>This means GPU utilization stays near 100% throughout serving—there is no idle waiting for the longest sequence to finish.</p>
+
+<pre class="pseudo-code"><span class="cm"># vLLM scheduler pseudocode (simplified)</span>
+<span class="kw">class</span> <span class="fn">Scheduler</span>:
+    <span class="kw">def</span> <span class="fn">schedule</span>(self):
+        <span class="cm"># 1. Check running sequences for completion</span>
+        finished = [s <span class="kw">for</span> s <span class="kw">in</span> self.running <span class="kw">if</span> s.is_finished()]
+        <span class="kw">for</span> seq <span class="kw">in</span> finished:
+            self.<span class="fn">free_blocks</span>(seq)
+            self.running.<span class="fn">remove</span>(seq)
+
+        <span class="cm"># 2. Admit new requests from waiting queue</span>
+        <span class="kw">while</span> self.waiting <span class="kw">and</span> self.<span class="fn">can_allocate</span>(self.waiting[0]):
+            seq = self.waiting.<span class="fn">popleft</span>()
+            self.<span class="fn">allocate_blocks</span>(seq)
+            self.running.<span class="fn">append</span>(seq)
+
+        <span class="cm"># 3. If memory pressure, preempt lowest-priority seqs</span>
+        <span class="kw">while</span> self.<span class="fn">num_free_blocks</span>() &lt; self.watermark:
+            victim = self.running.<span class="fn">pop</span>()  <span class="cm"># FCFS priority</span>
+            self.<span class="fn">swap_out</span>(victim)  <span class="cm"># move KV to CPU</span>
+
+        <span class="kw">return</span> SchedulerOutputs(self.running)</pre>
+
+      <p>When GPU memory is exhausted, vLLM uses <strong>preemption</strong> via two strategies: <em>swapping</em> (KV-cache to CPU RAM) or <em>recomputation</em> (discard KV-cache and recompute later). Swapping is default for sequences that have generated many tokens; recomputation is preferred for short sequences.</p>
+
+      <!-- Section 4 -->
+      <h2 id="architecture">Architecture &amp; Parallelism</h2>
+      <p>vLLM's architecture separates the engine into a <strong>frontend</strong> (API server, scheduler) and a <strong>backend</strong> (model runner, GPU workers). This separation enables clean scaling:</p>
+
+      <svg viewBox="0 0 720 320" style="width:100%;max-width:720px;margin:1.2rem auto;display:block" aria-label="vLLM architecture diagram">
+        <rect x="10" y="10" width="140" height="50" rx="10" fill="#0a8f6a" opacity="0.2" stroke="#0a8f6a"/>
+        <text x="80" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#0a8f6a">API Server</text>
+        <text x="80" y="55" text-anchor="middle" font-size="10" fill="#666">OpenAI-compat</text>
+
+        <rect x="180" y="10" width="140" height="50" rx="10" fill="#0a8f6a" opacity="0.2" stroke="#0a8f6a"/>
+        <text x="250" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#0a8f6a">Scheduler</text>
+        <text x="250" y="55" text-anchor="middle" font-size="10" fill="#666">Block Manager</text>
+
+        <rect x="360" y="10" width="140" height="50" rx="10" fill="#ff6b35" opacity="0.15" stroke="#ff6b35"/>
+        <text x="430" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#ff6b35">LLM Engine</text>
+        <text x="430" y="55" text-anchor="middle" font-size="10" fill="#666">Tokenizer + Detok</text>
+
+        <line x1="150" y1="35" x2="178" y2="35" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-vllm-arrow)"/>
+        <line x1="320" y1="35" x2="358" y2="35" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-vllm-arrow)"/>
+
+        <rect x="180" y="90" width="320" height="50" rx="10" fill="#1a73e8" opacity="0.12" stroke="#1a73e8"/>
+        <text x="340" y="115" text-anchor="middle" font-size="12" font-weight="700" fill="#1a73e8">Model Runner (Worker Process per GPU)</text>
+        <line x1="430" y1="60" x2="430" y2="88" stroke="#1a73e8" stroke-width="1.5" marker-end="url(#li-vllm-arrow)"/>
+
+        <rect x="100" y="170" width="130" height="50" rx="10" fill="#1a73e8" opacity="0.08" stroke="#1a73e8"/>
+        <text x="165" y="200" text-anchor="middle" font-size="11" font-weight="600" fill="#1a73e8">GPU 0</text>
+        <rect x="250" y="170" width="130" height="50" rx="10" fill="#1a73e8" opacity="0.08" stroke="#1a73e8"/>
+        <text x="315" y="200" text-anchor="middle" font-size="11" font-weight="600" fill="#1a73e8">GPU 1</text>
+        <rect x="400" y="170" width="130" height="50" rx="10" fill="#1a73e8" opacity="0.08" stroke="#1a73e8"/>
+        <text x="465" y="200" text-anchor="middle" font-size="11" font-weight="600" fill="#1a73e8">GPU 2</text>
+        <rect x="550" y="170" width="130" height="50" rx="10" fill="#1a73e8" opacity="0.08" stroke="#1a73e8"/>
+        <text x="615" y="200" text-anchor="middle" font-size="11" font-weight="600" fill="#1a73e8">GPU 3</text>
+
+        <line x1="340" y1="140" x2="165" y2="168" stroke="#1a73e8" stroke-width="1" stroke-dasharray="4,3"/>
+        <line x1="340" y1="140" x2="315" y2="168" stroke="#1a73e8" stroke-width="1" stroke-dasharray="4,3"/>
+        <line x1="340" y1="140" x2="465" y2="168" stroke="#1a73e8" stroke-width="1" stroke-dasharray="4,3"/>
+        <line x1="340" y1="140" x2="615" y2="168" stroke="#1a73e8" stroke-width="1" stroke-dasharray="4,3"/>
+
+        <text x="340" y="155" text-anchor="middle" font-size="10" fill="#666">Tensor Parallel (NCCL AllReduce)</text>
+
+        <text x="340" y="260" text-anchor="middle" font-size="11" fill="#666">TP=4: each GPU holds 1/4 of attention heads + 1/4 of FFN columns</text>
+        <text x="340" y="280" text-anchor="middle" font-size="11" fill="#666">70B model: 140GB FP16 ÷ 4 GPUs = 35GB/GPU (fits A100 80GB)</text>
+      </svg>
+
+      <p><strong>Tensor Parallelism (TP):</strong> vLLM uses Megatron-style tensor parallelism. Each attention head is assigned to a single GPU. For the FFN layer, the first linear is column-parallel and the second is row-parallel, requiring a single <code>AllReduce</code> per layer. A Llama-70B model with TP=4 on 4×A100-80GB uses ~35 GB per GPU for weights, leaving ~45 GB per GPU for KV-cache.</p>
+
+      <p><strong>Pipeline Parallelism (PP):</strong> Available since vLLM 0.3+, PP splits layers across GPUs. Combined with TP, you can serve a 70B model on 8×A10G (24GB each): TP=4 × PP=2 gives each GPU ~17.5 GB of weights from a fraction of the layers.</p>
+
+      <!-- Section 5 -->
+      <h2 id="deployment">Deployment &amp; Configuration</h2>
+      <p>vLLM provides both a Python API and an OpenAI-compatible HTTP server. The most common deployment is via Docker:</p>
+
+<pre class="pseudo-code"><span class="cm"># Launch vLLM with Docker (production-ready)</span>
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    --model meta-llama/Llama-3.1-70B-Instruct \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.92 \
+    --max-model-len 8192 \
+    --max-num-seqs 256 \
+    --enforce-eager  <span class="cm"># disable CUDA graphs for debugging</span></pre>
+
+      <p>Key configuration parameters:</p>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead><tr style="border-bottom:2px solid var(--brand)">
+          <th style="text-align:left;padding:0.5rem">Flag</th>
+          <th style="text-align:left;padding:0.5rem">Default</th>
+          <th style="text-align:left;padding:0.5rem">Description</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem"><code>--tensor-parallel-size</code></td><td>1</td><td>Number of GPUs for tensor parallelism</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem"><code>--gpu-memory-utilization</code></td><td>0.90</td><td>Fraction of GPU memory for KV-cache + weights</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem"><code>--max-model-len</code></td><td>model default</td><td>Maximum sequence length (prompt + output)</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem"><code>--max-num-seqs</code></td><td>256</td><td>Maximum concurrent sequences in a batch</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem"><code>--quantization</code></td><td>None</td><td>awq, gptq, squeezellm, fp8</td></tr>
+          <tr><td style="padding:0.5rem"><code>--enable-prefix-caching</code></td><td>False</td><td>Automatic prefix caching (APC) for shared system prompts</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Warning:</strong> Setting <code>--gpu-memory-utilization</code> above 0.95 can cause OOM errors during CUDA graph capture. The default 0.90 leaves headroom for activation memory. For production, 0.90–0.92 is optimal.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="api-usage">API Usage &amp; Client Code</h2>
+      <p>vLLM's server exposes an OpenAI-compatible API, making it a drop-in replacement for the OpenAI Python client:</p>
+
+<pre class="pseudo-code"><span class="kw">from</span> openai <span class="kw">import</span> OpenAI
+
+<span class="cm"># Point to vLLM server</span>
+client = OpenAI(base_url=<span class="fn">"http://localhost:8000/v1"</span>, api_key=<span class="fn">"dummy"</span>)
+
+<span class="cm"># Completion with streaming</span>
+stream = client.chat.completions.<span class="fn">create</span>(
+    model=<span class="fn">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+    messages=[
+        {<span class="fn">"role"</span>: <span class="fn">"system"</span>, <span class="fn">"content"</span>: <span class="fn">"You are a helpful assistant."</span>},
+        {<span class="fn">"role"</span>: <span class="fn">"user"</span>, <span class="fn">"content"</span>: <span class="fn">"Explain PagedAttention."</span>}
+    ],
+    max_tokens=512,
+    temperature=0.7,
+    stream=<span class="kw">True</span>
+)
+
+<span class="kw">for</span> chunk <span class="kw">in</span> stream:
+    <span class="kw">if</span> chunk.choices[0].delta.content:
+        <span class="fn">print</span>(chunk.choices[0].delta.content, end=<span class="fn">""</span>)</pre>
+
+      <p>For offline batch inference (e.g., evaluation workloads), use the Python API directly:</p>
+
+<pre class="pseudo-code"><span class="kw">from</span> vllm <span class="kw">import</span> LLM, SamplingParams
+
+llm = LLM(
+    model=<span class="fn">"meta-llama/Llama-3.1-8B-Instruct"</span>,
+    tensor_parallel_size=1,
+    gpu_memory_utilization=0.90
+)
+params = SamplingParams(temperature=0.0, max_tokens=256)
+
+prompts = [<span class="fn">"What is KV-cache?"</span>, <span class="fn">"Explain tensor parallelism."</span>]
+outputs = llm.<span class="fn">generate</span>(prompts, params)
+
+<span class="kw">for</span> out <span class="kw">in</span> outputs:
+    <span class="fn">print</span>(out.outputs[0].text)</pre>
+
+      <!-- Section 7 -->
+      <h2 id="benchmarks">Benchmarks &amp; Performance</h2>
+      <p>vLLM's improvements come from two axes: <strong>higher throughput</strong> (more tokens/sec via better batching and memory utilization) and <strong>lower waste</strong> (more sequences fit in GPU memory simultaneously).</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Llama-2-7B (1×A100-80GB)</h3>
+          <ul>
+            <li><strong>HF Transformers:</strong> ~8 req/s</li>
+            <li><strong>vLLM:</strong> ~24 req/s (3× faster)</li>
+            <li>Input: 128 tokens, Output: 128 tokens</li>
+            <li>Batch size: 64 concurrent requests</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Llama-2-13B (1×A100-80GB)</h3>
+          <ul>
+            <li><strong>HF Transformers:</strong> ~4.5 req/s</li>
+            <li><strong>vLLM:</strong> ~15 req/s (3.3× faster)</li>
+            <li>Input: 256 tokens, Output: 256 tokens</li>
+            <li>Memory util: 92% vs 35%</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Llama-2-70B (4×A100-80GB, TP=4)</h3>
+          <ul>
+            <li><strong>TGI:</strong> ~6 req/s</li>
+            <li><strong>vLLM:</strong> ~14 req/s (2.3× faster)</li>
+            <li>ShareGPT dataset (variable lengths)</li>
+            <li>Continuous batching advantage shines</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>High-Concurrency (Llama-7B)</h3>
+          <ul>
+            <li>256 concurrent requests</li>
+            <li><strong>vLLM throughput:</strong> 2,400 tok/s</li>
+            <li><strong>HF generate:</strong> 100 tok/s (24× gap)</li>
+            <li>vLLM keeps all 256 in-flight; HF serializes</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Prefix Caching (APC):</strong> When many requests share a system prompt, <code>--enable-prefix-caching</code> reuses KV-cache blocks for common prefixes. For chatbot workloads with a 1000-token system prompt, this reduces TTFT by <strong>40–60%</strong> and increases throughput by <strong>1.5–2×</strong>.
+      </div>
+
+      <p>vLLM also supports speculative decoding, chunked prefill, and multi-LoRA serving—making it the most feature-complete open-source LLM serving engine as of 2024. Its OpenAI-compatible API means zero code changes when migrating from OpenAI's hosted models to self-hosted inference.</p>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

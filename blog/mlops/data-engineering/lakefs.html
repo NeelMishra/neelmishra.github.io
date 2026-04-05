@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into LakeFS — Git-like branching, commits, merges, and Spark integration for data lakes.">
+  <title>LakeFS: Git-like Branching for Data Lakes | Neel Mishra</title>
+  <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#what-is-lakefs">What Is LakeFS?</a></li>
+          <li><a href="#branching-model">The Branching Model</a></li>
+          <li><a href="#commits-and-merges">Commits, History &amp; Merges</a></li>
+          <li><a href="#spark-integration">Spark + LakeFS Integration</a></li>
+          <li><a href="#ci-cd-for-data">CI/CD for Data Quality</a></li>
+          <li><a href="#lakefs-vs-dvc">LakeFS vs DVC</a></li>
+          <li><a href="#production-patterns">Production Deployment Patterns</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&larr; All Posts</a>
+
+      <header class="blog-post-header">
+        <h1>LakeFS: Git-like Branching for Data Lakes</h1>
+        <p class="post-meta">
+          <span>MLOps Series</span> · <span>Data Engineering</span>
+        </p>
+      </header>
+
+      <!-- ───────────── Section 1: What Is LakeFS? ───────────── -->
+      <h2 id="what-is-lakefs">What Is LakeFS?</h2>
+
+      <p>LakeFS is an open-source platform that layers <strong>Git-like version control</strong> on top of object storage (S3, GCS, Azure Blob). Instead of versioning code, it versions data — every Parquet file, every Delta partition, every raw CSV landing in your lake gets the same branch/commit/merge semantics developers already know.</p>
+
+      <p>The core problem it solves: data lakes are <em>mutable shared state</em>. A single bad ETL write can corrupt production tables with no rollback path. LakeFS turns your lake into an immutable, auditable, branch-isolated environment where you can experiment freely and promote changes atomically.</p>
+
+      <h3>Architecture Overview</h3>
+
+      <p>LakeFS sits as a lightweight <strong>metadata layer</strong> between your compute engines (Spark, Trino, dbt) and the underlying object store. It does <em>not</em> copy data. Instead, it maintains a metadata tree (a Merkle-like structure called a <em>graveler</em>) that maps logical paths to physical object addresses.</p>
+
+<pre class="pseudo-code"><span class="cm">// LakeFS Architecture — simplified data flow</span>
+
+<span class="kw">Client</span> (Spark / Trino / CLI)
+    │
+    ▼
+<span class="fn">LakeFS API Server</span>        ← stateless, horizontally scalable
+    │
+    ├── <span class="fn">Auth</span>              ← RBAC, OIDC, LDAP integration
+    ├── <span class="fn">Graveler</span>          ← metadata tree engine (branches, commits)
+    │       │
+    │       └── <span class="kw">KV Store</span>  ← PostgreSQL or DynamoDB (metadata persistence)
+    │
+    └── <span class="fn">Block Adapter</span>    ← S3 / GCS / Azure (actual data I/O)
+</pre>
+
+      <div class="callout">
+        <strong>Zero-copy design:</strong> Creating a branch in LakeFS is an O(1) metadata pointer operation, not a data duplication. A branch with 100 TB of data costs the same as a branch with 1 KB — only the metadata pointer differs.
+      </div>
+
+      <p>The API server exposes three access interfaces:</p>
+      <ul>
+        <li><strong>S3-compatible Gateway</strong> — existing S3 SDK calls work unchanged; just swap the endpoint</li>
+        <li><strong>OpenAPI REST API</strong> — full programmatic control over branches, commits, diffs</li>
+        <li><strong>lakectl CLI</strong> — developer-friendly command line for interactive workflows</li>
+      </ul>
+
+      <h3>Repository Concept</h3>
+
+      <p>A LakeFS <strong>repository</strong> maps to a single storage namespace (e.g., <code>s3://my-lake/repo1</code>). Inside it, you get branches, commits, and tags — all scoped to that namespace. Each repository has a default branch (typically <code>main</code>) that serves as the production-ready view of the data.</p>
+
+<pre class="pseudo-code"><span class="cm"># Create a new repository via lakectl</span>
+<span class="kw">lakectl</span> <span class="fn">repo create</span> \
+  lakefs://my-analytics \
+  s3://company-datalake/analytics \
+  --default-branch main
+
+<span class="cm"># List existing repositories</span>
+<span class="kw">lakectl</span> <span class="fn">repo list</span>
+<span class="cm"># ┌───────────────────┬──────────────────────────────────┬─────────┐</span>
+<span class="cm"># │ Repository        │ Storage Namespace                 │ Branch  │</span>
+<span class="cm"># ├───────────────────┼──────────────────────────────────┼─────────┤</span>
+<span class="cm"># │ my-analytics      │ s3://company-datalake/analytics  │ main    │</span>
+<span class="cm"># │ ml-features       │ s3://company-datalake/features   │ main    │</span>
+<span class="cm"># └───────────────────┴──────────────────────────────────┴─────────┘</span>
+</pre>
+
+      <!-- ───────────── Section 2: The Branching Model ───────────── -->
+      <h2 id="branching-model">The Branching Model</h2>
+
+      <p>Branching is the foundation of the LakeFS workflow. Like Git, branches are cheap pointers — creating one takes milliseconds regardless of data size. This unlocks patterns impossible with traditional data lakes: isolated ETL testing, safe schema migrations, feature branch experimentation for ML pipelines.</p>
+
+      <h3>Creating and Managing Branches</h3>
+
+<pre class="pseudo-code"><span class="cm"># Create a feature branch from main</span>
+<span class="kw">lakectl</span> <span class="fn">branch create</span> \
+  lakefs://my-analytics/feature/new-schema \
+  --source lakefs://my-analytics/main
+
+<span class="cm"># List all branches</span>
+<span class="kw">lakectl</span> <span class="fn">branch list</span> lakefs://my-analytics
+<span class="cm"># main</span>
+<span class="cm"># feature/new-schema</span>
+<span class="cm"># staging/etl-v2</span>
+
+<span class="cm"># Delete a branch (metadata only — no data loss)</span>
+<span class="kw">lakectl</span> <span class="fn">branch delete</span> lakefs://my-analytics/feature/new-schema
+
+<span class="cm"># Revert uncommitted changes on a branch</span>
+<span class="kw">lakectl</span> <span class="fn">branch revert</span> lakefs://my-analytics/staging/etl-v2
+</pre>
+
+      <h3>Branch Isolation Guarantees</h3>
+
+      <p>Each branch presents an independent, consistent snapshot of the entire repository. Writes on <code>feature/new-schema</code> are completely invisible to readers on <code>main</code>. This is enforced at the metadata level — there is no file-level locking, no race conditions between branches.</p>
+
+      <p>The isolation model supports several data engineering patterns:</p>
+      <ul>
+        <li><strong>Environment branches</strong> — <code>dev</code>, <code>staging</code>, <code>main</code> mirror deployment stages</li>
+        <li><strong>ETL branches</strong> — each pipeline run writes to an ephemeral branch, merges on success</li>
+        <li><strong>Experiment branches</strong> — ML engineers test feature engineering without polluting production tables</li>
+        <li><strong>Hotfix branches</strong> — urgent schema corrections applied in isolation, merged after validation</li>
+      </ul>
+
+      <div class="callout warn">
+        <strong>Caution:</strong> LakeFS branches do <em>not</em> provide ACID transactions across multiple object writes within a single commit. If your ETL writes 500 Parquet files and fails at file 300, the uncommitted branch will have partial state. Always wrap your pipeline: write to branch → validate → commit. Never commit partial writes.
+      </div>
+
+      <h3>Branch Naming Conventions</h3>
+
+      <p>Adopt a structured naming convention that integrates with your orchestration tooling:</p>
+
+<pre class="pseudo-code"><span class="cm"># Recommended branch naming patterns</span>
+<span class="kw">etl</span>/{pipeline_name}/{run_id}       <span class="cm"># e.g., etl/user-events/2024-01-15-001</span>
+<span class="kw">experiment</span>/{user}/{description}     <span class="cm"># e.g., experiment/alice/new-feature-store</span>
+<span class="kw">staging</span>/{release_version}           <span class="cm"># e.g., staging/v2.3.0</span>
+<span class="kw">hotfix</span>/{ticket_id}                  <span class="cm"># e.g., hotfix/DATA-1234</span>
+</pre>
+
+      <!-- ───────────── Section 3: Commits, History & Merges ───────────── -->
+      <h2 id="commits-and-merges">Commits, History &amp; Merges</h2>
+
+      <p>A LakeFS <strong>commit</strong> is an immutable, content-addressed snapshot of the repository at a point in time. Once committed, data cannot be altered — only new commits can be appended. This provides a full audit trail and enables instant rollback to any historical state.</p>
+
+      <h3>Committing Changes</h3>
+
+<pre class="pseudo-code"><span class="cm"># Stage and commit changes on a branch</span>
+<span class="kw">lakectl</span> <span class="fn">commit</span> lakefs://my-analytics/feature/new-schema \
+  --message "Add user_events partitioned by date" \
+  --meta pipeline_id=etl-v2 \
+  --meta run_date=2024-01-15
+
+<span class="cm"># View commit log</span>
+<span class="kw">lakectl</span> <span class="fn">log</span> lakefs://my-analytics/main
+<span class="cm"># commit abc123def4 (HEAD)</span>
+<span class="cm"># Author: etl-service</span>
+<span class="cm"># Date:   2024-01-15T08:30:00Z</span>
+<span class="cm"># Message: Daily user_events ingestion</span>
+<span class="cm">#</span>
+<span class="cm"># commit 789fed012a</span>
+<span class="cm"># Author: alice</span>
+<span class="cm"># Date:   2024-01-14T16:22:00Z</span>
+<span class="cm"># Message: Fix schema drift in payment_transactions</span>
+</pre>
+
+      <h3>Diffing Between References</h3>
+
+      <p>LakeFS computes diffs at the object level — added, removed, or modified files between any two references (branches, commits, tags).</p>
+
+<pre class="pseudo-code"><span class="cm"># Diff between a feature branch and main</span>
+<span class="kw">lakectl</span> <span class="fn">diff</span> lakefs://my-analytics/feature/new-schema lakefs://my-analytics/main
+<span class="cm"># Added:    data/user_events/dt=2024-01-15/part-00000.parquet</span>
+<span class="cm"># Added:    data/user_events/dt=2024-01-15/part-00001.parquet</span>
+<span class="cm"># Modified: _metadata/schema.json</span>
+<span class="cm"># Deleted:  data/legacy/old_events.csv</span>
+
+<span class="cm"># Diff between two commits</span>
+<span class="kw">lakectl</span> <span class="fn">diff</span> lakefs://my-analytics/abc123def4 lakefs://my-analytics/789fed012a
+</pre>
+
+      <h3>Merging Strategies</h3>
+
+      <p>LakeFS supports merging one branch into another. The merge operation is <strong>metadata-only</strong> — it updates pointers, not data. If there are no conflicts (same file modified on both branches), the merge completes instantly.</p>
+
+<pre class="pseudo-code"><span class="cm"># Merge feature branch into main</span>
+<span class="kw">lakectl</span> <span class="fn">merge</span> \
+  lakefs://my-analytics/feature/new-schema \
+  lakefs://my-analytics/main \
+  --message "Merge new user_events schema"
+
+<span class="cm"># If conflicts exist, LakeFS will report them:</span>
+<span class="cm"># CONFLICT: data/user_events/_metadata/schema.json</span>
+<span class="cm"># Resolve by choosing source or destination version</span>
+</pre>
+
+      <p>Conflict resolution in LakeFS is simpler than in Git because conflicts are at the <strong>whole-file level</strong>, not line-level. If the same object path was modified on both branches, you choose one version or the other. There is no three-way merge of file contents.</p>
+
+      <h3>Tags and Rollback</h3>
+
+<pre class="pseudo-code"><span class="cm"># Create a tag for a known-good state</span>
+<span class="kw">lakectl</span> <span class="fn">tag create</span> lakefs://my-analytics/v2.3.0-release abc123def4
+
+<span class="cm"># Rollback main to a previous commit</span>
+<span class="kw">lakectl</span> <span class="fn">branch revert</span> lakefs://my-analytics/main \
+  --commit 789fed012a \
+  --message "Revert: bad schema migration"
+
+<span class="cm"># Instant recovery — main now reflects the state at 789fed012a</span>
+</pre>
+
+      <div class="callout">
+        <strong>Rollback is O(1):</strong> Since commits are immutable snapshots, reverting does not move or delete data. It simply repoints the branch HEAD to an older commit. The "bad" data still exists in the object store (for audit) until garbage collection runs.
+      </div>
+
+      <!-- ───────────── Section 4: Spark + LakeFS Integration ───────────── -->
+      <h2 id="spark-integration">Spark + LakeFS Integration</h2>
+
+      <p>The most powerful integration point is the <strong>S3 Gateway</strong>. LakeFS exposes an S3-compatible API, meaning any tool that reads/writes S3 can work with LakeFS branches <em>without code changes</em>. You simply swap the endpoint and encode the branch name in the path.</p>
+
+      <h3>S3 Gateway URL Convention</h3>
+
+<pre class="pseudo-code"><span class="cm"># Standard S3 path</span>
+s3://my-bucket/data/user_events/
+
+<span class="cm"># LakeFS equivalent — branch encoded in path</span>
+s3://<span class="fn">my-analytics</span>/<span class="kw">main</span>/data/user_events/
+<span class="cm">#     ^^^^^^^^^^^    ^^^^</span>
+<span class="cm">#     repository     branch</span>
+
+<span class="cm"># Reading from a feature branch</span>
+s3://<span class="fn">my-analytics</span>/<span class="kw">feature/new-schema</span>/data/user_events/
+
+<span class="cm"># Reading from a specific commit</span>
+s3://<span class="fn">my-analytics</span>/<span class="kw">abc123def4</span>/data/user_events/
+</pre>
+
+      <h3>Spark Configuration</h3>
+
+<pre class="pseudo-code"><span class="cm"># spark-defaults.conf — point Spark at LakeFS S3 Gateway</span>
+
+<span class="kw">spark.hadoop.fs.s3a.endpoint</span>           https://lakefs.company.internal:8000
+<span class="kw">spark.hadoop.fs.s3a.access.key</span>         AKIAIOSFODNN7LAKEFS
+<span class="kw">spark.hadoop.fs.s3a.secret.key</span>         wJalrXUtnFEMI/K7MDENG/bPxRfiCYLAKEFS
+<span class="kw">spark.hadoop.fs.s3a.path.style.access</span>  <span class="fn">true</span>
+<span class="kw">spark.hadoop.fs.s3a.impl</span>               org.apache.hadoop.fs.s3a.S3AFileSystem
+
+<span class="cm"># For Delta Lake — ensure log store uses the same endpoint</span>
+<span class="kw">spark.delta.logStore.class</span>             org.apache.spark.sql.delta.storage.S3SingleDriverLogStore
+</pre>
+
+      <h3>PySpark Example: Branch-Isolated ETL</h3>
+
+<pre class="pseudo-code"><span class="kw">from</span> pyspark.sql <span class="kw">import</span> SparkSession
+<span class="kw">import</span> requests
+
+<span class="cm"># ── 1. Create an isolated ETL branch via LakeFS API ──</span>
+<span class="fn">lakefs_api</span> = "https://lakefs.company.internal/api/v1"
+<span class="fn">headers</span>    = {"Authorization": "Bearer <token>"}
+
+requests.<span class="fn">post</span>(
+    f"{lakefs_api}/repositories/my-analytics/branches",
+    json={"name": "etl/daily-ingest/2024-01-15", "source": "main"},
+    headers=headers
+)
+
+<span class="cm"># ── 2. Spark reads from main, writes to the ETL branch ──</span>
+spark = SparkSession.builder \
+    .<span class="fn">appName</span>("daily-ingest") \
+    .<span class="fn">config</span>("spark.hadoop.fs.s3a.endpoint", "https://lakefs.company.internal:8000") \
+    .<span class="fn">getOrCreate</span>()
+
+<span class="cm"># Read production data from main branch</span>
+raw_df = spark.<span class="fn">read</span>.<span class="fn">parquet</span>(
+    "s3a://my-analytics/<span class="kw">main</span>/data/raw/user_events/"
+)
+
+<span class="cm"># Transform</span>
+cleaned_df = raw_df \
+    .<span class="fn">filter</span>("event_timestamp IS NOT NULL") \
+    .<span class="fn">withColumn</span>("dt", <span class="fn">to_date</span>("event_timestamp")) \
+    .<span class="fn">dropDuplicates</span>(["event_id"])
+
+<span class="cm"># Write to the isolated ETL branch — main is untouched</span>
+cleaned_df.<span class="fn">write</span> \
+    .<span class="fn">partitionBy</span>("dt") \
+    .<span class="fn">mode</span>("overwrite") \
+    .<span class="fn">parquet</span>("s3a://my-analytics/<span class="kw">etl/daily-ingest/2024-01-15</span>/data/curated/user_events/")
+
+<span class="cm"># ── 3. Validate, then commit and merge ──</span>
+requests.<span class="fn">post</span>(
+    f"{lakefs_api}/repositories/my-analytics/branches/etl%2Fdaily-ingest%2F2024-01-15/commits",
+    json={"message": "Daily user_events ingestion — 2024-01-15"},
+    headers=headers
+)
+
+requests.<span class="fn">post</span>(
+    f"{lakefs_api}/repositories/my-analytics/refs/etl%2Fdaily-ingest%2F2024-01-15/merge/main",
+    json={"message": "Merge daily ingest into main"},
+    headers=headers
+)
+</pre>
+
+      <div class="callout">
+        <strong>Why this matters:</strong> If the Spark job fails mid-write, the <code>main</code> branch is untouched. No partial data, no corruption. You simply delete the ETL branch and retry. This is the fundamental guarantee that LakeFS provides over raw S3 writes.
+      </div>
+
+      <h3>Hadoop FileSystem Client (lakefs:// protocol)</h3>
+
+      <p>For tighter integration, LakeFS also provides a native Hadoop FileSystem implementation that uses the <code>lakefs://</code> URI scheme directly, avoiding the S3 Gateway entirely:</p>
+
+<pre class="pseudo-code"><span class="cm"># Alternative: use the lakefs:// protocol directly</span>
+<span class="kw">spark.hadoop.fs.lakefs.impl</span>            io.lakefs.clients.hadoop.LakeFSFileSystem
+<span class="kw">spark.hadoop.fs.lakefs.endpoint</span>        https://lakefs.company.internal/api/v1
+<span class="kw">spark.hadoop.fs.lakefs.access.key</span>      AKIAIOSFODNN7LAKEFS
+<span class="kw">spark.hadoop.fs.lakefs.secret.key</span>      wJalrXUtnFEMI/K7MDENG/bPxRfiCYLAKEFS
+
+<span class="cm"># Then read/write with lakefs:// URIs</span>
+df = spark.<span class="fn">read</span>.<span class="fn">parquet</span>("lakefs://my-analytics/<span class="kw">main</span>/data/curated/user_events/")
+</pre>
+
+      <!-- ───────────── Section 5: CI/CD for Data Quality ───────────── -->
+      <h2 id="ci-cd-for-data">CI/CD for Data Quality</h2>
+
+      <p>LakeFS provides <strong>hooks</strong> — pre-commit and pre-merge actions that execute validation logic before data is promoted. This is the data equivalent of CI/CD: automated quality gates that block bad data from reaching production.</p>
+
+      <h3>Hook Types</h3>
+
+      <ul>
+        <li><strong>pre-commit</strong> — runs before a commit is finalized on any branch</li>
+        <li><strong>pre-merge</strong> — runs before a merge into a target branch</li>
+        <li><strong>post-commit</strong> — triggers after a successful commit (notifications, downstream pipelines)</li>
+        <li><strong>post-merge</strong> — triggers after a successful merge</li>
+      </ul>
+
+      <h3>Hook Configuration (actions YAML)</h3>
+
+<pre class="pseudo-code"><span class="cm"># _lakefs_actions/quality_gates.yaml</span>
+<span class="kw">name</span>: data-quality-checks
+<span class="kw">on</span>:
+  <span class="kw">pre-merge</span>:
+    <span class="kw">branches</span>:
+      - main
+      - staging/*
+
+<span class="kw">hooks</span>:
+  - <span class="kw">id</span>: schema-validation
+    <span class="kw">type</span>: webhook
+    <span class="kw">properties</span>:
+      <span class="fn">url</span>: https://data-quality.internal/validate-schema
+      <span class="fn">timeout</span>: 60s
+      <span class="fn">query_params</span>:
+        <span class="fn">min_rows</span>: "1000"
+        <span class="fn">max_null_pct</span>: "0.05"
+
+  - <span class="kw">id</span>: great-expectations-suite
+    <span class="kw">type</span>: webhook
+    <span class="kw">properties</span>:
+      <span class="fn">url</span>: https://data-quality.internal/run-ge-suite
+      <span class="fn">timeout</span>: 300s
+      <span class="fn">query_params</span>:
+        <span class="fn">suite_name</span>: "production_expectations"
+
+  - <span class="kw">id</span>: freshness-check
+    <span class="kw">type</span>: webhook
+    <span class="kw">properties</span>:
+      <span class="fn">url</span>: https://data-quality.internal/check-freshness
+      <span class="fn">timeout</span>: 30s
+</pre>
+
+      <h3>Automated ETL Pipeline Pattern</h3>
+
+      <p>Combining branches, hooks, and merge gives you a fully automated data promotion pipeline:</p>
+
+<pre class="pseudo-code"><span class="cm">// End-to-end ETL pipeline with LakeFS quality gates</span>
+
+<span class="kw">STEP 1</span>: <span class="fn">create_branch</span>("etl/daily/{run_id}", source="main")
+           <span class="cm">// Isolated workspace — zero-copy from main</span>
+
+<span class="kw">STEP 2</span>: <span class="fn">run_spark_etl</span>(read_from="main", write_to="etl/daily/{run_id}")
+           <span class="cm">// Transform and write data to the isolated branch</span>
+
+<span class="kw">STEP 3</span>: <span class="fn">commit</span>(branch="etl/daily/{run_id}", msg="Daily ingest {date}")
+           <span class="cm">// pre-commit hook fires → schema validation</span>
+           <span class="cm">// If hook fails → commit is rejected, branch has uncommitted state</span>
+
+<span class="kw">STEP 4</span>: <span class="fn">merge</span>(source="etl/daily/{run_id}", target="main")
+           <span class="cm">// pre-merge hook fires → Great Expectations suite</span>
+           <span class="cm">// If hook fails → merge is blocked, main is safe</span>
+
+<span class="kw">STEP 5</span>: <span class="fn">delete_branch</span>("etl/daily/{run_id}")
+           <span class="cm">// Cleanup — metadata only</span>
+
+<span class="kw">STEP 6</span>: <span class="fn">garbage_collect</span>()
+           <span class="cm">// Reclaim storage from unreferenced objects (periodic)</span>
+</pre>
+
+      <div class="callout warn">
+        <strong>Garbage collection matters:</strong> Deleted branches and old commits still reference physical objects. Run <code>lakectl gc</code> periodically (or the server-side GC job) to reclaim storage. Without GC, your object store will grow monotonically even as you delete branches and overwrite files.
+      </div>
+
+      <!-- ───────────── Section 6: LakeFS vs DVC ───────────── -->
+      <h2 id="lakefs-vs-dvc">LakeFS vs DVC</h2>
+
+      <p>Both LakeFS and <strong>DVC</strong> (Data Version Control) aim to version data, but they operate at fundamentally different layers and serve different primary audiences.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🌊 LakeFS</h3>
+          <ul>
+            <li><strong>Layer:</strong> Infrastructure — sits between compute and storage</li>
+            <li><strong>Scope:</strong> Entire data lake, multi-TB to PB scale</li>
+            <li><strong>Branching:</strong> Zero-copy, O(1) metadata-only branches</li>
+            <li><strong>Integration:</strong> S3 Gateway — transparent to any S3-compatible tool</li>
+            <li><strong>Data format:</strong> Format-agnostic — Parquet, Delta, Iceberg, CSV, images</li>
+            <li><strong>Collaboration:</strong> Multi-user, RBAC, concurrent branch writes</li>
+            <li><strong>CI/CD:</strong> Built-in hooks (pre-commit, pre-merge webhooks)</li>
+            <li><strong>Best for:</strong> Data platform teams, lake-wide governance</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>📦 DVC</h3>
+          <ul>
+            <li><strong>Layer:</strong> Client-side — Git extension for data files</li>
+            <li><strong>Scope:</strong> Project-level, typically per-repo datasets</li>
+            <li><strong>Branching:</strong> Inherits Git branches; data stored externally with .dvc pointers</li>
+            <li><strong>Integration:</strong> CLI-driven; requires <code>dvc pull/push</code> to sync data</li>
+            <li><strong>Data format:</strong> Format-agnostic, but best for discrete file versioning</li>
+            <li><strong>Collaboration:</strong> Through Git; no native multi-user concurrency</li>
+            <li><strong>CI/CD:</strong> Via standard Git CI (GitHub Actions, GitLab CI)</li>
+            <li><strong>Best for:</strong> ML engineers versioning training datasets alongside code</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>When to Choose Which</h3>
+
+<pre class="pseudo-code"><span class="cm">// Decision matrix</span>
+
+<span class="kw">IF</span> you need to version an entire data lake (multi-TB+)
+   <span class="kw">AND</span> multiple teams write concurrently
+   <span class="kw">AND</span> you want transparent integration with Spark/Trino/dbt
+   → <span class="fn">Choose LakeFS</span>
+
+<span class="kw">IF</span> you need to version specific datasets alongside ML code
+   <span class="kw">AND</span> your workflow is Git-centric (branches, PRs)
+   <span class="kw">AND</span> dataset size is moderate (GBs, not PBs)
+   → <span class="fn">Choose DVC</span>
+
+<span class="kw">IF</span> you need both lake-level governance AND project-level tracking
+   → <span class="fn">Use both</span>: LakeFS for the lake, DVC for experiment artifacts
+</pre>
+
+      <div class="callout">
+        <strong>They're complementary, not competing:</strong> LakeFS versions the lake infrastructure. DVC versions ML project artifacts. In a mature MLOps stack, you might use LakeFS to manage the feature store and raw data lake, while DVC tracks the specific dataset snapshots and model files within each training repository.
+      </div>
+
+      <!-- ───────────── Section 7: Production Deployment Patterns ───────────── -->
+      <h2 id="production-patterns">Production Deployment Patterns</h2>
+
+      <p>Deploying LakeFS at scale requires thoughtful architecture around high availability, metadata storage, and operational runbooks.</p>
+
+      <h3>High Availability Setup</h3>
+
+<pre class="pseudo-code"><span class="cm"># Production HA deployment — Kubernetes</span>
+
+<span class="kw">apiVersion</span>: apps/v1
+<span class="kw">kind</span>: Deployment
+<span class="kw">metadata</span>:
+  <span class="fn">name</span>: lakefs-server
+<span class="kw">spec</span>:
+  <span class="fn">replicas</span>: 3                     <span class="cm"># Stateless — scale horizontally</span>
+  <span class="kw">template</span>:
+    <span class="kw">spec</span>:
+      <span class="kw">containers</span>:
+        - <span class="fn">name</span>: lakefs
+          <span class="fn">image</span>: treeverse/lakefs:1.x
+          <span class="kw">env</span>:
+            - <span class="fn">name</span>: LAKEFS_DATABASE_TYPE
+              <span class="fn">value</span>: "postgres"
+            - <span class="fn">name</span>: LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING
+              <span class="fn">value</span>: "postgres://lakefs:***@pg-cluster:5432/lakefs"
+            - <span class="fn">name</span>: LAKEFS_BLOCKSTORE_TYPE
+              <span class="fn">value</span>: "s3"
+            - <span class="fn">name</span>: LAKEFS_BLOCKSTORE_S3_REGION
+              <span class="fn">value</span>: "us-east-1"
+          <span class="kw">ports</span>:
+            - <span class="fn">containerPort</span>: 8000          <span class="cm"># API + S3 Gateway</span>
+          <span class="kw">resources</span>:
+            <span class="fn">requests</span>:
+              <span class="fn">cpu</span>: "500m"
+              <span class="fn">memory</span>: "1Gi"
+            <span class="fn">limits</span>:
+              <span class="fn">cpu</span>: "2"
+              <span class="fn">memory</span>: "4Gi"
+</pre>
+
+      <h3>Metadata Store Considerations</h3>
+
+      <p>The metadata backend is the critical path for all LakeFS operations. Choose based on scale:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>PostgreSQL</h3>
+          <ul>
+            <li>Best for: up to ~50M objects per repository</li>
+            <li>Simple operations (backup, restore, monitoring)</li>
+            <li>Use managed services (RDS, Cloud SQL) for HA</li>
+            <li>Tune <code>max_connections</code> and <code>shared_buffers</code> for LakeFS load</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>DynamoDB</h3>
+          <ul>
+            <li>Best for: 50M+ objects, massive scale deployments</li>
+            <li>Auto-scaling, serverless pricing model</li>
+            <li>Higher operational complexity for cross-region replication</li>
+            <li>Use on-demand capacity for unpredictable workloads</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Operational Runbook Essentials</h3>
+
+<pre class="pseudo-code"><span class="cm"># Essential operational commands</span>
+
+<span class="cm"># 1. Health check</span>
+<span class="kw">curl</span> -s https://lakefs.company.internal/api/v1/healthcheck | <span class="fn">jq</span> .
+
+<span class="cm"># 2. Garbage collection — reclaim unreferenced objects</span>
+<span class="kw">lakectl</span> <span class="fn">gc set-rules</span> lakefs://my-analytics \
+  --default-retention-days 30 \
+  --branch main --retention-days 90
+
+<span class="kw">lakectl</span> <span class="fn">gc run</span> lakefs://my-analytics
+
+<span class="cm"># 3. Export — materialize a branch to plain S3 (for tools that can't use LakeFS)</span>
+<span class="kw">lakectl</span> <span class="fn">fs export</span> \
+  --source lakefs://my-analytics/main/data/curated/ \
+  --dest s3://export-bucket/curated/ \
+  --parallelism 50
+
+<span class="cm"># 4. Audit — who did what, when</span>
+<span class="kw">lakectl</span> <span class="fn">log</span> lakefs://my-analytics/main \
+  --amount 100 \
+  --after 2024-01-01T00:00:00Z
+</pre>
+
+      <div class="callout">
+        <strong>Monitoring tip:</strong> Expose LakeFS Prometheus metrics (<code>/metrics</code> endpoint) and build dashboards for: API latency by operation type, S3 Gateway throughput, active branches count, and metadata store query latency. Alert on commit/merge failures — they often signal upstream ETL issues.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

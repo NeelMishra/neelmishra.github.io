@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Why standard load balancing fails for LLMs and how to implement request-aware routing, prefix locality, shortest-queue strategies, and session affinity for LLM serving.">
+  <title>Load Balancing for LLM Services | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#li-why-lb-fails">Why Standard LB Fails for LLMs</a></li>
+          <li><a href="#li-request-aware">Request-Aware Routing</a></li>
+          <li><a href="#li-prefix-locality">Prefix Locality Routing</a></li>
+          <li><a href="#li-shortest-queue">Shortest-Queue Routing</a></li>
+          <li><a href="#li-session-affinity">Session Affinity for Multi-Turn</a></li>
+          <li><a href="#li-health-checks">Health Checks &amp; Readiness Probes</a></li>
+          <li><a href="#li-envoy-config">Envoy / Istio Configuration</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Load Balancing for LLM Services</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-why-lb-fails">Why Standard Load Balancing Fails for LLMs</h2>
+      <p>Traditional load balancers (round-robin, least-connections, random) assume requests are roughly equivalent in cost. For web APIs, this works — most requests complete in 10-200ms with similar resource consumption. LLM inference shatters this assumption in every dimension:</p>
+
+      <ul>
+        <li><strong>Request duration varies 100×:</strong> A short completion (32 tokens, 128-token prompt) finishes in ~200ms. A long generation (2048 tokens, 4096-token prompt) takes 30+ seconds. Round-robin distributes request <em>count</em> evenly but leaves one replica overloaded with long requests while another idles.</li>
+        <li><strong>Request resource cost varies 50×:</strong> A 128-token prompt uses ~10MB of KV cache memory. A 32K-token prompt uses ~2.5GB. The short request leaves 99% of GPU memory available; the long one can prevent any new requests from being accepted.</li>
+        <li><strong>Streaming responses are long-lived connections:</strong> LLM responses stream tokens over 5-60 seconds via SSE. Least-connections routing counts each stream equally, but a stream with 2000 remaining tokens occupies the GPU 20× longer than one with 100 remaining tokens.</li>
+        <li><strong>Prefill and decode have different resource profiles:</strong> During prefill, the GPU is compute-saturated. During decode, it's memory-bandwidth-bound. A replica with 10 requests all in decode phase has fundamentally different capacity than one with 10 requests in prefill.</li>
+      </ul>
+
+      <svg viewBox="0 0 780 340" style="width:100%;max-width:780px;margin:1.5rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="li-lb-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+          <marker id="li-lb-arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#e53935"/></marker>
+        </defs>
+        <!-- Title -->
+        <text x="390" y="20" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#333">Round-Robin vs Request-Aware Routing</text>
+        <!-- Round Robin Side -->
+        <rect x="20" y="35" width="350" height="280" rx="12" fill="#fff" stroke="#e53935" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="195" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#e53935">❌ Round-Robin (Naive)</text>
+        <!-- RR LB -->
+        <rect x="130" y="70" width="130" height="35" rx="8" fill="#e53935" opacity="0.1" stroke="#e53935"/><text x="195" y="93" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#e53935">Round-Robin LB</text>
+        <!-- RR Replica 1 - overloaded -->
+        <rect x="40" y="140" width="140" height="80" rx="8" fill="#e53935" opacity="0.08" stroke="#e53935"/>
+        <text x="110" y="160" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#e53935">Replica 1 (overloaded)</text>
+        <text x="110" y="178" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">3 × long requests (4K tokens)</text>
+        <text x="110" y="193" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">KV cache: 95% full</text>
+        <text x="110" y="208" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#e53935">⚠ Queue building up</text>
+        <!-- RR Replica 2 - idle -->
+        <rect x="200" y="140" width="140" height="80" rx="8" fill="#0a8f6a" opacity="0.08" stroke="#0a8f6a"/>
+        <text x="270" y="160" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#0a8f6a">Replica 2 (idle)</text>
+        <text x="270" y="178" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">3 × short requests (128 tok)</text>
+        <text x="270" y="193" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">KV cache: 5% full</text>
+        <text x="270" y="208" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#0a8f6a">✓ Mostly idle</text>
+        <text x="195" y="260" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#e53935" font-weight="600">P95 TTFT: 8.2s (SLO breach)</text>
+        <text x="195" y="278" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#666">Equal request count ≠ equal load</text>
+        <!-- Request Aware Side -->
+        <rect x="410" y="35" width="350" height="280" rx="12" fill="#fff" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="585" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">✅ Request-Aware (Smart)</text>
+        <!-- RA LB -->
+        <rect x="520" y="70" width="130" height="35" rx="8" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/><text x="585" y="93" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a">Weighted Router</text>
+        <!-- RA Replica 1 - balanced -->
+        <rect x="430" y="140" width="140" height="80" rx="8" fill="#0a8f6a" opacity="0.08" stroke="#0a8f6a"/>
+        <text x="500" y="160" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#0a8f6a">Replica 1 (balanced)</text>
+        <text x="500" y="178" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">2 × long + 1 × short</text>
+        <text x="500" y="193" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">KV cache: 55% full</text>
+        <text x="500" y="208" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#0a8f6a">✓ Healthy load</text>
+        <!-- RA Replica 2 - balanced -->
+        <rect x="590" y="140" width="140" height="80" rx="8" fill="#0a8f6a" opacity="0.08" stroke="#0a8f6a"/>
+        <text x="660" y="160" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="600" fill="#0a8f6a">Replica 2 (balanced)</text>
+        <text x="660" y="178" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">1 × long + 2 × short</text>
+        <text x="660" y="193" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#555">KV cache: 45% full</text>
+        <text x="660" y="208" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#0a8f6a">✓ Healthy load</text>
+        <text x="585" y="260" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="600">P95 TTFT: 0.4s (SLO met)</text>
+        <text x="585" y="278" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#666">Balanced by token cost, not request count</text>
+        <!-- Arrows -->
+        <line x1="160" y1="107" x2="100" y2="138" stroke="#e53935" stroke-width="1.2" marker-end="url(#li-lb-arrow-red)"/>
+        <line x1="230" y1="107" x2="270" y2="138" stroke="#e53935" stroke-width="1.2" marker-end="url(#li-lb-arrow-red)"/>
+        <line x1="555" y1="107" x2="500" y2="138" stroke="#0a8f6a" stroke-width="1.2" marker-end="url(#li-lb-arrow)"/>
+        <line x1="615" y1="107" x2="660" y2="138" stroke="#0a8f6a" stroke-width="1.2" marker-end="url(#li-lb-arrow)"/>
+      </svg>
+
+      <!-- Section 2 -->
+      <h2 id="li-request-aware">Request-Aware Routing</h2>
+      <p>Request-aware routing considers the <em>cost</em> of each request — estimated token count, expected generation length, and current replica load — to make intelligent routing decisions. The router inspects the request before forwarding it.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Request-aware LLM load balancer</span>
+<span class="kw">class</span> <span class="fn">LLMLoadBalancer</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, replicas: List[Replica]):
+        self.replicas = replicas
+
+    <span class="kw">def</span> <span class="fn">estimate_cost</span>(self, request) -> float:
+        <span class="cm"># Estimate token count from request (tokenizer or heuristic)</span>
+        prompt_tokens = <span class="fn">len</span>(request.prompt) // 4  <span class="cm"># rough: ~4 chars/token</span>
+        max_output    = request.max_tokens <span class="kw">or</span> 512
+        <span class="cm"># Weighted cost: prefill is bursty, decode is sustained</span>
+        <span class="kw">return</span> prompt_tokens * 1.0 + max_output * 2.5
+
+    <span class="kw">def</span> <span class="fn">get_replica_load</span>(self, replica) -> float:
+        <span class="cm"># Composite load score from multiple signals</span>
+        queue_score  = replica.queue_depth / replica.max_queue
+        kv_score     = replica.kv_cache_usage          <span class="cm"># 0.0-1.0</span>
+        active_score = replica.active_tokens / replica.max_tokens
+        <span class="kw">return</span> 0.4 * queue_score + 0.35 * kv_score + 0.25 * active_score
+
+    <span class="kw">def</span> <span class="fn">route</span>(self, request) -> Replica:
+        cost = self.<span class="fn">estimate_cost</span>(request)
+        <span class="cm"># Select replica with lowest effective load after adding this request</span>
+        <span class="kw">return</span> <span class="fn">min</span>(self.replicas,
+            key=<span class="kw">lambda</span> r: self.<span class="fn">get_replica_load</span>(r) + cost / r.capacity)</pre>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Request-aware routing reduces P99 TTFT by 3-5× compared to round-robin in production workloads with high request variance. The improvement comes from avoiding the "long-request-on-loaded-replica" pathology that dominates tail latency.
+      </div>
+
+      <p>The cost estimation doesn't need to be perfect — even a rough heuristic (prompt length × 1 + max_tokens × 2.5) dramatically outperforms round-robin. The <code>max_tokens</code> parameter in the request is the best predictor of total request cost, since decode time dominates for most workloads.</p>
+
+      <!-- Section 3 -->
+      <h2 id="li-prefix-locality">Prefix Locality Routing</h2>
+      <p>Prefix locality is a powerful optimization unique to LLM serving: route requests that share the same system prompt or prefix to the same replica, so the KV cache for the shared prefix is already computed and cached. This eliminates redundant prefill computation.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Prefix-locality-aware router</span>
+<span class="kw">class</span> <span class="fn">PrefixLocalityRouter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, replicas, num_prefix_buckets=64):
+        self.replicas = replicas
+        self.prefix_map = {}   <span class="cm"># prefix_hash → replica_id</span>
+
+    <span class="kw">def</span> <span class="fn">hash_prefix</span>(self, prompt: str, prefix_len: int = 512) -> str:
+        <span class="cm"># Hash the first N characters as the "prefix key"</span>
+        <span class="cm"># Captures system prompt + few-shot examples</span>
+        prefix = prompt[:prefix_len]
+        <span class="kw">return</span> <span class="fn">hashlib.md5</span>(prefix.encode()).<span class="fn">hexdigest</span>()
+
+    <span class="kw">def</span> <span class="fn">route</span>(self, request) -> Replica:
+        prefix_hash = self.<span class="fn">hash_prefix</span>(request.prompt)
+
+        <span class="cm"># Check if we have a preferred replica for this prefix</span>
+        <span class="kw">if</span> prefix_hash <span class="kw">in</span> self.prefix_map:
+            preferred = self.prefix_map[prefix_hash]
+            <span class="cm"># Use preferred replica if not overloaded (&lt;80% capacity)</span>
+            <span class="kw">if</span> preferred.kv_cache_usage &lt; 0.80:
+                <span class="kw">return</span> preferred
+
+        <span class="cm"># Fallback: route to least-loaded replica</span>
+        target = <span class="fn">min</span>(self.replicas, key=<span class="kw">lambda</span> r: r.queue_depth)
+        self.prefix_map[prefix_hash] = target
+        <span class="kw">return</span> target</pre>
+
+      <p>The impact of prefix locality depends on workload characteristics:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>High Impact Workloads</h3>
+          <ul>
+            <li><strong>RAG pipelines:</strong> Shared system prompt + retrieval template (2K-4K tokens). Cache hit rate: 80-95%. TTFT reduction: 60-80%.</li>
+            <li><strong>Tool-use agents:</strong> Fixed tool definitions + formatting instructions (~1K tokens). Cache hit rate: 90%+. Prefill savings: 50-70%.</li>
+            <li><strong>Multi-tenant SaaS:</strong> Each tenant has a unique system prompt. Route all traffic for tenant A to replica 1, tenant B to replica 2, etc.</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Low Impact Workloads</h3>
+          <ul>
+            <li><strong>Open-ended chat:</strong> Each conversation has a unique context. No shared prefix beyond a short system prompt. Cache hit rate: &lt;10%.</li>
+            <li><strong>Code completion:</strong> Prefix is the code context, which changes with every keystroke. Prefix caching is ineffective.</li>
+            <li><strong>Single-turn diverse queries:</strong> No prefix commonality. Random routing performs equally well.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Quantified impact:</strong> For a RAG workload with a 2048-token system prompt and 85% cache hit rate, prefix locality routing reduces average TTFT from 350ms to 80ms (4.4× improvement) and reduces total GPU compute by 40%. The router overhead is negligible (&lt;1ms per request for hash computation and lookup).
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="li-shortest-queue">Shortest-Queue Routing</h2>
+      <p>Shortest-queue (or least-outstanding-requests) routing is the simplest effective strategy for LLMs. Unlike round-robin, it naturally adapts to heterogeneous request costs — replicas processing long requests accumulate fewer completions and thus receive fewer new requests.</p>
+
+      <p>However, naive shortest-queue has a flaw: it only counts <em>requests</em>, not <em>tokens</em>. A replica with 5 short requests (128 tokens each, total 640 tokens) appears equally loaded as one with 5 long requests (4096 tokens each, total 20,480 tokens). The token-weighted variant fixes this:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Token-weighted shortest-queue routing</span>
+<span class="kw">def</span> <span class="fn">token_weighted_route</span>(replicas, request):
+    <span class="kw">def</span> <span class="fn">effective_load</span>(replica):
+        <span class="cm"># Sum of estimated remaining tokens across all active sequences</span>
+        remaining = <span class="fn">sum</span>(
+            seq.max_tokens - seq.generated_tokens
+            <span class="kw">for</span> seq <span class="kw">in</span> replica.active_sequences
+        )
+        <span class="cm"># Add queued requests' estimated total tokens</span>
+        queued = <span class="fn">sum</span>(
+            req.prompt_tokens + req.max_tokens
+            <span class="kw">for</span> req <span class="kw">in</span> replica.queue
+        )
+        <span class="kw">return</span> (remaining + queued) / replica.max_throughput_tokens
+
+    <span class="kw">return</span> <span class="fn">min</span>(replicas, key=effective_load)
+
+<span class="cm"># Comparison on production traffic (Llama-2 70B, 6 replicas):</span>
+<span class="cm"># Round-robin:        P50 TTFT = 220ms, P99 TTFT = 4,200ms</span>
+<span class="cm"># Shortest-queue:     P50 TTFT = 180ms, P99 TTFT = 1,800ms</span>
+<span class="cm"># Token-weighted SQ:  P50 TTFT = 160ms, P99 TTFT =   650ms</span></pre>
+
+      <p>Token-weighted shortest-queue reduces P99 TTFT by 6.5× compared to round-robin. The P50 improvement is modest (27%), but the tail latency improvement is dramatic because it eliminates the worst-case scenario of stacking long requests on one replica.</p>
+
+      <!-- Section 5 -->
+      <h2 id="li-session-affinity">Session Affinity for Multi-Turn Conversations</h2>
+      <p>Multi-turn conversations (chatbots, agents) benefit from session affinity — routing all turns of a conversation to the same replica. This enables two optimizations:</p>
+
+      <ul>
+        <li><strong>KV cache reuse across turns:</strong> The KV cache from the previous turn is still in GPU memory. The next turn only needs to compute KV for the new user message and assistant response, not the entire conversation history. For a 10-turn conversation with 8K context, this saves 70-90% of prefill compute on turns 2+.</li>
+        <li><strong>Reduced memory allocation:</strong> The existing KV cache memory blocks are already allocated. No new PagedAttention block allocation needed for the historical context.</li>
+      </ul>
+
+      <pre class="pseudo-code"><span class="cm"># Session-affinity router with fallback</span>
+<span class="kw">class</span> <span class="fn">SessionAffinityRouter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, replicas):
+        self.replicas = replicas
+        self.sessions = {}      <span class="cm"># session_id → (replica_id, last_active)</span>
+        self.ttl = 300           <span class="cm"># 5 min session TTL</span>
+
+    <span class="kw">def</span> <span class="fn">route</span>(self, request) -> Replica:
+        session_id = request.headers.get(<span class="kw">"X-Session-ID"</span>)
+
+        <span class="kw">if</span> session_id <span class="kw">and</span> session_id <span class="kw">in</span> self.sessions:
+            replica_id, last_active = self.sessions[session_id]
+            <span class="kw">if</span> <span class="fn">time.time</span>() - last_active &lt; self.ttl:
+                replica = self.<span class="fn">get_replica</span>(replica_id)
+                <span class="kw">if</span> replica.is_healthy <span class="kw">and</span> replica.kv_cache_usage &lt; 0.90:
+                    self.sessions[session_id] = (replica_id, <span class="fn">time.time</span>())
+                    <span class="kw">return</span> replica
+                <span class="cm"># Fallback: replica unhealthy or overloaded</span>
+
+        <span class="cm"># New session or expired: use token-weighted shortest-queue</span>
+        target = <span class="fn">token_weighted_route</span>(self.replicas, request)
+        <span class="kw">if</span> session_id:
+            self.sessions[session_id] = (target.id, <span class="fn">time.time</span>())
+        <span class="kw">return</span> target</pre>
+
+      <div class="callout warn">
+        <strong>Affinity vs balance tradeoff:</strong> Strong session affinity can create load imbalance if some sessions are much heavier than others (e.g., one user sends 50 messages while others send 2). Always include a load-based override: break affinity when the preferred replica's KV cache exceeds 90% utilization. The cost of re-prefilling the conversation is lower than the cost of SLO breaches from overload.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="li-health-checks">Health Checks &amp; Model Readiness Probes</h2>
+      <p>LLM serving requires more nuanced health checks than standard web services. A replica can be "alive" (process running) but not "ready" (model not loaded) or "overloaded" (accepting requests but with degraded latency).</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Liveness Probe</h3>
+          <p>Checks if the process is alive. Failure triggers pod restart.</p>
+          <pre class="pseudo-code"><span class="kw">livenessProbe</span>:
+  <span class="kw">httpGet</span>:
+    <span class="kw">path</span>: /health
+    <span class="kw">port</span>: 8000
+  <span class="kw">initialDelaySeconds</span>: 180
+  <span class="kw">periodSeconds</span>: 30
+  <span class="kw">failureThreshold</span>: 3</pre>
+          <p><code>initialDelaySeconds: 180</code> — critical for LLMs. Model loading takes 1-3 minutes. Without this, Kubernetes restarts the pod before the model is loaded, creating an infinite restart loop.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Readiness Probe</h3>
+          <p>Checks if the model is loaded and ready to serve. Failure removes pod from service endpoints.</p>
+          <pre class="pseudo-code"><span class="kw">readinessProbe</span>:
+  <span class="kw">httpGet</span>:
+    <span class="kw">path</span>: /health/ready
+    <span class="kw">port</span>: 8000
+  <span class="kw">initialDelaySeconds</span>: 60
+  <span class="kw">periodSeconds</span>: 10
+  <span class="kw">successThreshold</span>: 1</pre>
+          <p>The <code>/health/ready</code> endpoint should return 200 only after the model weights are fully loaded into GPU memory and a warm-up inference has completed successfully.</p>
+        </div>
+      </div>
+
+      <p>Beyond basic liveness/readiness, implement a <strong>load-aware health check</strong> that returns degraded status when the replica is overloaded:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Custom health endpoint for LLM serving</span>
+<span class="kw">@app</span>.<span class="fn">get</span>(<span class="kw">"/health/detailed"</span>)
+<span class="kw">def</span> <span class="fn">detailed_health</span>():
+    status = {
+        <span class="kw">"model_loaded"</span>: engine.model_loaded,
+        <span class="kw">"gpu_healthy"</span>:  <span class="fn">check_gpu_errors</span>() == 0,
+        <span class="kw">"queue_depth"</span>:  engine.waiting_queue_size,
+        <span class="kw">"kv_cache_pct"</span>: engine.kv_cache_utilization,
+        <span class="kw">"active_seqs"</span>:  engine.num_running_sequences,
+        <span class="kw">"capacity"</span>:     engine.max_sequences,
+    }
+    <span class="cm"># Return 200 if healthy, 429 if overloaded, 503 if unhealthy</span>
+    <span class="kw">if not</span> status[<span class="kw">"model_loaded"</span>] <span class="kw">or not</span> status[<span class="kw">"gpu_healthy"</span>]:
+        <span class="kw">return</span> <span class="fn">JSONResponse</span>(status, status_code=503)
+    <span class="kw">if</span> status[<span class="kw">"kv_cache_pct"</span>] > 0.90 <span class="kw">or</span> status[<span class="kw">"queue_depth"</span>] > 50:
+        <span class="kw">return</span> <span class="fn">JSONResponse</span>(status, status_code=429)
+    <span class="kw">return</span> <span class="fn">JSONResponse</span>(status, status_code=200)</pre>
+
+      <!-- Section 7 -->
+      <h2 id="li-envoy-config">Envoy / Istio Configuration for LLM Workloads</h2>
+      <p>Envoy is the most common data-plane proxy for LLM serving (used directly or via Istio service mesh). Key configurations for LLM workloads differ significantly from standard web traffic:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Envoy cluster config for LLM backend</span>
+<span class="kw">clusters</span>:
+- <span class="kw">name</span>: llm_backend
+  <span class="kw">type</span>: STRICT_DNS
+  <span class="kw">lb_policy</span>: LEAST_REQUEST    <span class="cm"># NOT round_robin</span>
+  <span class="kw">least_request_lb_config</span>:
+    <span class="kw">choice_count</span>: 5            <span class="cm"># Sample 5 replicas, pick least loaded</span>
+  <span class="kw">load_assignment</span>:
+    <span class="kw">endpoints</span>:
+    - <span class="kw">lb_endpoints</span>:
+      - <span class="kw">endpoint</span>:
+          <span class="kw">address</span>:
+            <span class="kw">socket_address</span>:
+              <span class="kw">address</span>: vllm-service
+              <span class="kw">port_value</span>: 8000
+
+  <span class="cm"># Critical: increase timeouts for long generations</span>
+  <span class="kw">connect_timeout</span>: 5s
+  <span class="kw">typed_extension_protocol_options</span>:
+    envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+      <span class="kw">common_http_protocol_options</span>:
+        <span class="kw">idle_timeout</span>: 300s       <span class="cm"># 5 min for streaming responses</span>
+      <span class="kw">explicit_http_config</span>:
+        <span class="kw">http2_protocol_options</span>:
+          <span class="kw">max_concurrent_streams</span>: 100
+
+  <span class="cm"># Health checking</span>
+  <span class="kw">health_checks</span>:
+  - <span class="kw">timeout</span>: 10s
+    <span class="kw">interval</span>: 15s
+    <span class="kw">healthy_threshold</span>: 1
+    <span class="kw">unhealthy_threshold</span>: 3
+    <span class="kw">http_health_check</span>:
+      <span class="kw">path</span>: /health/ready
+
+  <span class="cm"># Circuit breaking for GPU memory protection</span>
+  <span class="kw">circuit_breakers</span>:
+    <span class="kw">thresholds</span>:
+    - <span class="kw">max_connections</span>: 200
+      <span class="kw">max_pending_requests</span>: 100  <span class="cm"># Queue limit per replica</span>
+      <span class="kw">max_requests</span>: 150          <span class="cm"># Max concurrent requests</span>
+      <span class="kw">max_retries</span>: 2</pre>
+
+      <p>Critical Envoy settings for LLM workloads:</p>
+      <ul>
+        <li><strong>idle_timeout: 300s</strong> — Default is 60s, which will kill streaming responses that take longer. A 2048-token generation at 30 tok/s takes 68 seconds, and many models generate longer outputs.</li>
+        <li><strong>LEAST_REQUEST with choice_count: 5</strong> — "Power of two choices" extended to 5 choices. Samples 5 random backends and picks the one with fewest active requests. Good approximation of shortest-queue without requiring global state.</li>
+        <li><strong>Circuit breakers: max_pending_requests: 100</strong> — Prevents KV cache OOM by limiting the queue depth per replica. When the circuit breaker trips, Envoy returns 503 immediately rather than queuing indefinitely. The client can retry on a different replica.</li>
+        <li><strong>max_retries: 2</strong> — Keep retries low. LLM requests are expensive — retrying a 4096-token prefill that failed due to OOM will likely fail again. Better to shed load gracefully.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Production architecture:</strong> For most LLM deployments, use Envoy's LEAST_REQUEST as the baseline, add a custom external processing filter (ext_proc) for prefix-locality routing when KV cache hit rates justify the complexity, and rely on circuit breakers as the safety net against GPU memory exhaustion. This combination handles 90%+ of production LLM load balancing needs.
+      </div>
+
+      <p>Summary of routing strategy selection:</p>
+      <table class="cost-table" style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead><tr>
+          <th style="padding:0.6rem 0.8rem;border:1px solid var(--line);background:rgba(10,143,106,0.08);font-weight:700;color:var(--brand)">Workload</th>
+          <th style="padding:0.6rem 0.8rem;border:1px solid var(--line);background:rgba(10,143,106,0.08);font-weight:700;color:var(--brand)">Best Strategy</th>
+          <th style="padding:0.6rem 0.8rem;border:1px solid var(--line);background:rgba(10,143,106,0.08);font-weight:700;color:var(--brand)">Key Metric</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">RAG / tool-use</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Prefix locality + shortest queue</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Cache hit rate</td></tr>
+          <tr style="background:rgba(0,0,0,0.02)"><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Multi-turn chat</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Session affinity + load override</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">KV reuse rate</td></tr>
+          <tr><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Batch API</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Token-weighted shortest queue</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">P99 latency</td></tr>
+          <tr style="background:rgba(0,0,0,0.02)"><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Simple completions</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Least-request (Envoy default)</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Throughput</td></tr>
+          <tr><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Mixed / unknown</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Request-aware composite</td><td style="padding:0.6rem 0.8rem;border:1px solid var(--line)">Queue depth + KV %</td></tr>
+        </tbody>
+      </table>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

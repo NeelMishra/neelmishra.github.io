@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Complete guide to 3D parallelism combining data, tensor, and pipeline parallelism for training large language models at scale.">
+  <title>3D Parallelism: Data + Tensor + Pipeline | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+    .formula-block{background:#f8f9fa;border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;font-family:Consolas,monospace;font-size:0.9rem;line-height:1.8;overflow-x:auto}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-3d">Why 3D Parallelism?</a></li>
+        <li><a href="#hardware-topology">Hardware Topology Mapping</a></li>
+        <li><a href="#communication-analysis">Communication Cost Analysis</a></li>
+        <li><a href="#choosing-dimensions">Choosing Parallelism Dimensions</a></li>
+        <li><a href="#grid-visualization">3D Parallelism Grid Visualization</a></li>
+        <li><a href="#config-examples">Configuration Examples by Model Size</a></li>
+        <li><a href="#mfu-analysis">Performance Optimization &amp; MFU Analysis</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>3D Parallelism: Data + Tensor + Pipeline</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <p>Training frontier LLMs with hundreds of billions of parameters requires distributing computation across thousands of GPUs. No single parallelism strategy suffices: data parallelism hits memory walls, tensor parallelism hits communication walls across nodes, and pipeline parallelism suffers from bubble overhead at scale. <strong>3D parallelism</strong> composes all three strategies simultaneously, mapping each dimension to the hardware topology to maximize throughput while keeping memory per GPU manageable.</p>
+
+      <!-- ============================================================ -->
+      <h2 id="why-3d">Why 3D Parallelism?</h2>
+
+      <p>Each parallelism dimension addresses a different bottleneck, but introduces its own limitation when used in isolation:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Data Parallelism Alone</h3>
+          <p>Replicates the entire model on every GPU. Each rank processes a different micro-batch, then gradients are synchronized via all-reduce. Works when the model fits in one GPU's memory. For a 70B parameter model at fp16 (140 GB for weights alone, plus optimizer states ~4× under Adam → 560 GB), a single A100-80GB cannot hold the model. DP alone is impossible.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Tensor Parallelism Alone</h3>
+          <p>Shards each layer's weight matrices across GPUs. For a TP degree of <em>t</em>, each GPU holds <em>1/t</em> of every layer. This requires two all-reduce (or all-gather + reduce-scatter) operations per transformer layer in the forward pass and two more in the backward pass. The collective volume per layer is <em>O(b × s × h)</em> where <em>b</em> is micro-batch size, <em>s</em> is sequence length, and <em>h</em> is hidden dimension. This is feasible intra-node over NVLink (900 GB/s on DGX H100) but becomes a severe bottleneck when spanning nodes connected by InfiniBand (400 Gb/s ≈ 50 GB/s).</p>
+        </div>
+      </div>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Pipeline Parallelism Alone</h3>
+          <p>Assigns consecutive groups of layers to different GPUs. Communication is point-to-point: only activations between pipeline stages need to be transferred. However, pipeline bubbles waste compute. With <em>p</em> stages and <em>m</em> micro-batches, the bubble fraction is <em>(p - 1) / m</em>. For <em>p = 64</em> and <em>m = 128</em>, the bubble is ~49%—nearly half the cluster idles.</p>
+        </div>
+        <div class="compare-card">
+          <h3>3D Parallelism Combined</h3>
+          <p>By composing DP × TP × PP, we keep each dimension's degree moderate. Typical: TP=8 (intra-node), PP=8 (inter-node), DP=16 (across node groups). The bubble fraction drops to <em>(8 - 1) / m</em>, TP communication stays within NVLink, and each DP replica only synchronizes gradients for its shard. Total GPUs = 8 × 8 × 16 = 1024.</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Key Insight:</strong> 3D parallelism is not just about fitting the model—it is about <em>mapping communication patterns to hardware bandwidth tiers</em>. High-bandwidth intra-node links handle the chatty TP collectives, while lower-bandwidth inter-node links handle the sparse PP point-to-point and periodic DP all-reduce traffic.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="hardware-topology">Hardware Topology Mapping</h2>
+
+      <p>Modern GPU clusters have a strict bandwidth hierarchy. The principle of 3D parallelism assignment is simple: <strong>assign the most communication-intensive parallelism to the fastest interconnect</strong>.</p>
+
+      <h3>Bandwidth Tiers (DGX H100 Example)</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead><tr style="border-bottom:2px solid var(--line)">
+          <th style="text-align:left;padding:0.5rem">Interconnect</th>
+          <th style="text-align:left;padding:0.5rem">Bandwidth</th>
+          <th style="text-align:left;padding:0.5rem">Latency</th>
+          <th style="text-align:left;padding:0.5rem">Assigned Parallelism</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">NVSwitch (intra-node)</td><td style="padding:0.5rem">900 GB/s bidirectional</td><td style="padding:0.5rem">~1 μs</td><td style="padding:0.5rem"><strong>Tensor Parallelism</strong></td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">InfiniBand NDR (inter-node)</td><td style="padding:0.5rem">400 Gb/s ≈ 50 GB/s</td><td style="padding:0.5rem">~5 μs</td><td style="padding:0.5rem"><strong>Pipeline Parallelism</strong></td></tr>
+          <tr><td style="padding:0.5rem">Cross-rack / spine network</td><td style="padding:0.5rem">Shared, variable</td><td style="padding:0.5rem">~10-50 μs</td><td style="padding:0.5rem"><strong>Data Parallelism</strong></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Mapping Strategy</h3>
+      <p><strong>Tensor Parallelism (TP)</strong> within each node: A DGX H100 has 8 GPUs connected by NVSwitch. TP degree = 8 means each GPU in the node holds a column/row shard of every layer. The all-reduce per layer transfers activations of size <em>b × s × h</em> (e.g., 4 × 2048 × 12288 × 2 bytes ≈ 192 MB) multiple times per layer. At 900 GB/s, this takes &lt;1 ms per collective.</p>
+
+      <p><strong>Pipeline Parallelism (PP)</strong> across nodes in the same rack: Consecutive pipeline stages are placed on adjacent nodes. P2P send/recv of activations only requires transferring one micro-batch's activation tensor: <em>b × s × h × sizeof(dtype)</em>. For a micro-batch of size 1 with seq=2048, h=12288, fp16: 2048 × 12288 × 2 ≈ 50 MB per message. At 50 GB/s, this completes in ~1 ms.</p>
+
+      <p><strong>Data Parallelism (DP)</strong> across racks: Gradient all-reduce happens once per training step (not per layer), and when combined with ZeRO Stage-1 or gradient compression, the volume becomes manageable. With DP degree <em>d</em>, each rank all-reduces <em>Ψ/TP</em> parameters' gradients. The ring all-reduce cost is <em>2(d-1)/d × (Ψ / TP) × sizeof(dtype)</em>.</p>
+
+      <div class="callout warn">
+        <strong>Common Mistake:</strong> Placing TP across nodes. Even with InfiniBand 400 Gb/s, the per-layer all-reduce latency balloons from &lt;1 ms to 4-5 ms. For a model with 80 layers, this adds 640-800 ms <em>per training step</em> in the forward pass alone—a 20-30% throughput loss compared to intra-node TP.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="communication-analysis">Communication Cost Analysis</h2>
+
+      <p>Understanding the exact bytes transferred for each parallelism dimension is critical for predicting training throughput and identifying bottlenecks.</p>
+
+      <h3>Data Parallelism: All-Reduce</h3>
+      <p>Ring all-reduce on <em>d</em> ranks transfers each element exactly <em>2(d-1)/d</em> times. For a model with <em>Ψ</em> total parameters split across TP=<em>t</em>, each DP rank holds <em>Ψ/t</em> parameters:</p>
+      <div class="formula-block">
+Cost_DP = 2 × (d - 1) / d × (Ψ / t) × sizeof(dtype)<br>
+<br>
+Example: Ψ = 70B, t = 8, d = 8, dtype = bf16 (2 bytes)<br>
+Cost_DP = 2 × 7/8 × (70×10⁹ / 8) × 2 = 2 × 0.875 × 8.75×10⁹ × 2 ≈ 30.6 GB per step
+      </div>
+
+      <h3>Tensor Parallelism: All-Gather + Reduce-Scatter</h3>
+      <p>Each transformer layer requires collectives in both the attention and MLP blocks. In Megatron-LM's column-then-row partitioning, the forward pass performs one all-gather (for the column-parallel linear) and one reduce-scatter (for the row-parallel linear) per sub-block, totaling 4 collective operations per layer (2 for attention, 2 for MLP):</p>
+      <div class="formula-block">
+Volume_per_collective = b × s × h × sizeof(dtype)<br>
+Cost_TP_per_layer = 4 × (t - 1) / t × b × s × h × sizeof(dtype)<br>
+Cost_TP_total = L_local × Cost_TP_per_layer<br>
+<br>
+Example: b=4, s=2048, h=12288, t=8, L_local=10 (80 layers / PP=8), bf16<br>
+Per collective: 4 × 2048 × 12288 × 2 = 201 MB<br>
+Per layer: 4 × (7/8) × 201 MB = 703 MB<br>
+Total TP: 10 × 703 MB ≈ 6.9 GB per step
+      </div>
+
+      <h3>Pipeline Parallelism: Point-to-Point</h3>
+      <p>PP sends activations between consecutive stages. With 1F1B scheduling and <em>m</em> micro-batches:</p>
+      <div class="formula-block">
+Activation_size = b_micro × s × h × sizeof(dtype)<br>
+PP_volume = m × Activation_size × 2  (forward + backward)<br>
+<br>
+Example: b_micro=1, s=2048, h=12288, bf16, m=32<br>
+Per message: 1 × 2048 × 12288 × 2 = 50.3 MB<br>
+Total PP: 32 × 50.3 × 2 ≈ 3.2 GB per step
+      </div>
+
+      <div class="callout">
+        <strong>Overlap Opportunities:</strong> TP collectives can overlap with compute in the next sub-block. PP send/recv overlaps with compute on other micro-batches. DP all-reduce overlaps with the backward pass of non-final layers (gradient bucketing). Effective wall-clock communication is often 30-50% less than the raw volume suggests.
+      </div>
+
+      <h3>Communication Summary</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Latency-Sensitive (TP)</h3>
+          <p>4 collectives per layer × L layers in a critical path. Must use highest-bandwidth link (NVLink/NVSwitch). Latency directly adds to per-step time with limited overlap within a single layer.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Throughput-Sensitive (DP)</h3>
+          <p>One large all-reduce per step. Can be fully overlapped with backward computation using gradient bucketing. Tolerates higher latency but needs sustained bandwidth for large models.</p>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="choosing-dimensions">Choosing Parallelism Dimensions</h2>
+
+      <p>Given a total GPU count <em>N</em>, we need to find <em>DP × TP × PP = N</em> such that: (1) the model fits in memory, (2) the pipeline bubble is acceptable, and (3) communication overhead is minimized.</p>
+
+      <h3>Step 1: Set TP Based on Node Size</h3>
+      <p>Almost always TP = GPUs per node (typically 8). Only reduce TP if the model is small enough that TP=8 causes each shard to be too small for efficient GEMM (e.g., a 7B model with h=4096 sharded 8 ways → 512-dim columns, which under-utilizes tensor cores).</p>
+
+      <h3>Step 2: Set PP Based on Memory</h3>
+      <p>Compute memory per GPU for a given PP degree:</p>
+      <div class="formula-block">
+Memory_per_GPU = (Ψ / (TP × PP)) × bytes_per_param     <span style="color:#666">← model weights</span><br>
+                + (Ψ / (TP × PP)) × bytes_optimizer      <span style="color:#666">← optimizer (12 for Adam fp32)</span><br>
+                + activations(b_micro, s, h, L/PP)        <span style="color:#666">← activation memory</span><br>
+                + gradient_buffer                          <span style="color:#666">← gradient accumulation</span><br>
+<br>
+For 70B model, TP=8, PP=4:<br>
+  Weights: (70B / 32) × 2 = 4.375 GB<br>
+  Optimizer: (70B / 32) × 12 = 26.25 GB<br>
+  Activations (with recomp): ~10-15 GB<br>
+  Gradients: ~4.375 GB<br>
+  Total ≈ 45-50 GB → Fits in 80 GB A100 ✓
+      </div>
+
+      <h3>Step 3: Set DP = N / (TP × PP)</h3>
+      <p>The remaining GPUs form the data parallel dimension. More DP means larger effective batch size. Verify that <em>global_batch = DP × m × b_micro</em> matches the desired training batch size.</p>
+
+      <div class="callout warn">
+        <strong>Constraint:</strong> The number of layers <em>L</em> must be divisible by PP. For LLaMA-70B with 80 layers, valid PP values are {1, 2, 4, 5, 8, 10, 16, 20, 40, 80}. Choose the smallest PP that fits in memory to minimize the pipeline bubble.
+      </div>
+
+      <h3>Decision Flowchart</h3>
+<div class="pseudo-code"><span class="kw">def</span> <span class="fn">choose_parallelism</span>(num_gpus, model_params, gpu_memory, gpus_per_node):
+    <span class="cm"># Step 1: TP = node size (reduce if model is small)</span>
+    tp = gpus_per_node
+    <span class="kw">if</span> model_params &lt; 10e9:
+        tp = <span class="fn">min</span>(4, gpus_per_node)  <span class="cm"># Smaller models don't need full TP</span>
+
+    <span class="cm"># Step 2: Find minimum PP that fits memory</span>
+    <span class="kw">for</span> pp <span class="kw">in</span> <span class="fn">sorted</span>(<span class="fn">divisors</span>(num_layers)):
+        mem = <span class="fn">estimate_memory</span>(model_params, tp, pp)
+        <span class="kw">if</span> mem &lt; gpu_memory * 0.9:  <span class="cm"># 90% utilization target</span>
+            <span class="kw">break</span>
+
+    <span class="cm"># Step 3: Remaining GPUs → data parallelism</span>
+    dp = num_gpus // (tp * pp)
+    <span class="kw">assert</span> dp * tp * pp == num_gpus, <span class="cm">"GPU count must be divisible"</span>
+
+    <span class="cm"># Validate bubble overhead</span>
+    num_microbatches = global_batch // (dp * micro_batch)
+    bubble = (pp - 1) / num_microbatches
+    <span class="kw">assert</span> bubble &lt; 0.05, <span class="cm">"Pipeline bubble &gt;5%, increase micro-batches"</span>
+
+    <span class="kw">return</span> dp, tp, pp</div>
+
+      <!-- ============================================================ -->
+      <h2 id="grid-visualization">3D Parallelism Grid Visualization</h2>
+
+      <p>The diagram below shows how GPUs are organized in a 3D grid. Each small cube represents one GPU. The three axes correspond to the three parallelism dimensions: <strong>TP</strong> (intra-node, front-to-back), <strong>PP</strong> (pipeline stages, left-to-right), and <strong>DP</strong> (replicas, bottom-to-top).</p>
+
+      <svg id="lt-grid-svg" viewBox="0 0 700 440" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:700px;margin:1.2rem auto;display:block">
+        <defs>
+          <linearGradient id="lt-grad-tp" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0a8f6a"/><stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.5"/></linearGradient>
+          <linearGradient id="lt-grad-pp" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#ff6b35"/><stop offset="100%" stop-color="#ff6b35" stop-opacity="0.5"/></linearGradient>
+          <linearGradient id="lt-grad-dp" x1="0" y1="1" x2="0" y2="0"><stop offset="0%" stop-color="#4a90d9"/><stop offset="100%" stop-color="#4a90d9" stop-opacity="0.5"/></linearGradient>
+        </defs>
+        <!-- DP axis label (vertical) -->
+        <text id="lt-label-dp" x="20" y="120" font-size="14" font-weight="700" fill="#4a90d9" transform="rotate(-90,20,120)">DP (replicas)</text>
+        <!-- PP axis label (horizontal) -->
+        <text id="lt-label-pp" x="330" y="420" font-size="14" font-weight="700" fill="#ff6b35" text-anchor="middle">PP (pipeline stages) →</text>
+        <!-- TP axis label (depth) -->
+        <text id="lt-label-tp" x="600" y="70" font-size="14" font-weight="700" fill="#0a8f6a">TP (intra-node) ↗</text>
+
+        <!-- DP=0 row (bottom) -->
+        <!-- PP stage 0 -->
+        <g id="lt-node-d0p0">
+          <rect id="lt-gpu-d0p0t0" x="80" y="300" width="50" height="40" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="105" y="325" font-size="9" text-anchor="middle" fill="#333">GPU 0</text>
+          <rect id="lt-gpu-d0p0t1" x="110" y="280" width="50" height="40" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="135" y="305" font-size="9" text-anchor="middle" fill="#333">GPU 1</text>
+        </g>
+        <!-- PP stage 1 -->
+        <g id="lt-node-d0p1">
+          <rect id="lt-gpu-d0p1t0" x="220" y="300" width="50" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+          <text x="245" y="325" font-size="9" text-anchor="middle" fill="#333">GPU 2</text>
+          <rect id="lt-gpu-d0p1t1" x="250" y="280" width="50" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+          <text x="275" y="305" font-size="9" text-anchor="middle" fill="#333">GPU 3</text>
+        </g>
+        <!-- PP stage 2 -->
+        <g id="lt-node-d0p2">
+          <rect id="lt-gpu-d0p2t0" x="360" y="300" width="50" height="40" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="385" y="325" font-size="9" text-anchor="middle" fill="#333">GPU 4</text>
+          <rect id="lt-gpu-d0p2t1" x="390" y="280" width="50" height="40" rx="4" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="415" y="305" font-size="9" text-anchor="middle" fill="#333">GPU 5</text>
+        </g>
+        <!-- PP stage 3 -->
+        <g id="lt-node-d0p3">
+          <rect id="lt-gpu-d0p3t0" x="500" y="300" width="50" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+          <text x="525" y="325" font-size="9" text-anchor="middle" fill="#333">GPU 6</text>
+          <rect id="lt-gpu-d0p3t1" x="530" y="280" width="50" height="40" rx="4" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+          <text x="555" y="305" font-size="9" text-anchor="middle" fill="#333">GPU 7</text>
+        </g>
+
+        <!-- DP=1 row (top) -->
+        <g id="lt-node-d1p0">
+          <rect id="lt-gpu-d1p0t0" x="80" y="190" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="105" y="215" font-size="9" text-anchor="middle" fill="#333">GPU 8</text>
+          <rect id="lt-gpu-d1p0t1" x="110" y="170" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="135" y="195" font-size="9" text-anchor="middle" fill="#333">GPU 9</text>
+        </g>
+        <g id="lt-node-d1p1">
+          <rect id="lt-gpu-d1p1t0" x="220" y="190" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="245" y="215" font-size="9" text-anchor="middle" fill="#333">GPU 10</text>
+          <rect id="lt-gpu-d1p1t1" x="250" y="170" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="275" y="195" font-size="9" text-anchor="middle" fill="#333">GPU 11</text>
+        </g>
+        <g id="lt-node-d1p2">
+          <rect id="lt-gpu-d1p2t0" x="360" y="190" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="385" y="215" font-size="9" text-anchor="middle" fill="#333">GPU 12</text>
+          <rect id="lt-gpu-d1p2t1" x="390" y="170" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="415" y="195" font-size="9" text-anchor="middle" fill="#333">GPU 13</text>
+        </g>
+        <g id="lt-node-d1p3">
+          <rect id="lt-gpu-d1p3t0" x="500" y="190" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="525" y="215" font-size="9" text-anchor="middle" fill="#333">GPU 14</text>
+          <rect id="lt-gpu-d1p3t1" x="530" y="170" width="50" height="40" rx="4" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="555" y="195" font-size="9" text-anchor="middle" fill="#333">GPU 15</text>
+        </g>
+
+        <!-- TP arrows (NVLink, within each node group) -->
+        <line id="lt-tp-arrow-0" x1="130" y1="310" x2="115" y2="298" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrowhead-tp)"/>
+        <!-- PP arrows (InfiniBand, between stages) -->
+        <line id="lt-pp-arrow-0" x1="165" y1="310" x2="215" y2="310" stroke="#ff6b35" stroke-width="2" stroke-dasharray="5,3"/>
+        <line id="lt-pp-arrow-1" x1="305" y1="310" x2="355" y2="310" stroke="#ff6b35" stroke-width="2" stroke-dasharray="5,3"/>
+        <line id="lt-pp-arrow-2" x1="445" y1="310" x2="495" y2="310" stroke="#ff6b35" stroke-width="2" stroke-dasharray="5,3"/>
+        <!-- DP arrows (cross-rack, between replicas) -->
+        <line id="lt-dp-arrow-0" x1="105" y1="295" x2="105" y2="235" stroke="#4a90d9" stroke-width="2" stroke-dasharray="2,4"/>
+        <line id="lt-dp-arrow-1" x1="245" y1="295" x2="245" y2="235" stroke="#4a90d9" stroke-width="2" stroke-dasharray="2,4"/>
+        <line id="lt-dp-arrow-2" x1="385" y1="295" x2="385" y2="235" stroke="#4a90d9" stroke-width="2" stroke-dasharray="2,4"/>
+        <line id="lt-dp-arrow-3" x1="525" y1="295" x2="525" y2="235" stroke="#4a90d9" stroke-width="2" stroke-dasharray="2,4"/>
+
+        <!-- Legend -->
+        <g id="lt-legend" transform="translate(80,370)">
+          <rect x="0" y="0" width="14" height="14" rx="2" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text x="20" y="12" font-size="11" fill="#333">TP group (NVLink)</text>
+          <rect x="170" y="0" width="14" height="14" rx="2" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+          <text x="190" y="12" font-size="11" fill="#333">PP stages (InfiniBand)</text>
+          <rect x="380" y="0" width="14" height="14" rx="2" fill="#e3f2fd" stroke="#4a90d9" stroke-width="1.5"/>
+          <text x="400" y="12" font-size="11" fill="#333">DP replicas (cross-rack)</text>
+        </g>
+      </svg>
+
+      <p>In this simplified 16-GPU example (DP=2, TP=2, PP=4): GPUs 0-1 form a TP group handling the first pipeline stage of the first DP replica. GPUs 8-9 are the corresponding TP group in the second DP replica. PP communication flows left-to-right between stages, while DP sync flows vertically between replicas.</p>
+
+      <!-- ============================================================ -->
+      <h2 id="config-examples">Configuration Examples by Model Size</h2>
+
+      <p>Below are production-tested configurations for popular model sizes, assuming DGX A100-80GB or H100-80GB nodes with 8 GPUs each.</p>
+
+      <h3>7B Parameters (e.g., LLaMA-2 7B)</h3>
+<div class="pseudo-code"><span class="cm"># 7B fits on a single GPU with bf16, but TP helps for speed</span>
+<span class="cm"># 8 GPUs (1 node) — no PP needed</span>
+config = {
+    <span class="cm"># Parallelism</span>
+    "tensor_model_parallel_size": 2,    <span class="cm"># TP=2 (model fits, but 2-way speeds up GEMM)</span>
+    "pipeline_model_parallel_size": 1,  <span class="cm"># PP=1 (model fits without sharding layers)</span>
+    "data_parallel_size": 4,            <span class="cm"># DP=4 (8 / (2×1) = 4)</span>
+
+    <span class="cm"># Training</span>
+    "micro_batch_size": 4,
+    "global_batch_size": 256,           <span class="cm"># 256 / 4 / 4 = 16 accumulation steps</span>
+    "seq_length": 4096,
+    "bf16": <span class="kw">True</span>,
+}</div>
+
+      <h3>13B Parameters (e.g., LLaMA-2 13B)</h3>
+<div class="pseudo-code"><span class="cm"># 13B: weights=26GB (bf16), optimizer≈156GB → needs partitioning</span>
+<span class="cm"># 16 GPUs (2 nodes)</span>
+config = {
+    "tensor_model_parallel_size": 4,    <span class="cm"># TP=4 intra-node</span>
+    "pipeline_model_parallel_size": 2,  <span class="cm"># PP=2 (40 layers / 2 = 20 per stage)</span>
+    "data_parallel_size": 2,            <span class="cm"># DP=2 (16 / (4×2) = 2)</span>
+
+    "micro_batch_size": 2,
+    "global_batch_size": 512,
+    "seq_length": 4096,
+    "bf16": <span class="kw">True</span>,
+    "use_flash_attention": <span class="kw">True</span>,
+    "recompute_granularity": "selective", <span class="cm"># Save memory via activation recomputation</span>
+}</div>
+
+      <h3>70B Parameters (e.g., LLaMA-2 70B)</h3>
+<div class="pseudo-code"><span class="cm"># 70B: weights=140GB, optimizer=840GB → heavy sharding</span>
+<span class="cm"># 64 GPUs (8 nodes)</span>
+config = {
+    "tensor_model_parallel_size": 8,    <span class="cm"># TP=8 (full node, required for memory)</span>
+    "pipeline_model_parallel_size": 4,  <span class="cm"># PP=4 (80 layers / 4 = 20 per stage)</span>
+    "data_parallel_size": 2,            <span class="cm"># DP=2 (64 / (8×4) = 2)</span>
+
+    "micro_batch_size": 1,
+    "global_batch_size": 1024,          <span class="cm"># 1024 / 1 / 2 = 512 accumulation steps</span>
+    "num_micro_batches": 32,            <span class="cm"># Bubble = (4-1)/32 ≈ 9.4%</span>
+    "seq_length": 4096,
+    "bf16": <span class="kw">True</span>,
+    "use_flash_attention": <span class="kw">True</span>,
+    "recompute_granularity": "full",    <span class="cm"># Full activation recomputation</span>
+    "distribute_saved_activations": <span class="kw">True</span>,
+}</div>
+
+      <h3>175B Parameters (e.g., GPT-3 Scale)</h3>
+<div class="pseudo-code"><span class="cm"># 175B: weights=350GB, optimizer=2.1TB → massive distribution</span>
+<span class="cm"># 1024 GPUs (128 nodes)</span>
+config = {
+    "tensor_model_parallel_size": 8,     <span class="cm"># TP=8 (full node)</span>
+    "pipeline_model_parallel_size": 16,  <span class="cm"># PP=16 (96 layers / 16 = 6 per stage)</span>
+    "data_parallel_size": 8,             <span class="cm"># DP=8 (1024 / (8×16) = 8)</span>
+
+    "micro_batch_size": 1,
+    "global_batch_size": 1536,
+    "num_micro_batches": 48,             <span class="cm"># Bubble = (16-1)/48 ≈ 31% — mitigate with interleaved</span>
+    "virtual_pipeline_model_parallel_size": 2,  <span class="cm"># Interleaved 1F1B halves bubble</span>
+    "seq_length": 2048,
+    "bf16": <span class="kw">True</span>,
+    "use_flash_attention": <span class="kw">True</span>,
+    "recompute_granularity": "full",
+    "distribute_saved_activations": <span class="kw">True</span>,
+    "overlap_grad_reduce": <span class="kw">True</span>,          <span class="cm"># Overlap DP all-reduce with backward</span>
+    "overlap_param_gather": <span class="kw">True</span>,         <span class="cm"># For ZeRO-1 param all-gather</span>
+}</div>
+
+      <div class="callout">
+        <strong>Interleaved Pipeline:</strong> Setting <code>virtual_pipeline_model_parallel_size = v</code> assigns <em>v</em> non-contiguous chunks of layers to each stage instead of one contiguous block. This reduces the pipeline bubble from <em>(p-1)/m</em> to approximately <em>(p-1)/(m×v)</em>. For the 175B config above: without interleaving bubble ≈ 31%, with v=2 bubble ≈ 15.6%.
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="mfu-analysis">Performance Optimization &amp; MFU Analysis</h2>
+
+      <p><strong>Model FLOPS Utilization (MFU)</strong> is the gold standard metric for training efficiency. It measures what fraction of the hardware's peak FLOPS is actually spent on useful model computation:</p>
+
+      <div class="formula-block">
+MFU = Actual_TFLOPS / Peak_TFLOPS<br>
+<br>
+Actual_TFLOPS = (6 × Ψ × B × S) / (time_per_step × 10¹²)<br>
+<br>
+Where:<br>
+  Ψ = model parameters (e.g., 70×10⁹)<br>
+  B = global batch size (e.g., 1024)<br>
+  S = sequence length (e.g., 4096)<br>
+  time_per_step = wall-clock seconds per training step<br>
+  6 = forward (2×) + backward (4×) multiply-accumulate factor<br>
+  Peak_TFLOPS (H100 bf16) = 989.5 TFLOPS per GPU
+      </div>
+
+      <h3>MFU Breakdown by Loss Source</h3>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead><tr style="border-bottom:2px solid var(--line)">
+          <th style="text-align:left;padding:0.5rem">Loss Source</th>
+          <th style="text-align:left;padding:0.5rem">Typical Impact</th>
+          <th style="text-align:left;padding:0.5rem">Mitigation</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">PP bubble</td><td style="padding:0.5rem">5-15%</td><td style="padding:0.5rem">Interleaved schedule, more micro-batches</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">TP communication</td><td style="padding:0.5rem">3-8%</td><td style="padding:0.5rem">Keep TP intra-node, overlap with compute</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">DP all-reduce</td><td style="padding:0.5rem">2-5%</td><td style="padding:0.5rem">Gradient bucketing, overlap with backward</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">Activation recomputation</td><td style="padding:0.5rem">10-25%</td><td style="padding:0.5rem">Selective recomputation (only attention/norm)</td></tr>
+          <tr style="border-bottom:1px solid var(--line)"><td style="padding:0.5rem">Memory-bound ops</td><td style="padding:0.5rem">5-10%</td><td style="padding:0.5rem">Kernel fusion, FlashAttention</td></tr>
+          <tr><td style="padding:0.5rem">Data loading / stalls</td><td style="padding:0.5rem">1-3%</td><td style="padding:0.5rem">Prefetching, NVMe-based data loaders</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Real-World MFU Benchmarks</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>LLaMA-70B on 64× A100</h3>
+          <p><strong>Config:</strong> TP=8, PP=4, DP=2<br>
+          <strong>Throughput:</strong> ~3,800 tokens/sec/GPU<br>
+          <strong>MFU:</strong> ~38-42%<br>
+          With selective recomp + FlashAttention-2: ~45-48%</p>
+        </div>
+        <div class="compare-card">
+          <h3>GPT-175B on 1024× H100</h3>
+          <p><strong>Config:</strong> TP=8, PP=16, DP=8<br>
+          <strong>Throughput:</strong> ~4,200 tokens/sec/GPU<br>
+          <strong>MFU:</strong> ~42-47%<br>
+          With interleaved PP (v=2) + overlap: ~50-54%</p>
+        </div>
+      </div>
+
+      <h3>Optimization Checklist</h3>
+<div class="pseudo-code"><span class="kw">def</span> <span class="fn">optimize_3d_config</span>(config):
+    <span class="cm"># 1. Enable communication overlap</span>
+    config["overlap_grad_reduce"] = <span class="kw">True</span>     <span class="cm"># Overlap DP gradient all-reduce</span>
+    config["overlap_param_gather"] = <span class="kw">True</span>    <span class="cm"># Overlap ZeRO param gather</span>
+
+    <span class="cm"># 2. Reduce PP bubble</span>
+    <span class="kw">if</span> config["pipeline_model_parallel_size"] &gt; 4:
+        config["virtual_pipeline_model_parallel_size"] = 2  <span class="cm"># Interleaved</span>
+    <span class="cm"># Increase micro-batches until bubble &lt; 5%</span>
+    pp = config["pipeline_model_parallel_size"]
+    <span class="kw">while</span> (pp - 1) / config["num_micro_batches"] &gt; 0.05:
+        config["num_micro_batches"] += pp  <span class="cm"># Must be multiple of pp</span>
+
+    <span class="cm"># 3. Memory optimization</span>
+    config["use_flash_attention"] = <span class="kw">True</span>
+    config["recompute_granularity"] = "selective"  <span class="cm"># Recompute attention only</span>
+
+    <span class="cm"># 4. Compute MFU target</span>
+    psi = config["model_params"]
+    B = config["global_batch_size"]
+    S = config["seq_length"]
+    peak = config["num_gpus"] * 989.5e12  <span class="cm"># H100 bf16 peak</span>
+    target_mfu = 0.50  <span class="cm"># Aim for 50%+ MFU</span>
+    max_step_time = (6 * psi * B * S) / (target_mfu * peak)
+    <span class="fn">print</span>(f"Target step time for {target_mfu:.0%} MFU: {max_step_time:.2f}s")
+
+    <span class="kw">return</span> config</div>
+
+      <div class="callout warn">
+        <strong>MFU vs. HFU:</strong> Hardware FLOPS Utilization (HFU) includes recomputation FLOPS in the numerator, giving higher numbers (often 55-65%). MFU is the more honest metric because it only counts FLOPS that contribute to the actual forward + backward model computation. When comparing systems, always confirm whether reported numbers are MFU or HFU.
+      </div>
+
+      <p>3D parallelism remains the dominant strategy for training models from 10B to 1T+ parameters. The key engineering challenge is not the algorithm but the <strong>systems integration</strong>: correctly mapping parallelism dimensions to hardware topology, tuning micro-batch counts to minimize bubbles, overlapping communication with compute, and profiling to identify the true bottleneck. With careful configuration, MFU values of 50%+ are achievable even on thousand-GPU clusters.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

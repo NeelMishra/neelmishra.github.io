@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into Direct Preference Optimization training infrastructure including data preparation, reference model management, DPO loss implementation, and comparison to RLHF">
+  <title>DPO Training Infrastructure | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#dpo-fundamentals">DPO Fundamentals &amp; Mathematical Formulation</a></li>
+        <li><a href="#preference-data-pipeline">Preference Data Preparation Pipeline</a></li>
+        <li><a href="#reference-model-management">Reference Model Management</a></li>
+        <li><a href="#dpo-loss-implementation">DPO Loss Implementation</a></li>
+        <li><a href="#beta-tuning">Beta Parameter Tuning &amp; Sensitivity</a></li>
+        <li><a href="#dpo-vs-rlhf">DPO vs RLHF Infrastructure Comparison</a></li>
+        <li><a href="#ipo-kto-variants">IPO, KTO &amp; DPO Variants</a></li>
+        <li><a href="#training-configs">Training Configurations by Model Scale</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>DPO Training Infrastructure</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- Section 1: DPO Fundamentals -->
+      <h2 id="dpo-fundamentals">DPO Fundamentals &amp; Mathematical Formulation</h2>
+      <p>
+        Direct Preference Optimization (DPO) collapses the traditional three-stage RLHF pipeline — reward model training, PPO value/policy optimization, and KL-constrained sampling — into a single supervised-style objective that directly optimizes the policy on preference pairs. The key insight from Rafailov et al. (2023) is that the optimal policy under the KL-constrained reward maximization objective has a closed-form relationship to the reward function, which lets us eliminate the reward model entirely.
+      </p>
+      <p>
+        The standard RLHF objective maximizes <code>E[r(x, y)] - β · KL(π_θ || π_ref)</code> where <code>r(x, y)</code> is a learned reward, <code>π_θ</code> is the policy being optimized, <code>π_ref</code> is a frozen reference policy (typically the SFT checkpoint), and <code>β</code> controls KL divergence penalty strength. The optimal solution to this objective is:
+      </p>
+      <div class="pseudo-code"><span class="cm"># Optimal policy under KL-constrained reward maximization</span>
+π*(y | x) = (1 / Z(x)) · π_ref(y | x) · exp(r(x, y) / β)
+
+<span class="cm"># Rearranging to express reward in terms of optimal policy</span>
+r(x, y) = β · log(π*(y | x) / π_ref(y | x)) + β · log(Z(x))
+
+<span class="cm"># Substituting into Bradley-Terry preference model P(y_w ≻ y_l | x) = σ(r(x, y_w) - r(x, y_l))</span>
+<span class="cm"># The partition function Z(x) cancels in the difference:</span>
+L_DPO(π_θ; π_ref) = -E[ log σ( β · (log(π_θ(y_w|x)/π_ref(y_w|x)) - log(π_θ(y_l|x)/π_ref(y_l|x))) ) ]</div>
+      <p>
+        This is the DPO loss. It requires only: (1) the current policy's log-probabilities on chosen and rejected completions, (2) the reference model's log-probabilities on the same completions, and (3) forward passes — no sampling, no value function, no reward model inference. The partition function <code>Z(x)</code> cancels because the Bradley-Terry model only depends on reward <em>differences</em>, making the entire procedure tractable.
+      </p>
+      <div class="callout">
+        <strong>Core insight:</strong> DPO reparameterizes the reward as an implicit function of the policy-to-reference log-ratio. The model simultaneously learns to assign higher probability to chosen responses and lower probability to rejected ones, while staying close to the reference — all in a single cross-entropy-style loss.
+      </div>
+
+      <!-- Section 2: Preference Data Pipeline -->
+      <h2 id="preference-data-pipeline">Preference Data Preparation Pipeline</h2>
+      <p>
+        DPO training data consists of triplets <code>(x, y_w, y_l)</code> — a prompt, a chosen (winning) completion, and a rejected (losing) completion. The quality and consistency of this data dominates final alignment quality far more than hyperparameter tuning. A production preference data pipeline must handle deduplication, length-bias mitigation, format normalization, and tokenization alignment.
+      </p>
+      <h3>Data Schema and Validation</h3>
+      <div class="pseudo-code"><span class="kw">import</span> json
+<span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass
+<span class="kw">from</span> typing <span class="kw">import</span> List, Optional
+
+@dataclass
+<span class="kw">class</span> PreferenceSample:
+    prompt: str
+    chosen: str
+    rejected: str
+    source: str                <span class="cm"># e.g. "human_annotator", "ai_feedback", "ranked_sampling"</span>
+    confidence: Optional[float] <span class="cm"># annotator agreement score, 0.0 - 1.0</span>
+
+<span class="kw">def</span> <span class="fn">validate_preference_batch</span>(samples: List[PreferenceSample]) -&gt; List[PreferenceSample]:
+    valid = []
+    <span class="kw">for</span> s <span class="kw">in</span> samples:
+        <span class="cm"># Reject if chosen == rejected (no preference signal)</span>
+        <span class="kw">if</span> s.chosen.strip() == s.rejected.strip():
+            <span class="kw">continue</span>
+        <span class="cm"># Reject low-confidence annotations (noisy labels hurt DPO badly)</span>
+        <span class="kw">if</span> s.confidence <span class="kw">is not</span> <span class="kw">None</span> <span class="kw">and</span> s.confidence &lt; 0.6:
+            <span class="kw">continue</span>
+        <span class="cm"># Warn on extreme length disparity (DPO can learn length bias)</span>
+        ratio = <span class="fn">len</span>(s.chosen) / <span class="fn">max</span>(<span class="fn">len</span>(s.rejected), 1)
+        <span class="kw">if</span> ratio &gt; 3.0 <span class="kw">or</span> ratio &lt; 0.33:
+            <span class="fn">log_warning</span>(f"Length ratio {ratio:.1f} for prompt: {s.prompt[:60]}")
+        valid.<span class="fn">append</span>(s)
+    <span class="kw">return</span> valid</div>
+      <div class="callout warn">
+        <strong>Length bias:</strong> If chosen responses are systematically longer than rejected ones, DPO will learn to be verbose rather than learning actual quality distinctions. Always monitor the length distribution of your chosen vs. rejected pairs. Consider length-normalized sampling or including pairs where the shorter response wins.
+      </div>
+      <h3>Tokenization Alignment</h3>
+      <p>
+        A subtle but critical detail: the log-probabilities in DPO must be computed over the <em>completion tokens only</em>, conditioned on the prompt. This means during tokenization you must track the boundary between prompt tokens and completion tokens exactly. With chat templates that add special tokens (e.g., <code>&lt;|assistant|&gt;</code>), the boundary can shift depending on tokenizer behavior. The standard approach is to tokenize the full sequence, then create a loss mask that zeros out all prompt positions:
+      </p>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">tokenize_preference_pair</span>(tokenizer, prompt, chosen, rejected, max_len=2048):
+    <span class="cm"># Tokenize prompt separately to find boundary</span>
+    prompt_ids = tokenizer.<span class="fn">encode</span>(prompt, add_special_tokens=<span class="kw">True</span>)
+    prompt_len = <span class="fn">len</span>(prompt_ids)
+
+    <span class="cm"># Tokenize full chosen/rejected sequences</span>
+    chosen_ids = tokenizer.<span class="fn">encode</span>(prompt + chosen, add_special_tokens=<span class="kw">True</span>)[:max_len]
+    rejected_ids = tokenizer.<span class="fn">encode</span>(prompt + rejected, add_special_tokens=<span class="kw">True</span>)[:max_len]
+
+    <span class="cm"># Build loss masks: 1 for completion tokens, 0 for prompt tokens</span>
+    chosen_mask = [0] * prompt_len + [1] * (<span class="fn">len</span>(chosen_ids) - prompt_len)
+    rejected_mask = [0] * prompt_len + [1] * (<span class="fn">len</span>(rejected_ids) - prompt_len)
+
+    <span class="kw">return</span> {
+        "chosen_ids": chosen_ids, "chosen_mask": chosen_mask,
+        "rejected_ids": rejected_ids, "rejected_mask": rejected_mask,
+        "prompt_len": prompt_len,
+    }</div>
+
+      <!-- Section 3: Reference Model Management -->
+      <h2 id="reference-model-management">Reference Model Management</h2>
+      <p>
+        The reference model <code>π_ref</code> is central to DPO: it provides the baseline log-probabilities that anchor the implicit reward. There are two dominant strategies for managing the reference model, each with very different memory, compute, and systems trade-offs.
+      </p>
+      <h3>Strategy 1: Frozen In-Memory Copy</h3>
+      <p>
+        The simplest approach keeps a full frozen copy of the reference model loaded alongside the trainable policy. Both share the same architecture, but the reference weights are wrapped in <code>torch.no_grad()</code> and never receive gradient updates. This doubles GPU memory consumption — for a 7B model in bf16, you need ~14 GB for the policy and ~14 GB for the reference, plus optimizer states (~28 GB for AdamW), totaling ~56 GB just for model state.
+      </p>
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> copy
+
+<span class="kw">def</span> <span class="fn">setup_dpo_models</span>(base_model, device="cuda"):
+    <span class="cm"># Policy model — trainable, receives gradients</span>
+    policy = base_model.<span class="fn">to</span>(device)
+    policy.<span class="fn">train</span>()
+
+    <span class="cm"># Reference model — frozen deep copy, no gradients ever</span>
+    ref_model = copy.<span class="fn">deepcopy</span>(base_model).<span class="fn">to</span>(device)
+    ref_model.<span class="fn">eval</span>()
+    <span class="kw">for</span> param <span class="kw">in</span> ref_model.<span class="fn">parameters</span>():
+        param.requires_grad = <span class="kw">False</span>
+
+    <span class="cm"># Verify no shared storage (critical for correctness)</span>
+    <span class="kw">for</span> (n1, p1), (n2, p2) <span class="kw">in</span> <span class="fn">zip</span>(policy.<span class="fn">named_parameters</span>(), ref_model.<span class="fn">named_parameters</span>()):
+        <span class="kw">assert</span> p1.data_ptr() != p2.data_ptr(), f"Shared storage at {n1}"
+
+    <span class="kw">return</span> policy, ref_model</div>
+      <h3>Strategy 2: Pre-Cached Log-Probabilities</h3>
+      <p>
+        For memory-constrained setups, you can precompute reference log-probabilities for the entire dataset before training begins, store them on disk, and load them alongside each training batch. This eliminates the reference model from GPU memory entirely during training, cutting memory roughly in half.
+      </p>
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> torch.utils.data <span class="kw">import</span> DataLoader
+
+@torch.<span class="fn">no_grad</span>()
+<span class="kw">def</span> <span class="fn">precompute_ref_logprobs</span>(ref_model, dataset, tokenizer, batch_size=8):
+    ref_model.<span class="fn">eval</span>()
+    loader = <span class="fn">DataLoader</span>(dataset, batch_size=batch_size, shuffle=<span class="kw">False</span>)
+    all_chosen_logps, all_rejected_logps = [], []
+
+    <span class="kw">for</span> batch <span class="kw">in</span> loader:
+        <span class="cm"># Forward pass for chosen completions</span>
+        chosen_logits = ref_model(batch["chosen_ids"].<span class="fn">cuda</span>()).logits
+        chosen_logps = <span class="fn">compute_sequence_logprob</span>(chosen_logits, batch["chosen_ids"], batch["chosen_mask"])
+        all_chosen_logps.<span class="fn">append</span>(chosen_logps.<span class="fn">cpu</span>())
+
+        <span class="cm"># Forward pass for rejected completions</span>
+        rejected_logits = ref_model(batch["rejected_ids"].<span class="fn">cuda</span>()).logits
+        rejected_logps = <span class="fn">compute_sequence_logprob</span>(rejected_logits, batch["rejected_ids"], batch["rejected_mask"])
+        all_rejected_logps.<span class="fn">append</span>(rejected_logps.<span class="fn">cpu</span>())
+
+    <span class="cm"># Save to disk — load lazily during training</span>
+    torch.<span class="fn">save</span>({
+        "ref_chosen_logps": torch.<span class="fn">cat</span>(all_chosen_logps),
+        "ref_rejected_logps": torch.<span class="fn">cat</span>(all_rejected_logps),
+    }, "ref_logprobs_cache.pt")</div>
+      <div class="callout warn">
+        <strong>Caveat with caching:</strong> Pre-cached log-probs are only valid for the exact tokenization and data order used during caching. If you re-shuffle data, add new samples, or change the tokenizer/chat template, you must re-run the caching pass. Always store a hash of the dataset alongside the cache for validation.
+      </div>
+
+      <!-- Section 4: DPO Loss Implementation -->
+      <h2 id="dpo-loss-implementation">DPO Loss Implementation</h2>
+      <p>
+        The DPO loss operates on per-sequence log-probabilities. For each preference pair, you compute the sum of per-token log-probs over completion tokens (masked to exclude prompt tokens), then form the log-ratio between the policy and reference for both chosen and rejected sequences. The loss pushes the policy's log-ratio for chosen completions above the log-ratio for rejected completions by a margin controlled by β.
+      </p>
+      <h3>Sequence Log-Probability Computation</h3>
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn.functional <span class="kw">as</span> F
+
+<span class="kw">def</span> <span class="fn">compute_sequence_logprob</span>(logits, input_ids, loss_mask):
+    <span class="cm"># logits: (B, T, V), input_ids: (B, T), loss_mask: (B, T)</span>
+    <span class="cm"># Shift logits and labels for next-token prediction</span>
+    shift_logits = logits[:, :-1, :]          <span class="cm"># (B, T-1, V)</span>
+    shift_labels = input_ids[:, 1:]           <span class="cm"># (B, T-1)</span>
+    shift_mask = loss_mask[:, 1:].<span class="fn">float</span>()     <span class="cm"># (B, T-1)</span>
+
+    <span class="cm"># Per-token log-probs via log_softmax + gather</span>
+    log_probs = F.<span class="fn">log_softmax</span>(shift_logits, dim=-1)          <span class="cm"># (B, T-1, V)</span>
+    token_logps = log_probs.<span class="fn">gather</span>(2, shift_labels.<span class="fn">unsqueeze</span>(2)).<span class="fn">squeeze</span>(2)  <span class="cm"># (B, T-1)</span>
+
+    <span class="cm"># Masked sum: only completion tokens contribute</span>
+    seq_logps = (token_logps * shift_mask).<span class="fn">sum</span>(dim=-1)      <span class="cm"># (B,)</span>
+    <span class="kw">return</span> seq_logps</div>
+      <h3>Full DPO Loss with Log-Ratio Trick</h3>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">dpo_loss</span>(policy_chosen_logps, policy_rejected_logps,
+             ref_chosen_logps, ref_rejected_logps, beta=0.1):
+    <span class="cm"># Log-ratio trick: implicit reward = β · log(π_θ(y|x) / π_ref(y|x))</span>
+    chosen_log_ratios = policy_chosen_logps - ref_chosen_logps     <span class="cm"># (B,)</span>
+    rejected_log_ratios = policy_rejected_logps - ref_rejected_logps <span class="cm"># (B,)</span>
+
+    <span class="cm"># DPO logits = β · (chosen_log_ratio - rejected_log_ratio)</span>
+    logits = beta * (chosen_log_ratios - rejected_log_ratios)       <span class="cm"># (B,)</span>
+
+    <span class="cm"># Negative log-sigmoid loss (binary cross-entropy formulation)</span>
+    loss = -F.<span class="fn">logsigmoid</span>(logits).<span class="fn">mean</span>()
+
+    <span class="cm"># Diagnostics: track implicit reward margin and accuracy</span>
+    <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+        chosen_rewards = beta * chosen_log_ratios
+        rejected_rewards = beta * rejected_log_ratios
+        reward_margin = (chosen_rewards - rejected_rewards).<span class="fn">mean</span>()
+        accuracy = (logits &gt; 0).<span class="fn">float</span>().<span class="fn">mean</span>()
+
+    <span class="kw">return</span> loss, {
+        "reward_margin": reward_margin.<span class="fn">item</span>(),
+        "accuracy": accuracy.<span class="fn">item</span>(),
+        "chosen_reward": chosen_rewards.<span class="fn">mean</span>().<span class="fn">item</span>(),
+        "rejected_reward": rejected_rewards.<span class="fn">mean</span>().<span class="fn">item</span>(),
+    }</div>
+      <div class="callout">
+        <strong>Diagnostic signals:</strong> Monitor <code>accuracy</code> (fraction of pairs where the policy assigns higher implicit reward to the chosen response) and <code>reward_margin</code> (gap between chosen and rejected implicit rewards). Accuracy starting near 0.5 and climbing to 0.7–0.8 indicates healthy learning. Accuracy jumping to 1.0 quickly often signals overfitting or β set too high.
+      </div>
+
+      <!-- Section 5: Beta Tuning -->
+      <h2 id="beta-tuning">Beta Parameter Tuning &amp; Sensitivity</h2>
+      <p>
+        The β (beta) parameter controls the strength of the KL divergence constraint between the policy and the reference model. It directly appears as the scaling factor in the DPO logits and governs how aggressively the policy can deviate from the reference distribution. This is the single most important hyperparameter in DPO training.
+      </p>
+      <h3>Effect of β on Training Dynamics</h3>
+      <p>
+        <strong>Low β (0.01–0.05):</strong> Weak constraint. The policy can deviate significantly from the reference. This yields fast convergence and large reward margins, but risks mode collapse, degenerate outputs, and loss of diversity. The model may over-optimize on spurious patterns in the preference data.
+      </p>
+      <p>
+        <strong>Moderate β (0.1–0.2):</strong> Standard regime. Balances alignment signal with distribution preservation. This is the default in most production deployments (Anthropic's original DPO paper uses β = 0.1). The policy improves on the preference signal while retaining the linguistic capabilities of the reference.
+      </p>
+      <p>
+        <strong>High β (0.3–0.5+):</strong> Strong constraint. The policy barely moves from the reference. Useful when you have a strong SFT checkpoint and noisy preference data — prevents the model from overfitting to labeler noise. The trade-off is very slow alignment progress and potentially wasted compute.
+      </p>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">beta_sweep_config</span>():
+    <span class="cm"># Recommended sweep for initial DPO runs</span>
+    <span class="kw">return</span> {
+        "beta_values": [0.05, 0.1, 0.2, 0.5],
+        "eval_metrics": [
+            "reward_margin",          <span class="cm"># Should be positive and growing</span>
+            "implicit_reward_var",    <span class="cm"># Should not collapse to zero</span>
+            "kl_divergence",          <span class="cm"># Monitor via: chosen_log_ratios.mean()</span>
+            "response_diversity",     <span class="cm"># Distinct-N on eval generations</span>
+            "winrate_vs_sft",         <span class="cm"># A/B eval against the SFT baseline</span>
+        ],
+        "early_stop_if": "accuracy > 0.95 for 3 consecutive evals",
+        "total_steps_per_run": 2000,
+    }</div>
+      <div class="callout warn">
+        <strong>β interacts with data quality:</strong> With clean, high-agreement annotation data you can use lower β. With noisy crowd-sourced data, higher β prevents the model from memorizing inconsistent preferences. If you see reward accuracy spike to 1.0 in under 500 steps, β is too high or your data has insufficient diversity.
+      </div>
+
+      <!-- Section 6: DPO vs RLHF Architecture Diagram + Comparison -->
+      <h2 id="dpo-vs-rlhf">DPO vs RLHF Infrastructure Comparison</h2>
+      <p>
+        The primary advantage of DPO over RLHF is infrastructure simplicity. RLHF requires orchestrating four models (policy, reference, reward, value), a generation loop, and PPO's multi-step optimization. DPO requires only two models (policy and reference) and a single supervised-style forward/backward pass. This dramatically reduces code complexity, failure modes, and GPU memory requirements.
+      </p>
+
+      <!-- SVG: DPO vs RLHF Architecture -->
+      <svg viewBox="0 0 820 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:820px;margin:1.2rem auto;display:block;font-family:Manrope,sans-serif" role="img" aria-label="DPO vs RLHF architecture comparison diagram">
+        <!-- RLHF side -->
+        <rect id="lt-rlhf-bg" x="10" y="10" width="390" height="360" rx="14" fill="#fef3ee" stroke="#ff6b35" stroke-width="1.5"/>
+        <text id="lt-rlhf-title" x="205" y="38" text-anchor="middle" font-size="15" font-weight="700" fill="#ff6b35">RLHF Pipeline (4 models)</text>
+
+        <rect id="lt-rlhf-policy" x="30" y="58" width="160" height="44" rx="8" fill="#fff" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="110" y="84" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Policy π_θ</text>
+        <rect id="lt-rlhf-ref" x="220" y="58" width="160" height="44" rx="8" fill="#fff" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="300" y="84" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Reference π_ref</text>
+        <rect id="lt-rlhf-reward" x="30" y="120" width="160" height="44" rx="8" fill="#fff" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="110" y="146" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Reward Model r_φ</text>
+        <rect id="lt-rlhf-value" x="220" y="120" width="160" height="44" rx="8" fill="#fff" stroke="#ff6b35" stroke-width="1.2"/>
+        <text x="300" y="146" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Value Function V_ψ</text>
+
+        <rect id="lt-rlhf-gen" x="30" y="185" width="350" height="34" rx="8" fill="#ffe8db" stroke="#ff6b35" stroke-width="1"/>
+        <text x="205" y="207" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cc4400">Online Generation Loop (sampling + KL calc)</text>
+
+        <rect id="lt-rlhf-ppo" x="30" y="235" width="350" height="34" rx="8" fill="#ffe8db" stroke="#ff6b35" stroke-width="1"/>
+        <text x="205" y="257" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cc4400">PPO Clipped Objective + GAE Advantages</text>
+
+        <text id="lt-rlhf-mem" x="205" y="300" text-anchor="middle" font-size="10" fill="#666">Memory: ~4× model params (policy + ref + reward + value)</text>
+        <text id="lt-rlhf-complexity" x="205" y="318" text-anchor="middle" font-size="10" fill="#666">Complexity: generation loop, reward inference, GAE, PPO clip</text>
+        <text id="lt-rlhf-fail" x="205" y="336" text-anchor="middle" font-size="10" fill="#666">Failure modes: reward hacking, value collapse, KL explosion</text>
+        <text id="lt-rlhf-gpu" x="205" y="354" text-anchor="middle" font-size="10" fill="#cc4400" font-weight="600">7B model ≈ 120+ GB VRAM</text>
+
+        <!-- DPO side -->
+        <rect id="lt-dpo-bg" x="420" y="10" width="390" height="360" rx="14" fill="#eef9f5" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text id="lt-dpo-title" x="615" y="38" text-anchor="middle" font-size="15" font-weight="700" fill="#0a8f6a">DPO Pipeline (2 models)</text>
+
+        <rect id="lt-dpo-policy" x="440" y="58" width="160" height="44" rx="8" fill="#fff" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="520" y="84" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Policy π_θ</text>
+        <rect id="lt-dpo-ref" x="630" y="58" width="160" height="44" rx="8" fill="#fff" stroke="#0a8f6a" stroke-width="1.2"/>
+        <text x="710" y="84" text-anchor="middle" font-size="11" font-weight="600" fill="#333">Reference π_ref</text>
+
+        <rect id="lt-dpo-fwd" x="440" y="130" width="350" height="34" rx="8" fill="#ddf3ec" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="615" y="152" text-anchor="middle" font-size="10.5" font-weight="600" fill="#066b4e">Forward Pass: log-probs on (y_w, y_l)</text>
+
+        <rect id="lt-dpo-loss" x="440" y="180" width="350" height="34" rx="8" fill="#ddf3ec" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="615" y="202" text-anchor="middle" font-size="10.5" font-weight="600" fill="#066b4e">DPO Loss: -log σ(β · Δ log-ratio)</text>
+
+        <rect id="lt-dpo-bwd" x="440" y="235" width="350" height="34" rx="8" fill="#ddf3ec" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="615" y="257" text-anchor="middle" font-size="10.5" font-weight="600" fill="#066b4e">Backward + AdamW Update (policy only)</text>
+
+        <text id="lt-dpo-mem" x="615" y="300" text-anchor="middle" font-size="10" fill="#666">Memory: ~2× model params (policy + ref, or 1× with caching)</text>
+        <text id="lt-dpo-complexity" x="615" y="318" text-anchor="middle" font-size="10" fill="#666">Complexity: standard fwd/bwd, no sampling, no value fn</text>
+        <text id="lt-dpo-fail" x="615" y="336" text-anchor="middle" font-size="10" fill="#666">Failure modes: data quality, β misconfiguration, length bias</text>
+        <text id="lt-dpo-gpu" x="615" y="354" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="600">7B model ≈ 56 GB VRAM (28 GB with caching)</text>
+      </svg>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3 style="color:#ff6b35;margin-top:0">RLHF (PPO)</h3>
+          <ul>
+            <li><strong>Models:</strong> 4 (policy, reference, reward, value)</li>
+            <li><strong>Training loop:</strong> Generation → reward scoring → GAE advantage computation → PPO clipped update</li>
+            <li><strong>Memory (7B):</strong> ~120 GB+ across all models and optimizer states</li>
+            <li><strong>Sampling:</strong> Required — must generate full completions each step</li>
+            <li><strong>Hyperparameters:</strong> PPO clip ε, GAE λ, value loss coeff, KL penalty coeff, entropy bonus, rollout length, mini-batch count</li>
+            <li><strong>Failure modes:</strong> Reward hacking, value function collapse, KL explosion, reward model overoptimization</li>
+            <li><strong>Wall-clock:</strong> 3–5× slower per step due to generation + multi-model inference</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3 style="color:#0a8f6a;margin-top:0">DPO</h3>
+          <ul>
+            <li><strong>Models:</strong> 2 (policy, reference) or 1 with cached logprobs</li>
+            <li><strong>Training loop:</strong> Forward pass on pairs → log-ratio computation → sigmoid loss → backward</li>
+            <li><strong>Memory (7B):</strong> ~56 GB (28 GB with reference logprob caching)</li>
+            <li><strong>Sampling:</strong> Not required — operates on static preference pairs</li>
+            <li><strong>Hyperparameters:</strong> β, learning rate, warmup steps</li>
+            <li><strong>Failure modes:</strong> Data quality, length bias, β miscalibration, distribution shift</li>
+            <li><strong>Wall-clock:</strong> Similar to SFT training — standard forward/backward</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>When to use RLHF over DPO:</strong> RLHF still wins when you need online exploration (the policy discovers novel good responses during training), when your preference data is limited and you have a strong pretrained reward model, or when you need the reward model for other downstream tasks like best-of-N sampling.
+      </div>
+
+      <!-- Section 7: IPO, KTO & Variants -->
+      <h2 id="ipo-kto-variants">IPO, KTO &amp; DPO Variants</h2>
+      <p>
+        Several important variants of DPO address specific limitations of the original formulation. Understanding these is critical for production deployments where standard DPO's assumptions may not hold.
+      </p>
+      <h3>Identity Preference Optimization (IPO)</h3>
+      <p>
+        Azar et al. (2023) identified that DPO's derivation assumes the Bradley-Terry model perfectly fits the preference data. When this assumption is violated (as it often is with real human annotations), DPO can overfit to noise. IPO replaces the log-sigmoid with a squared loss on the log-ratio difference:
+      </p>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">ipo_loss</span>(policy_chosen_logps, policy_rejected_logps,
+             ref_chosen_logps, ref_rejected_logps, beta=0.1):
+    chosen_log_ratios = policy_chosen_logps - ref_chosen_logps
+    rejected_log_ratios = policy_rejected_logps - ref_rejected_logps
+    diff = chosen_log_ratios - rejected_log_ratios
+
+    <span class="cm"># Squared loss centered at 1/(2β) — no sigmoid, more robust to noise</span>
+    loss = (diff - 1.0 / (2.0 * beta)) ** 2
+    <span class="kw">return</span> loss.<span class="fn">mean</span>()</div>
+      <h3>Kahneman-Tversky Optimization (KTO)</h3>
+      <p>
+        Ethayarajh et al. (2024) proposed KTO for settings where you only have binary feedback (thumbs-up/thumbs-down) rather than pairwise preferences. This is significant because binary feedback is far cheaper to collect — you don't need to show annotators two responses side-by-side. KTO operates on individual completions with a desirability label:
+      </p>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">kto_loss</span>(policy_logps, ref_logps, is_desirable, beta=0.1):
+    <span class="cm"># is_desirable: boolean tensor, True for good, False for bad</span>
+    log_ratios = policy_logps - ref_logps
+    kl_estimate = log_ratios.<span class="fn">mean</span>().<span class="fn">detach</span>()  <span class="cm"># Running KL estimate</span>
+
+    <span class="cm"># Separate losses for desirable/undesirable with asymmetric weighting</span>
+    desirable_losses = 1.0 - torch.<span class="fn">sigmoid</span>(beta * (log_ratios - kl_estimate))
+    undesirable_losses = 1.0 - torch.<span class="fn">sigmoid</span>(beta * (kl_estimate - log_ratios))
+
+    desirable_mask = is_desirable.<span class="fn">float</span>()
+    undesirable_mask = 1.0 - desirable_mask
+
+    loss = (desirable_losses * desirable_mask + undesirable_losses * undesirable_mask).<span class="fn">mean</span>()
+    <span class="kw">return</span> loss</div>
+      <div class="callout">
+        <strong>Choosing between variants:</strong> Use standard DPO when you have clean pairwise preference data with high annotator agreement. Use IPO when preference data is noisy or you suspect the Bradley-Terry model is a poor fit. Use KTO when you only have per-example quality scores (likes/dislikes) without pairwise comparisons.
+      </div>
+
+      <h3>cDPO (Conservative DPO)</h3>
+      <p>
+        Conservative DPO adds label smoothing to handle annotation noise. Instead of treating preference labels as hard 0/1 targets, it mixes in a small probability ε that the labels are flipped:
+      </p>
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">cdpo_loss</span>(logits, beta, label_smoothing=0.1):
+    <span class="cm"># label_smoothing ε: probability that the annotator chose wrong</span>
+    loss = -(1.0 - label_smoothing) * F.<span class="fn">logsigmoid</span>(beta * logits) \
+           - label_smoothing * F.<span class="fn">logsigmoid</span>(-beta * logits)
+    <span class="kw">return</span> loss.<span class="fn">mean</span>()</div>
+
+      <!-- Section 8: Training Configurations -->
+      <h2 id="training-configs">Training Configurations by Model Scale</h2>
+      <p>
+        DPO training configurations vary significantly with model scale. Below are battle-tested configurations for three common model sizes, accounting for GPU memory, data throughput, and convergence characteristics.
+      </p>
+      <h3>7B Parameters (e.g., Llama-2-7B, Mistral-7B)</h3>
+      <div class="pseudo-code"><span class="cm"># 7B DPO config — fits on 2×A100 80GB with frozen reference</span>
+config_7b = {
+    "model_size": "7B",
+    "precision": "bf16",
+    "reference_strategy": "frozen_copy",  <span class="cm"># Fits in memory on 2 GPUs</span>
+    "beta": 0.1,
+    "learning_rate": 5e-7,
+    "lr_scheduler": "cosine",
+    "warmup_ratio": 0.1,
+    "batch_size_per_gpu": 2,
+    "gradient_accumulation_steps": 8,     <span class="cm"># Effective batch = 32</span>
+    "max_seq_length": 2048,
+    "num_epochs": 1,                      <span class="cm"># DPO overfits fast — rarely &gt; 1 epoch</span>
+    "max_grad_norm": 1.0,
+    "optimizer": "adamw_torch",
+    "weight_decay": 0.01,
+    "gpu_setup": "2x A100-80GB, FSDP full_shard",
+    "estimated_vram_per_gpu": "~56 GB",
+    "estimated_throughput": "~1200 samples/hour",
+}</div>
+      <h3>13B Parameters (e.g., Llama-2-13B)</h3>
+      <div class="pseudo-code"><span class="cm"># 13B DPO config — requires logprob caching to fit in memory</span>
+config_13b = {
+    "model_size": "13B",
+    "precision": "bf16",
+    "reference_strategy": "cached_logprobs",  <span class="cm"># Saves ~26 GB VRAM</span>
+    "beta": 0.1,
+    "learning_rate": 3e-7,
+    "lr_scheduler": "cosine",
+    "warmup_ratio": 0.1,
+    "batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 16,    <span class="cm"># Effective batch = 64</span>
+    "max_seq_length": 2048,
+    "num_epochs": 1,
+    "max_grad_norm": 1.0,
+    "optimizer": "adamw_torch",
+    "weight_decay": 0.01,
+    "gpu_setup": "4x A100-80GB, FSDP full_shard",
+    "estimated_vram_per_gpu": "~62 GB",
+    "estimated_throughput": "~800 samples/hour",
+    "notes": "Run ref logprob caching as separate job before training",
+}</div>
+      <h3>70B Parameters (e.g., Llama-2-70B)</h3>
+      <div class="pseudo-code"><span class="cm"># 70B DPO config — needs aggressive sharding + caching</span>
+config_70b = {
+    "model_size": "70B",
+    "precision": "bf16",
+    "reference_strategy": "cached_logprobs",  <span class="cm"># Mandatory at this scale</span>
+    "beta": 0.1,
+    "learning_rate": 1e-7,                     <span class="cm"># Lower LR for stability</span>
+    "lr_scheduler": "cosine",
+    "warmup_ratio": 0.1,
+    "batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 32,    <span class="cm"># Effective batch = 128</span>
+    "max_seq_length": 4096,
+    "num_epochs": 1,
+    "max_grad_norm": 0.5,                 <span class="cm"># Tighter clip for stability</span>
+    "optimizer": "adamw_torch",
+    "weight_decay": 0.01,
+    "gpu_setup": "8x H100-80GB, FSDP full_shard + activation ckpt",
+    "estimated_vram_per_gpu": "~72 GB",
+    "estimated_throughput": "~250 samples/hour",
+    "notes": [
+        "Use activation checkpointing to fit within VRAM",
+        "Gradient accumulation critical — micro-batch = 1",
+        "Consider LoRA (r=64, alpha=128) to reduce trainable params",
+        "Flash Attention 2 mandatory for acceptable throughput",
+    ],
+}</div>
+      <div class="callout">
+        <strong>LoRA with DPO:</strong> For 70B+ models, applying LoRA to the policy while keeping the base model as the implicit reference (since LoRA-adapted weights share the base) is increasingly popular. This eliminates the need for a separate reference model entirely — the reference log-probs are the base model's log-probs, and only the LoRA adapters are trained. Memory drops to ~140 GB total for a 70B model across 4 GPUs.
+      </p>
+      </div>
+
+      <h3>Full Training Loop</h3>
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> torch.optim <span class="kw">import</span> AdamW
+<span class="kw">from</span> torch.optim.lr_scheduler <span class="kw">import</span> CosineAnnealingLR
+
+<span class="kw">def</span> <span class="fn">train_dpo</span>(policy, ref_model, dataloader, config):
+    optimizer = <span class="fn">AdamW</span>(policy.<span class="fn">parameters</span>(), lr=config["learning_rate"],
+                      weight_decay=config["weight_decay"])
+    scheduler = <span class="fn">CosineAnnealingLR</span>(optimizer, T_max=<span class="fn">len</span>(dataloader))
+    scaler = torch.cuda.amp.<span class="fn">GradScaler</span>()
+
+    policy.<span class="fn">train</span>()
+    ref_model.<span class="fn">eval</span>()
+
+    <span class="kw">for</span> step, batch <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+        <span class="kw">with</span> torch.cuda.amp.<span class="fn">autocast</span>(dtype=torch.bfloat16):
+            <span class="cm"># Policy forward on both chosen and rejected</span>
+            pi_c_logps = <span class="fn">compute_sequence_logprob</span>(
+                policy(batch["chosen_ids"]).logits, batch["chosen_ids"], batch["chosen_mask"])
+            pi_r_logps = <span class="fn">compute_sequence_logprob</span>(
+                policy(batch["rejected_ids"]).logits, batch["rejected_ids"], batch["rejected_mask"])
+
+            <span class="cm"># Reference forward (no grad)</span>
+            <span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+                ref_c_logps = <span class="fn">compute_sequence_logprob</span>(
+                    ref_model(batch["chosen_ids"]).logits, batch["chosen_ids"], batch["chosen_mask"])
+                ref_r_logps = <span class="fn">compute_sequence_logprob</span>(
+                    ref_model(batch["rejected_ids"]).logits, batch["rejected_ids"], batch["rejected_mask"])
+
+            loss, metrics = <span class="fn">dpo_loss</span>(pi_c_logps, pi_r_logps, ref_c_logps, ref_r_logps, config["beta"])
+            loss = loss / config["gradient_accumulation_steps"]
+
+        scaler.<span class="fn">scale</span>(loss).<span class="fn">backward</span>()
+
+        <span class="kw">if</span> (step + 1) % config["gradient_accumulation_steps"] == 0:
+            scaler.<span class="fn">unscale_</span>(optimizer)
+            torch.nn.utils.<span class="fn">clip_grad_norm_</span>(policy.<span class="fn">parameters</span>(), config["max_grad_norm"])
+            scaler.<span class="fn">step</span>(optimizer)
+            scaler.<span class="fn">update</span>()
+            optimizer.<span class="fn">zero_grad</span>()
+            scheduler.<span class="fn">step</span>()
+
+        <span class="kw">if</span> step % 50 == 0:
+            <span class="fn">log_metrics</span>(step, loss.<span class="fn">item</span>(), metrics)</div>
+      <div class="callout warn">
+        <strong>Epoch count:</strong> DPO should almost always train for ≤ 1 epoch. Unlike SFT, repeated exposure to the same preference pairs causes rapid overfitting — the model memorizes the specific chosen/rejected pairs rather than learning the underlying preference. If you need more training signal, invest in collecting more diverse preference data rather than repeating epochs.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

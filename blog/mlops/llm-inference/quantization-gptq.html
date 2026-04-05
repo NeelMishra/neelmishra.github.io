@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into GPTQ post-training quantization: Optimal Brain Quantization, Hessian-based weight updates, INT4 quantization achieving 70B models in 35GB with minimal perplexity loss.">
+  <title>GPTQ: Post-Training INT4 | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#li-obq-foundation">OBQ Foundation</a></li>
+        <li><a href="#li-hessian-update">Hessian-Based Weight Update</a></li>
+        <li><a href="#li-gptq-algorithm">The GPTQ Algorithm</a></li>
+        <li><a href="#li-group-quantization">Group Quantization</a></li>
+        <li><a href="#li-memory-perplexity">Memory Savings &amp; Perplexity</a></li>
+        <li><a href="#li-autogptq">Running GPTQ with AutoGPTQ</a></li>
+        <li><a href="#li-limitations">Limitations &amp; Trade-offs</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>GPTQ: Post-Training INT4</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-obq-foundation">OBQ Foundation</h2>
+      <p>GPTQ (Frantar et al., 2022) builds on <strong>Optimal Brain Quantization (OBQ)</strong>, which itself extends the classic Optimal Brain Surgeon (OBS) framework. The central idea: when quantizing a weight, the quantization error can be partially compensated by adjusting the <em>remaining</em> unquantized weights in the same row.</p>
+      <p>OBQ formulates weight quantization as a constrained optimization. Given a weight matrix W ∈ ℝ<sup>d_out × d_in</sup> and calibration inputs X, the objective is to find quantized weights Ŵ that minimize the layer-wise reconstruction error:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        argmin_Ŵ ||WX - ŴX||₂²
+      </p>
+      <p>OBQ quantizes weights <em>one at a time</em>, greedily choosing the weight whose quantization introduces the least additional error. After quantizing weight w<sub>ij</sub>, it applies a closed-form update to all remaining weights in the same row to partially compensate the error.</p>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Naive round-to-nearest quantization ignores weight correlations. By using second-order information (the Hessian), we can redistribute quantization error to preserve the layer's input-output mapping far more accurately.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="li-hessian-update">Hessian-Based Weight Update</h2>
+      <p>The Hessian of the layer-wise objective with respect to weights in row i is:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        H = 2X·Xᵀ ∈ ℝ<sup>d_in × d_in</sup>
+      </p>
+      <p>This is the same Hessian for every row — it depends only on the input activations, not the weights. When we quantize weight w<sub>q</sub> at column q with quantization error δ<sub>q</sub> = quant(w<sub>q</sub>) - w<sub>q</sub>, the optimal update to the remaining weights in the same row is:</p>
+      <p style="padding:0.5rem;background:#f8f9fa;border-radius:6px;font-family:Consolas,monospace;font-size:0.88rem;">
+        δ_F = -δ_q · (H<sub>F,q</sub> / H<sub>qq</sub>)
+      </p>
+      <p>where F is the set of remaining (unquantized) column indices, H<sub>F,q</sub> is the column of the Hessian restricted to those indices, and H<sub>qq</sub> is the diagonal entry. This is the OBS weight update — a rank-1 correction that minimizes the squared error increase.</p>
+
+      <svg viewBox="0 0 750 260" style="width:100%;max-width:750px;margin:1.2rem auto;display:block" aria-label="GPTQ quantization pipeline showing column-by-column weight processing">
+        <defs>
+          <marker id="li-gptq-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+        </defs>
+        <!-- Weight matrix -->
+        <rect x="20" y="30" width="160" height="120" rx="8" fill="#f8f9fa" stroke="#ccc" stroke-width="1"/>
+        <text x="100" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#333">Weight Matrix W (one row)</text>
+        <!-- Columns: some quantized, one being processed, rest unquantized -->
+        <rect x="28" y="40" width="24" height="100" rx="3" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <text x="40" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#28a745">Q</text>
+        <rect x="56" y="40" width="24" height="100" rx="3" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <text x="68" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#28a745">Q</text>
+        <rect x="84" y="40" width="24" height="100" rx="3" fill="#fff3cd" stroke="#ffc107" stroke-width="2"/>
+        <text x="96" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#856404">w_q</text>
+        <rect x="112" y="40" width="24" height="100" rx="3" fill="#e3e8f0" stroke="#aaa" stroke-width="1"/>
+        <text x="124" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#666">F</text>
+        <rect x="140" y="40" width="24" height="100" rx="3" fill="#e3e8f0" stroke="#aaa" stroke-width="1"/>
+        <text x="152" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#666">F</text>
+        <!-- Arrow to Hessian -->
+        <line x1="190" y1="90" x2="250" y2="90" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-gptq-arrow)"/>
+        <!-- Hessian block -->
+        <rect x="260" y="30" width="150" height="120" rx="8" fill="#eaf7f2" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="335" y="55" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#0a8f6a">Hessian H = XXᵀ</text>
+        <text x="335" y="80" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">δ_q = quant(w_q) - w_q</text>
+        <text x="335" y="105" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#333">δ_F = -δ_q · H_Fq/H_qq</text>
+        <text x="335" y="130" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Compensate remaining weights</text>
+        <!-- Arrow to result -->
+        <line x1="420" y1="90" x2="480" y2="90" stroke="#0a8f6a" stroke-width="2" marker-end="url(#li-gptq-arrow)"/>
+        <!-- Updated matrix -->
+        <rect x="490" y="30" width="240" height="120" rx="8" fill="#f8f9fa" stroke="#ccc" stroke-width="1"/>
+        <text x="610" y="22" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#333">Updated Row</text>
+        <rect x="498" y="40" width="24" height="100" rx="3" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <rect x="526" y="40" width="24" height="100" rx="3" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <rect x="554" y="40" width="24" height="100" rx="3" fill="#d4edda" stroke="#28a745" stroke-width="1"/>
+        <text x="566" y="96" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#28a745">Q</text>
+        <rect x="582" y="40" width="24" height="100" rx="3" fill="#cce5ff" stroke="#007bff" stroke-width="1.5"/>
+        <text x="594" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#007bff">F+δ</text>
+        <rect x="610" y="40" width="24" height="100" rx="3" fill="#cce5ff" stroke="#007bff" stroke-width="1.5"/>
+        <text x="622" y="90" text-anchor="middle" font-family="Consolas,monospace" font-size="8" fill="#007bff">F+δ</text>
+        <text x="610" y="175" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Remaining weights adjusted to compensate</text>
+        <!-- Timeline -->
+        <line x1="20" y1="210" x2="740" y2="210" stroke="#ccc" stroke-width="1" stroke-dasharray="4"/>
+        <text x="20" y="235" font-family="Manrope,sans-serif" font-size="11" fill="#666">Process: Left-to-right column scan → quantize column → update remaining → repeat</text>
+        <text x="20" y="252" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a" font-weight="600">GPTQ key trick: Fixed column order (no greedy search) + block processing for speed</text>
+      </svg>
+
+      <!-- Section 3 -->
+      <h2 id="li-gptq-algorithm">The GPTQ Algorithm</h2>
+      <p>GPTQ makes two critical departures from OBQ to achieve tractability on billion-parameter models:</p>
+      <ol>
+        <li><strong>Fixed column ordering:</strong> Instead of greedily selecting the best column to quantize (O(d²) per step), GPTQ processes columns left-to-right. Empirically, the column order matters little because the Hessian-based compensation absorbs most of the error regardless of order.</li>
+        <li><strong>Block-wise processing:</strong> Columns are processed in blocks of B=128 columns. Within a block, updates are accumulated in registers. After the block completes, a single batched update is applied to all remaining columns. This converts O(d) memory writes per column into O(d/B) batched writes — a ~128× reduction in memory traffic.</li>
+      </ol>
+
+      <p>The full algorithm processes each layer independently with the following steps:</p>
+<pre class="pseudo-code"><span class="kw">def</span> <span class="fn">gptq_quantize_layer</span>(W, X_cal, bits=4, group_size=128, block_size=128):
+    <span class="cm">"""GPTQ: quantize one linear layer using calibration data."""</span>
+    d_row, d_col = W.shape
+    Q = torch.zeros_like(W)                   <span class="cm"># quantized output</span>
+    H = 2 * (X_cal.T @ X_cal)                 <span class="cm"># Hessian: d_col × d_col</span>
+    H += 1e-6 * torch.eye(d_col)              <span class="cm"># damping for numerical stability</span>
+    H_inv = <span class="fn">torch.linalg.cholesky_inverse</span>(torch.linalg.cholesky(H))
+
+    <span class="kw">for</span> block_start <span class="kw">in</span> range(0, d_col, block_size):
+        block_end = min(block_start + block_size, d_col)
+        W_block = W[:, block_start:block_end].clone()
+        Err = torch.zeros_like(W_block)
+        H_inv_block = H_inv[block_start:block_end, block_start:block_end]
+
+        <span class="kw">for</span> j <span class="kw">in</span> range(block_end - block_start):
+            col = block_start + j
+            w = W_block[:, j]
+            h_inv_jj = H_inv_block[j, j]
+
+            <span class="cm"># Quantize this column</span>
+            q = <span class="fn">quantize_to_int</span>(w, bits, group_size)
+            Q[:, col] = q
+            delta = (w - q) / h_inv_jj       <span class="cm"># scaled quantization error</span>
+            Err[:, j] = delta
+
+            <span class="cm"># Update remaining columns in this block</span>
+            W_block[:, j+1:] -= delta.unsqueeze(1) * H_inv_block[j, j+1:].unsqueeze(0)
+
+        <span class="cm"># Apply accumulated error to all remaining columns beyond this block</span>
+        W[:, block_end:] -= Err @ H_inv[block_start:block_end, block_end:]
+
+    <span class="kw">return</span> Q</pre>
+
+      <div class="callout">
+        <strong>Complexity:</strong> GPTQ quantizes a 175B-parameter model in approximately <strong>4 GPU-hours</strong> on a single A100, compared to OBQ which would take days. The block processing reduces the per-layer cost from O(d_col² · d_row) to O(d_col · d_row · B) memory operations.
+      </div>
+
+      <!-- Section 4 -->
+      <h2 id="li-group-quantization">Group Quantization</h2>
+      <p>Pure per-channel INT4 quantization uses one scale and zero-point per output channel (row). This works well for INT8, but at 4-bit precision the dynamic range per row is often too varied, causing large quantization errors for outlier columns.</p>
+      <p><strong>Group quantization</strong> subdivides each row into groups of <code>group_size</code> consecutive weights (typically 128), each with its own scale and zero-point. This significantly improves accuracy at minimal storage overhead.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Per-Channel (group_size = d_in)</h3>
+          <p>One scale per row. Overhead: 2 bytes per row. Quality degrades with wider layers. Perplexity penalty: +0.5–2.0 on WikiText-2 for LLaMA-7B at INT4.</p>
+        </div>
+        <div class="compare-card">
+          <h3>Group-128 (group_size = 128)</h3>
+          <p>One scale per 128 weights. Overhead: ~0.125 bits/weight extra (FP16 scale per 128 INT4 values = 16/(128×4) = 3.1% overhead). Perplexity penalty: +0.1–0.3 — nearly lossless.</p>
+        </div>
+      </div>
+
+      <p>The storage per weight with group quantization is: 4 bits (weight) + 16 bits / group_size (scale) + 16 bits / group_size (zero-point) = 4 + 32/128 = <strong>4.25 bits/weight</strong> for group_size=128. Some implementations omit the zero-point for symmetric quantization, giving 4.125 bits/weight.</p>
+
+      <!-- Section 5 -->
+      <h2 id="li-memory-perplexity">Memory Savings &amp; Perplexity</h2>
+      <p>GPTQ INT4 quantization dramatically reduces model size and memory requirements:</p>
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem">
+        <thead><tr style="border-bottom:2px solid var(--brand)">
+          <th style="text-align:left;padding:0.5rem">Model</th>
+          <th style="text-align:right;padding:0.5rem">FP16 Size</th>
+          <th style="text-align:right;padding:0.5rem">INT4 GPTQ</th>
+          <th style="text-align:right;padding:0.5rem">Compression</th>
+          <th style="text-align:right;padding:0.5rem">PPL (FP16)</th>
+          <th style="text-align:right;padding:0.5rem">PPL (INT4)</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-7B</td><td style="text-align:right;padding:0.5rem">13.5 GB</td><td style="text-align:right;padding:0.5rem">3.6 GB</td><td style="text-align:right;padding:0.5rem">3.75×</td><td style="text-align:right;padding:0.5rem">5.68</td><td style="text-align:right;padding:0.5rem">5.85</td></tr>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-13B</td><td style="text-align:right;padding:0.5rem">26 GB</td><td style="text-align:right;padding:0.5rem">6.8 GB</td><td style="text-align:right;padding:0.5rem">3.82×</td><td style="text-align:right;padding:0.5rem">5.09</td><td style="text-align:right;padding:0.5rem">5.20</td></tr>
+          <tr style="border-bottom:1px solid #eee"><td style="padding:0.5rem">LLaMA-30B</td><td style="text-align:right;padding:0.5rem">62 GB</td><td style="text-align:right;padding:0.5rem">16.2 GB</td><td style="text-align:right;padding:0.5rem">3.83×</td><td style="text-align:right;padding:0.5rem">4.10</td><td style="text-align:right;padding:0.5rem">4.20</td></tr>
+          <tr><td style="padding:0.5rem">LLaMA-65B</td><td style="text-align:right;padding:0.5rem">130 GB</td><td style="text-align:right;padding:0.5rem">33.5 GB</td><td style="text-align:right;padding:0.5rem">3.88×</td><td style="text-align:right;padding:0.5rem">3.53</td><td style="text-align:right;padding:0.5rem">3.60</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Scaling law for quantization:</strong> Larger models are more robust to quantization. The perplexity gap (INT4 vs FP16) <em>decreases</em> as model size increases. LLaMA-65B loses only 0.07 PPL at INT4, while LLaMA-7B loses 0.17. This makes GPTQ particularly effective for the largest models — exactly where memory savings matter most.
+      </div>
+
+      <p>Calibration uses only <strong>128 random samples</strong> from C4 (typically 2048 tokens each). The calibration set is used to compute the Hessian H = XXᵀ per layer. GPTQ is remarkably insensitive to the calibration data — using Wikipedia vs. C4 vs. code changes perplexity by &lt;0.05 in most cases.</p>
+
+      <!-- Section 6 -->
+      <h2 id="li-autogptq">Running GPTQ with AutoGPTQ</h2>
+      <p>AutoGPTQ provides a practical interface for GPTQ quantization with HuggingFace integration:</p>
+
+<pre class="pseudo-code"><span class="kw">from</span> auto_gptq <span class="kw">import</span> AutoGPTQForCausalLM, BaseQuantizeConfig
+<span class="kw">from</span> transformers <span class="kw">import</span> AutoTokenizer
+<span class="kw">import</span> torch
+
+model_name = <span class="fn">"meta-llama/Llama-2-70b-hf"</span>
+quant_config = <span class="fn">BaseQuantizeConfig</span>(
+    bits=4,                    <span class="cm"># 4-bit quantization</span>
+    group_size=128,            <span class="cm"># group size for sub-channel quantization</span>
+    desc_act=<span class="kw">False</span>,            <span class="cm"># True = activation ordering (slower but better)</span>
+    damp_percent=0.01,         <span class="cm"># Hessian damping: H += damp * diag(H)</span>
+    sym=<span class="kw">True</span>,                  <span class="cm"># symmetric quantization (no zero-point)</span>
+    model_seqlen=2048,         <span class="cm"># calibration sequence length</span>
+)
+
+<span class="cm"># Load model in FP16 (needs ~140GB RAM or multi-GPU)</span>
+tokenizer = <span class="fn">AutoTokenizer.from_pretrained</span>(model_name)
+model = <span class="fn">AutoGPTQForCausalLM.from_pretrained</span>(
+    model_name,
+    quant_config,
+    torch_dtype=torch.float16,
+    device_map=<span class="fn">"auto"</span>
+)
+
+<span class="cm"># Prepare calibration data: 128 samples of 2048 tokens</span>
+<span class="kw">from</span> datasets <span class="kw">import</span> load_dataset
+cal_data = <span class="fn">load_dataset</span>(<span class="fn">"allenai/c4"</span>, split=<span class="fn">"train"</span>, streaming=<span class="kw">True</span>)
+cal_texts = [sample[<span class="fn">"text"</span>] <span class="kw">for</span> _, sample <span class="kw">in</span> zip(range(128), cal_data)]
+cal_tokens = tokenizer(cal_texts, return_tensors=<span class="fn">"pt"</span>,
+                        truncation=<span class="kw">True</span>, max_length=2048, padding=<span class="kw">True</span>)
+
+<span class="cm"># Quantize: ~4 GPU-hours for 70B on single A100</span>
+model.<span class="fn">quantize</span>(cal_tokens[<span class="fn">"input_ids"</span>])
+
+<span class="cm"># Save quantized model: ~35GB instead of ~140GB</span>
+model.<span class="fn">save_quantized</span>(<span class="fn">"./llama-70b-gptq-int4"</span>)
+tokenizer.<span class="fn">save_pretrained</span>(<span class="fn">"./llama-70b-gptq-int4"</span>)
+
+<span class="cm"># Load and run inference (fits on single 48GB GPU!)</span>
+model = <span class="fn">AutoGPTQForCausalLM.from_quantized</span>(
+    <span class="fn">"./llama-70b-gptq-int4"</span>,
+    device_map=<span class="fn">"auto"</span>,
+    use_safetensors=<span class="kw">True</span>,
+    inject_fused_attention=<span class="kw">True</span>,  <span class="cm"># fused kernels for faster inference</span>
+)
+output = model.<span class="fn">generate</span>(**tokenizer(<span class="fn">"The capital of France is"</span>, return_tensors=<span class="fn">"pt"</span>))</pre>
+
+      <div class="callout warn">
+        <strong>desc_act=True (activation ordering):</strong> Processes columns in order of decreasing activation magnitude rather than left-to-right. This yields ~0.05 lower perplexity but prevents efficient fused kernel execution because the column ordering is non-sequential, reducing inference throughput by ~15–20%. Recommended only when quality is paramount.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="li-limitations">Limitations &amp; Trade-offs</h2>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Strengths</h3>
+          <ul>
+            <li>Near-lossless INT4 for large models (&gt;13B)</li>
+            <li>3.5–4× memory reduction</li>
+            <li>Fast quantization (hours, not days)</li>
+            <li>Excellent HuggingFace/vLLM ecosystem support</li>
+            <li>Needs only 128 calibration samples</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Weaknesses</h3>
+          <ul>
+            <li>Requires full FP16 model in memory during quantization</li>
+            <li>INT4 kernels are slower than FP16 on some hardware (INT4 dequant overhead)</li>
+            <li>Small models (&lt;7B) degrade more noticeably</li>
+            <li>Not easily fine-tunable after quantization</li>
+            <li>Activation ordering hurts inference speed</li>
+          </ul>
+        </div>
+      </div>
+
+      <p>GPTQ remains the most widely deployed post-training quantization method for LLMs, forming the backbone of the Hugging Face GPTQ model ecosystem with thousands of pre-quantized models available. Its combination of strong quality preservation, fast quantization time, and broad tooling support makes it the default choice for deploying large models on constrained hardware.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

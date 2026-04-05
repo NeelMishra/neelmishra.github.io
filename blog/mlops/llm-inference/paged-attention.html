@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into PagedAttention and vLLM: virtual memory analogy for KV cache, paging mechanism, fragmentation elimination, memory efficiency, and production deployment.">
+  <title>PagedAttention and vLLM | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#fragmentation-problem">The Fragmentation Problem</a></li>
+        <li><a href="#virtual-memory-analogy">Virtual Memory Analogy</a></li>
+        <li><a href="#paged-kv-cache">Paged KV Cache</a></li>
+        <li><a href="#interactive-walkthrough">Interactive: Page Allocation</a></li>
+        <li><a href="#block-table">Block Tables and Attention Kernel</a></li>
+        <li><a href="#memory-efficiency">Memory Efficiency Gains</a></li>
+        <li><a href="#advanced-features">Advanced: Sharing and Swapping</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>PagedAttention and vLLM</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="fragmentation-problem">The Fragmentation Problem</h2>
+      <p>Traditional LLM serving systems pre-allocate KV cache as contiguous memory blocks for each sequence. Since the output length is unknown at request time, systems must allocate for the <strong>maximum possible sequence length</strong>. This causes two devastating forms of memory waste:</p>
+
+      <pre class="pseudo-code"><span class="cm"># The contiguous allocation problem</span>
+<span class="cm"># System allocates for max_seq_len=2048 per sequence</span>
+
+<span class="cm"># Scenario: 3 sequences on a GPU with 10 GB KV cache budget</span>
+<span class="cm"># Per-sequence allocation: 2048 positions × 327 KB/position = 654 MB</span>
+
+seq_A: allocated=654 MB, actually_used=120 MB (184 tokens)   <span class="cm"># 82% wasted</span>
+seq_B: allocated=654 MB, actually_used=654 MB (2048 tokens)  <span class="cm"># 0% wasted</span>
+seq_C: allocated=654 MB, actually_used=45 MB  (69 tokens)    <span class="cm"># 93% wasted</span>
+
+total_allocated = 1962 MB
+total_used      = 819 MB
+<span class="cm"># Internal fragmentation: 58% of allocated KV cache is wasted!</span>
+
+<span class="cm"># External fragmentation: after seq_A finishes, its 654 MB slot</span>
+<span class="cm"># may not be reusable if a new request needs a different-sized block</span>
+<span class="cm"># Free memory gets split into unusable fragments over time</span></pre>
+
+      <div class="callout warn">
+        <strong>Real-world waste:</strong> The vLLM paper (Kwon et al., SOSP 2023) measured that existing systems waste 60–80% of KV cache memory due to fragmentation. For a server with 8×A100-80GB GPUs serving LLaMA-13B, this means ~300 GB of GPU memory is wasted on empty pre-allocated KV cache slots. PagedAttention recovers nearly all of this waste.
+      </div>
+
+      <p>There are three sources of memory waste in traditional KV cache management:</p>
+      <ul>
+        <li><strong>Internal fragmentation:</strong> Pre-allocated space beyond what a sequence actually uses (most sequences don't reach max length)</li>
+        <li><strong>External fragmentation:</strong> Free memory broken into non-contiguous chunks too small to be useful</li>
+        <li><strong>Reservation waste:</strong> Memory reserved for future tokens that may never be generated (early EOS)</li>
+      </ul>
+
+      <!-- Section 2 -->
+      <h2 id="virtual-memory-analogy">Virtual Memory Analogy</h2>
+      <p>PagedAttention borrows the core idea from operating system virtual memory. In an OS, each process sees a contiguous virtual address space, but the physical memory is divided into fixed-size pages that can be scattered anywhere in RAM. A page table maps virtual pages to physical frames.</p>
+
+      <svg id="li-vm-analogy" viewBox="0 0 720 250" style="width:100%;max-width:720px;margin:1.2rem auto;display:block">
+        <text x="360" y="18" text-anchor="middle" font-size="13" font-weight="700" font-family="Manrope" fill="#333">OS Virtual Memory → PagedAttention Analogy</text>
+
+        <!-- OS side -->
+        <rect x="20" y="35" width="320" height="200" rx="10" fill="none" stroke="#1976d2" stroke-width="1.5"/>
+        <text x="180" y="55" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#1976d2">Operating System</text>
+
+        <rect x="35" y="65" width="130" height="80" rx="6" fill="#e3f2fd"/>
+        <text x="100" y="82" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Virtual Address</text>
+        <text x="100" y="98" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">page 0 → frame 7</text>
+        <text x="100" y="112" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">page 1 → frame 2</text>
+        <text x="100" y="126" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">page 2 → frame 5</text>
+        <text x="100" y="140" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">page 3 → (not alloc)</text>
+
+        <rect x="195" y="65" width="130" height="80" rx="6" fill="#e8f5e9"/>
+        <text x="260" y="82" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Physical RAM</text>
+        <text x="260" y="98" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">frame 2: [data]</text>
+        <text x="260" y="112" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">frame 5: [data]</text>
+        <text x="260" y="126" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">frame 7: [data]</text>
+        <text x="260" y="140" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">others: free</text>
+
+        <text x="100" y="170" text-anchor="middle" font-size="9" font-family="Manrope" fill="#1976d2">Contiguous virtual view</text>
+        <text x="260" y="170" text-anchor="middle" font-size="9" font-family="Manrope" fill="#0a8f6a">Non-contiguous physical</text>
+        <text x="180" y="195" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Page table maps virtual → physical</text>
+        <text x="180" y="210" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Pages allocated on demand</text>
+        <text x="180" y="225" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">No external fragmentation</text>
+
+        <!-- Arrow -->
+        <text x="370" y="135" text-anchor="middle" font-size="24" fill="#999">→</text>
+
+        <!-- PagedAttention side -->
+        <rect x="400" y="35" width="305" height="200" rx="10" fill="none" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="552" y="55" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">PagedAttention</text>
+
+        <rect x="415" y="65" width="130" height="80" rx="6" fill="#fff3e0"/>
+        <text x="480" y="82" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Logical KV Cache</text>
+        <text x="480" y="98" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">block 0 → phys 3</text>
+        <text x="480" y="112" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">block 1 → phys 9</text>
+        <text x="480" y="126" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">block 2 → phys 1</text>
+        <text x="480" y="140" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">block 3 → (on demand)</text>
+
+        <rect x="565" y="65" width="125" height="80" rx="6" fill="#f3e5f5"/>
+        <text x="627" y="82" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">GPU KV Memory</text>
+        <text x="627" y="98" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">phys 1: [KV data]</text>
+        <text x="627" y="112" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">phys 3: [KV data]</text>
+        <text x="627" y="126" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">phys 9: [KV data]</text>
+        <text x="627" y="140" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">others: free pool</text>
+
+        <text x="480" y="170" text-anchor="middle" font-size="9" font-family="Manrope" fill="#ff6b35">Sequence sees contiguous</text>
+        <text x="627" y="170" text-anchor="middle" font-size="9" font-family="Manrope" fill="#7b1fa2">Blocks scattered in GPU</text>
+        <text x="552" y="195" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Block table maps logical → physical</text>
+        <text x="552" y="210" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Blocks allocated on demand (no waste)</text>
+        <text x="552" y="225" text-anchor="middle" font-size="9" font-family="Manrope" fill="#666">Near-zero fragmentation</text>
+      </svg>
+
+      <!-- Section 3 -->
+      <h2 id="paged-kv-cache">Paged KV Cache</h2>
+      <p>In PagedAttention, KV cache memory is divided into fixed-size <strong>blocks</strong> (pages). Each block holds KV data for a fixed number of tokens (typically 16). Blocks are allocated from a free pool on demand—one at a time—as the sequence generates more tokens.</p>
+
+      <pre class="pseudo-code"><span class="cm"># PagedAttention data structures</span>
+BLOCK_SIZE = 16   <span class="cm"># tokens per block (typical: 16 or 32)</span>
+
+<span class="kw">class</span> <span class="fn">KVBlock</span>:
+    <span class="cm">"""One physical block of KV cache in GPU memory."""</span>
+    <span class="cm"># Stores K and V for BLOCK_SIZE tokens, for ALL layers and heads</span>
+    <span class="cm"># Shape per tensor: [num_layers, num_kv_heads, BLOCK_SIZE, head_dim]</span>
+    <span class="cm"># Memory: 2 × 80 × 8 × 16 × 128 × 2 bytes = 5.24 MB per block (70B)</span>
+    k: Tensor  <span class="cm"># [layers, kv_heads, block_size, head_dim]</span>
+    v: Tensor
+    ref_count: <span class="kw">int</span> = 0   <span class="cm"># for copy-on-write sharing</span>
+
+<span class="kw">class</span> <span class="fn">BlockAllocator</span>:
+    <span class="cm">"""Manages a pool of physical KV blocks on GPU."""</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, num_blocks):
+        self.free_blocks = <span class="fn">deque</span>(<span class="fn">range</span>(num_blocks))
+        self.blocks = [<span class="fn">KVBlock</span>() <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(num_blocks)]
+    
+    <span class="kw">def</span> <span class="fn">allocate</span>(self) -> <span class="kw">int</span>:
+        <span class="kw">if not</span> self.free_blocks:
+            <span class="kw">raise</span> <span class="fn">OutOfMemoryError</span>("No free KV blocks")
+        <span class="kw">return</span> self.free_blocks.<span class="fn">popleft</span>()
+    
+    <span class="kw">def</span> <span class="fn">free</span>(self, block_id):
+        self.blocks[block_id].ref_count -= 1
+        <span class="kw">if</span> self.blocks[block_id].ref_count == 0:
+            self.free_blocks.<span class="fn">append</span>(block_id)
+
+<span class="kw">class</span> <span class="fn">SequenceState</span>:
+    <span class="cm">"""Per-sequence metadata: logical → physical block mapping."""</span>
+    block_table: List[<span class="kw">int</span>]  <span class="cm"># block_table[i] = physical block ID for logical block i</span>
+    num_tokens: <span class="kw">int</span>          <span class="cm"># current sequence length</span>
+
+    <span class="kw">def</span> <span class="fn">append_token</span>(self, allocator):
+        <span class="cm"># Check if current last block is full</span>
+        <span class="kw">if</span> self.num_tokens % BLOCK_SIZE == 0:
+            <span class="cm"># Need a new block!</span>
+            new_block = allocator.<span class="fn">allocate</span>()
+            self.block_table.<span class="fn">append</span>(new_block)
+        self.num_tokens += 1</pre>
+
+      <div class="callout">
+        <strong>On-demand allocation:</strong> A sequence that generates 50 tokens only uses ceil(50/16) = 4 blocks. At 5.24 MB per block (LLaMA-70B), that's 21 MB—versus 654 MB for a pre-allocated 2048-token contiguous cache. The last block may have some internal waste (up to BLOCK_SIZE−1 = 15 tokens), but this is negligible: worst case is &lt;5% waste with block size 16, compared to 60–80% with contiguous allocation.
+      </div>
+
+      <!-- Section 4: Interactive -->
+      <h2 id="interactive-walkthrough">Interactive: Page Allocation Walkthrough</h2>
+      <p>Step through the animation below to see how PagedAttention allocates physical memory blocks on demand as sequences generate tokens, and frees blocks when sequences complete.</p>
+
+      <svg id="li-paged-anim" viewBox="0 0 720 340" style="width:100%;max-width:720px;margin:1rem auto;display:block;border:1px solid #e0e0e0;border-radius:12px;background:#fafafa">
+        <!-- Physical memory pool -->
+        <text x="20" y="22" font-size="11" font-weight="600" font-family="Manrope" fill="#333">Physical Block Pool (GPU Memory)</text>
+        <rect id="li-pb0" x="20" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb0-t" x="57" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 0</text>
+        <rect id="li-pb1" x="105" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb1-t" x="142" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 1</text>
+        <rect id="li-pb2" x="190" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb2-t" x="227" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 2</text>
+        <rect id="li-pb3" x="275" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb3-t" x="312" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 3</text>
+        <rect id="li-pb4" x="360" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb4-t" x="397" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 4</text>
+        <rect id="li-pb5" x="445" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb5-t" x="482" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 5</text>
+        <rect id="li-pb6" x="530" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb6-t" x="567" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 6</text>
+        <rect id="li-pb7" x="615" y="30" width="75" height="36" rx="5" fill="#e0e0e0" stroke="#bbb" stroke-width="1"/>
+        <text id="li-pb7-t" x="652" y="52" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999">Block 7</text>
+
+        <!-- Sequence A -->
+        <text x="20" y="100" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">Seq A — Block Table</text>
+        <rect id="li-sa0" x="20" y="108" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sa0-t" x="55" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <rect id="li-sa1" x="100" y="108" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sa1-t" x="135" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <rect id="li-sa2" x="180" y="108" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sa2-t" x="215" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <text id="li-sa-info" x="280" y="128" font-size="9" font-family="Manrope" fill="#666"></text>
+
+        <!-- Sequence B -->
+        <text x="20" y="168" font-size="11" font-weight="600" font-family="Manrope" fill="#1976d2">Seq B — Block Table</text>
+        <rect id="li-sb0" x="20" y="176" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sb0-t" x="55" y="196" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <rect id="li-sb1" x="100" y="176" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sb1-t" x="135" y="196" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <rect id="li-sb2" x="180" y="176" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sb2-t" x="215" y="196" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <text id="li-sb-info" x="280" y="196" font-size="9" font-family="Manrope" fill="#666"></text>
+
+        <!-- Sequence C -->
+        <text x="20" y="236" font-size="11" font-weight="600" font-family="Manrope" fill="#7b1fa2">Seq C — Block Table</text>
+        <rect id="li-sc0" x="20" y="244" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sc0-t" x="55" y="264" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <rect id="li-sc1" x="100" y="244" width="70" height="30" rx="5" fill="#fff" stroke="#ccc" stroke-width="1" opacity="0.3"/>
+        <text id="li-sc1-t" x="135" y="264" text-anchor="middle" font-size="9" font-family="Consolas" fill="#999" opacity="0.3">—</text>
+        <text id="li-sc-info" x="200" y="264" font-size="9" font-family="Manrope" fill="#666"></text>
+
+        <!-- Stats -->
+        <text id="li-pa-stats" x="20" y="305" font-size="10" font-family="Consolas" fill="#666">Free blocks: 8/8 | Waste: 0%</text>
+        <text id="li-pa-util" x="20" y="322" font-size="10" font-family="Consolas" fill="#666">Sequences active: 0</text>
+      </svg>
+
+      <div class="step-controls">
+        <button id="li-pa-prev">&#8592; Prev</button>
+        <button id="li-pa-next">Next &#8594;</button>
+        <span class="step-label" id="li-pa-label">Step 1 / 7</span>
+      </div>
+      <div class="step-controls">
+        <div class="step-desc" id="li-pa-desc">Click Next to see PagedAttention in action.</div>
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="block-table">Block Tables and Attention Kernel</h2>
+      <p>The block table is the core data structure enabling PagedAttention. It's a simple array per sequence: <code>block_table[i]</code> maps logical block <em>i</em> to a physical block ID. The custom attention kernel uses this mapping to gather KV data from scattered physical blocks during the attention computation.</p>
+
+      <pre class="pseudo-code"><span class="cm"># PagedAttention kernel (simplified)</span>
+<span class="kw">def</span> <span class="fn">paged_attention</span>(query, key_cache, value_cache, block_tables, context_lens):
+    <span class="cm">"""
+    query:        [batch, 1, num_heads, head_dim]     (current token)
+    key_cache:    [num_blocks, kv_heads, block_size, head_dim]  (all physical blocks)
+    value_cache:  [num_blocks, kv_heads, block_size, head_dim]
+    block_tables: [batch, max_blocks_per_seq]          (logical → physical mapping)
+    context_lens: [batch]                              (current sequence lengths)
+    """</span>
+    output = <span class="fn">torch.zeros_like</span>(query)
+    
+    <span class="kw">for</span> b <span class="kw">in</span> <span class="fn">range</span>(batch_size):                  <span class="cm"># parallel in GPU</span>
+        seq_len = context_lens[b]
+        num_blocks = <span class="fn">ceil</span>(seq_len / BLOCK_SIZE)
+        
+        <span class="kw">for</span> block_idx <span class="kw">in</span> <span class="fn">range</span>(num_blocks):        <span class="cm"># parallel in GPU</span>
+            <span class="cm"># Look up physical block from block table</span>
+            phys_block = block_tables[b][block_idx]
+            
+            <span class="cm"># Fetch K, V from the physical block</span>
+            k_block = key_cache[phys_block]        <span class="cm"># [kv_heads, block_size, head_dim]</span>
+            v_block = value_cache[phys_block]
+            
+            <span class="cm"># Compute partial attention scores for this block</span>
+            scores = query[b] @ k_block.<span class="fn">transpose</span>(-1, -2)  <span class="cm"># [heads, 1, block_size]</span>
+            
+            <span class="cm"># Accumulate using online softmax (log-sum-exp trick)</span>
+            <span class="cm"># Avoids materializing the full attention matrix</span>
+            output[b] = <span class="fn">online_softmax_update</span>(output[b], scores, v_block)
+    
+    <span class="kw">return</span> output
+
+<span class="cm"># The kernel iterates over blocks, not individual tokens</span>
+<span class="cm"># Each block is fetched via one pointer lookup → minimal overhead</span>
+<span class="cm"># Block-level computation enables efficient GPU parallelism</span></pre>
+
+      <div class="callout">
+        <strong>Overhead is minimal:</strong> The indirection through block tables adds only ~5% overhead compared to contiguous attention. Each block table lookup is a single integer index. The blocks are stored contiguously <em>within</em> each block (16 consecutive tokens), so GPU memory access is still coalesced within a block. The gain in memory efficiency (2–4× more sequences served) vastly outweighs this small overhead.
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="memory-efficiency">Memory Efficiency Gains</h2>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>🔴 Contiguous Allocation</h3>
+          <ul>
+            <li><strong>Pre-allocate:</strong> max_seq_len per sequence</li>
+            <li><strong>Internal fragmentation:</strong> 60–80% (typical)</li>
+            <li><strong>External fragmentation:</strong> Grows over time</li>
+            <li><strong>Memory utilization:</strong> 20–38%</li>
+            <li><strong>Max batch size (70B, 480GB KV budget, seq=4096):</strong> ~146 sequences (allocated) but only ~55 effectively used</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>🟢 PagedAttention</h3>
+          <ul>
+            <li><strong>Allocate:</strong> One block at a time, on demand</li>
+            <li><strong>Internal fragmentation:</strong> &lt;4% (last block only)</li>
+            <li><strong>External fragmentation:</strong> Zero (any free block fits)</li>
+            <li><strong>Memory utilization:</strong> &gt;96%</li>
+            <li><strong>Max batch size (70B, 480GB KV budget, seq=4096):</strong> ~366 sequences (nearly 100% of theoretical max)</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm"># Memory efficiency comparison (LLaMA-70B GQA, 480 GB KV budget)</span>
+
+<span class="cm"># Contiguous allocation (pessimistic: allocate for max_seq_len=4096)</span>
+per_seq_allocated = 2 × 80 × 8 × 128 × 4096 × 2       <span class="cm"># = 1.34 GB</span>
+max_seqs_contiguous = 480 / 1.34                         <span class="cm"># = 358 sequences</span>
+<span class="cm"># But average utilization only 35% → effective sequences ≈ 125</span>
+
+<span class="cm"># PagedAttention (allocate only for actual tokens used, avg 1500 tok)</span>
+per_seq_actual = 2 × 80 × 8 × 128 × 1500 × 2           <span class="cm"># = 0.49 GB</span>
+max_seqs_paged = 480 / 0.49                              <span class="cm"># = 979 sequences!</span>
+<span class="cm"># Plus ~4% waste in last blocks → ~940 effective sequences</span>
+
+<span class="cm"># Result: 2.6× more concurrent sequences with PagedAttention</span>
+<span class="cm"># At same average seq length, 7.5× more effective sequences</span>
+
+<span class="cm"># vLLM benchmark result (LLaMA-13B, A100-40GB):</span>
+<span class="cm"># - Contiguous: max 8 concurrent sequences</span>
+<span class="cm"># - PagedAttention: max 20+ concurrent sequences (2.5×)</span>
+<span class="cm"># - Combined with continuous batching: 14-24× throughput improvement</span></pre>
+
+      <!-- Section 7 -->
+      <h2 id="advanced-features">Advanced: Sharing and Swapping</h2>
+      <p>PagedAttention's block-based architecture enables two powerful advanced features that are impossible with contiguous allocation:</p>
+
+      <p><strong>1. Copy-on-Write Block Sharing (Parallel Sampling / Beam Search):</strong></p>
+      <pre class="pseudo-code"><span class="cm"># Parallel sampling: generate N completions for one prompt</span>
+<span class="cm"># With contiguous allocation: N copies of the prompt's KV cache</span>
+<span class="cm"># With PagedAttention: N sequences SHARE the same physical blocks</span>
+
+<span class="kw">def</span> <span class="fn">fork_sequence</span>(parent_seq, allocator):
+    <span class="cm">"""Create a new sequence sharing the parent's KV cache blocks."""</span>
+    child = <span class="fn">SequenceState</span>()
+    <span class="cm"># Share all physical blocks (just copy the block table)</span>
+    child.block_table = parent_seq.block_table.<span class="fn">copy</span>()
+    <span class="cm"># Increment ref counts</span>
+    <span class="kw">for</span> phys_id <span class="kw">in</span> child.block_table:
+        allocator.blocks[phys_id].ref_count += 1
+    <span class="kw">return</span> child
+
+<span class="cm"># When child diverges (generates different tokens):</span>
+<span class="kw">def</span> <span class="fn">copy_on_write</span>(seq, block_idx, allocator):
+    <span class="cm">"""Copy block only when modified, if shared."""</span>
+    phys_id = seq.block_table[block_idx]
+    <span class="kw">if</span> allocator.blocks[phys_id].ref_count > 1:
+        new_block = allocator.<span class="fn">allocate</span>()
+        <span class="fn">gpu_memcpy</span>(new_block, phys_id)      <span class="cm"># copy data</span>
+        allocator.blocks[phys_id].ref_count -= 1
+        seq.block_table[block_idx] = new_block  <span class="cm"># point to copy</span>
+
+<span class="cm"># Memory savings for parallel sampling (N=4, prompt=2048 tokens):</span>
+<span class="cm"># Contiguous: 4 × 0.66 GB = 2.64 GB</span>
+<span class="cm"># PagedAttention: 0.66 GB shared + 4 × (divergent blocks only)</span>
+<span class="cm"># If avg divergence is 100 tokens: 0.66 + 4 × 0.03 = 0.78 GB (3.4× savings)</span></pre>
+
+      <p><strong>2. KV Cache Swapping (Preemption Support):</strong></p>
+      <pre class="pseudo-code"><span class="cm"># When GPU memory is full but a high-priority request arrives:</span>
+<span class="cm"># PagedAttention can swap blocks to CPU memory</span>
+
+<span class="kw">class</span> <span class="fn">BlockSwapper</span>:
+    <span class="kw">def</span> <span class="fn">swap_out</span>(self, sequence, gpu_allocator, cpu_allocator):
+        <span class="cm">"""Move sequence's KV blocks from GPU to CPU."""</span>
+        cpu_block_table = []
+        <span class="kw">for</span> gpu_block_id <span class="kw">in</span> sequence.block_table:
+            cpu_block = cpu_allocator.<span class="fn">allocate</span>()
+            <span class="fn">async_d2h_copy</span>(cpu_block, gpu_block_id)  <span class="cm"># GPU → CPU async</span>
+            gpu_allocator.<span class="fn">free</span>(gpu_block_id)
+            cpu_block_table.<span class="fn">append</span>(cpu_block)
+        sequence.block_table = cpu_block_table
+        sequence.on_gpu = <span class="kw">False</span>
+    
+    <span class="kw">def</span> <span class="fn">swap_in</span>(self, sequence, gpu_allocator, cpu_allocator):
+        <span class="cm">"""Move sequence's KV blocks from CPU back to GPU."""</span>
+        gpu_block_table = []
+        <span class="kw">for</span> cpu_block_id <span class="kw">in</span> sequence.block_table:
+            gpu_block = gpu_allocator.<span class="fn">allocate</span>()
+            <span class="fn">async_h2d_copy</span>(gpu_block, cpu_block_id)  <span class="cm"># CPU → GPU async</span>
+            cpu_allocator.<span class="fn">free</span>(cpu_block_id)
+            gpu_block_table.<span class="fn">append</span>(gpu_block)
+        sequence.block_table = gpu_block_table
+        sequence.on_gpu = <span class="kw">True</span>
+
+<span class="cm"># Swap granularity is per-block → can partially swap sequences</span>
+<span class="cm"># PCIe 4.0 x16: 32 GB/s → swapping 500 MB takes ~16ms</span>
+<span class="cm"># Better than recomputing from scratch for long sequences!</span></pre>
+
+      <div class="callout">
+        <strong>vLLM in production:</strong> vLLM combines PagedAttention with continuous batching, prefix caching, tensor parallelism, and speculative decoding into a production-ready serving engine. As of 2024, it's the most widely deployed open-source LLM serving system, used by organizations ranging from startups to large tech companies. The key insight—treating KV cache memory like OS virtual memory—eliminated the largest source of waste in LLM serving and enabled 2–4× more sequences per GPU.
+      </div>
+
+      <p>PagedAttention is now implemented in virtually every major serving framework: vLLM (original), TensorRT-LLM (NVIDIA), TGI (HuggingFace), and SGLang. It's the foundation that makes large-scale LLM serving economically viable.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script>
+  (function(){
+    var steps = [
+      {
+        phys:[0,0,0,0,0,0,0,0], physLabels:['Free','Free','Free','Free','Free','Free','Free','Free'],
+        seqA:[0,0,0], seqALabels:['—','—','—'], seqAInfo:'',
+        seqB:[0,0,0], seqBLabels:['—','—','—'], seqBInfo:'',
+        seqC:[0,0],   seqCLabels:['—','—'],     seqCInfo:'',
+        stats:'Free blocks: 8/8 | Waste: 0%', util:'Sequences active: 0',
+        desc:'<strong>Initial state:</strong> The GPU has 8 physical KV blocks in a free pool. Each block holds KV data for 16 tokens across all layers. No sequences are active yet. Total KV capacity: 8 × 16 = 128 token positions.'
+      },
+      {
+        phys:[1,1,0,0,0,0,0,0], physLabels:['Seq A','Seq A','Free','Free','Free','Free','Free','Free'],
+        seqA:[1,1,0], seqALabels:['→ Phys 0','→ Phys 1','—'], seqAInfo:'24 tokens (2 blocks, 8 slots wasted in last block)',
+        seqB:[0,0,0], seqBLabels:['—','—','—'], seqBInfo:'',
+        seqC:[0,0],   seqCLabels:['—','—'],     seqCInfo:'',
+        stats:'Free blocks: 6/8 | Waste: 4% (last block)', util:'Sequences active: 1 (Seq A)',
+        desc:'<strong>Seq A arrives</strong> with a 24-token prompt. The allocator gives it 2 physical blocks (0 and 1). Block 0 holds tokens 0–15, block 1 holds tokens 16–23 (8 empty slots). Only 2 blocks used — not the maximum 256 blocks that contiguous allocation would require.'
+      },
+      {
+        phys:[1,1,2,2,2,0,0,0], physLabels:['Seq A','Seq A','Seq B','Seq B','Seq B','Free','Free','Free'],
+        seqA:[1,1,0], seqALabels:['→ Phys 0','→ Phys 1','—'], seqAInfo:'30 tokens (2 blocks)',
+        seqB:[1,1,1], seqBLabels:['→ Phys 2','→ Phys 3','→ Phys 4'], seqBInfo:'40 tokens (3 blocks)',
+        seqC:[0,0],   seqCLabels:['—','—'],     seqCInfo:'',
+        stats:'Free blocks: 3/8 | Waste: 3%', util:'Sequences active: 2 (A generating, B prefilled)',
+        desc:'<strong>Seq B arrives</strong> with a 40-token prompt. It gets 3 physical blocks (2, 3, 4). Note: blocks are non-contiguous in the pool — block 2 follows A\'s block 1, but that\'s fine! The block table handles the mapping. A has generated 6 more tokens (now 30 total, still fits in 2 blocks).'
+      },
+      {
+        phys:[1,1,2,2,2,3,0,0], physLabels:['Seq A','Seq A','Seq B','Seq B','Seq B','Seq C','Free','Free'],
+        seqA:[1,1,0], seqALabels:['→ Phys 0','→ Phys 1','—'], seqAInfo:'32 tokens (2 blocks, exactly full)',
+        seqB:[1,1,1], seqBLabels:['→ Phys 2','→ Phys 3','→ Phys 4'], seqBInfo:'44 tokens (3 blocks)',
+        seqC:[1,0],   seqCLabels:['→ Phys 5','—'],     seqCInfo:'10 tokens (1 block)',
+        stats:'Free blocks: 2/8 | Waste: 5%', util:'Sequences active: 3',
+        desc:'<strong>Seq C arrives</strong> with a 10-token prompt. Gets 1 block (phys 5). Meanwhile, A has 32 tokens (2 full blocks — no waste at all!) and B has 44 tokens. Three sequences share the same physical pool with near-zero fragmentation.'
+      },
+      {
+        phys:[0,0,2,2,2,3,0,0], physLabels:['Free!','Free!','Seq B','Seq B','Seq B','Seq C','Free','Free'],
+        seqA:[0,0,0], seqALabels:['freed','freed','—'], seqAInfo:'COMPLETED — blocks returned to pool',
+        seqB:[1,1,1], seqBLabels:['→ Phys 2','→ Phys 3','→ Phys 4'], seqBInfo:'48 tokens (3 blocks, EOS soon)',
+        seqC:[1,1],   seqCLabels:['→ Phys 5','→ Phys 6'], seqCInfo:'20 tokens (2 blocks)',
+        stats:'Free blocks: 4/8 | Waste: 3%', util:'Sequences active: 2 (A completed!)',
+        desc:'<strong>Seq A completes!</strong> Its 2 blocks (phys 0, 1) are immediately returned to the free pool. No waiting for other sequences. C has grown to 20 tokens and got a second block (phys 6). In static batching, A\'s memory would be trapped until the entire batch finishes.'
+      },
+      {
+        phys:[4,0,2,2,2,3,3,0], physLabels:['Seq D','Free','Seq B','Seq B','Seq B','Seq C','Seq C','Free'],
+        seqA:[0,0,0], seqALabels:['—','—','—'], seqAInfo:'',
+        seqB:[1,1,1], seqBLabels:['→ Phys 2','→ Phys 3','→ Phys 4'], seqBInfo:'48 tokens (EOS reached!)',
+        seqC:[1,1],   seqCLabels:['→ Phys 5','→ Phys 6'], seqCInfo:'25 tokens (2 blocks)',
+        stats:'Free blocks: 2/8 | Waste: 4%', util:'Sequences active: 3 (D new, B finishing)',
+        desc:'<strong>Seq D arrives</strong> immediately into A\'s freed slot, getting phys block 0. Meanwhile B hits EOS. The freed blocks from A were reused <em>within the same iteration</em> — this is the power of PagedAttention + continuous batching together. Any free block can serve any sequence.'
+      },
+      {
+        phys:[4,4,0,0,0,3,3,0], physLabels:['Seq D','Seq D','Free!','Free!','Free!','Seq C','Seq C','Free'],
+        seqA:[0,0,0], seqALabels:['—','—','—'], seqAInfo:'',
+        seqB:[0,0,0], seqBLabels:['freed','freed','freed'], seqBInfo:'COMPLETED — 3 blocks freed',
+        seqC:[1,1],   seqCLabels:['→ Phys 5','→ Phys 6'], seqCInfo:'30 tokens (done)',
+        stats:'Free blocks: 4/8 | Waste: <4%', util:'Sequences active: 2 (D growing, C wrapping up)',
+        desc:'<strong>Seq B completes,</strong> freeing 3 blocks (phys 2, 3, 4) back to the pool. D has grown into a second block (phys 1). The pool now has 4 free blocks ready for new sequences. <strong>Key takeaway:</strong> Blocks are allocated on demand, freed immediately, and reused by any sequence. Internal fragmentation is limited to the last block per sequence (<4%). External fragmentation is zero.'
+      }
+    ];
+
+    var cur = 0;
+    var prevBtn = document.getElementById('li-pa-prev');
+    var nextBtn = document.getElementById('li-pa-next');
+    var label = document.getElementById('li-pa-label');
+    var descEl = document.getElementById('li-pa-desc');
+    var physColors = {0:'#e0e0e0', 1:'#c8e6c9', 2:'#bbdefb', 3:'#e1bee7', 4:'#ffe0b2'};
+    var physStrokes = {0:'#bbb', 1:'#0a8f6a', 2:'#1976d2', 3:'#7b1fa2', 4:'#ff6b35'};
+    var textColors = {0:'#999', 1:'#333', 2:'#333', 3:'#333', 4:'#333'};
+
+    function render(){
+      var s = steps[cur];
+      label.textContent = 'Step '+(cur+1)+' / '+steps.length;
+      descEl.innerHTML = s.desc;
+      for(var i=0;i<8;i++){
+        var r = document.getElementById('li-pb'+i);
+        var t = document.getElementById('li-pb'+i+'-t');
+        var c = s.phys[i];
+        r.setAttribute('fill', physColors[c]||'#e0e0e0');
+        r.setAttribute('stroke', physStrokes[c]||'#bbb');
+        t.textContent = s.physLabels[i];
+        t.setAttribute('fill', textColors[c]||'#999');
+      }
+      var seqSlots = [
+        {prefix:'li-sa', data:s.seqA, labels:s.seqALabels, info:s.seqAInfo},
+        {prefix:'li-sb', data:s.seqB, labels:s.seqBLabels, info:s.seqBInfo},
+        {prefix:'li-sc', data:s.seqC, labels:s.seqCLabels, info:s.seqCInfo}
+      ];
+      for(var si=0;si<seqSlots.length;si++){
+        var slot = seqSlots[si];
+        for(var j=0;j<slot.data.length;j++){
+          var rect = document.getElementById(slot.prefix+j);
+          var txt = document.getElementById(slot.prefix+j+'-t');
+          if(rect && txt){
+            if(slot.data[j]){
+              rect.setAttribute('opacity','1');
+              rect.setAttribute('fill', si===0?'#c8e6c9':si===1?'#bbdefb':'#e1bee7');
+              rect.setAttribute('stroke', si===0?'#0a8f6a':si===1?'#1976d2':'#7b1fa2');
+              txt.setAttribute('opacity','1');
+              txt.setAttribute('fill','#333');
+            } else {
+              rect.setAttribute('opacity','0.3');
+              rect.setAttribute('fill','#fff');
+              rect.setAttribute('stroke','#ccc');
+              txt.setAttribute('opacity','0.3');
+              txt.setAttribute('fill','#999');
+            }
+            txt.textContent = slot.labels[j];
+          }
+        }
+        var infoEl = document.getElementById(slot.prefix.replace('li-s','li-s')+'-info');
+        if(infoEl) infoEl.textContent = slot.info;
+      }
+      document.getElementById('li-pa-stats').textContent = s.stats;
+      document.getElementById('li-pa-util').textContent = s.util;
+    }
+    prevBtn.onclick = function(){ if(cur>0){cur--;render();} };
+    nextBtn.onclick = function(){ if(cur<steps.length-1){cur++;render();} };
+    render();
+  })();
+  </script>
+</body>
+</html>

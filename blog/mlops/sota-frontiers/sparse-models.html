@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into sparse models — activation sparsity in FFN layers, ReLU vs SwiGLU sparsity patterns, top-k activation selection, PowerInfer heterogeneous inference, Mixture-of-Depths, early exit strategies, structured vs unstructured sparsity, and hardware-aware sparse inference.">
+  <title>Sparse Models: Activation Sparsity, Conditional Compute | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#sf-activation-sparsity">Activation Sparsity in FFN Layers</a></li>
+        <li><a href="#sf-relu-vs-swiglu">ReLU vs SwiGLU Sparsity Patterns</a></li>
+        <li><a href="#sf-topk-activation">Top-K Activation Selection</a></li>
+        <li><a href="#sf-predictive-sparsity">Predictive Sparsity: DejaVu &amp; PowerInfer</a></li>
+        <li><a href="#sf-mixture-of-depths">Mixture-of-Depths &amp; Early Exit</a></li>
+        <li><a href="#sf-structured-unstructured">Structured vs Unstructured Sparsity</a></li>
+        <li><a href="#sf-hardware-support">Hardware Support &amp; Sparse Tensor Cores</a></li>
+        <li><a href="#sf-speedup-benchmarks">Inference Speedup Benchmarks</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Sparse Models: Activation Sparsity, Conditional Compute</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">SOTA &amp; Frontiers</span>
+        </div>
+      </div>
+
+      <!-- ============ Section 1: Activation Sparsity ============ -->
+      <h2 id="sf-activation-sparsity">Activation Sparsity in FFN Layers</h2>
+      <p>A striking empirical observation: in transformer feed-forward networks (FFN), a large fraction of neurons produce <strong>near-zero activations</strong> for any given input token. In ReLU-based models, 90–95% of intermediate activations are exactly zero. Even in models using GELU or SwiGLU, 70–85% of activations fall below negligible thresholds. This <strong>activation sparsity</strong> is distinct from weight sparsity (pruning) — the weights are dense, but the computation graph is dynamically sparse at runtime.</p>
+
+      <p>The core idea behind sparse inference: if most FFN neurons contribute nothing to a given token, we can <strong>skip their computation entirely</strong> and still recover the same (or nearly the same) output. This turns a dense O(d·d_ff) matmul into a sparse operation touching only k active neurons out of d_ff total.</p>
+
+      <!-- SVG: Dense vs Sparse Activation Patterns -->
+      <svg viewBox="0 0 720 300" style="width:100%;max-width:720px;margin:1.2rem auto;display:block" aria-label="Dense vs sparse activation patterns in FFN layers">
+        <defs>
+          <linearGradient id="sparseGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0.03"/>
+          </linearGradient>
+        </defs>
+        <!-- Dense side -->
+        <rect x="10" y="10" width="340" height="280" rx="12" fill="#fafafa" stroke="#ddd"/>
+        <text x="180" y="36" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#333">Dense Forward Pass</text>
+        <text x="180" y="54" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">All d_ff neurons computed</text>
+        <!-- Dense neurons grid -->
+        <g transform="translate(30,68)">
+          <rect x="0" y="0" width="300" height="100" rx="6" fill="url(#sparseGrad)" stroke="#ccc" stroke-dasharray="4"/>
+          <text x="150" y="-6" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#666">FFN intermediate (d_ff = 11008)</text>
+          <!-- Active neurons (all colored) -->
+          <rect x="4" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/><rect x="18" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/>
+          <rect x="32" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/><rect x="46" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <rect x="60" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="74" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/>
+          <rect x="88" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.4"/><rect x="102" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="116" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/><rect x="130" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/>
+          <rect x="144" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/><rect x="158" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/>
+          <rect x="172" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.3"/><rect x="186" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="200" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="214" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/>
+          <rect x="228" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/><rect x="242" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <rect x="256" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/><rect x="270" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/>
+          <!-- Row 2 -->
+          <rect x="4" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="18" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <rect x="32" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/><rect x="46" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/>
+          <rect x="60" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.4"/><rect x="74" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="88" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="102" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <rect x="116" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/><rect x="130" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/>
+          <rect x="144" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.3"/><rect x="158" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="172" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="186" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <rect x="200" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/><rect x="214" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.6"/>
+          <rect x="228" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.4"/><rect x="242" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="256" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="270" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.5"/>
+          <text x="150" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="700">100% neurons computed</text>
+          <text x="150" y="74" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#888">FLOPs: 2 × d × d_ff</text>
+        </g>
+        <text x="180" y="200" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#cc3333" font-weight="600">⚡ ~22 GFLOPs per token (LLaMA-7B)</text>
+        <rect x="50" y="215" width="260" height="60" rx="8" fill="none" stroke="#ddd" stroke-dasharray="4"/>
+        <text x="180" y="235" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Memory bandwidth bottleneck:</text>
+        <text x="180" y="252" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#cc3333">W_up(4096×11008) + W_down(11008×4096)</text>
+        <text x="180" y="268" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#888">~86 MB per layer in FP16</text>
+
+        <!-- Sparse side -->
+        <rect x="370" y="10" width="340" height="280" rx="12" fill="#f0faf6" stroke="#0a8f6a" stroke-opacity="0.3"/>
+        <text x="540" y="36" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Sparse Forward Pass</text>
+        <text x="540" y="54" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#888">Only top-k neurons computed</text>
+        <!-- Sparse neurons grid (mostly gray, few green) -->
+        <g transform="translate(390,68)">
+          <rect x="0" y="0" width="300" height="100" rx="6" fill="url(#sparseGrad)" stroke="#0a8f6a" stroke-opacity="0.3" stroke-dasharray="4"/>
+          <text x="150" y="-6" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#666">FFN intermediate (d_ff = 11008)</text>
+          <!-- Row 1: mostly inactive, a few active -->
+          <rect x="4" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="18" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="32" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/><rect x="46" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="60" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="74" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="88" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="102" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/>
+          <rect x="116" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="130" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="144" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="158" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="172" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="186" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/>
+          <rect x="200" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="214" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="228" y="8" width="10" height="10" rx="2" fill="#ddd"/><rect x="242" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="256" y="8" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="270" y="8" width="10" height="10" rx="2" fill="#ddd"/>
+          <!-- Row 2 -->
+          <rect x="4" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="18" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.8"/>
+          <rect x="32" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="46" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="60" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="74" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="88" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="102" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="116" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.9"/><rect x="130" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="144" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="158" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="172" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="186" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="200" y="24" width="10" height="10" rx="2" fill="#0a8f6a" opacity="0.7"/><rect x="214" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="228" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="242" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <rect x="256" y="24" width="10" height="10" rx="2" fill="#ddd"/><rect x="270" y="24" width="10" height="10" rx="2" fill="#ddd"/>
+          <text x="150" y="58" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#0a8f6a" font-weight="700">~5–10% neurons computed</text>
+          <text x="150" y="74" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#0a8f6a">FLOPs: 2 × d × k  (k ≪ d_ff)</text>
+        </g>
+        <text x="540" y="200" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a" font-weight="600">⚡ ~2.2 GFLOPs per token (10× less)</text>
+        <rect x="410" y="215" width="260" height="60" rx="8" fill="none" stroke="#0a8f6a" stroke-opacity="0.3" stroke-dasharray="4"/>
+        <text x="540" y="235" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Only load k active columns:</text>
+        <text x="540" y="252" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#0a8f6a">W_up[:, active] + W_down[active, :]</text>
+        <text x="540" y="268" text-anchor="middle" font-family="Manrope,sans-serif" font-size="9" fill="#888">~8.6 MB per layer (10% active)</text>
+      </svg>
+
+      <div class="callout">
+        <strong>Key insight:</strong> Activation sparsity is a <em>free lunch</em> that already exists in trained models. Unlike weight pruning, it requires no retraining — we just need efficient mechanisms to predict which neurons will be active and skip the rest.
+      </div>
+
+      <!-- ============ Section 2: ReLU vs SwiGLU ============ -->
+      <h2 id="sf-relu-vs-swiglu">ReLU vs SwiGLU Sparsity Patterns</h2>
+      <p>The choice of activation function fundamentally determines natural sparsity levels. <strong>ReLU</strong> produces exact zeros for all negative pre-activations, yielding 90–97% sparsity in FFN intermediate layers of OPT-66B and similar models. Modern architectures have shifted to <strong>SwiGLU</strong> (LLaMA, Mistral, Gemma) and <strong>GELU</strong> (GPT, BLOOM), which never produce exact zeros but still exhibit heavy-tailed activation distributions.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>🔷 ReLU Sparsity</h4>
+          <p><strong>Mechanism:</strong> max(0, x) → exact zeros</p>
+          <p><strong>Typical sparsity:</strong> 90–97%</p>
+          <p><strong>Advantage:</strong> Trivially exploitable — zero activations mean zero FLOPs with no approximation error</p>
+          <p><strong>Models:</strong> OPT, early GPT variants, ReluLLaMA</p>
+          <p><strong>Catch:</strong> ReLU degrades model quality slightly vs SwiGLU at same param count</p>
+        </div>
+        <div class="compare-card">
+          <h4>🔶 SwiGLU / GELU Sparsity</h4>
+          <p><strong>Mechanism:</strong> Smooth activations → near-zero but non-zero</p>
+          <p><strong>Typical sparsity:</strong> 70–90% (with threshold ε &lt; 0.01)</p>
+          <p><strong>Advantage:</strong> Better model quality, standard in SOTA LLMs</p>
+          <p><strong>Models:</strong> LLaMA-2/3, Mistral, Gemma, Qwen</p>
+          <p><strong>Catch:</strong> Requires thresholding or top-k selection; small approximation error</p>
+        </div>
+      </div>
+
+      <p>Recent work on <strong>ReluLLaMA</strong> (Zhang et al., 2024) shows that replacing SwiGLU with ReLU in LLaMA-2 and continuing pre-training for a small number of tokens recovers model quality while boosting natural sparsity to 90%+. This enables direct exploitation of ReLU zeros without any predictor overhead.</p>
+
+      <div class="pseudo-code"><span class="cm"># Measuring activation sparsity across different activations</span>
+
+<span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn.functional <span class="kw">as</span> F
+
+<span class="kw">def</span> <span class="fn">measure_sparsity</span>(hidden_states, activation_fn, threshold=0.01):
+    <span class="cm">"""Compare sparsity of different activation functions."""</span>
+    <span class="kw">if</span> activation_fn == <span class="fn">"relu"</span>:
+        activated = F.<span class="fn">relu</span>(hidden_states)
+        sparsity = (activated == 0).<span class="fn">float</span>().<span class="fn">mean</span>()
+    <span class="kw">elif</span> activation_fn == <span class="fn">"gelu"</span>:
+        activated = F.<span class="fn">gelu</span>(hidden_states)
+        sparsity = (activated.<span class="fn">abs</span>() &lt; threshold).<span class="fn">float</span>().<span class="fn">mean</span>()
+    <span class="kw">elif</span> activation_fn == <span class="fn">"swiglu"</span>:
+        gate = hidden_states[..., :hidden_states.shape[-1]//2]
+        up   = hidden_states[..., hidden_states.shape[-1]//2:]
+        activated = F.<span class="fn">silu</span>(gate) * up
+        sparsity = (activated.<span class="fn">abs</span>() &lt; threshold).<span class="fn">float</span>().<span class="fn">mean</span>()
+    <span class="kw">return</span> sparsity.<span class="fn">item</span>()
+
+<span class="cm"># Empirical results on LLaMA-2-7B (SwiGLU): ~85% near-zero</span>
+<span class="cm"># Empirical results on OPT-66B (ReLU):      ~95% exact-zero</span>
+<span class="cm"># ReluLLaMA-7B after conversion:             ~92% exact-zero</span></div>
+
+      <div class="callout warn">
+        <strong>Approximation error:</strong> For SwiGLU/GELU models, zeroing out near-zero activations introduces a small error. At 80% sparsity, perplexity typically increases by &lt;0.5%; at 90%, it can increase by 1–3%. Top-k selection (keeping the k largest) is more robust than flat thresholding.
+      </div>
+
+      <!-- ============ Section 3: Top-K Activation ============ -->
+      <h2 id="sf-topk-activation">Top-K Activation Selection</h2>
+      <p>Rather than relying on natural sparsity (which varies by token and layer), <strong>top-k activation</strong> enforces a fixed sparsity budget: for each token, keep only the k largest activations in the FFN intermediate layer and zero out the rest. This gives a predictable FLOPs reduction of (1 − k/d_ff) and enables hardware-friendly sparse kernels.</p>
+
+      <h3>The Top-K FFN Forward Pass</h3>
+      <div class="pseudo-code"><span class="cm"># Top-K sparse FFN: only compute output projection for k active neurons</span>
+
+<span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn <span class="kw">as</span> nn
+
+<span class="kw">class</span> <span class="fn">TopKSparseFFN</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, d_ff, k):
+        <span class="fn">super</span>().__init__()
+        self.w_up   = nn.<span class="fn">Linear</span>(d_model, d_ff, bias=<span class="kw">False</span>)
+        self.w_gate  = nn.<span class="fn">Linear</span>(d_model, d_ff, bias=<span class="kw">False</span>)
+        self.w_down  = nn.<span class="fn">Linear</span>(d_ff, d_model, bias=<span class="kw">False</span>)
+        self.k = k
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="cm"># Step 1: compute full intermediate (unavoidable)</span>
+        gate = torch.<span class="fn">sigmoid</span>(self.<span class="fn">w_gate</span>(x))
+        up   = self.<span class="fn">w_up</span>(x)
+        intermediate = gate * up              <span class="cm"># SwiGLU-style</span>
+
+        <span class="cm"># Step 2: select top-k activations</span>
+        topk_vals, topk_idx = torch.<span class="fn">topk</span>(
+            intermediate.<span class="fn">abs</span>(), self.k, dim=-1
+        )
+        mask = torch.<span class="fn">zeros_like</span>(intermediate)
+        mask.<span class="fn">scatter_</span>(-1, topk_idx, 1.0)
+        sparse_intermediate = intermediate * mask
+
+        <span class="cm"># Step 3: down-projection (only k columns active)</span>
+        <span class="kw">return</span> self.<span class="fn">w_down</span>(sparse_intermediate)</div>
+
+      <p>The naive implementation above still computes the full up-projection. The real speedup comes from <strong>predictive approaches</strong> that determine which k neurons will be active <em>before</em> the expensive matmul, allowing us to load only the corresponding weight columns.</p>
+
+      <div class="callout">
+        <strong>Sparsity budgets in practice:</strong> LLaMA-2-7B has d_ff = 11008. At k = 1024 (~9.3% active), the FFN compute drops from ~90M FLOPs to ~8.4M FLOPs per token per layer. Across 32 layers, that's a theoretical 10× reduction in FFN compute — FFN layers account for ~67% of total model FLOPs.
+      </div>
+
+      <!-- ============ Section 4: DejaVu & PowerInfer ============ -->
+      <h2 id="sf-predictive-sparsity">Predictive Sparsity: DejaVu &amp; PowerInfer</h2>
+      <p>The key challenge: how do we know <em>which</em> neurons will be active without computing the full intermediate? Two landmark systems solve this with lightweight predictors.</p>
+
+      <h3>DejaVu (Liu et al., 2023)</h3>
+      <p>DejaVu trains a small <strong>MLP predictor</strong> (2-layer, ~1% of FFN size) per layer that takes the attention output as input and predicts which FFN neurons will have top-k activations. The predictor is trained offline on calibration data with a binary cross-entropy loss against ground-truth activation masks.</p>
+
+      <div class="pseudo-code"><span class="cm"># DejaVu: lightweight sparsity predictor</span>
+
+<span class="kw">class</span> <span class="fn">SparsityPredictor</span>(nn.Module):
+    <span class="cm">"""Small MLP that predicts top-k neuron indices."""</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, d_ff, hidden=256):
+        <span class="fn">super</span>().__init__()
+        self.net = nn.<span class="fn">Sequential</span>(
+            nn.<span class="fn">Linear</span>(d_model, hidden),
+            nn.<span class="fn">ReLU</span>(),
+            nn.<span class="fn">Linear</span>(hidden, d_ff),  <span class="cm"># logits per neuron</span>
+        )
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, attn_out):
+        <span class="cm"># Predict which neurons will be active</span>
+        logits = self.<span class="fn">net</span>(attn_out)
+        <span class="cm"># Select top-k predicted neurons</span>
+        _, pred_idx = torch.<span class="fn">topk</span>(logits, k=1024, dim=-1)
+        <span class="kw">return</span> pred_idx
+
+<span class="cm"># Prediction accuracy: ~95% overlap with oracle top-k</span>
+<span class="cm"># Predictor overhead: &lt;2% of total FFN compute</span>
+<span class="cm"># Net speedup: 2–6× on OPT-175B with &lt;0.1% quality loss</span></div>
+
+      <h3>PowerInfer (Song et al., 2023)</h3>
+      <p>PowerInfer takes a different approach: instead of predicting sparsity at runtime, it <strong>profiles activation patterns offline</strong> and partitions neurons into "hot" (frequently activated) and "cold" (rarely activated) sets. Hot neurons are permanently placed on GPU; cold neurons stay in CPU DRAM. At inference time, a lightweight classifier routes each token's computation.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>🟢 Hot Neurons (GPU)</h4>
+          <p>~10% of FFN neurons</p>
+          <p>Activated for &gt;50% of tokens</p>
+          <p>Preloaded into GPU VRAM permanently</p>
+          <p>Zero transfer overhead at inference</p>
+        </div>
+        <div class="compare-card">
+          <h4>🔵 Cold Neurons (CPU)</h4>
+          <p>~90% of FFN neurons</p>
+          <p>Activated for &lt;5% of tokens each</p>
+          <p>Computed on CPU when activated</p>
+          <p>Async transfer overlaps with GPU compute</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>PowerInfer results:</strong> On a single RTX 4090 (24GB), PowerInfer runs LLaMA-2-70B at <strong>11.7 tokens/sec</strong> — an 11.6× speedup over llama.cpp CPU offloading. For Falcon-40B, it achieves 8.0 tok/s vs 0.8 tok/s baseline. The key enabler: power-law activation distributions mean a tiny subset of neurons handles most of the work.
+      </div>
+
+      <!-- ============ Section 5: Mixture-of-Depths & Early Exit ============ -->
+      <h2 id="sf-mixture-of-depths">Mixture-of-Depths &amp; Early Exit</h2>
+      <p>Activation sparsity operates within each layer. <strong>Conditional compute across layers</strong> goes further: not every token needs every layer. Two strategies exploit this insight.</p>
+
+      <h3>Mixture-of-Depths (Raposo et al., 2024)</h3>
+      <p>MoD introduces a <strong>per-layer router</strong> that decides whether each token should be processed by a layer or skip it via a residual connection. The router is trained jointly with the model using a capacity factor C that limits how many tokens each layer processes (e.g., C = 0.5 means only 50% of tokens are actively processed per layer).</p>
+
+      <div class="pseudo-code"><span class="cm"># Mixture-of-Depths: per-token, per-layer routing</span>
+
+<span class="kw">class</span> <span class="fn">MoDLayer</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, capacity=0.5):
+        <span class="fn">super</span>().__init__()
+        self.router = nn.<span class="fn">Linear</span>(d_model, 1)
+        self.attn = <span class="fn">MultiHeadAttention</span>(d_model)
+        self.ffn  = <span class="fn">FeedForward</span>(d_model)
+        self.capacity = capacity
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="cm"># x: (batch, seq_len, d_model)</span>
+        scores = self.router(x).<span class="fn">squeeze</span>(-1)   <span class="cm"># (B, S)</span>
+        k = <span class="fn">int</span>(x.shape[1] * self.capacity)
+        _, top_idx = torch.<span class="fn">topk</span>(scores, k, dim=-1)
+
+        <span class="cm"># Only process top-k tokens through the layer</span>
+        selected = x.<span class="fn">gather</span>(1, top_idx.unsqueeze(-1).<span class="fn">expand</span>(-1,-1,x.shape[-1]))
+        processed = self.<span class="fn">ffn</span>(self.<span class="fn">attn</span>(selected))
+
+        <span class="cm"># Scatter back; skipped tokens pass through unchanged</span>
+        out = x.<span class="fn">clone</span>()
+        out.<span class="fn">scatter_</span>(1, top_idx.unsqueeze(-1).<span class="fn">expand_as</span>(processed), processed)
+        <span class="kw">return</span> out</div>
+
+      <h3>Early Exit Strategies</h3>
+      <p>Early exit takes a complementary approach: tokens that the model is already confident about can <strong>exit the network at intermediate layers</strong> without passing through all N layers. A small classifier head at each layer predicts whether the current representation is "good enough."</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>🔷 Mixture-of-Depths</h4>
+          <p><strong>Granularity:</strong> Per-token, per-layer</p>
+          <p><strong>Decision:</strong> Router selects which tokens to process</p>
+          <p><strong>Savings:</strong> 30–50% FLOPs with isoFLOP-optimal quality</p>
+          <p><strong>Training:</strong> Joint training with capacity constraint</p>
+          <p><strong>Benefit:</strong> Uniform batch size at each layer (good for hardware)</p>
+        </div>
+        <div class="compare-card">
+          <h4>🔶 Early Exit</h4>
+          <p><strong>Granularity:</strong> Per-token, exits entire remaining network</p>
+          <p><strong>Decision:</strong> Confidence threshold on auxiliary head</p>
+          <p><strong>Savings:</strong> 20–40% FLOPs on "easy" tokens</p>
+          <p><strong>Training:</strong> Auxiliary heads trained post-hoc or jointly</p>
+          <p><strong>Challenge:</strong> Ragged batches hurt GPU utilization</p>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>Practical challenge:</strong> Both MoD and early exit create <strong>variable-length computation</strong> per token, which complicates batched inference. Current frameworks (vLLM, TGI) assume all tokens traverse all layers. Production deployment requires custom schedulers that handle heterogeneous compute paths.
+      </div>
+
+      <!-- ============ Section 6: Structured vs Unstructured Sparsity ============ -->
+      <h2 id="sf-structured-unstructured">Structured vs Unstructured Sparsity</h2>
+      <p>How sparsity is organized in the weight/activation matrices determines whether hardware can actually exploit it for speedups.</p>
+
+      <h3>Unstructured Sparsity</h3>
+      <p>Individual elements are zeroed without pattern constraints. Achieves the best quality-per-sparsity ratio because the pruning/selection algorithm has maximum freedom. However, <strong>hardware hates it</strong>: scattered memory accesses, no vectorization, GPU cores sit idle waiting for irregular data patterns.</p>
+
+      <h3>Structured Sparsity (N:M)</h3>
+      <p>NVIDIA's Ampere and Hopper architectures support <strong>2:4 structured sparsity</strong>: in every group of 4 contiguous elements, exactly 2 must be zero. This yields a guaranteed 50% sparsity with hardware-accelerated sparse tensor core operations, achieving near 2× throughput improvement on A100/H100 GPUs.</p>
+
+      <div class="pseudo-code"><span class="cm"># Structured 2:4 sparsity enforcement</span>
+
+<span class="kw">def</span> <span class="fn">apply_2_4_sparsity</span>(weight):
+    <span class="cm">"""Enforce 2:4 structured sparsity on a weight matrix.
+    For every 4 contiguous elements, keep the 2 largest."""</span>
+    w = weight.<span class="fn">clone</span>()
+    <span class="cm"># Reshape into groups of 4</span>
+    orig_shape = w.shape
+    w_grouped = w.<span class="fn">view</span>(-1, 4)
+
+    <span class="cm"># Find top-2 in each group</span>
+    _, top2_idx = torch.<span class="fn">topk</span>(w_grouped.<span class="fn">abs</span>(), 2, dim=-1)
+
+    <span class="cm"># Create mask: keep only top-2 per group of 4</span>
+    mask = torch.<span class="fn">zeros_like</span>(w_grouped)
+    mask.<span class="fn">scatter_</span>(1, top2_idx, 1.0)
+
+    sparse_w = (w_grouped * mask).<span class="fn">view</span>(orig_shape)
+    <span class="kw">return</span> sparse_w
+
+<span class="cm"># Usage with NVIDIA's sparse tensor core API</span>
+<span class="cm"># sparse_w = apply_2_4_sparsity(model.ffn.w_up.weight)</span>
+<span class="cm"># Speedup: 1.5–1.9× on A100 sparse tensor cores</span>
+<span class="cm"># Quality: &lt;1% accuracy drop with fine-tuning recovery</span></div>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Unstructured Sparsity</h4>
+          <p><strong>Pattern:</strong> Arbitrary zero locations</p>
+          <p><strong>Achievable sparsity:</strong> 90%+ with quality</p>
+          <p><strong>Hardware support:</strong> Poor — requires sparse formats (CSR/COO), overhead often eats the theoretical gain</p>
+          <p><strong>Use case:</strong> Research, CPU inference, specialized accelerators</p>
+        </div>
+        <div class="compare-card">
+          <h4>Structured Sparsity (2:4)</h4>
+          <p><strong>Pattern:</strong> 2 zeros per 4 elements</p>
+          <p><strong>Fixed sparsity:</strong> Exactly 50%</p>
+          <p><strong>Hardware support:</strong> Native on A100/H100/B100 sparse tensor cores — near-zero overhead</p>
+          <p><strong>Use case:</strong> Production GPU inference, complements quantization</p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Combining techniques:</strong> Structured 2:4 weight sparsity + activation sparsity are orthogonal. Apply 2:4 pruning to weights (50% FLOPs saved) and top-k activation selection (additional 5–10× reduction in active neurons). Together: up to 90–95% compute reduction in FFN layers with minimal quality impact.
+      </div>
+
+      <!-- ============ Section 7: Hardware Support ============ -->
+      <h2 id="sf-hardware-support">Hardware Support &amp; Sparse Tensor Cores</h2>
+      <p>Exploiting sparsity at the hardware level requires architectural support that goes beyond general-purpose CUDA cores.</p>
+
+      <h3>NVIDIA Sparse Tensor Cores</h3>
+      <p>Starting with Ampere (A100), NVIDIA GPUs include <strong>sparse tensor cores</strong> that natively execute 2:4 structured sparse matrix multiplications. The sparse matrix is stored in a compressed format alongside a 2-bit index metadata array. The tensor core skips zero-element multiplications and achieves up to <strong>2× throughput</strong> over dense operations with identical latency characteristics.</p>
+
+      <h3>Hardware Sparsity Roadmap</h3>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>A100 (Ampere)</h4>
+          <p>2:4 structured sparsity</p>
+          <p>FP16/BF16/INT8/TF32 sparse ops</p>
+          <p>~2× speedup on eligible matmuls</p>
+        </div>
+        <div class="compare-card">
+          <h4>H100 (Hopper)</h4>
+          <p>2:4 + improved FP8 sparse support</p>
+          <p>TMA + sparse = overlapped data movement</p>
+          <p>~2× on FP8, combined with quantization for 4× gains</p>
+        </div>
+      </div>
+
+      <p>Beyond NVIDIA, emerging architectures target broader sparsity support. <strong>Cerebras WSE-3</strong> natively handles unstructured sparsity via its dataflow architecture — each PE skips zero-valued computations without index overhead. <strong>Graphcore IPUs</strong> support block-sparse operations with minimal overhead in their BSP execution model.</p>
+
+      <div class="callout warn">
+        <strong>The sparsity gap:</strong> Theoretical speedup from sparsity is often 5–10× higher than achieved speedup. Reasons: (1) memory bandwidth dominates over compute in LLM inference, so reducing FLOPs helps less than expected; (2) irregular access patterns cause cache misses; (3) sparse format overhead (indices, metadata) eats into savings. The real wins come from approaches like PowerInfer that <em>avoid loading</em> inactive weights entirely.
+      </div>
+
+      <!-- ============ Section 8: Speedup Benchmarks ============ -->
+      <h2 id="sf-speedup-benchmarks">Inference Speedup Benchmarks</h2>
+      <p>Real-world numbers from published systems, measured on commodity hardware:</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+        <thead>
+          <tr style="border-bottom:2px solid var(--brand)">
+            <th style="text-align:left;padding:0.5rem">System</th>
+            <th style="text-align:left;padding:0.5rem">Model</th>
+            <th style="text-align:left;padding:0.5rem">Hardware</th>
+            <th style="text-align:left;padding:0.5rem">Speedup</th>
+            <th style="text-align:left;padding:0.5rem">Quality Impact</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>DejaVu</strong></td>
+            <td style="padding:0.5rem">OPT-175B</td>
+            <td style="padding:0.5rem">8× A100-80GB</td>
+            <td style="padding:0.5rem">2× latency reduction</td>
+            <td style="padding:0.5rem">&lt;0.1% perplexity increase</td>
+          </tr>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>PowerInfer</strong></td>
+            <td style="padding:0.5rem">LLaMA-2-70B</td>
+            <td style="padding:0.5rem">RTX 4090 + CPU</td>
+            <td style="padding:0.5rem">11.6× vs llama.cpp</td>
+            <td style="padding:0.5rem">Lossless (same outputs)</td>
+          </tr>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>PowerInfer</strong></td>
+            <td style="padding:0.5rem">Falcon-40B</td>
+            <td style="padding:0.5rem">RTX 4090 + CPU</td>
+            <td style="padding:0.5rem">10× vs llama.cpp</td>
+            <td style="padding:0.5rem">Lossless</td>
+          </tr>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>ReluLLaMA</strong></td>
+            <td style="padding:0.5rem">LLaMA-2-7B</td>
+            <td style="padding:0.5rem">A100</td>
+            <td style="padding:0.5rem">1.5–2.0× decode speedup</td>
+            <td style="padding:0.5rem">&lt;0.5% quality drop</td>
+          </tr>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>2:4 Sparsity</strong></td>
+            <td style="padding:0.5rem">BERT / GPT-2</td>
+            <td style="padding:0.5rem">A100 sparse cores</td>
+            <td style="padding:0.5rem">1.5–1.9× matmul throughput</td>
+            <td style="padding:0.5rem">&lt;1% accuracy drop</td>
+          </tr>
+          <tr style="border-bottom:1px solid #eee">
+            <td style="padding:0.5rem"><strong>Mixture-of-Depths</strong></td>
+            <td style="padding:0.5rem">isoFLOP-optimal</td>
+            <td style="padding:0.5rem">TPU v4</td>
+            <td style="padding:0.5rem">50% FLOPs, same quality</td>
+            <td style="padding:0.5rem">Matched dense baseline</td>
+          </tr>
+          <tr>
+            <td style="padding:0.5rem"><strong>DejaVu + Quant</strong></td>
+            <td style="padding:0.5rem">OPT-66B</td>
+            <td style="padding:0.5rem">4× A100</td>
+            <td style="padding:0.5rem">3–6× combined</td>
+            <td style="padding:0.5rem">&lt;0.5% perplexity increase</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>The compound effect:</strong> Sparsity stacks multiplicatively with other optimizations. Combining activation sparsity (3×) + INT4 quantization (2×) + speculative decoding (2×) can yield <strong>12× end-to-end speedups</strong> over naïve FP16 inference — bringing 70B-class models to single-GPU interactive speeds.
+      </div>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>Activation sparsity is ubiquitous:</strong> 70–95% of FFN neurons produce negligible output per token. This is free computational waste to eliminate.</li>
+        <li><strong>ReLU enables exact sparsity</strong> but SwiGLU/GELU models can still achieve 80–90% effective sparsity via top-k selection with small quality tradeoffs.</li>
+        <li><strong>Predictive sparsity</strong> (DejaVu, PowerInfer) avoids computing the full intermediate by using lightweight predictors or offline profiling to identify active neurons before the matmul.</li>
+        <li><strong>Conditional compute across layers</strong> (MoD, early exit) offers orthogonal savings by routing tokens around entire layers.</li>
+        <li><strong>Hardware matters:</strong> Structured 2:4 sparsity gets native GPU acceleration; unstructured sparsity needs specialized systems. The gap between theoretical and practical speedup remains large.</li>
+        <li><strong>Combine everything:</strong> Sparsity + quantization + speculative decoding = multiplicative speedups. This is the path to running 100B+ models on consumer hardware.</li>
+      </ul>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

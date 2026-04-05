@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Understanding and preventing training instabilities in large language models including loss spikes, gradient explosions, NaN detection, and automatic recovery strategies.">
+  <title>Training Stability: Loss Spikes, NaN, Recovery | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#common-instabilities">Common Training Instabilities</a></li>
+        <li><a href="#root-cause-analysis">Root Cause Analysis</a></li>
+        <li><a href="#detection-monitoring">Detection and Monitoring</a></li>
+        <li><a href="#gradient-clipping">Gradient Clipping Strategies</a></li>
+        <li><a href="#automatic-recovery">Automatic Recovery</a></li>
+        <li><a href="#advanced-stabilization">Advanced Stabilization Techniques</a></li>
+        <li><a href="#stability-monitor-impl">Full Stability Monitor Implementation</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Training Stability: Loss Spikes, NaN, Recovery</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <p>Training large language models at scale is an exercise in controlled chaos. A 175B-parameter run on 1024 GPUs can consume $4M+ in compute, and a single unrecovered instability event can waste days of wall-clock time. This post dissects the taxonomy of training instabilities, builds robust detection and monitoring systems, and implements automatic recovery strategies used in production training pipelines at organizations like Google DeepMind, Meta FAIR, and Anthropic.</p>
+
+      <!-- ==================== SECTION 1 ==================== -->
+      <h2 id="common-instabilities">Common Training Instabilities</h2>
+
+      <p>Training instabilities in LLMs manifest in several distinct failure modes, each with characteristic signatures in the loss curve, gradient statistics, and activation distributions. Understanding these patterns is essential for building resilient training infrastructure.</p>
+
+      <h3>Loss Spikes</h3>
+      <p>Loss spikes are sudden, dramatic increases in the training loss—often 2-10× the running average—followed by either gradual recovery or complete divergence. They are the most visible symptom of instability and occur in virtually every large-scale training run. Google's PaLM paper documented ~20 loss spikes during training of the 540B model, each requiring manual intervention or automatic rollback.</p>
+
+      <div class="callout">
+        <strong>Key characteristic:</strong> Loss spikes are often <em>transient</em> if the learning rate is low enough and the optimizer has sufficient momentum. However, at scale, even a recovered spike can shift the model into a worse loss basin, permanently degrading final performance by 0.1-0.5% on downstream benchmarks.
+      </div>
+
+      <h3>Gradient Explosions</h3>
+      <p>Gradient explosions occur when the gradient norm grows exponentially across layers during backpropagation. In a Transformer with L layers, the gradient at layer l scales roughly as ∏(i=l to L) ||∂h_i/∂h_{i-1}||. If per-layer Jacobian norms exceed 1.0 consistently, gradients at early layers can exceed fp16 range (65504) and overflow to Inf or NaN.</p>
+
+      <h3>NaN and Inf Propagation</h3>
+      <p>Once a single NaN or Inf enters the computation graph, it propagates irreversibly through all downstream operations. In mixed-precision training with fp16 forward passes, the most common sources are: softmax overflow when attention logits exceed ~88 (exp(88) ≈ 1.65×10³⁸, near fp32 max), division by zero in LayerNorm when variance collapses, and loss scaling overflow when the dynamic loss scaler's scale factor grows too large.</p>
+
+      <div class="callout warn">
+        <strong>Critical:</strong> NaN detection must happen <em>before</em> the optimizer step. Once NaN gradients are applied to parameters, the entire model state is corrupted and the only recovery is checkpoint rollback. This is why frameworks like Megatron-LM check for NaN in the gradient reduction step.
+      </div>
+
+      <h3>Slow Divergence</h3>
+      <p>Unlike dramatic spikes, slow divergence is a gradual increase in loss over hundreds or thousands of steps. It's harder to detect because individual step-to-step changes are within normal variance. Root causes include learning rate schedules that don't decay fast enough, embedding norm growth that shifts the model's representational geometry, or accumulated numerical errors in optimizer states stored in fp16.</p>
+
+      <!-- SVG: Training Loss Curve with Spike and Recovery -->
+      <svg id="lt-loss-curve" viewBox="0 0 700 320" style="width:100%;max-width:700px;margin:1.5rem auto;display:block" role="img" aria-label="Training loss curve showing normal training, a spike event, checkpoint rollback, and recovery">
+        <defs>
+          <linearGradient id="lt-bg-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#0a8f6a" stop-opacity="0.08"/>
+            <stop offset="100%" stop-color="#0a8f6a" stop-opacity="0"/>
+          </linearGradient>
+          <marker id="lt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+            <path d="M0,0 L8,3 L0,6" fill="#ff6b35"/>
+          </marker>
+        </defs>
+        <!-- Axes -->
+        <line id="lt-x-axis" x1="60" y1="270" x2="670" y2="270" stroke="#333" stroke-width="1.5"/>
+        <line id="lt-y-axis" x1="60" y1="20" x2="60" y2="270" stroke="#333" stroke-width="1.5"/>
+        <text id="lt-x-label" x="365" y="300" text-anchor="middle" font-size="12" fill="#555" font-family="Manrope">Training Steps (thousands)</text>
+        <text id="lt-y-label" x="18" y="145" text-anchor="middle" font-size="12" fill="#555" font-family="Manrope" transform="rotate(-90,18,145)">Loss</text>
+        <!-- Grid lines -->
+        <line id="lt-grid-1" x1="60" y1="70" x2="670" y2="70" stroke="#eee" stroke-width="0.5"/>
+        <line id="lt-grid-2" x1="60" y1="120" x2="670" y2="120" stroke="#eee" stroke-width="0.5"/>
+        <line id="lt-grid-3" x1="60" y1="170" x2="670" y2="170" stroke="#eee" stroke-width="0.5"/>
+        <line id="lt-grid-4" x1="60" y1="220" x2="670" y2="220" stroke="#eee" stroke-width="0.5"/>
+        <!-- Y-axis ticks -->
+        <text id="lt-ytick-1" x="50" y="74" text-anchor="end" font-size="10" fill="#888">4.0</text>
+        <text id="lt-ytick-2" x="50" y="124" text-anchor="end" font-size="10" fill="#888">3.0</text>
+        <text id="lt-ytick-3" x="50" y="174" text-anchor="end" font-size="10" fill="#888">2.0</text>
+        <text id="lt-ytick-4" x="50" y="224" text-anchor="end" font-size="10" fill="#888">1.0</text>
+        <!-- Normal training curve -->
+        <path id="lt-normal-curve" d="M60,100 C120,95 160,90 200,85 C240,80 280,74 320,68 C340,65 360,62 380,60" fill="none" stroke="#0a8f6a" stroke-width="2.5"/>
+        <!-- Fill under normal curve -->
+        <path id="lt-normal-fill" d="M60,100 C120,95 160,90 200,85 C240,80 280,74 320,68 C340,65 360,62 380,60 L380,270 L60,270 Z" fill="url(#lt-bg-grad)"/>
+        <!-- Spike event -->
+        <path id="lt-spike" d="M380,60 C385,55 390,40 395,30 C398,25 400,22 402,30 C405,40 408,55 410,70" fill="none" stroke="#ff6b35" stroke-width="2.5"/>
+        <!-- Rollback arrow -->
+        <line id="lt-rollback-line" x1="415" y1="75" x2="370" y2="62" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#lt-arrow)"/>
+        <text id="lt-rollback-label" x="420" y="88" font-size="10" fill="#ff6b35" font-family="Manrope" font-weight="600">rollback</text>
+        <!-- Recovery curve with lower LR -->
+        <path id="lt-recovery-curve" d="M370,62 C400,60 430,57 460,54 C500,50 540,47 580,44 C620,42 650,40 670,39" fill="none" stroke="#0a8f6a" stroke-width="2.5" stroke-dasharray="6,3"/>
+        <!-- Annotations -->
+        <text id="lt-label-normal" x="200" y="110" font-size="11" fill="#0a8f6a" font-family="Manrope" font-weight="600">Normal Training</text>
+        <text id="lt-label-spike" x="385" y="16" font-size="11" fill="#ff6b35" font-family="Manrope" font-weight="700">Loss Spike</text>
+        <text id="lt-label-recovery" x="510" y="36" font-size="11" fill="#0a8f6a" font-family="Manrope" font-weight="600">Recovery (reduced LR)</text>
+        <!-- Checkpoint marker -->
+        <circle id="lt-ckpt-dot" cx="370" cy="62" r="4" fill="#0a8f6a"/>
+        <text id="lt-ckpt-label" x="345" y="52" font-size="9" fill="#555" font-family="Manrope">checkpoint</text>
+      </svg>
+
+      <!-- ==================== SECTION 2 ==================== -->
+      <h2 id="root-cause-analysis">Root Cause Analysis</h2>
+
+      <p>Diagnosing the root cause of instability is the most time-consuming part of large-scale training. Each failure mode has multiple potential causes, and the interaction between distributed training, mixed precision, and data composition creates a combinatorial space of failure triggers.</p>
+
+      <h3>Learning Rate Miscalibration</h3>
+      <p>The most common cause of instability is a learning rate that is too high for the model's current loss landscape curvature. The critical learning rate η_crit ≈ 2/λ_max, where λ_max is the largest eigenvalue of the Hessian. For Transformers, λ_max grows during training as the model sharpens its predictions, meaning a fixed learning rate that was stable at step 10k can become unstable at step 100k. This is why cosine decay schedules are essential—not just for convergence, but for stability.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Too-High Learning Rate</h4>
+          <p><strong>Symptoms:</strong> Periodic loss spikes with increasing frequency. Gradient norms exhibit high variance (CV > 0.5). The model oscillates around the minimum rather than converging.</p>
+          <p><strong>Fix:</strong> Reduce peak LR by 2-3×, extend warmup from 2000 to 5000+ steps, use a more aggressive decay schedule.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Bad Data Batches</h4>
+          <p><strong>Symptoms:</strong> Isolated, non-periodic spikes. Loss returns to baseline within 5-20 steps without intervention. Gradient norms spike on specific data shards.</p>
+          <p><strong>Fix:</strong> Implement batch-level loss monitoring, skip batches with loss > 5× moving average, add data validation in the preprocessing pipeline.</p>
+        </div>
+      </div>
+
+      <h3>Numerical Precision Issues</h3>
+      <p>Mixed-precision training with fp16 (IEEE 754 half-precision) has a dynamic range of 6.1×10⁻⁵ to 65504 and ~3.3 decimal digits of precision. BF16 (bfloat16) trades precision for range: same exponent bits as fp32 (8 bits) giving a range up to 3.39×10³⁸, but only ~2.4 decimal digits of precision. The critical implication is that <strong>fp16 underflows gradients below 6.1×10⁻⁵ to zero</strong>, which silently kills learning for parameters with small gradients (early embedding layers, bias terms).</p>
+
+      <div class="callout">
+        <strong>Industry practice:</strong> Most production systems (Megatron-LM, GPT-NeoX, PaLM) use bf16 for forward/backward passes and fp32 for optimizer states and gradient accumulation. This gives the range safety of bf16 while maintaining precision where it matters most—in the Adam momentum and variance estimates.
+      </div>
+
+      <h3>Attention Logit Growth</h3>
+      <p>In standard scaled dot-product attention, the logits are computed as QK^T/√d_k. As training progresses, the norms of Q and K vectors tend to grow, causing attention logits to increase. When logits exceed ~88 in fp32 (or ~11 in fp16), the softmax computation overflows because exp(x) exceeds the representable range. This is a well-documented failure mode observed in GPT-3, PaLM, and Chinchilla training runs.</p>
+
+      <h3>Embedding Norm Growth</h3>
+      <p>Token embeddings and positional embeddings can grow unboundedly during training because there is no explicit constraint on their norm. As embedding norms grow, the input to the first Transformer layer increases in magnitude, which amplifies through residual connections. The embedding norm at step t typically grows as O(√t) under SGD, but Adam's normalization can accelerate this to O(t) in pathological cases.</p>
+
+      <!-- ==================== SECTION 3 ==================== -->
+      <h2 id="detection-monitoring">Detection and Monitoring</h2>
+
+      <p>Robust detection infrastructure is the foundation of training stability. The goal is to detect instability within 1-5 steps of onset, before NaN propagation corrupts model state. This requires monitoring at multiple levels: global loss, per-layer gradient norms, activation statistics, and optimizer state health.</p>
+
+      <h3>Gradient Norm Tracking</h3>
+      <p>The global gradient norm (L2 norm of the flattened gradient vector) is the single most informative stability metric. In a stable training run, it follows a predictable distribution: roughly log-normal with a slowly decreasing mean as the model converges. A spike in gradient norm of >3σ from the running mean is a reliable early warning of impending loss spike.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> collections <span class="kw">import</span> deque
+<span class="kw">import</span> math
+
+<span class="kw">class</span> <span class="fn">GradNormTracker</span>:
+    <span class="cm"># Tracks gradient norms with exponential moving average</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, window=1000, sigma_threshold=3.0):
+        self.window = window
+        self.sigma_threshold = sigma_threshold
+        self.history = <span class="fn">deque</span>(maxlen=window)
+        self.ema_mean = <span class="kw">None</span>
+        self.ema_var = <span class="kw">None</span>
+        self.alpha = 0.01  <span class="cm"># EMA decay factor</span>
+
+    <span class="kw">def</span> <span class="fn">update</span>(self, grad_norm: float) -> dict:
+        self.history.<span class="fn">append</span>(grad_norm)
+        <span class="kw">if</span> self.ema_mean <span class="kw">is</span> <span class="kw">None</span>:
+            self.ema_mean = grad_norm
+            self.ema_var = 0.0
+            <span class="kw">return</span> {"spike": <span class="kw">False</span>, "grad_norm": grad_norm}
+
+        <span class="cm"># Update exponential moving average and variance</span>
+        delta = grad_norm - self.ema_mean
+        self.ema_mean += self.alpha * delta
+        self.ema_var = (1 - self.alpha) * (self.ema_var + self.alpha * delta ** 2)
+        ema_std = math.<span class="fn">sqrt</span>(self.ema_var + 1e-8)
+
+        z_score = <span class="fn">abs</span>(delta) / ema_std
+        is_spike = z_score > self.sigma_threshold
+        <span class="kw">return</span> {
+            "spike": is_spike,
+            "grad_norm": grad_norm,
+            "z_score": z_score,
+            "ema_mean": self.ema_mean,
+            "ema_std": ema_std,
+        }</div>
+
+      <h3>Loss Spike Detection</h3>
+      <p>Loss spike detection requires comparing the current loss against a robust baseline. Using a simple moving average is insufficient because it's sensitive to outliers. Instead, use an exponential moving average with a long decay (α=0.001) combined with a median filter over a short window. A spike is declared when the current loss exceeds max(2× EMA, EMA + 4σ).</p>
+
+      <h3>Per-Layer Monitoring</h3>
+      <p>Global gradient norm can mask per-layer pathologies. A single layer with exploding gradients might contribute only 10% of the global norm but be in a completely unstable regime. Production systems monitor: gradient norm per layer group (embedding, attention, FFN, final LM head), activation mean and variance per layer, and the ratio of parameter update magnitude to parameter magnitude (should stay between 10⁻⁴ and 10⁻²).</p>
+
+      <div class="callout warn">
+        <strong>Performance overhead:</strong> Per-layer monitoring adds ~2-5% overhead to training throughput due to additional all-reduce operations for distributed gradient statistics. In production, teams often monitor a random 10% subset of layers per step and rotate which layers are monitored, reducing overhead to &lt;0.5%.
+      </div>
+
+      <!-- ==================== SECTION 4 ==================== -->
+      <h2 id="gradient-clipping">Gradient Clipping Strategies</h2>
+
+      <p>Gradient clipping is the primary defense against gradient explosions. It bounds the gradient magnitude before the optimizer applies the update, preventing catastrophically large parameter changes. The choice of clipping strategy and threshold significantly impacts both stability and convergence speed.</p>
+
+      <h3>Global Gradient Norm Clipping</h3>
+      <p>The most widely used strategy. The global gradient norm ||g||₂ is computed across all parameters, and if it exceeds a threshold τ, all gradients are scaled by τ/||g||₂. This preserves the relative direction of the gradient while bounding its magnitude. The key advantage is that it treats the gradient as a single vector in parameter space, maintaining the direction that the optimizer would take.</p>
+
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">clip_grad_norm_global</span>(parameters, max_norm, norm_type=2.0):
+    <span class="cm"># Compute total gradient norm across all parameters</span>
+    total_norm = torch.<span class="fn">norm</span>(
+        torch.<span class="fn">stack</span>([torch.<span class="fn">norm</span>(p.grad, norm_type) <span class="kw">for</span> p <span class="kw">in</span> parameters]),
+        norm_type
+    )
+
+    <span class="cm"># Scale gradients if norm exceeds threshold</span>
+    clip_coef = max_norm / (total_norm + 1e-6)
+    <span class="kw">if</span> clip_coef &lt; 1.0:
+        <span class="kw">for</span> p <span class="kw">in</span> parameters:
+            p.grad.<span class="fn">mul_</span>(clip_coef)
+
+    <span class="kw">return</span> total_norm</div>
+
+      <h3>Per-Parameter Value Clipping</h3>
+      <p>An alternative approach clips each gradient element independently: g_i = clamp(g_i, -τ, τ). This is simpler but fundamentally changes the gradient direction, which can slow convergence. It's primarily useful when specific parameters (e.g., the final logit projection) consistently have disproportionately large gradients.</p>
+
+      <h3>Adaptive Clipping</h3>
+      <p>Adaptive gradient clipping (AGC), introduced in the NFNet paper, clips gradients based on the ratio of gradient norm to parameter norm: if ||g_l||/||w_l|| > λ for layer l, the gradient is clipped to λ·||w_l||. The intuition is that a parameter update should not change the parameter by more than a fraction λ of its current magnitude. Typical values are λ ∈ [0.01, 0.1].</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Global Norm Clipping</h4>
+          <p><strong>Threshold:</strong> Typically 1.0 for LLMs. GPT-3 used 1.0, PaLM used 1.0, LLaMA used 1.0.</p>
+          <p><strong>Pros:</strong> Preserves gradient direction, well-understood interaction with Adam optimizer, single hyperparameter.</p>
+          <p><strong>Cons:</strong> Doesn't account for parameter scale differences, can under-clip small layers while over-clipping large ones.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Adaptive Clipping (AGC)</h4>
+          <p><strong>Threshold:</strong> λ = 0.01 to 0.1, unitless ratio. Layer-aware by construction.</p>
+          <p><strong>Pros:</strong> Automatically adapts to different layer scales, enables training without batch normalization, reduces sensitivity to learning rate.</p>
+          <p><strong>Cons:</strong> More complex, interacts non-trivially with weight decay, less studied at >100B scale.</p>
+        </div>
+      </div>
+
+      <h3>Choosing Clip Thresholds</h3>
+      <p>The optimal clip threshold depends on the model architecture, optimizer, learning rate, and training stage. A practical approach: run a short calibration phase (1000 steps) without clipping, record the gradient norm distribution, and set the clip threshold at the 95th-99th percentile. For most Transformer LLMs with Adam and LR ~3×10⁻⁴, a global norm clip of 1.0 is a robust default. Values below 0.3 can significantly slow convergence; values above 5.0 provide little protection.</p>
+
+      <!-- ==================== SECTION 5 ==================== -->
+      <h2 id="automatic-recovery">Automatic Recovery</h2>
+
+      <p>Automatic recovery transforms training instability from a catastrophic failure into a temporary slowdown. The key principle: <strong>never corrupt model state</strong>. This means detecting instability before applying optimizer updates and having a fallback plan at every step.</p>
+
+      <h3>Checkpoint Rollback</h3>
+      <p>The most robust recovery strategy: revert to the last known-good checkpoint and resume training with modified hyperparameters. Google's PaLM training used this approach for all 20 loss spikes during the 540B run. The procedure is: (1) detect spike via loss > 2× EMA, (2) halt training across all workers, (3) load the checkpoint from N steps before the spike, (4) skip the data batch window that triggered the spike, (5) optionally reduce learning rate by 10-50%, (6) resume training.</p>
+
+      <div class="callout">
+        <strong>Checkpoint frequency trade-off:</strong> More frequent checkpoints (every 100 steps) minimize rollback waste but consume storage bandwidth. At scale with 175B parameters at fp32, each checkpoint is ~700 GB. Distributed checkpointing with tensor-parallel sharding reduces per-node I/O but requires all nodes to be available for recovery.
+      </div>
+
+      <h3>Batch Skipping</h3>
+      <p>For instabilities caused by bad data batches (corrupted text, adversarial sequences, extreme length outliers), the simplest recovery is to skip the problematic batch. The decision is made before the optimizer step: if the loss for the current batch exceeds a threshold (e.g., 5× running average), the gradients are zeroed and the step is skipped. This is lightweight but only effective when the instability source is data-related, not systemic.</p>
+
+      <h3>Learning Rate Reduction</h3>
+      <p>After a detected instability event, temporarily reducing the learning rate helps the optimizer navigate the high-curvature region that triggered the spike. A common strategy: multiply the current LR by 0.5, maintain the reduced LR for 500-1000 steps, then linearly ramp back to the scheduled LR over another 500 steps. This creates a "healing window" where the model can recover without risking re-triggering the instability.</p>
+
+      <h3>Z-Loss Regularization</h3>
+      <p>Z-loss adds a penalty term proportional to the log of the sum of exponentials of the logits: L_z = α · log²(Σ exp(z_i)). This directly penalizes large logit values, preventing the softmax overflow that causes NaN. The PaLM paper used α = 10⁻⁴ and found it eliminated most attention-logit-related instabilities. The overhead is negligible (&lt;0.1% compute) because the logsumexp is already computed for the cross-entropy loss.</p>
+
+      <div class="pseudo-code"><span class="kw">def</span> <span class="fn">z_loss</span>(logits, coeff=1e-4):
+    <span class="cm"># Penalize large logit magnitudes to prevent softmax overflow</span>
+    <span class="cm"># logits shape: (batch_size, seq_len, vocab_size)</span>
+    log_z = torch.<span class="fn">logsumexp</span>(logits, dim=-1)  <span class="cm"># (batch, seq)</span>
+    loss = coeff * (log_z ** 2).<span class="fn">mean</span>()
+    <span class="kw">return</span> loss
+
+<span class="kw">def</span> <span class="fn">compute_total_loss</span>(logits, targets, z_loss_coeff=1e-4):
+    <span class="cm"># Standard cross-entropy plus z-loss regularization</span>
+    ce_loss = torch.nn.functional.<span class="fn">cross_entropy</span>(
+        logits.<span class="fn">view</span>(-1, logits.<span class="fn">size</span>(-1)),
+        targets.<span class="fn">view</span>(-1),
+        ignore_index=-100
+    )
+    z_reg = <span class="fn">z_loss</span>(logits, z_loss_coeff)
+    <span class="kw">return</span> ce_loss + z_reg, {"ce_loss": ce_loss.<span class="fn">item</span>(), "z_loss": z_reg.<span class="fn">item</span>()}</div>
+
+      <!-- ==================== SECTION 6 ==================== -->
+      <h2 id="advanced-stabilization">Advanced Stabilization Techniques</h2>
+
+      <p>Beyond reactive recovery, proactive stabilization techniques modify the architecture or parameterization to prevent instabilities from occurring in the first place. These are increasingly standard in models trained at 100B+ scale.</p>
+
+      <h3>QK-Norm (Query-Key Normalization)</h3>
+      <p>QK-Norm applies LayerNorm to the query and key vectors before computing attention logits: Attention = softmax(LN(Q)·LN(K)^T / √d_k). By normalizing Q and K to unit variance, the attention logit magnitude is bounded regardless of training progress. This eliminates the attention logit growth problem entirely. Google's Gemini and ViT-22B both use QK-Norm.</p>
+
+      <h3>Embedding Scaling</h3>
+      <p>Instead of allowing embeddings to grow freely, scale them by a fixed factor at initialization and after each update. The simplest approach: multiply the embedding output by √d_model (as in the original Transformer paper) combined with a maximum norm constraint. Alternatively, use parametric scaling where a learned scalar γ modulates the embedding magnitude, initialized to a small value (0.1-1.0).</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h4>Pre-Norm (GPT-style)</h4>
+          <p><strong>Structure:</strong> x + Sublayer(LN(x)). LayerNorm is applied <em>before</em> each sublayer. The residual stream carries unnormalized activations.</p>
+          <p><strong>Stability:</strong> More stable because the sublayer input is always normalized. Gradient flow through the residual is unimpeded by normalization.</p>
+          <p><strong>Caveat:</strong> Can lead to representation collapse in very deep models because the residual stream dominates sublayer contributions.</p>
+        </div>
+        <div class="compare-card">
+          <h4>Post-Norm (Original Transformer)</h4>
+          <p><strong>Structure:</strong> LN(x + Sublayer(x)). LayerNorm is applied <em>after</em> the residual addition.</p>
+          <p><strong>Stability:</strong> Less stable during training—requires careful warmup and lower learning rates. Gradient magnitudes vary more across layers.</p>
+          <p><strong>Advantage:</strong> Often achieves better final performance because sublayer outputs are not suppressed by normalization.</p>
+        </div>
+      </div>
+
+      <h3>μP (Maximal Update Parameterization)</h3>
+      <p>μP is a principled approach to parameterization that ensures hyperparameters transfer across model widths. Under standard parameterization (SP), the optimal learning rate, initialization scale, and other hyperparameters change when you scale model width. Under μP, each parameter group has a width-dependent learning rate multiplier: embeddings use η/d, hidden layers use η/d, and the output layer uses η/d, where d is the model width. This means you can tune hyperparameters on a small (128-width) model and directly transfer them to the full-scale (12288-width) model.</p>
+
+      <div class="callout">
+        <strong>μP in practice:</strong> Cerebras and Microsoft have validated μP transfer across 3 orders of magnitude in model width. The key implementation detail is that μP requires different learning rate multipliers per parameter group in the optimizer—not a single global learning rate. Most frameworks require custom optimizer wrappers to implement this correctly.
+      </div>
+
+      <!-- ==================== SECTION 7 ==================== -->
+      <h2 id="stability-monitor-impl">Full Stability Monitor Implementation</h2>
+
+      <p>The following implementation combines all the detection and recovery strategies into a production-grade StabilityMonitor class. It integrates with a standard PyTorch training loop and supports distributed training via gradient norm all-reduce.</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> math
+<span class="kw">import</span> logging
+<span class="kw">from</span> collections <span class="kw">import</span> deque
+<span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass, field
+<span class="kw">from</span> typing <span class="kw">import</span> Optional, Dict, List
+
+logger = logging.<span class="fn">getLogger</span>(__name__)
+
+@<span class="fn">dataclass</span>
+<span class="kw">class</span> <span class="fn">StabilityConfig</span>:
+    <span class="cm"># Detection thresholds</span>
+    loss_spike_sigma: float = 4.0       <span class="cm"># z-score threshold for loss spike</span>
+    grad_spike_sigma: float = 3.0       <span class="cm"># z-score threshold for grad norm spike</span>
+    loss_spike_multiplier: float = 2.0  <span class="cm"># absolute multiplier threshold</span>
+    nan_check_enabled: bool = <span class="kw">True</span>
+    <span class="cm"># Recovery parameters</span>
+    max_consecutive_skips: int = 5      <span class="cm"># max batch skips before rollback</span>
+    lr_reduction_factor: float = 0.5    <span class="cm"># LR multiplier on spike recovery</span>
+    lr_recovery_steps: int = 500        <span class="cm"># steps to ramp LR back up</span>
+    ema_alpha: float = 0.001            <span class="cm"># EMA decay for loss tracking</span>
+    grad_ema_alpha: float = 0.01        <span class="cm"># EMA decay for grad norm tracking</span>
+    checkpoint_interval: int = 200      <span class="cm"># steps between stability checkpoints</span>
+
+<span class="kw">class</span> <span class="fn">StabilityMonitor</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, config: StabilityConfig):
+        self.config = config
+        self.step = 0
+        self.loss_ema = <span class="kw">None</span>
+        self.loss_var = 0.0
+        self.grad_ema = <span class="kw">None</span>
+        self.grad_var = 0.0
+        self.consecutive_skips = 0
+        self.lr_recovery_remaining = 0
+        self.original_lr = <span class="kw">None</span>
+        self.last_good_checkpoint = <span class="kw">None</span>
+        self.spike_events: List[Dict] = []
+
+    <span class="kw">def</span> <span class="fn">check_nan</span>(self, loss, model) -> bool:
+        <span class="cm"># Check for NaN/Inf in loss and gradients</span>
+        <span class="kw">if</span> <span class="kw">not</span> self.config.nan_check_enabled:
+            <span class="kw">return</span> <span class="kw">False</span>
+        <span class="kw">if</span> torch.<span class="fn">isnan</span>(loss) <span class="kw">or</span> torch.<span class="fn">isinf</span>(loss):
+            logger.<span class="fn">error</span>(f"NaN/Inf detected in loss at step {self.step}")
+            <span class="kw">return</span> <span class="kw">True</span>
+        <span class="kw">for</span> name, param <span class="kw">in</span> model.<span class="fn">named_parameters</span>():
+            <span class="kw">if</span> param.grad <span class="kw">is</span> <span class="kw">not</span> <span class="kw">None</span>:
+                <span class="kw">if</span> torch.<span class="fn">isnan</span>(param.grad).<span class="fn">any</span>() <span class="kw">or</span> torch.<span class="fn">isinf</span>(param.grad).<span class="fn">any</span>():
+                    logger.<span class="fn">error</span>(f"NaN/Inf gradient in {name} at step {self.step}")
+                    <span class="kw">return</span> <span class="kw">True</span>
+        <span class="kw">return</span> <span class="kw">False</span>
+
+    <span class="kw">def</span> <span class="fn">compute_grad_norm</span>(self, model) -> float:
+        total_norm = 0.0
+        <span class="kw">for</span> p <span class="kw">in</span> model.<span class="fn">parameters</span>():
+            <span class="kw">if</span> p.grad <span class="kw">is</span> <span class="kw">not</span> <span class="kw">None</span>:
+                total_norm += p.grad.<span class="fn">data</span>.<span class="fn">norm</span>(2).<span class="fn">item</span>() ** 2
+        <span class="kw">return</span> math.<span class="fn">sqrt</span>(total_norm)
+
+    <span class="kw">def</span> <span class="fn">_update_ema</span>(self, value, ema, var, alpha):
+        <span class="kw">if</span> ema <span class="kw">is</span> <span class="kw">None</span>:
+            <span class="kw">return</span> value, 0.0
+        delta = value - ema
+        new_ema = ema + alpha * delta
+        new_var = (1 - alpha) * (var + alpha * delta ** 2)
+        <span class="kw">return</span> new_ema, new_var
+
+    <span class="kw">def</span> <span class="fn">detect_loss_spike</span>(self, loss_val: float) -> bool:
+        <span class="kw">if</span> self.loss_ema <span class="kw">is</span> <span class="kw">None</span>:
+            self.loss_ema = loss_val
+            <span class="kw">return</span> <span class="kw">False</span>
+        std = math.<span class="fn">sqrt</span>(self.loss_var + 1e-8)
+        z_score = (loss_val - self.loss_ema) / std <span class="kw">if</span> std > 0 <span class="kw">else</span> 0
+        absolute_spike = loss_val > self.config.loss_spike_multiplier * self.loss_ema
+        statistical_spike = z_score > self.config.loss_spike_sigma
+        <span class="kw">return</span> absolute_spike <span class="kw">or</span> statistical_spike
+
+    <span class="kw">def</span> <span class="fn">detect_grad_spike</span>(self, grad_norm: float) -> bool:
+        <span class="kw">if</span> self.grad_ema <span class="kw">is</span> <span class="kw">None</span>:
+            self.grad_ema = grad_norm
+            <span class="kw">return</span> <span class="kw">False</span>
+        std = math.<span class="fn">sqrt</span>(self.grad_var + 1e-8)
+        z_score = (grad_norm - self.grad_ema) / std <span class="kw">if</span> std > 0 <span class="kw">else</span> 0
+        <span class="kw">return</span> z_score > self.config.grad_spike_sigma
+
+    <span class="kw">def</span> <span class="fn">step_check</span>(self, loss, model, optimizer) -> str:
+        <span class="cm"># Returns: "ok", "skip_batch", or "rollback"</span>
+        self.step += 1
+        loss_val = loss.<span class="fn">item</span>()
+
+        <span class="cm"># Phase 1: NaN check (most critical)</span>
+        <span class="kw">if</span> self.<span class="fn">check_nan</span>(loss, model):
+            <span class="kw">return</span> "rollback"
+
+        <span class="cm"># Phase 2: Gradient norm analysis</span>
+        grad_norm = self.<span class="fn">compute_grad_norm</span>(model)
+        grad_spike = self.<span class="fn">detect_grad_spike</span>(grad_norm)
+        self.grad_ema, self.grad_var = self.<span class="fn">_update_ema</span>(
+            grad_norm, self.grad_ema, self.grad_var, self.config.grad_ema_alpha
+        )
+
+        <span class="cm"># Phase 3: Loss spike detection</span>
+        loss_spike = self.<span class="fn">detect_loss_spike</span>(loss_val)
+        self.loss_ema, self.loss_var = self.<span class="fn">_update_ema</span>(
+            loss_val, self.loss_ema, self.loss_var, self.config.ema_alpha
+        )
+
+        <span class="kw">if</span> loss_spike <span class="kw">or</span> grad_spike:
+            self.consecutive_skips += 1
+            self.spike_events.<span class="fn">append</span>({
+                "step": self.step, "loss": loss_val,
+                "grad_norm": grad_norm, "type": "loss+grad" <span class="kw">if</span> (loss_spike <span class="kw">and</span> grad_spike) <span class="kw">else</span> "loss" <span class="kw">if</span> loss_spike <span class="kw">else</span> "grad"
+            })
+            logger.<span class="fn">warning</span>(f"Spike at step {self.step}: loss={loss_val:.4f}, grad={grad_norm:.4f}")
+            <span class="kw">if</span> self.consecutive_skips >= self.config.max_consecutive_skips:
+                <span class="kw">return</span> "rollback"
+            <span class="kw">return</span> "skip_batch"
+        <span class="kw">else</span>:
+            self.consecutive_skips = 0
+            <span class="kw">return</span> "ok"
+
+    <span class="kw">def</span> <span class="fn">reduce_lr</span>(self, optimizer):
+        <span class="cm"># Temporarily reduce learning rate for recovery</span>
+        <span class="kw">if</span> self.original_lr <span class="kw">is</span> <span class="kw">None</span>:
+            self.original_lr = optimizer.param_groups[0]["lr"]
+        <span class="kw">for</span> pg <span class="kw">in</span> optimizer.param_groups:
+            pg["lr"] *= self.config.lr_reduction_factor
+        self.lr_recovery_remaining = self.config.lr_recovery_steps
+
+    <span class="kw">def</span> <span class="fn">maybe_restore_lr</span>(self, optimizer):
+        <span class="cm"># Linearly ramp LR back to original after recovery</span>
+        <span class="kw">if</span> self.lr_recovery_remaining > 0 <span class="kw">and</span> self.original_lr <span class="kw">is</span> <span class="kw">not</span> <span class="kw">None</span>:
+            self.lr_recovery_remaining -= 1
+            current_lr = optimizer.param_groups[0]["lr"]
+            ramp = (self.original_lr - current_lr) / (self.lr_recovery_remaining + 1)
+            <span class="kw">for</span> pg <span class="kw">in</span> optimizer.param_groups:
+                pg["lr"] += ramp
+            <span class="kw">if</span> self.lr_recovery_remaining == 0:
+                self.original_lr = <span class="kw">None</span></div>
+
+      <p>Now integrating the StabilityMonitor into a full training loop with checkpoint management, batch skipping, and automatic recovery:</p>
+
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> os
+<span class="kw">import</span> logging
+
+logger = logging.<span class="fn">getLogger</span>(__name__)
+
+<span class="kw">def</span> <span class="fn">save_checkpoint</span>(model, optimizer, step, path):
+    torch.<span class="fn">save</span>({
+        "model": model.<span class="fn">state_dict</span>(),
+        "optimizer": optimizer.<span class="fn">state_dict</span>(),
+        "step": step
+    }, path)
+
+<span class="kw">def</span> <span class="fn">load_checkpoint</span>(model, optimizer, path):
+    ckpt = torch.<span class="fn">load</span>(path, map_location="cpu")
+    model.<span class="fn">load_state_dict</span>(ckpt["model"])
+    optimizer.<span class="fn">load_state_dict</span>(ckpt["optimizer"])
+    <span class="kw">return</span> ckpt["step"]
+
+<span class="kw">def</span> <span class="fn">train_with_stability</span>(model, optimizer, dataloader, config):
+    monitor = <span class="fn">StabilityMonitor</span>(<span class="fn">StabilityConfig</span>())
+    scaler = torch.cuda.amp.<span class="fn">GradScaler</span>()
+    ckpt_dir = "checkpoints/stability"
+    os.<span class="fn">makedirs</span>(ckpt_dir, exist_ok=<span class="kw">True</span>)
+
+    step = 0
+    <span class="kw">for</span> epoch <span class="kw">in</span> <span class="fn">range</span>(config.num_epochs):
+        <span class="kw">for</span> batch <span class="kw">in</span> dataloader:
+            step += 1
+
+            <span class="cm"># Save periodic stability checkpoint</span>
+            <span class="kw">if</span> step % monitor.config.checkpoint_interval == 0:
+                path = f"{ckpt_dir}/ckpt_{step}.pt"
+                <span class="fn">save_checkpoint</span>(model, optimizer, step, path)
+                monitor.last_good_checkpoint = path
+
+            <span class="cm"># Forward pass with mixed precision</span>
+            <span class="kw">with</span> torch.cuda.amp.<span class="fn">autocast</span>(dtype=torch.bfloat16):
+                logits = <span class="fn">model</span>(batch["input_ids"])
+                loss, loss_dict = <span class="fn">compute_total_loss</span>(
+                    logits, batch["labels"]
+                )
+
+            <span class="cm"># Backward pass</span>
+            optimizer.<span class="fn">zero_grad</span>()
+            scaler.<span class="fn">scale</span>(loss).<span class="fn">backward</span>()
+            scaler.<span class="fn">unscale_</span>(optimizer)
+
+            <span class="cm"># Stability check BEFORE optimizer step</span>
+            action = monitor.<span class="fn">step_check</span>(loss, model, optimizer)
+
+            <span class="kw">if</span> action == "ok":
+                <span class="cm"># Normal path: clip and step</span>
+                torch.nn.utils.<span class="fn">clip_grad_norm_</span>(model.<span class="fn">parameters</span>(), 1.0)
+                scaler.<span class="fn">step</span>(optimizer)
+                scaler.<span class="fn">update</span>()
+                monitor.<span class="fn">maybe_restore_lr</span>(optimizer)
+
+            <span class="kw">elif</span> action == "skip_batch":
+                <span class="cm"># Bad batch: zero grads, skip optimizer step</span>
+                optimizer.<span class="fn">zero_grad</span>()
+                logger.<span class="fn">warning</span>(f"Skipping batch at step {step}")
+
+            <span class="kw">elif</span> action == "rollback":
+                <span class="cm"># Critical instability: rollback to checkpoint</span>
+                <span class="kw">if</span> monitor.last_good_checkpoint <span class="kw">is</span> <span class="kw">not</span> <span class="kw">None</span>:
+                    logger.<span class="fn">error</span>(f"Rolling back to {monitor.last_good_checkpoint}")
+                    step = <span class="fn">load_checkpoint</span>(
+                        model, optimizer, monitor.last_good_checkpoint
+                    )
+                    monitor.<span class="fn">reduce_lr</span>(optimizer)
+                    monitor.consecutive_skips = 0
+                <span class="kw">else</span>:
+                    <span class="kw">raise</span> <span class="fn">RuntimeError</span>("No checkpoint available for rollback")
+
+            <span class="cm"># Log metrics every 100 steps</span>
+            <span class="kw">if</span> step % 100 == 0:
+                logger.<span class="fn">info</span>(
+                    f"Step {step}: loss={loss_dict['ce_loss']:.4f}, "
+                    f"z_loss={loss_dict['z_loss']:.6f}, "
+                    f"grad_ema={monitor.grad_ema:.4f}, "
+                    f"lr={optimizer.param_groups[0]['lr']:.2e}"
+                )</div>
+
+      <div class="callout">
+        <strong>Production considerations:</strong> In distributed training, the stability check must be coordinated across all ranks. Use an all-reduce on a boolean "skip" flag so all workers agree on whether to skip a batch or rollback. Inconsistent decisions across ranks will desynchronize the data pipeline and corrupt gradient accumulation.
+      </div>
+
+      <div class="callout warn">
+        <strong>Testing your stability system:</strong> Inject synthetic instabilities during development—multiply a random gradient by 1000× every N steps—to verify that your detection, skip, and rollback logic works end-to-end before running on expensive GPU clusters. Never ship a stability monitor that hasn't been tested with synthetic spikes.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

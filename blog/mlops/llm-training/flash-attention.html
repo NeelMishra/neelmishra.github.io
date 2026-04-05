@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Technical deep dive into FlashAttention algorithm including IO-aware design, tiling strategy, online softmax trick, and FlashAttention-2/3 improvements for memory-efficient training">
+  <title>FlashAttention: Memory-Efficient Attention | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#standard-attention-memory">The O(N²) Memory Problem in Standard Attention</a></li>
+        <li><a href="#io-aware-design">IO-Aware Algorithm Design: HBM vs SRAM</a></li>
+        <li><a href="#tiling-strategy">Tiling Strategy: Block-Sparse Loads to SRAM</a></li>
+        <li><a href="#online-softmax">Online Softmax Trick</a></li>
+        <li><a href="#flash-attention-2">FlashAttention-2: Better Work Partitioning</a></li>
+        <li><a href="#flash-attention-3">FlashAttention-3: FP8 &amp; Hopper Asynchrony</a></li>
+        <li><a href="#framework-integration">Integration with Training Frameworks</a></li>
+        <li><a href="#memory-savings">Memory Savings Analysis</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>FlashAttention: Memory-Efficient Attention</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!-- Section 1: Standard Attention Memory Problem                  -->
+      <!-- ============================================================ -->
+      <section id="standard-attention-memory">
+        <h2>The O(N²) Memory Problem in Standard Attention</h2>
+        <p>
+          The self-attention mechanism at the core of every Transformer computes
+          <strong>Attention(Q, K, V) = softmax(QK<sup>T</sup> / √d<sub>k</sub>)V</strong>.
+          For a sequence of length <em>N</em> and head dimension <em>d</em>, the intermediate
+          attention score matrix <strong>S = QK<sup>T</sup></strong> is of shape <em>N × N</em>.
+          Materializing this matrix in GPU High-Bandwidth Memory (HBM) requires O(N²) memory —
+          which becomes the dominant bottleneck for long-context models.
+        </p>
+        <p>
+          Consider concrete numbers: with sequence length N = 8192 and batch×heads = 32, the
+          attention matrix alone is 32 × 8192 × 8192 × 2 bytes (fp16) ≈ <strong>4 GB</strong>.
+          At N = 32768 (32k context), that grows to <strong>64 GB</strong> — exceeding the
+          memory of even an A100-80GB GPU for a single layer. The standard PyTorch implementation
+          proceeds in three kernel launches:
+        </p>
+        <div class="pseudo-code"><span class="cm"># Standard attention — three materialized N×N matrices in HBM</span>
+<span class="kw">import</span> torch
+
+<span class="kw">def</span> <span class="fn">standard_attention</span>(Q, K, V, scale):
+    S = torch.<span class="fn">matmul</span>(Q, K.<span class="fn">transpose</span>(-2, -1)) * scale   <span class="cm"># O(N²) HBM write</span>
+    P = torch.nn.functional.<span class="fn">softmax</span>(S, dim=-1)            <span class="cm"># O(N²) HBM read + write</span>
+    P = torch.nn.functional.<span class="fn">dropout</span>(P, p=0.1)             <span class="cm"># O(N²) HBM read + write</span>
+    O = torch.<span class="fn">matmul</span>(P, V)                                <span class="cm"># O(N²) HBM read</span>
+    <span class="kw">return</span> O</div>
+        <p>
+          Each step reads and writes the full N×N matrix from/to HBM. On an A100, HBM bandwidth
+          is ~2 TB/s while peak FP16 compute is ~312 TFLOPS. The arithmetic intensity of
+          softmax is O(1) FLOP per byte — making attention <strong>memory-bandwidth bound</strong>,
+          not compute-bound. The GPU's tensor cores sit idle, waiting for data to arrive from
+          HBM. FlashAttention's central insight is to restructure the computation to minimize
+          these HBM round-trips by exploiting the GPU's faster, smaller on-chip SRAM.
+        </p>
+        <div class="callout">
+          <strong>Key insight:</strong> Standard attention is <em>memory-bandwidth bound</em>.
+          The bottleneck is not the number of FLOPs but the number of bytes moved between HBM
+          and the streaming multiprocessors. Reducing HBM accesses — even at the cost of
+          extra recomputation — yields a net wall-clock speedup.
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 2: IO-Aware Design                                    -->
+      <!-- ============================================================ -->
+      <section id="io-aware-design">
+        <h2>IO-Aware Algorithm Design: HBM vs SRAM</h2>
+        <p>
+          GPU memory has a distinct hierarchy analogous to the CPU cache hierarchy. On an
+          NVIDIA A100, the two critical tiers are:
+        </p>
+        <ul>
+          <li><strong>HBM (High-Bandwidth Memory):</strong> 80 GB capacity, ~2 TB/s bandwidth.
+              This is where tensors normally reside.</li>
+          <li><strong>SRAM (on-chip shared memory):</strong> ~20 MB total across 108 SMs
+              (~192 KB per SM), but with bandwidth exceeding <strong>19 TB/s</strong> —
+              roughly 10× faster than HBM.</li>
+        </ul>
+        <p>
+          Standard attention kernels are "IO-unaware": they are written as a sequence of
+          high-level PyTorch/cuBLAS calls, each of which materializes its output to HBM before
+          the next kernel reads it back. FlashAttention is <strong>IO-aware</strong> — it
+          explicitly reasons about data movement between HBM and SRAM, fusing the entire
+          attention computation into a single kernel that tiles inputs into SRAM-resident blocks.
+        </p>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h3>Standard Attention</h3>
+            <ul>
+              <li>3 separate CUDA kernels (matmul → softmax → matmul)</li>
+              <li>Full N×N matrix written to HBM between kernels</li>
+              <li>HBM reads/writes: <strong>O(N²d + N²)</strong></li>
+              <li>Memory: O(N²) for attention matrix</li>
+              <li>Bandwidth-bound at typical sequence lengths</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h3>FlashAttention</h3>
+            <ul>
+              <li>1 fused CUDA kernel — never materializes full S or P</li>
+              <li>Tiles of Q, K, V loaded to SRAM; partial results accumulated in registers</li>
+              <li>HBM reads/writes: <strong>O(N²d² / M)</strong> where M = SRAM size</li>
+              <li>Memory: O(N) — only stores row-wise running max &amp; sum</li>
+              <li>Approaches compute-bound regime</li>
+            </ul>
+          </div>
+        </div>
+        <p>
+          The IO complexity reduction is substantial. For typical values (d = 128, M = 192 KB
+          per SM), the HBM traffic decreases by a factor proportional to d²/M — roughly
+          <strong>4–8×</strong> fewer bytes moved. Because the kernel is bandwidth-bound, this
+          directly translates to a proportional wall-clock speedup. The authors proved that
+          FlashAttention's IO complexity is <em>optimal</em> up to constant factors for any
+          exact-attention algorithm that uses sub-quadratic extra memory.
+        </p>
+        <div class="callout warn">
+          <strong>Warning:</strong> FlashAttention computes <em>exact</em> attention — it is
+          not an approximation. It produces bit-for-bit identical results to standard attention
+          (up to floating-point non-associativity). This is in contrast to sparse or linear
+          attention approximations that trade accuracy for speed.
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 3: Tiling Strategy                                    -->
+      <!-- ============================================================ -->
+      <section id="tiling-strategy">
+        <h2>Tiling Strategy: Block-Sparse Loads to SRAM</h2>
+        <p>
+          The core of FlashAttention is a <strong>two-level tiling loop</strong> that processes
+          the attention matrix in blocks that fit in SRAM. Let B<sub>r</sub> and B<sub>c</sub>
+          denote the tile sizes for the row (query) and column (key) dimensions, respectively.
+          Typical values are B<sub>r</sub> = B<sub>c</sub> = 128 on A100 with d = 128.
+        </p>
+
+        <!-- SVG: Tiling diagram -->
+        <svg viewBox="0 0 720 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:1.2rem auto;display:block" aria-label="FlashAttention tiling pattern showing Q, K, V block loads from HBM to SRAM">
+          <!-- HBM region -->
+          <rect id="lt-hbm-region" x="10" y="10" width="700" height="130" rx="10" fill="#f0f4f8" stroke="#94a3b8" stroke-width="1.5"/>
+          <text id="lt-hbm-label" x="360" y="30" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#475569">HBM (High-Bandwidth Memory — 80 GB, ~2 TB/s)</text>
+          <!-- Q matrix -->
+          <rect id="lt-hbm-q" x="30" y="45" width="200" height="80" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+          <text x="130" y="75" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#1e40af">Q  [N × d]</text>
+          <text x="130" y="95" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#3b82f6">stored in HBM</text>
+          <!-- K matrix -->
+          <rect id="lt-hbm-k" x="260" y="45" width="200" height="80" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="1.5"/>
+          <text x="360" y="75" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#166534">K  [N × d]</text>
+          <text x="360" y="95" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#22c55e">stored in HBM</text>
+          <!-- V matrix -->
+          <rect id="lt-hbm-v" x="490" y="45" width="200" height="80" rx="6" fill="#fef9c3" stroke="#eab308" stroke-width="1.5"/>
+          <text x="590" y="75" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#854d0e">V  [N × d]</text>
+          <text x="590" y="95" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#eab308">stored in HBM</text>
+
+          <!-- Transfer arrows -->
+          <defs>
+            <marker id="lt-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+          </defs>
+          <line id="lt-arrow-q" x1="100" y1="125" x2="100" y2="195" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+          <line id="lt-arrow-k" x1="360" y1="125" x2="310" y2="195" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+          <line id="lt-arrow-v" x1="590" y1="125" x2="530" y2="195" stroke="#0a8f6a" stroke-width="2" marker-end="url(#lt-arrow)"/>
+          <text id="lt-transfer-label" x="360" y="168" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#0a8f6a" font-weight="600">Load tiles (Br×d) and (Bc×d)</text>
+
+          <!-- SRAM region -->
+          <rect id="lt-sram-region" x="10" y="200" width="700" height="170" rx="10" fill="#f0fdf4" stroke="#0a8f6a" stroke-width="1.5"/>
+          <text id="lt-sram-label" x="360" y="220" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">SRAM (On-chip Shared Memory — 192 KB/SM, ~19 TB/s)</text>
+
+          <!-- Q tile in SRAM -->
+          <rect id="lt-sram-q-tile" x="30" y="235" width="130" height="60" rx="6" fill="#bfdbfe" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <text x="95" y="260" text-anchor="middle" font-family="Consolas,monospace" font-size="10" font-weight="600" fill="#1e40af">Q_i [Br×d]</text>
+          <text x="95" y="280" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#3b82f6">tile i of Q</text>
+
+          <!-- K tile in SRAM -->
+          <rect id="lt-sram-k-tile" x="190" y="235" width="130" height="60" rx="6" fill="#bbf7d0" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <text x="255" y="260" text-anchor="middle" font-family="Consolas,monospace" font-size="10" font-weight="600" fill="#166534">K_j [Bc×d]</text>
+          <text x="255" y="280" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#22c55e">tile j of K</text>
+
+          <!-- V tile in SRAM -->
+          <rect id="lt-sram-v-tile" x="350" y="235" width="130" height="60" rx="6" fill="#fef08a" stroke="#eab308" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <text x="415" y="260" text-anchor="middle" font-family="Consolas,monospace" font-size="10" font-weight="600" fill="#854d0e">V_j [Bc×d]</text>
+          <text x="415" y="280" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#eab308">tile j of V</text>
+
+          <!-- Compute box in SRAM -->
+          <rect id="lt-sram-compute" x="510" y="235" width="180" height="60" rx="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="600" y="255" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" font-weight="700" fill="#5b21b6">Compute in SRAM</text>
+          <text x="600" y="272" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#7c3aed">S_ij = Q_i × K_j^T</text>
+          <text x="600" y="286" text-anchor="middle" font-family="Consolas,monospace" font-size="9" fill="#7c3aed">O_i += softmax(S_ij)×V_j</text>
+
+          <!-- Output write-back -->
+          <rect id="lt-output-block" x="250" y="320" width="220" height="40" rx="6" fill="#fce7f3" stroke="#ec4899" stroke-width="1.5"/>
+          <text id="lt-output-label" x="360" y="345" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" font-weight="600" fill="#be185d">Write O_i back to HBM (only final output)</text>
+        </svg>
+
+        <p>
+          The algorithm proceeds in two nested loops. The <strong>outer loop</strong> iterates
+          over blocks of K and V (column tiles j = 1, …, ⌈N/B<sub>c</sub>⌉). For each outer
+          iteration, the <strong>inner loop</strong> iterates over blocks of Q (row tiles
+          i = 1, …, ⌈N/B<sub>r</sub>⌉). Within the inner loop body:
+        </p>
+        <ol>
+          <li>Load Q<sub>i</sub> (B<sub>r</sub> × d) from HBM to SRAM</li>
+          <li>Load K<sub>j</sub> (B<sub>c</sub> × d) and V<sub>j</sub> (B<sub>c</sub> × d) from HBM to SRAM</li>
+          <li>Compute local attention scores: S<sub>ij</sub> = Q<sub>i</sub> K<sub>j</sub><sup>T</sup> (B<sub>r</sub> × B<sub>c</sub> — fits in SRAM)</li>
+          <li>Apply the online softmax rescaling (see next section) to accumulate into O<sub>i</sub></li>
+          <li>After the inner loop completes for all j, write final O<sub>i</sub> back to HBM</li>
+        </ol>
+        <p>
+          Crucially, the <em>full</em> N × N attention matrix is <strong>never materialized</strong>.
+          Only blocks of size B<sub>r</sub> × B<sub>c</sub> exist transiently in SRAM. The memory
+          footprint drops from O(N²) to O(N) — we only store the output O (N × d), plus
+          per-row running statistics (max and sum) of size O(N).
+        </p>
+        <div class="callout">
+          <strong>Tile size selection:</strong> The optimal B<sub>r</sub> and B<sub>c</sub> depend
+          on SRAM capacity M. We need 3 tiles in SRAM simultaneously:
+          B<sub>r</sub>d + B<sub>c</sub>d + B<sub>r</sub>B<sub>c</sub> ≤ M.
+          For d = 128 and M = 192 KB (96K fp16 elements), B<sub>r</sub> = B<sub>c</sub> = 128
+          uses ~98K elements — a tight fit that maximizes data reuse.
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 4: Online Softmax                                     -->
+      <!-- ============================================================ -->
+      <section id="online-softmax">
+        <h2>Online Softmax Trick</h2>
+        <p>
+          The fundamental challenge of tiling attention is that <strong>softmax is a global
+          operation</strong>: computing softmax(S<sub>i,:</sub>) over a full row requires
+          knowing the maximum value across all N columns, but we only see B<sub>c</sub> columns
+          at a time. The online softmax trick (Milakov &amp; Gimelshein, 2018) solves this by
+          maintaining <em>running statistics</em> that allow incremental updates.
+        </p>
+        <p>
+          For each row i, we maintain two scalars across tile iterations:
+        </p>
+        <ul>
+          <li><strong>m<sub>i</sub></strong> — the running maximum of S<sub>i,:</sub> seen so far</li>
+          <li><strong>ℓ<sub>i</sub></strong> — the running sum of exp(S<sub>i,k</sub> − m<sub>i</sub>) seen so far</li>
+        </ul>
+        <p>
+          When we process a new tile j, we compute a <em>local</em> block of scores
+          S<sub>ij</sub> = Q<sub>i</sub>K<sub>j</sub><sup>T</sup>. Let m<sub>ij</sub> =
+          max(S<sub>ij</sub>) along the column dimension. The update rules are:
+        </p>
+        <div class="pseudo-code"><span class="cm"># Online softmax update for tile j at row block i</span>
+<span class="cm"># m_prev, l_prev, O_prev are the running statistics from tiles 0..j-1</span>
+
+m_new = <span class="fn">max</span>(m_prev, m_ij)                       <span class="cm"># global max so far</span>
+
+<span class="cm"># Rescale previous accumulator to account for the new global max</span>
+alpha = <span class="fn">exp</span>(m_prev - m_new)                       <span class="cm"># correction factor</span>
+beta  = <span class="fn">exp</span>(m_ij   - m_new)                       <span class="cm"># scale for new tile</span>
+
+l_new = alpha * l_prev + beta * <span class="fn">sum</span>(<span class="fn">exp</span>(S_ij - m_ij))  <span class="cm"># updated denominator</span>
+
+<span class="cm"># Update output accumulator with rescaling</span>
+P_ij = beta * <span class="fn">exp</span>(S_ij - m_ij)                    <span class="cm"># unnormalized local softmax</span>
+O_new = alpha * O_prev + <span class="fn">matmul</span>(P_ij, V_j)         <span class="cm"># accumulate weighted values</span>
+
+<span class="cm"># After all tiles processed, final normalization:</span>
+O_final = O_new / l_new                              <span class="cm"># divide by the total softmax sum</span></div>
+        <p>
+          The mathematical correctness relies on the identity:
+          <strong>softmax(x)<sub>k</sub> = exp(x<sub>k</sub> − m) / Σ exp(x<sub>j</sub> − m)</strong>
+          where m = max(x). When we see new elements that might change the global max, the
+          exponential rescaling factors (α and β) correctly adjust the previously accumulated
+          numerators and denominators. After processing all ⌈N/B<sub>c</sub>⌉ tiles, the
+          accumulated O<sub>i</sub> and ℓ<sub>i</sub> give us the <em>exact</em> output of
+          softmax — no approximation involved.
+        </p>
+        <div class="callout warn">
+          <strong>Numerical stability:</strong> The subtraction of m (the running max) inside
+          the exp() calls is critical for numerical stability. Without it, exp(S<sub>ij</sub>)
+          can overflow to inf in fp16 when scores exceed ~11. This is the same log-sum-exp
+          trick used in standard numerically-stable softmax, applied incrementally.
+        </div>
+        <p>
+          For the <strong>backward pass</strong>, FlashAttention avoids storing the full
+          attention matrix P. Instead, it stores only O, ℓ, and m (all O(N) memory). During
+          backpropagation, the S<sub>ij</sub> blocks are <em>recomputed</em> from Q and K tiles
+          on the fly. This recomputation costs extra FLOPs but saves O(N²) memory, making the
+          tradeoff favorable because the kernel remains bandwidth-bound.
+        </p>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 5: FlashAttention-2                                   -->
+      <!-- ============================================================ -->
+      <section id="flash-attention-2">
+        <h2>FlashAttention-2: Better Work Partitioning</h2>
+        <p>
+          FlashAttention-1 achieved 25–40% of peak FP16 TFLOPS utilization on A100.
+          FlashAttention-2 (Dao, 2023) pushed this to <strong>50–73%</strong> through three
+          key algorithmic refinements:
+        </p>
+        <h3>1. Reduced Non-Matmul FLOPs</h3>
+        <p>
+          In FlashAttention-1, the online softmax rescaling required multiple element-wise
+          operations (multiply by α, multiply by β, etc.) that execute on CUDA cores rather
+          than tensor cores. FlashAttention-2 restructures the computation to defer the
+          rescaling: the output accumulator O is kept in an <em>unnormalized</em> form and
+          the division by ℓ is done only once at the very end. This reduces non-matmul FLOPs
+          by approximately 4× while maintaining numerical stability.
+        </p>
+        <h3>2. Parallelism Over Sequence Length</h3>
+        <p>
+          FlashAttention-1's outer loop iterates over K/V blocks, and the inner loop over Q
+          blocks. Each thread block handles one Q block — limiting parallelism to
+          batch_size × num_heads. FlashAttention-2 <strong>swaps the loop order</strong>:
+          the outer loop now iterates over Q blocks, and the inner loop over K/V blocks.
+          This allows parallelizing over the sequence length dimension as well, since different
+          Q blocks are fully independent. On long sequences with small batch sizes
+          (common during inference), this increases GPU occupancy dramatically.
+        </p>
+        <h3>3. Within-Warp Partitioning</h3>
+        <p>
+          FlashAttention-1 splits the K/V dimension across warps within a thread block, requiring
+          a cross-warp reduction (via shared memory) to combine partial results. FlashAttention-2
+          instead splits the <strong>Q dimension</strong> across warps. Since each warp processes
+          a different subset of Q rows against the same K/V block, no cross-warp communication
+          is needed for the output — eliminating shared-memory synchronization overhead and
+          improving warp-level efficiency.
+        </p>
+        <div class="compare-grid">
+          <div class="compare-card">
+            <h3>FlashAttention-1</h3>
+            <ul>
+              <li>25–40% of A100 peak TFLOPS</li>
+              <li>Outer loop: K/V blocks; Inner: Q blocks</li>
+              <li>Cross-warp reduction needed (shared memory sync)</li>
+              <li>Frequent rescaling in inner loop</li>
+              <li>~1.5–2× faster than standard attention</li>
+            </ul>
+          </div>
+          <div class="compare-card">
+            <h3>FlashAttention-2</h3>
+            <ul>
+              <li>50–73% of A100 peak TFLOPS</li>
+              <li>Outer loop: Q blocks; Inner: K/V blocks</li>
+              <li>No cross-warp sync — warp-level independence</li>
+              <li>Deferred rescaling; single final division</li>
+              <li>~2× faster than FlashAttention-1</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 6: FlashAttention-3                                   -->
+      <!-- ============================================================ -->
+      <section id="flash-attention-3">
+        <h2>FlashAttention-3: FP8 &amp; Hopper Asynchrony</h2>
+        <p>
+          FlashAttention-3 (Shah et al., 2024) targets the NVIDIA Hopper architecture (H100)
+          and exploits three hardware features unavailable on Ampere:
+        </p>
+        <h3>1. Asynchronous Execution via WGMMA and TMA</h3>
+        <p>
+          Hopper introduces the <strong>Warp Group Matrix Multiply-Accumulate (WGMMA)</strong>
+          instruction, which allows tensor core operations to execute asynchronously with respect
+          to other instructions. FlashAttention-3 pipelines the computation: while the tensor
+          cores compute S<sub>ij</sub> = Q<sub>i</sub>K<sub>j</sub><sup>T</sup>, the
+          <strong>Tensor Memory Accelerator (TMA)</strong> simultaneously loads the next K/V
+          tile from HBM into SRAM. This overlaps compute and memory access, hiding latency and
+          achieving near-peak utilization.
+        </p>
+        <h3>2. FP8 Quantized Attention</h3>
+        <p>
+          H100 tensor cores support FP8 (E4M3 and E5M2 formats) with 2× the throughput of
+          FP16 — up to <strong>~990 TFLOPS</strong>. FlashAttention-3 introduces block-wise
+          quantization: Q, K, V tiles are dynamically quantized to FP8 upon loading into SRAM,
+          with per-tile scaling factors maintained in FP32. The incoherent processing technique
+          applies random orthogonal transformations to mitigate outlier-induced quantization
+          error. This achieves <strong>1.2–1.5× additional speedup</strong> over FP16
+          FlashAttention-2 with minimal accuracy degradation.
+        </p>
+        <h3>3. Low-Precision with High-Precision Accumulation</h3>
+        <p>
+          A key concern with FP8 matmuls is accumulator precision. Hopper's WGMMA accumulates
+          in FP32 by default, but the accumulation happens over chunks. FlashAttention-3
+          implements <strong>periodic FP32 promotion</strong>: after every few FP8 matmul
+          chunks, intermediate results are promoted to FP32 and accumulated, preventing
+          precision loss from cascading rounding errors. The paper shows this achieves
+          within 1% perplexity of full FP16 training on GPT-scale models.
+        </p>
+        <div class="callout">
+          <strong>Performance summary:</strong> On H100 SXM5, FlashAttention-3 achieves up to
+          <strong>740 TFLOPS</strong> in FP16 (75% utilization) and approximately
+          <strong>1.2 PFLOPS</strong> in FP8 — making attention no longer the bottleneck
+          in Transformer training for the first time.
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 7: Framework Integration                              -->
+      <!-- ============================================================ -->
+      <section id="framework-integration">
+        <h2>Integration with Training Frameworks</h2>
+        <p>
+          FlashAttention is available as a drop-in replacement in all major training stacks.
+          Below are the primary integration paths:
+        </p>
+
+        <h3>PyTorch Native (torch.nn.functional.scaled_dot_product_attention)</h3>
+        <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">from</span> torch.nn.functional <span class="kw">import</span> scaled_dot_product_attention
+
+<span class="cm"># PyTorch 2.0+ automatically selects FlashAttention when available</span>
+<span class="kw">with</span> torch.backends.cuda.sdp_kernel(
+    enable_flash=<span class="kw">True</span>,
+    enable_math=<span class="kw">False</span>,
+    enable_mem_efficient=<span class="kw">False</span>
+):
+    output = <span class="fn">scaled_dot_product_attention</span>(
+        query, key, value,
+        attn_mask=<span class="kw">None</span>,
+        dropout_p=0.0,
+        is_causal=<span class="kw">True</span>,
+        scale=<span class="kw">None</span>
+    )
+
+<span class="cm"># Constraints: head_dim must be ≤ 256, dtype must be fp16 or bf16</span>
+<span class="cm"># Causal masking is fused — no need to pass an explicit mask tensor</span></div>
+
+        <h3>HuggingFace Transformers</h3>
+        <div class="pseudo-code"><span class="kw">from</span> transformers <span class="kw">import</span> AutoModelForCausalLM
+
+<span class="cm"># Method 1: Set attn_implementation at model load time</span>
+model = AutoModelForCausalLM.<span class="fn">from_pretrained</span>(
+    "meta-llama/Llama-3.1-70B",
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",   <span class="cm"># uses FlashAttention-2</span>
+    device_map="auto"
+)
+
+<span class="cm"># Method 2: Use BetterTransformer (deprecated in favor of native SDPA)</span>
+<span class="cm"># model = model.to_bettertransformer()</span>
+
+<span class="cm"># For FlashAttention-2, ensure flash-attn is installed:</span>
+<span class="cm"># pip install flash-attn --no-build-isolation</span></div>
+
+        <h3>Direct flash-attn Library</h3>
+        <div class="pseudo-code"><span class="kw">from</span> flash_attn <span class="kw">import</span> flash_attn_func, flash_attn_varlen_func
+
+<span class="cm"># Standard fixed-length attention</span>
+output = <span class="fn">flash_attn_func</span>(
+    q, k, v,                     <span class="cm"># each [batch, seqlen, nheads, headdim]</span>
+    dropout_p=0.0,
+    softmax_scale=<span class="kw">None</span>,         <span class="cm"># defaults to 1/sqrt(headdim)</span>
+    causal=<span class="kw">True</span>,
+    window_size=(-1, -1),        <span class="cm"># (-1,-1) = no sliding window</span>
+    return_attn_probs=<span class="kw">False</span>
+)
+
+<span class="cm"># Variable-length / packed sequences (padding-free)</span>
+output_varlen = <span class="fn">flash_attn_varlen_func</span>(
+    q_unpad, k_unpad, v_unpad,   <span class="cm"># [total_tokens, nheads, headdim]</span>
+    cu_seqlens_q, cu_seqlens_k,  <span class="cm"># cumulative sequence lengths</span>
+    max_seqlen_q, max_seqlen_k,
+    causal=<span class="kw">True</span>
+)</div>
+
+        <div class="callout warn">
+          <strong>Installation note:</strong> The flash-attn package requires
+          CUDA ≥ 11.6, PyTorch ≥ 1.12, and an NVIDIA GPU with sm_80 or higher (A100, H100,
+          L40, RTX 3090/4090). The <code>--no-build-isolation</code> flag is required because
+          the package uses PyTorch's CUDA extension build system. Compilation can take 10–30
+          minutes. Pre-built wheels are available for common PyTorch/CUDA combinations.
+        </div>
+      </section>
+
+      <!-- ============================================================ -->
+      <!-- Section 8: Memory Savings Analysis                            -->
+      <!-- ============================================================ -->
+      <section id="memory-savings">
+        <h2>Memory Savings Analysis</h2>
+        <p>
+          The memory savings from FlashAttention are most impactful for long-context training.
+          The following analysis assumes a single attention layer with fp16 precision,
+          batch_size × num_heads = 32, and head dimension d = 128.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.9rem">
+          <thead>
+            <tr style="border-bottom:2px solid var(--line);text-align:left">
+              <th style="padding:0.6rem">Sequence Length</th>
+              <th style="padding:0.6rem">Standard Attn Memory</th>
+              <th style="padding:0.6rem">FlashAttention Memory</th>
+              <th style="padding:0.6rem">Reduction</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--line)">
+              <td style="padding:0.5rem">2,048</td>
+              <td style="padding:0.5rem">256 MB (attn matrix)</td>
+              <td style="padding:0.5rem">16 MB (O + stats)</td>
+              <td style="padding:0.5rem"><strong>16×</strong></td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--line)">
+              <td style="padding:0.5rem">8,192</td>
+              <td style="padding:0.5rem">4 GB</td>
+              <td style="padding:0.5rem">64 MB</td>
+              <td style="padding:0.5rem"><strong>64×</strong></td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--line)">
+              <td style="padding:0.5rem">32,768</td>
+              <td style="padding:0.5rem">64 GB</td>
+              <td style="padding:0.5rem">256 MB</td>
+              <td style="padding:0.5rem"><strong>256×</strong></td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--line)">
+              <td style="padding:0.5rem">131,072 (128k)</td>
+              <td style="padding:0.5rem">1 TB (infeasible)</td>
+              <td style="padding:0.5rem">1 GB</td>
+              <td style="padding:0.5rem"><strong>1024×</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          The standard attention memory is <code>B×H × N² × 2 bytes</code> where B×H = 32.
+          FlashAttention stores only the output tensor O (B×H × N × d × 2 bytes) plus
+          row-wise softmax statistics (2 × B×H × N × 4 bytes for m and ℓ in fp32).
+          The reduction factor grows linearly with N/d — meaning FlashAttention becomes
+          <em>more</em> advantageous as context length increases.
+        </p>
+
+        <h3>Wall-Clock Speedup</h3>
+        <p>
+          Memory savings translate directly to speed because attention is bandwidth-bound.
+          Empirical benchmarks on A100-80GB show:
+        </p>
+        <ul>
+          <li><strong>N = 2k:</strong> FlashAttention-2 is ~2× faster than standard, ~4× faster than PyTorch's memory-efficient implementation</li>
+          <li><strong>N = 8k:</strong> FlashAttention-2 is ~3× faster (standard attention OOMs on smaller GPUs at this length)</li>
+          <li><strong>N = 16k:</strong> FlashAttention-2 is the only exact-attention option that fits in 80 GB; ~3.5× faster than standard on multi-GPU setups</li>
+        </ul>
+
+        <h3>End-to-End Training Impact</h3>
+        <p>
+          In a full GPT-3 175B training configuration, attention accounts for approximately
+          40% of total HBM usage (including forward activations stored for the backward pass).
+          FlashAttention reduces this to under 5%, freeing memory for larger batch sizes or
+          longer sequences. The practical impact:
+        </p>
+        <ul>
+          <li>GPT-3 175B training with 2k context: activation memory drops from ~120 GB to ~68 GB per GPU, enabling training on 8×A100-80GB without activation checkpointing</li>
+          <li>LLaMA-2 70B with 4k context: FlashAttention-2 enables 30% larger micro-batch size, improving training throughput by ~20% (due to better GPU utilization)</li>
+          <li>Long-context fine-tuning (32k–128k): only feasible with FlashAttention; standard attention would require model-parallel splitting of the attention layer itself</li>
+        </ul>
+
+        <div class="callout">
+          <strong>Backward pass savings:</strong> Standard attention must store the full
+          N × N attention probability matrix P for the backward pass. FlashAttention instead
+          stores only O, m, and ℓ (all O(N)), then <em>recomputes</em> S and P tile-by-tile
+          during backpropagation. This recomputation adds ~25% extra FLOPs but saves massive
+          memory — a favorable trade because the forward+backward pass remains bandwidth-bound.
+          With activation checkpointing, the memory savings compound further.
+        </div>
+      </section>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

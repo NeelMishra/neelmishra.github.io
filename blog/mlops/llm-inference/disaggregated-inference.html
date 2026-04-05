@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into disaggregated inference: splitting prefill and decode phases across specialized hardware for 30-40% cost savings in LLM serving.">
+  <title>Disaggregated Inference | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#li-why-disaggregate">Why Disaggregate?</a></li>
+          <li><a href="#li-prefill-decode-asymmetry">Prefill vs Decode Asymmetry</a></li>
+          <li><a href="#li-architecture">Disaggregated Architecture</a></li>
+          <li><a href="#li-kv-transfer">KV Cache Transfer</a></li>
+          <li><a href="#li-splitwise-distserve">Splitwise &amp; DistServe</a></li>
+          <li><a href="#li-cost-savings">Cost Savings &amp; Tradeoffs</a></li>
+          <li><a href="#li-implementation">Implementation Patterns</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>Disaggregated Inference</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="li-why-disaggregate">Why Disaggregate Prefill and Decode?</h2>
+      <p>Traditional LLM serving colocates both the <strong>prefill</strong> (prompt processing) and <strong>decode</strong> (token generation) phases on the same GPU. This seems natural — one model, one machine — but it creates a fundamental resource mismatch. Prefill is <em>compute-bound</em>, saturating tensor cores with massive matrix multiplications across all input tokens simultaneously. Decode is <em>memory-bandwidth-bound</em>, reading the entire model weight matrix for each single token generated autoregressively.</p>
+
+      <p>When both phases share a GPU, you face an impossible optimization problem: tuning for prefill throughput (large batches, high compute utilization) actively hurts decode latency (small sequential operations that need fast memory access). The GPU is either underutilizing compute during decode or creating head-of-line blocking during prefill.</p>
+
+      <div class="callout">
+        <strong>Core insight:</strong> Prefill achieves 60-80% MFU (Model FLOPS Utilization) on compute-optimized hardware, while decode rarely exceeds 5% MFU but needs 2-3 TB/s memory bandwidth. Disaggregation lets you match each phase to its optimal hardware profile.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="li-prefill-decode-asymmetry">Prefill vs Decode: The Computational Asymmetry</h2>
+      <p>Understanding the arithmetic intensity difference is key. For a Llama-2 70B model with 8192 hidden dimensions and 64 attention heads:</p>
+
+      <p><strong>Prefill phase</strong> processes all <em>N</em> input tokens in parallel. The QKV projection for one layer performs matrix multiplications of shape <code>[N, 8192] × [8192, 24576]</code>. With N=2048 tokens, that's ~103 billion FLOPs per layer, across 80 layers — roughly 8.2 TFLOPs total. An H100 with 989 TFLOPS FP16 can do this in ~8.3ms. The arithmetic intensity is <code>2×N×d / (N+d) ≈ 2×d ≈ 16384</code> ops/byte — deeply compute-bound.</p>
+
+      <p><strong>Decode phase</strong> generates one token at a time. The same QKV projection becomes <code>[1, 8192] × [8192, 24576]</code> — only ~402 million FLOPs per layer but still reading the same 24576×8192×2 = 384 MB weight matrix. Arithmetic intensity drops to ~2 ops/byte — squarely memory-bandwidth-bound. Even with batching 64 requests, intensity only reaches ~128 ops/byte.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>⚡ Prefill Phase</h3>
+          <ul>
+            <li><strong>Bound by:</strong> Compute (TFLOPS)</li>
+            <li><strong>Arithmetic intensity:</strong> ~16K ops/byte</li>
+            <li><strong>Ideal hardware:</strong> H100 SXM (989 TFLOPS FP16)</li>
+            <li><strong>GPU utilization:</strong> 60-80% MFU achievable</li>
+            <li><strong>Parallelism:</strong> All input tokens processed simultaneously</li>
+            <li><strong>Duration:</strong> 50-500ms (proportional to prompt length)</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>🔄 Decode Phase</h3>
+          <ul>
+            <li><strong>Bound by:</strong> Memory bandwidth (TB/s)</li>
+            <li><strong>Arithmetic intensity:</strong> ~2 ops/byte (batch=1)</li>
+            <li><strong>Ideal hardware:</strong> A10G / L4 (high BW/$ ratio)</li>
+            <li><strong>GPU utilization:</strong> 2-5% MFU typical</li>
+            <li><strong>Parallelism:</strong> One token at a time per sequence</li>
+            <li><strong>Duration:</strong> 20-50ms per token × hundreds of tokens</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="li-architecture">Disaggregated Serving Architecture</h2>
+      <p>In a disaggregated system, dedicated <strong>prefill nodes</strong> handle prompt processing while separate <strong>decode nodes</strong> handle autoregressive generation. A routing layer directs incoming requests to available prefill nodes, then migrates the computed KV cache to a decode node for token generation.</p>
+
+      <svg viewBox="0 0 800 420" style="width:100%;max-width:800px;margin:1.5rem auto;display:block" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="li-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#0a8f6a"/></marker>
+          <marker id="li-arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#ff6b35"/></marker>
+        </defs>
+        <!-- Router -->
+        <rect x="320" y="10" width="160" height="50" rx="10" fill="#0a8f6a" opacity="0.15" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="400" y="40" text-anchor="middle" font-family="Manrope,sans-serif" font-size="14" font-weight="700" fill="#0a8f6a">Request Router</text>
+        <!-- Prefill Pool -->
+        <rect x="40" y="110" width="300" height="160" rx="12" fill="#fff" stroke="#0a8f6a" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="190" y="135" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">Prefill Pool (Compute-Optimized)</text>
+        <rect x="60" y="150" width="120" height="50" rx="8" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="120" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">H100 SXM ×4</text>
+        <rect x="200" y="150" width="120" height="50" rx="8" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="260" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">H100 SXM ×4</text>
+        <rect x="60" y="210" width="120" height="50" rx="8" fill="#0a8f6a" opacity="0.1" stroke="#0a8f6a"/>
+        <text x="120" y="240" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">H100 SXM ×4</text>
+        <!-- Decode Pool -->
+        <rect x="460" y="110" width="300" height="160" rx="12" fill="#fff" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="610" y="135" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#ff6b35">Decode Pool (Memory-Optimized)</text>
+        <rect x="480" y="150" width="120" height="50" rx="8" fill="#ff6b35" opacity="0.1" stroke="#ff6b35"/>
+        <text x="540" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">A10G ×8</text>
+        <rect x="620" y="150" width="120" height="50" rx="8" fill="#ff6b35" opacity="0.1" stroke="#ff6b35"/>
+        <text x="680" y="180" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">A10G ×8</text>
+        <rect x="480" y="210" width="120" height="50" rx="8" fill="#ff6b35" opacity="0.1" stroke="#ff6b35"/>
+        <text x="540" y="240" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">A10G ×8</text>
+        <rect x="620" y="210" width="120" height="50" rx="8" fill="#ff6b35" opacity="0.1" stroke="#ff6b35"/>
+        <text x="680" y="240" text-anchor="middle" font-family="Manrope,sans-serif" font-size="11" fill="#333">A10G ×8</text>
+        <!-- KV Cache Transfer -->
+        <rect x="250" y="310" width="300" height="55" rx="10" fill="#1a1a2e" opacity="0.08" stroke="#1a1a2e" stroke-width="1"/>
+        <text x="400" y="335" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="600" fill="#1a1a2e">KV Cache Transfer Layer</text>
+        <text x="400" y="355" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">NVLink / InfiniBand / RDMA (100-400 Gbps)</text>
+        <!-- Arrows -->
+        <line x1="360" y1="60" x2="190" y2="108" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-arrow)"/>
+        <line x1="440" y1="60" x2="610" y2="108" stroke="#0a8f6a" stroke-width="1.5" marker-end="url(#li-arrow)"/>
+        <path d="M340,240 Q340,310 350,310" stroke="#ff6b35" stroke-width="2" fill="none" marker-end="url(#li-arrow-orange)"/>
+        <path d="M450,310 Q460,310 460,240" stroke="#ff6b35" stroke-width="2" fill="none" marker-end="url(#li-arrow-orange)"/>
+        <text x="400" y="400" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#999">Prefill nodes compute KV cache → transfer → Decode nodes generate tokens</text>
+      </svg>
+
+      <p>The flow is: (1) Router receives prompt → (2) Assigns to prefill node with lowest queue depth → (3) Prefill node computes full KV cache for the prompt → (4) KV cache is transferred to a decode node → (5) Decode node generates tokens autoregressively, streaming back to client.</p>
+
+      <!-- Section 4 -->
+      <h2 id="li-kv-transfer">KV Cache Transfer: The Critical Path</h2>
+      <p>The KV cache transfer between prefill and decode nodes is the key engineering challenge. For Llama-2 70B with 2048 input tokens, the KV cache size per request is:</p>
+
+      <pre class="pseudo-code"><span class="cm"># KV cache size calculation for Llama-2 70B</span>
+<span class="kw">num_layers</span>     = 80
+<span class="kw">num_kv_heads</span>   = 8          <span class="cm"># GQA: 8 KV heads (not 64)</span>
+<span class="kw">head_dim</span>       = 128
+<span class="kw">seq_len</span>        = 2048
+<span class="kw">dtype_bytes</span>    = 2          <span class="cm"># FP16</span>
+
+<span class="cm"># Per-layer: 2 (K+V) × num_kv_heads × seq_len × head_dim × dtype</span>
+<span class="kw">per_layer</span> = 2 * 8 * 2048 * 128 * 2    <span class="cm"># = 8,388,608 bytes = 8 MB</span>
+<span class="kw">total_kv</span>  = per_layer * 80              <span class="cm"># = 640 MB per request</span>
+
+<span class="cm"># Transfer time at different bandwidths:</span>
+<span class="cm"># 100 Gbps (InfiniBand HDR):  ~51 ms</span>
+<span class="cm"># 200 Gbps (InfiniBand NDR):  ~25 ms</span>
+<span class="cm"># 400 Gbps (NVLink / NDR×2):  ~12 ms</span>
+
+<span class="cm"># Compare to prefill compute time: ~80ms on 4×H100</span>
+<span class="cm"># Transfer overhead: 15-60% of prefill time</span></pre>
+
+      <div class="callout warn">
+        <strong>Transfer overhead matters:</strong> If KV transfer takes 50ms and prefill takes 80ms, you're adding 62% latency overhead to TTFT. For latency-sensitive applications, you need ≥200 Gbps interconnect or the disaggregation penalty outweighs the benefit.
+      </div>
+
+      <p>Strategies to reduce transfer overhead:</p>
+      <ul>
+        <li><strong>KV cache compression:</strong> Quantize KV cache to INT8 or INT4 during transfer (2-4× reduction), dequantize on decode node. Research shows &lt;1% quality loss with INT8 KV cache.</li>
+        <li><strong>Pipelined transfer:</strong> Start transferring KV cache layer-by-layer as prefill completes each layer, overlapping compute and network. Reduces effective transfer latency by 40-60%.</li>
+        <li><strong>Proximity placement:</strong> Co-locate prefill and decode nodes on the same rack with NVLink bridges or NVSwitch for sub-10ms transfer.</li>
+        <li><strong>Selective transfer:</strong> Only transfer the KV cache for the attention-heavy layers; recompute shallow layers on the decode node.</li>
+      </ul>
+
+      <!-- Section 5 -->
+      <h2 id="li-splitwise-distserve">Splitwise &amp; DistServe Approaches</h2>
+      <p><strong>Splitwise</strong> (UW, 2024) was among the first to formalize disaggregated inference. Key contributions:</p>
+      <ul>
+        <li>Profiled the compute/memory asymmetry across 8 popular LLMs and showed 2-3× cost reduction potential</li>
+        <li>Designed a <em>mixed-pool scheduler</em> that assigns prefill to high-compute nodes (H100) and decode to cost-efficient nodes (A10G)</li>
+        <li>Demonstrated 1.4× higher throughput at the same SLO compared to colocated serving on Llama-2 70B</li>
+        <li>Showed that even with network transfer overhead, disaggregation wins when prompt lengths exceed ~512 tokens</li>
+      </ul>
+
+      <p><strong>DistServe</strong> (PKU, 2024) extended this with a goodput-optimized placement algorithm:</p>
+      <ul>
+        <li>Formulated GPU placement as a mixed-integer linear program (MILP) optimizing for <em>goodput</em> — requests meeting both TTFT and TPOT SLOs</li>
+        <li>Introduced <em>prefill-decode parallelism</em>: pipeline KV transfer with the next prefill computation</li>
+        <li>Achieved 2.0× higher goodput than vLLM colocated serving under strict SLOs (TTFT &lt; 200ms, TPOT &lt; 50ms)</li>
+        <li>Showed 4.48× goodput improvement over colocated serving on a Llama-70B chatbot workload</li>
+      </ul>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Splitwise</h3>
+          <ul>
+            <li><strong>Focus:</strong> Hardware heterogeneity</li>
+            <li><strong>Scheduler:</strong> Queue-depth based routing</li>
+            <li><strong>Transfer:</strong> Full KV cache migration</li>
+            <li><strong>Result:</strong> 1.4× throughput, 30% cost reduction</li>
+            <li><strong>Best for:</strong> Mixed GPU fleets</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>DistServe</h3>
+          <ul>
+            <li><strong>Focus:</strong> SLO-aware goodput optimization</li>
+            <li><strong>Scheduler:</strong> MILP-based placement</li>
+            <li><strong>Transfer:</strong> Pipelined layer-by-layer</li>
+            <li><strong>Result:</strong> 2-4.48× goodput improvement</li>
+            <li><strong>Best for:</strong> Strict latency SLO workloads</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Section 6 -->
+      <h2 id="li-cost-savings">Cost Savings &amp; Latency Tradeoffs</h2>
+      <p>The economics of disaggregation are compelling. Consider serving Llama-2 70B at 1000 requests/minute with average 1024-token prompts and 512-token completions:</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Colocated (Baseline)</h3>
+          <ul>
+            <li>8× H100 SXM nodes (4 GPUs each)</li>
+            <li>Cost: 8 × $30/hr = <strong>$240/hr</strong></li>
+            <li>Throughput: ~125 req/min per node</li>
+            <li>P50 TTFT: 180ms</li>
+            <li>P50 TPOT: 35ms</li>
+            <li>GPU utilization: 45% compute, 60% memory BW</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Disaggregated</h3>
+          <ul>
+            <li>3× H100 SXM (prefill) + 6× A10G (decode)</li>
+            <li>Cost: 3×$30 + 6×$4 = <strong>$114/hr</strong></li>
+            <li>Throughput: ~333 prefill/min + ~167 decode/min</li>
+            <li>P50 TTFT: 120ms (faster — dedicated prefill)</li>
+            <li>P50 TPOT: 40ms (slightly slower — cheaper HW)</li>
+            <li>GPU utilization: 75% compute, 80% memory BW</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>52% cost reduction</strong> ($240/hr → $114/hr) while maintaining comparable latency. The key: H100 compute is wasted during decode, and A10G memory bandwidth is sufficient for autoregressive generation at 40ms/token.
+      </div>
+
+      <p>The tradeoff space depends on workload characteristics:</p>
+      <ul>
+        <li><strong>Long prompts, short outputs</strong> (summarization): Disaggregation saves 40-50%. Prefill dominates, so specializing compute pays off significantly.</li>
+        <li><strong>Short prompts, long outputs</strong> (creative writing): Savings drop to 15-25%. Decode dominates, and KV transfer overhead is amortized less.</li>
+        <li><strong>Balanced prompts/outputs</strong> (chat): Savings of 30-40%. Best overall tradeoff for disaggregation.</li>
+        <li><strong>Very short prompts (&lt;128 tokens)</strong>: Disaggregation may <em>hurt</em> — transfer overhead exceeds prefill compute time.</li>
+      </ul>
+
+      <!-- Section 7 -->
+      <h2 id="li-implementation">Implementation Patterns</h2>
+      <p>A production disaggregated serving system requires careful orchestration. Here's a reference architecture using vLLM with a custom router:</p>
+
+      <pre class="pseudo-code"><span class="cm"># Disaggregated inference router</span>
+<span class="kw">class</span> <span class="fn">DisaggregatedRouter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, prefill_pool, decode_pool):
+        self.prefill_pool = prefill_pool    <span class="cm"># List[PrefillNode]</span>
+        self.decode_pool  = decode_pool     <span class="cm"># List[DecodeNode]</span>
+        self.kv_store     = <span class="fn">DistributedKVStore</span>(backend=<span class="kw">"rdma"</span>)
+
+    <span class="kw">async def</span> <span class="fn">serve_request</span>(self, prompt: str, params: SamplingParams):
+        <span class="cm"># 1. Route to least-loaded prefill node</span>
+        prefill_node = <span class="fn">min</span>(self.prefill_pool, key=<span class="kw">lambda</span> n: n.queue_depth)
+
+        <span class="cm"># 2. Run prefill — returns KV cache reference</span>
+        kv_ref = <span class="kw">await</span> prefill_node.<span class="fn">prefill</span>(prompt)
+
+        <span class="cm"># 3. Select decode node by available KV cache memory</span>
+        decode_node = <span class="fn">min</span>(self.decode_pool,
+            key=<span class="kw">lambda</span> n: n.active_sequences / n.max_sequences)
+
+        <span class="cm"># 4. Transfer KV cache via RDMA (pipelined, layer-by-layer)</span>
+        <span class="kw">await</span> self.kv_store.<span class="fn">transfer</span>(
+            src=prefill_node, dst=decode_node,
+            kv_ref=kv_ref, pipeline=<span class="kw">True</span>
+        )
+
+        <span class="cm"># 5. Start decode — streams tokens back</span>
+        <span class="kw">async for</span> token <span class="kw">in</span> decode_node.<span class="fn">decode</span>(kv_ref, params):
+            <span class="kw">yield</span> token
+
+        <span class="cm"># 6. Free KV cache on decode node when done</span>
+        decode_node.<span class="fn">release_kv</span>(kv_ref)</pre>
+
+      <p>Key implementation considerations for production deployment:</p>
+      <ul>
+        <li><strong>Fault tolerance:</strong> If a decode node fails mid-generation, the KV cache must be re-created. Keep prefill nodes stateless so any node can re-prefill. Store prompts in the router until generation completes.</li>
+        <li><strong>Load balancing:</strong> Prefill queue depth is the best signal for routing. Decode nodes should be balanced by active sequence count relative to their KV cache capacity.</li>
+        <li><strong>Scaling ratio:</strong> Typical ratio is 1 prefill node : 2-4 decode nodes, depending on average output length. Monitor and adjust dynamically.</li>
+        <li><strong>KV cache memory management:</strong> Decode nodes need aggressive PagedAttention or similar block-level memory management. KV cache fragmentation is the primary bottleneck at scale.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Production tip:</strong> Start with colocated serving and profile your workload. Disaggregate only when (a) prompt lengths average &gt;512 tokens, (b) you have heterogeneous GPU inventory, and (c) your interconnect supports ≥100 Gbps. The operational complexity is significant — make sure the savings justify it.
+      </div>
+
+    </article>
+  </div>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into KV cache internals: per-layer per-head storage, memory formulas, growth dynamics with sequence length, multi-query attention, and compression techniques.">
+  <title>KV Cache Deep Dive | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#what-gets-cached">What Gets Cached</a></li>
+        <li><a href="#memory-formula">The Memory Formula</a></li>
+        <li><a href="#cache-structure">Cache Structure Diagram</a></li>
+        <li><a href="#scaling-analysis">Scaling with Sequence Length</a></li>
+        <li><a href="#mqa-gqa">MQA and GQA: Shrinking the Cache</a></li>
+        <li><a href="#compression-techniques">Cache Compression Techniques</a></li>
+        <li><a href="#memory-pressure">Memory Pressure in Production</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>KV Cache Deep Dive</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Inference &amp; Serving</span>
+        </div>
+      </div>
+
+      <!-- Section 1 -->
+      <h2 id="what-gets-cached">What Gets Cached</h2>
+      <p>In a standard multi-head attention layer, the input hidden state <em>h</em> is projected into three tensors: Query (Q), Key (K), and Value (V). During autoregressive generation, Q for the current token attends over K and V from <em>all</em> previous tokens. Without caching, this means recomputing K and V for the entire sequence history at every decode step.</p>
+      <p>The KV cache stores the <strong>Key and Value tensors for every token, at every layer, for every attention head</strong>. The Query tensor is <em>not</em> cached—it's only needed for the current token's attention computation and is discarded immediately.</p>
+
+      <pre class="pseudo-code"><span class="cm"># What a single attention layer computes per token</span>
+<span class="kw">def</span> <span class="fn">attention_layer</span>(hidden, kv_cache_layer, layer_idx):
+    <span class="cm"># Project current token's hidden state</span>
+    q = hidden @ W_q[layer_idx]   <span class="cm"># [batch, 1, n_heads × head_dim]</span>
+    k = hidden @ W_k[layer_idx]   <span class="cm"># [batch, 1, n_kv_heads × head_dim]</span>
+    v = hidden @ W_v[layer_idx]   <span class="cm"># [batch, 1, n_kv_heads × head_dim]</span>
+
+    <span class="cm"># Reshape to multi-head format</span>
+    q = q.<span class="fn">view</span>(batch, 1, n_heads, head_dim)
+    k = k.<span class="fn">view</span>(batch, 1, n_kv_heads, head_dim)
+    v = v.<span class="fn">view</span>(batch, 1, n_kv_heads, head_dim)
+
+    <span class="cm"># Append new K, V to cache (this is the caching step)</span>
+    kv_cache_layer['k'] = <span class="fn">torch.cat</span>([kv_cache_layer['k'], k], dim=1)
+    kv_cache_layer['v'] = <span class="fn">torch.cat</span>([kv_cache_layer['v'], v], dim=1)
+
+    <span class="cm"># Attend: Q (1 token) × K^T (all cached tokens)</span>
+    all_k = kv_cache_layer['k']   <span class="cm"># [batch, seq_so_far, n_kv_heads, head_dim]</span>
+    all_v = kv_cache_layer['v']
+
+    attn_weights = (q @ all_k.<span class="fn">transpose</span>(-1, -2)) / <span class="fn">sqrt</span>(head_dim)
+    attn_out = <span class="fn">softmax</span>(attn_weights) @ all_v
+    <span class="kw">return</span> attn_out @ W_o[layer_idx]</pre>
+
+      <div class="callout">
+        <strong>Per-layer, per-head storage:</strong> Each of the L layers independently maintains its own K and V cache. For a model with 80 layers (like LLaMA-70B), there are 80 separate K tensors and 80 separate V tensors in the cache. Each K/V tensor has shape <code>[batch, seq_len, n_kv_heads, head_dim]</code>.
+      </div>
+
+      <!-- Section 2 -->
+      <h2 id="memory-formula">The Memory Formula</h2>
+      <p>The KV cache memory for a single sequence is determined by a straightforward formula:</p>
+
+      <pre class="pseudo-code"><span class="cm"># KV Cache Memory Formula</span>
+kv_memory = 2 × num_layers × num_kv_heads × head_dim × seq_len × bytes_per_element
+<span class="cm">#           ↑       ↑            ↑            ↑         ↑          ↑</span>
+<span class="cm">#        K and V   depth of    heads per     dim per   context   FP16=2,</span>
+<span class="cm">#        tensors   network     KV group      head     length    FP8=1</span>
+
+<span class="cm"># For a batch of B sequences:</span>
+total_kv_memory = kv_memory × batch_size
+
+<span class="cm"># ──────────────────────────────────────────────────────────────────────</span>
+<span class="cm"># Concrete examples (FP16, batch=1):</span>
+<span class="cm"># ──────────────────────────────────────────────────────────────────────</span>
+
+<span class="cm"># LLaMA-2 7B: L=32, n_kv_heads=32, head_dim=128, seq=4096</span>
+kv_7b = 2 × 32 × 32 × 128 × 4096 × 2   <span class="cm"># = 2.15 GB</span>
+
+<span class="cm"># LLaMA-2 13B: L=40, n_kv_heads=40, head_dim=128, seq=4096</span>
+kv_13b = 2 × 40 × 40 × 128 × 4096 × 2  <span class="cm"># = 3.36 GB</span>
+
+<span class="cm"># LLaMA-2 70B: L=80, n_kv_heads=8 (GQA!), head_dim=128, seq=4096</span>
+kv_70b = 2 × 80 × 8 × 128 × 4096 × 2   <span class="cm"># = 1.34 GB</span>
+<span class="cm"># Note: 70B uses GQA with only 8 KV heads (vs 64 query heads)!</span>
+<span class="cm"># Without GQA it would be: 2 × 80 × 64 × 128 × 4096 × 2 = 10.7 GB</span>
+
+<span class="cm"># GPT-4 class (estimated): L=120, n_kv_heads=16, head_dim=128, seq=128K</span>
+kv_gpt4 = 2 × 120 × 16 × 128 × 131072 × 2  <span class="cm"># = 62.9 GB per sequence!</span></pre>
+
+      <div class="callout warn">
+        <strong>The hidden cost:</strong> A 70B model in FP16 needs 140 GB of GPU memory for weights alone. But at batch size 64 with 4096 context, the KV cache adds another 85.9 GB (1.34 GB × 64). At 128K context length, a single sequence's KV cache for a 120-layer model can exceed 60 GB—nearly an entire A100's memory. This is why KV cache management is the central challenge of LLM serving.
+      </div>
+
+      <!-- Section 3 -->
+      <h2 id="cache-structure">Cache Structure Diagram</h2>
+
+      <svg id="li-kv-structure-diagram" viewBox="0 0 750 380" style="width:100%;max-width:750px;margin:1.2rem auto;display:block">
+        <text x="375" y="20" text-anchor="middle" font-size="14" font-weight="700" font-family="Manrope" fill="#333">KV Cache Memory Layout (LLaMA-2 70B, GQA)</text>
+
+        <!-- Outer container -->
+        <rect x="15" y="35" width="720" height="330" rx="12" fill="none" stroke="#ccc" stroke-width="1" stroke-dasharray="6,3"/>
+        <text x="375" y="55" text-anchor="middle" font-size="11" font-family="Manrope" fill="#666">Total Cache: 2 tensors (K,V) × 80 layers × 8 KV heads × 128 dims × seq_len positions</text>
+
+        <!-- Layer 0 -->
+        <rect x="30" y="70" width="340" height="130" rx="10" fill="none" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="200" y="88" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">Layer 0</text>
+        <!-- K tensor -->
+        <rect x="45" y="95" width="145" height="90" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="117" y="112" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Key Cache</text>
+        <text x="117" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">[8 heads, seq, 128]</text>
+        <!-- Head slots in K -->
+        <rect x="55" y="135" width="30" height="18" rx="3" fill="#a5d6a7"/><text x="70" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h0</text>
+        <rect x="88" y="135" width="30" height="18" rx="3" fill="#a5d6a7"/><text x="103" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h1</text>
+        <rect x="121" y="135" width="30" height="18" rx="3" fill="#a5d6a7"/><text x="136" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">...</text>
+        <rect x="154" y="135" width="30" height="18" rx="3" fill="#a5d6a7"/><text x="169" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h7</text>
+        <text x="117" y="175" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">seq grows each step →</text>
+
+        <!-- V tensor -->
+        <rect x="210" y="95" width="145" height="90" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>
+        <text x="282" y="112" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Value Cache</text>
+        <text x="282" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">[8 heads, seq, 128]</text>
+        <rect x="220" y="135" width="30" height="18" rx="3" fill="#90caf9"/><text x="235" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h0</text>
+        <rect x="253" y="135" width="30" height="18" rx="3" fill="#90caf9"/><text x="268" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h1</text>
+        <rect x="286" y="135" width="30" height="18" rx="3" fill="#90caf9"/><text x="301" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">...</text>
+        <rect x="319" y="135" width="30" height="18" rx="3" fill="#90caf9"/><text x="334" y="148" text-anchor="middle" font-size="7" font-family="Consolas" fill="#333">h7</text>
+        <text x="282" y="175" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">same shape as K</text>
+
+        <!-- Ellipsis -->
+        <text x="395" y="145" text-anchor="middle" font-size="28" fill="#999">…</text>
+
+        <!-- Layer 79 -->
+        <rect x="420" y="70" width="300" height="130" rx="10" fill="none" stroke="#0a8f6a" stroke-width="1.5"/>
+        <text x="570" y="88" text-anchor="middle" font-size="11" font-weight="600" font-family="Manrope" fill="#0a8f6a">Layer 79</text>
+        <rect x="435" y="95" width="125" height="90" rx="8" fill="#e8f5e9" stroke="#0a8f6a" stroke-width="1"/>
+        <text x="497" y="112" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Key Cache</text>
+        <text x="497" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">[8, seq, 128]</text>
+        <rect x="445" y="135" width="100" height="18" rx="3" fill="#a5d6a7"/>
+        <text x="495" y="148" text-anchor="middle" font-size="8" font-family="Consolas" fill="#333">8 heads × 128 dims</text>
+        <text x="497" y="175" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">identical structure</text>
+
+        <rect x="580" y="95" width="125" height="90" rx="8" fill="#e3f2fd" stroke="#1976d2" stroke-width="1"/>
+        <text x="642" y="112" text-anchor="middle" font-size="10" font-weight="600" font-family="Manrope" fill="#333">Value Cache</text>
+        <text x="642" y="128" text-anchor="middle" font-size="9" font-family="Consolas" fill="#666">[8, seq, 128]</text>
+        <rect x="590" y="135" width="100" height="18" rx="3" fill="#90caf9"/>
+        <text x="640" y="148" text-anchor="middle" font-size="8" font-family="Consolas" fill="#333">8 heads × 128 dims</text>
+        <text x="642" y="175" text-anchor="middle" font-size="8" font-family="Manrope" fill="#999">×80 layers total</text>
+
+        <!-- Memory calculation box -->
+        <rect x="30" y="215" width="340" height="140" rx="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="1.5"/>
+        <text x="200" y="235" text-anchor="middle" font-size="12" font-weight="700" font-family="Manrope" fill="#7b1fa2">Memory Breakdown (FP16, seq=4096)</text>
+        <text x="50" y="258" font-size="10" font-family="Consolas" fill="#333">Per head, per layer: 2 × 4096 × 128 × 2B = 2 MB</text>
+        <text x="50" y="278" font-size="10" font-family="Consolas" fill="#333">Per layer (8 heads):  8 × 2 MB = 16 MB</text>
+        <text x="50" y="298" font-size="10" font-family="Consolas" fill="#333">All 80 layers:        80 × 16 MB = 1.28 GB</text>
+        <text x="50" y="318" font-size="10" font-family="Consolas" fill="#333">Batch of 64:          64 × 1.28 GB = <tspan font-weight="700" fill="#7b1fa2">81.9 GB</tspan></text>
+        <text x="50" y="342" font-size="9" font-family="Manrope" fill="#999">With MHA (64 heads): 8× larger → 10.24 GB per seq!</text>
+
+        <!-- Growth arrow -->
+        <rect x="420" y="215" width="300" height="140" rx="10" fill="#fff3e0" stroke="#ff6b35" stroke-width="1.5"/>
+        <text x="570" y="235" text-anchor="middle" font-size="12" font-weight="700" font-family="Manrope" fill="#ff6b35">Growth Dynamics</text>
+        <text x="440" y="258" font-size="10" font-family="Manrope" fill="#333">• Cache grows linearly with seq_len</text>
+        <text x="440" y="278" font-size="10" font-family="Manrope" fill="#333">• Each new token adds across ALL layers</text>
+        <text x="440" y="298" font-size="10" font-family="Manrope" fill="#333">• Per-token increment (70B GQA):</text>
+        <text x="450" y="316" font-size="10" font-family="Consolas" fill="#ff6b35">  2 × 80 × 8 × 128 × 2B = 327 KB/token</text>
+        <text x="440" y="340" font-size="10" font-family="Manrope" fill="#333">• 128K context → 40 GB for one sequence</text>
+      </svg>
+
+      <!-- Section 4 -->
+      <h2 id="scaling-analysis">Scaling with Sequence Length</h2>
+      <p>The KV cache grows <strong>linearly</strong> with sequence length, but this linear growth has quadratic consequences for the total memory budget. When combined with batching, KV cache becomes the dominant memory consumer—often exceeding model weights.</p>
+
+      <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">kv_cache_memory_gb</span>(n_layers, n_kv_heads, head_dim, seq_len, batch, dtype_bytes=2):
+    <span class="cm">"""Calculate KV cache memory in GB."""</span>
+    bytes_total = 2 * n_layers * n_kv_heads * head_dim * seq_len * batch * dtype_bytes
+    <span class="kw">return</span> bytes_total / (1024**3)
+
+<span class="cm"># LLaMA-2 70B (GQA: 8 KV heads) at various sequence lengths</span>
+<span class="kw">for</span> seq <span class="kw">in</span> [512, 2048, 4096, 8192, 32768, 131072]:
+    mem = <span class="fn">kv_cache_memory_gb</span>(80, 8, 128, seq, batch=1)
+    <span class="fn">print</span>(f"seq={seq:>6d}: {mem:.2f} GB/seq")
+
+<span class="cm"># Output:</span>
+<span class="cm"># seq=   512: 0.16 GB/seq</span>
+<span class="cm"># seq=  2048: 0.66 GB/seq</span>
+<span class="cm"># seq=  4096: 1.31 GB/seq</span>
+<span class="cm"># seq=  8192: 2.62 GB/seq</span>
+<span class="cm"># seq= 32768: 10.49 GB/seq</span>
+<span class="cm"># seq=131072: 41.94 GB/seq  ← nearly fills an entire A100!</span></pre>
+
+      <div class="callout">
+        <strong>Memory budget crunch:</strong> An 8×A100 node has 640 GB total GPU memory. LLaMA-70B weights (FP16) consume 140 GB. That leaves 500 GB for KV cache. At 4096 context length, you can serve ~381 concurrent sequences (500 GB / 1.31 GB). At 32K context, only ~47. At 128K, only ~11. This is why long-context serving requires aggressive KV cache optimization.
+      </div>
+
+      <!-- Section 5 -->
+      <h2 id="mqa-gqa">MQA and GQA: Shrinking the Cache</h2>
+      <p>The most architecturally impactful KV cache optimization is reducing the number of KV heads. Standard Multi-Head Attention (MHA) uses <em>n_heads</em> separate KV heads. Multi-Query Attention (MQA) and Grouped-Query Attention (GQA) share KV heads across multiple query heads.</p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>Multi-Head Attention (MHA)</h3>
+          <ul>
+            <li><strong>KV heads:</strong> Same as query heads (e.g., 64)</li>
+            <li><strong>Cache size:</strong> Baseline (1×)</li>
+            <li><strong>Quality:</strong> Best attention quality</li>
+            <li><strong>Models:</strong> GPT-3, LLaMA-1, OPT</li>
+            <li><strong>70B cache (seq=4096):</strong> 10.7 GB/seq</li>
+          </ul>
+        </div>
+        <div class="compare-card">
+          <h3>Grouped-Query Attention (GQA)</h3>
+          <ul>
+            <li><strong>KV heads:</strong> Fewer (e.g., 8 for 70B)</li>
+            <li><strong>Cache size:</strong> Reduced by n_heads/n_kv_heads (8×)</li>
+            <li><strong>Quality:</strong> Near-MHA quality with proper training</li>
+            <li><strong>Models:</strong> LLaMA-2 70B, Mistral, Gemma</li>
+            <li><strong>70B cache (seq=4096):</strong> 1.34 GB/seq</li>
+          </ul>
+        </div>
+      </div>
+
+      <pre class="pseudo-code"><span class="cm"># GQA: each KV head is shared across a group of query heads</span>
+<span class="cm"># LLaMA-2 70B: 64 query heads, 8 KV heads → group_size = 8</span>
+
+<span class="kw">def</span> <span class="fn">gqa_attention</span>(q, k, v, n_q_heads=64, n_kv_heads=8):
+    group_size = n_q_heads // n_kv_heads   <span class="cm"># = 8</span>
+    
+    <span class="cm"># q: [batch, seq, 64, head_dim]</span>
+    <span class="cm"># k: [batch, seq,  8, head_dim]  ← 8× smaller!</span>
+    <span class="cm"># v: [batch, seq,  8, head_dim]  ← 8× smaller!</span>
+    
+    <span class="cm"># Repeat K,V to match query heads (or use grouped GEMM)</span>
+    k_expanded = k.<span class="fn">repeat_interleave</span>(group_size, dim=2)  <span class="cm"># [b,s,64,d]</span>
+    v_expanded = v.<span class="fn">repeat_interleave</span>(group_size, dim=2)
+    
+    <span class="cm"># Standard attention from here</span>
+    attn = (q @ k_expanded.<span class="fn">transpose</span>(-1, -2)) / <span class="fn">sqrt</span>(head_dim)
+    <span class="kw">return</span> <span class="fn">softmax</span>(attn) @ v_expanded
+
+<span class="cm"># Memory savings: 64→8 KV heads = 8× reduction in KV cache</span>
+<span class="cm"># 10.7 GB → 1.34 GB per sequence at 4096 context</span></pre>
+
+      <!-- Section 6 -->
+      <h2 id="compression-techniques">Cache Compression Techniques</h2>
+      <p>Beyond architectural choices like GQA, several post-training techniques can further reduce KV cache memory:</p>
+
+      <pre class="pseudo-code"><span class="cm"># 1. KV Cache Quantization (INT8 or INT4)</span>
+<span class="cm"># Reduces bytes_per_element from 2 (FP16) to 1 (INT8) or 0.5 (INT4)</span>
+<span class="cm"># Typically per-channel or per-token quantization</span>
+
+kv_fp16 = 1.34   <span class="cm"># GB for LLaMA-70B, seq=4096</span>
+kv_int8 = 0.67   <span class="cm"># 2× reduction, minimal quality loss</span>
+kv_int4 = 0.34   <span class="cm"># 4× reduction, some quality degradation</span>
+
+<span class="cm"># 2. Sliding Window Attention (Mistral, StreamingLLM)</span>
+<span class="cm"># Only cache last W tokens (e.g., W=4096)</span>
+<span class="cm"># Attention sink: keep first few tokens + sliding window</span>
+
+<span class="kw">def</span> <span class="fn">sliding_window_cache</span>(kv_cache, window_size=4096, n_sink=4):
+    <span class="kw">if</span> kv_cache.<span class="fn">seq_len</span>() > window_size + n_sink:
+        <span class="cm"># Keep sink tokens (positions 0..n_sink-1)</span>
+        sink = kv_cache[:, :n_sink, :, :]
+        <span class="cm"># Keep recent window</span>
+        recent = kv_cache[:, -window_size:, :, :]
+        kv_cache = <span class="fn">torch.cat</span>([sink, recent], dim=1)
+    <span class="kw">return</span> kv_cache
+
+<span class="cm"># 3. Token Eviction (H2O, ScissorHands)</span>
+<span class="cm"># Evict tokens with lowest cumulative attention scores</span>
+<span class="cm"># Keep "heavy hitter" tokens that receive high attention</span>
+
+<span class="kw">def</span> <span class="fn">h2o_eviction</span>(kv_cache, attn_scores, budget=2048):
+    <span class="cm"># Accumulate attention scores across all heads and layers</span>
+    cumulative = attn_scores.<span class="fn">sum</span>(dim=(0, 1))   <span class="cm"># sum over layers, heads</span>
+    <span class="cm"># Keep top-k tokens by cumulative attention</span>
+    _, keep_idx = cumulative.<span class="fn">topk</span>(budget)
+    <span class="kw">return</span> kv_cache[:, <span class="fn">sorted</span>(keep_idx), :, :]</pre>
+
+      <div class="callout">
+        <strong>Combining techniques:</strong> In practice, production systems stack multiple optimizations. A system might use GQA (8× reduction) + INT8 quantization (2× reduction) + sliding window (bounded growth) to achieve 16× or more memory savings over naive MHA with FP16 cache. vLLM supports FP8 KV cache, and TensorRT-LLM supports INT8 KV cache quantization out of the box.
+      </div>
+
+      <!-- Section 7 -->
+      <h2 id="memory-pressure">Memory Pressure in Production</h2>
+      <p>In production serving, GPU memory is partitioned between model weights, KV cache, and activations. The KV cache is the only component that grows dynamically during inference, making it the primary source of memory pressure and out-of-memory errors.</p>
+
+      <pre class="pseudo-code"><span class="cm"># Memory budget for an 8×A100-80GB node serving LLaMA-70B</span>
+total_gpu_memory  = 8 × 80             <span class="cm"># = 640 GB</span>
+model_weights     = 140                 <span class="cm"># 70B params × 2 bytes (FP16)</span>
+activation_buffer = 10                  <span class="cm"># overhead for intermediate activations</span>
+framework_overhead = 10                 <span class="cm"># CUDA contexts, PyTorch allocator</span>
+kv_budget = 640 - 140 - 10 - 10        <span class="cm"># = 480 GB for KV cache</span>
+
+<span class="cm"># Max concurrent sequences at different context lengths:</span>
+<span class="cm"># seq=2048:  480 / 0.66  = 727 sequences</span>
+<span class="cm"># seq=4096:  480 / 1.31  = 366 sequences</span>
+<span class="cm"># seq=8192:  480 / 2.62  = 183 sequences</span>
+<span class="cm"># seq=32768: 480 / 10.49 =  45 sequences</span>
+
+<span class="cm"># The serving system must:</span>
+<span class="cm"># 1. Pre-allocate or dynamically manage KV cache memory</span>
+<span class="cm"># 2. Reject/queue requests when cache budget is exhausted</span>
+<span class="cm"># 3. Free cache immediately when sequences complete</span>
+<span class="cm"># 4. Handle variable-length sequences efficiently (→ PagedAttention)</span></pre>
+
+      <div class="callout warn">
+        <strong>The fragmentation problem:</strong> Naive KV cache allocation pre-allocates memory for the maximum sequence length. If a request only uses 500 tokens of a 4096-token allocation, 87% of that memory is wasted. Across hundreds of sequences, this internal fragmentation can waste 60–80% of available KV cache memory. This is the exact problem that PagedAttention (vLLM) solves by allocating cache in small, fixed-size pages.
+      </div>
+
+      <p>The KV cache is the single most important data structure in LLM serving. Every major optimization—from GQA to quantization to PagedAttention to speculative decoding—is fundamentally about managing KV cache memory more efficiently. Understanding its structure, size, and growth dynamics is essential for anyone working on LLM inference systems.</p>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

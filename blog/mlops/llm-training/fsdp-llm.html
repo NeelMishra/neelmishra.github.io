@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Technical guide to PyTorch FSDP for LLM training covering sharding strategies, wrapping policies, mixed precision, and performance tuning.">
+  <title>FSDP for LLM Training | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.9;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+    .pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#666;font-style:italic}
+    .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+    .compare-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.85)}
+    .step-controls{display:flex;gap:0.5rem;margin:0.8rem 0}
+    .step-controls button{padding:0.4rem 1rem;border:1px solid var(--brand);border-radius:8px;background:#fff;color:var(--brand);cursor:pointer;font-weight:600;font-family:"Manrope",sans-serif;font-size:0.85rem}
+    .step-controls button:hover{background:var(--brand);color:#fff}
+    .step-controls .step-label{font-size:0.85rem;line-height:2;margin-left:0.5rem;color:var(--ink-muted)}
+    .step-controls .step-desc{display:block;margin-top:0.6rem;padding:0.8rem 1rem;background:rgba(10,143,106,0.04);border:1px solid var(--line);border-radius:10px;font-size:0.88rem;line-height:1.6;color:var(--ink)}
+    .step-controls .step-desc strong{color:var(--brand)}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#fsdp-architecture">FSDP Architecture &amp; Sharding Strategies</a></li>
+        <li><a href="#wrapping-policies">Wrapping Policies</a></li>
+        <li><a href="#mixed-precision">Mixed Precision with BFloat16</a></li>
+        <li><a href="#performance-tuning">Performance Tuning</a></li>
+        <li><a href="#state-dict-checkpointing">State Dict Types &amp; Checkpointing</a></li>
+        <li><a href="#fsdp-sharding-visual">FSDP Sharding Visualized</a></li>
+        <li><a href="#gotchas-debugging">Common Gotchas &amp; Debugging</a></li>
+      </ul></div>
+    </aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="blog-post-header">
+        <h1>FSDP for LLM Training</h1>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">MLOps Series</span>
+          <span class="blog-post-category">LLM Training Infrastructure</span>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 1: FSDP Architecture & Sharding Strategies          -->
+      <!-- ============================================================ -->
+      <h2 id="fsdp-architecture">FSDP Architecture &amp; Sharding Strategies</h2>
+      <p>
+        PyTorch Fully Sharded Data Parallel (FSDP) is a native implementation of the ZeRO-3 algorithm from DeepSpeed.
+        Instead of replicating the entire model on every GPU (as vanilla DDP does), FSDP <strong>shards parameters,
+        gradients, and optimizer states</strong> across the data-parallel group. Before a forward or backward computation
+        on a given FSDP unit, all-gather collectives reconstruct the full parameters; after the backward pass,
+        reduce-scatter distributes and sums gradient shards.
+      </p>
+      <p>
+        The key enum is <code>ShardingStrategy</code>, which controls what gets sharded and when memory is freed:
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>FULL_SHARD (ZeRO-3)</h3>
+          <p>Shards <strong>parameters + gradients + optimizer states</strong>. After forward, full params are freed; after backward,
+          gradient shards are reduced. This yields the lowest per-GPU memory but the highest communication volume&mdash;
+          two all-gathers and one reduce-scatter per FSDP unit per step.</p>
+        </div>
+        <div class="compare-card">
+          <h3>SHARD_GRAD_OP (ZeRO-2)</h3>
+          <p>Shards <strong>gradients + optimizer states</strong> only. Full parameters are kept in memory after the forward all-gather,
+          avoiding the backward all-gather. This trades ~1.5&times; more memory for ~33% less communication&mdash;ideal when
+          the model fits with this strategy but not with DDP.</p>
+        </div>
+        <div class="compare-card">
+          <h3>NO_SHARD</h3>
+          <p>Equivalent to standard DDP: every rank holds a full replica. Useful as a debugging baseline or when the
+          model is small enough to fit fully replicated. Communication is a single all-reduce per step.</p>
+        </div>
+        <div class="compare-card">
+          <h3>HYBRID_SHARD</h3>
+          <p>Full-shards within a node (intra-node NVLink) but replicates across nodes (inter-node InfiniBand).
+          Balances memory savings with reduced cross-node traffic. Requires setting
+          <code>_hybrid_shard_zero2</code> or <code>ShardingStrategy.HYBRID_SHARD</code>.</p>
+        </div>
+      </div>
+
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> (
+    FullyShardedDataParallel <span class="kw">as</span> FSDP,
+    ShardingStrategy,
+)
+
+<span class="cm"># Choose sharding based on cluster topology</span>
+model = <span class="fn">FSDP</span>(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,   <span class="cm"># ZeRO-3</span>
+    <span class="cm"># sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,  # ZeRO-2</span>
+    <span class="cm"># sharding_strategy=ShardingStrategy.HYBRID_SHARD,   # Intra-node shard</span>
+    device_id=torch.cuda.<span class="fn">current_device</span>(),
+)</div>
+
+      <div class="callout">
+        <strong>Memory rule of thumb:</strong> A 7B-parameter model in fp32 needs ~28 GB for parameters alone.
+        With Adam optimizer states (2&times; param memory), total is ~84 GB per replica under DDP.
+        FULL_SHARD across 8 GPUs reduces this to ~10.5 GB per GPU for params+optim, enabling training
+        on 40 GB A100s.
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 2: Wrapping Policies                                -->
+      <!-- ============================================================ -->
+      <h2 id="wrapping-policies">Wrapping Policies</h2>
+      <p>
+        FSDP wraps models into a hierarchy of <code>FullyShardedDataParallel</code> units. Each unit is the
+        granularity at which all-gather and reduce-scatter operate. Wrapping too coarsely (entire model as one unit)
+        means all params must be gathered at once, destroying memory savings. Wrapping too finely (every linear layer)
+        explodes communication overhead. The optimal boundary is typically <strong>one transformer block</strong>.
+      </p>
+
+      <h3>Size-Based Auto Wrapping</h3>
+      <p>Wraps any <code>nn.Module</code> whose parameter count exceeds a threshold:</p>
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp.wrap <span class="kw">import</span> size_based_auto_wrap_policy
+
+<span class="cm"># Wrap any sub-module with &gt;= 100M params as its own FSDP unit</span>
+auto_wrap_policy = <span class="fn">functools.partial</span>(
+    size_based_auto_wrap_policy,
+    min_num_params=<span class="fn">int</span>(1e8),
+)
+
+model = <span class="fn">FSDP</span>(model, auto_wrap_policy=auto_wrap_policy)</div>
+
+      <h3>Transformer Auto Wrapping</h3>
+      <p>
+        The recommended approach for LLMs. You specify the transformer layer class and FSDP wraps each instance
+        as a separate unit. This aligns FSDP boundaries with the natural compute structure:
+      </p>
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp.wrap <span class="kw">import</span> transformer_auto_wrap_policy
+<span class="kw">from</span> transformers.models.llama.modeling_llama <span class="kw">import</span> LlamaDecoderLayer
+
+<span class="cm"># Each LlamaDecoderLayer becomes one FSDP unit</span>
+auto_wrap_policy = <span class="fn">functools.partial</span>(
+    transformer_auto_wrap_policy,
+    transformer_layer_cls={LlamaDecoderLayer},
+)
+
+model = <span class="fn">FSDP</span>(
+    model,
+    auto_wrap_policy=auto_wrap_policy,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    device_id=torch.cuda.<span class="fn">current_device</span>(),
+)</div>
+
+      <h3>Manual Wrapping</h3>
+      <p>
+        For non-standard architectures (mixture-of-experts, multi-modal models), manual wrapping provides full
+        control. You explicitly wrap each sub-module:
+      </p>
+      <div class="pseudo-code"><span class="cm"># Manual wrapping for a MoE model</span>
+<span class="kw">for</span> i, layer <span class="kw">in</span> <span class="fn">enumerate</span>(model.layers):
+    <span class="cm"># Wrap the attention block</span>
+    layer.self_attn = <span class="fn">FSDP</span>(layer.self_attn)
+    <span class="cm"># Wrap each expert separately for balanced sharding</span>
+    <span class="kw">for</span> j, expert <span class="kw">in</span> <span class="fn">enumerate</span>(layer.moe.experts):
+        layer.moe.experts[j] = <span class="fn">FSDP</span>(expert)
+    <span class="cm"># Wrap the full layer</span>
+    model.layers[i] = <span class="fn">FSDP</span>(layer)
+
+<span class="cm"># Root wrap</span>
+model = <span class="fn">FSDP</span>(model)</div>
+
+      <div class="callout warn">
+        <strong>Warning:</strong> If you manually wrap sub-modules, you <em>must</em> still wrap the root module
+        with FSDP. Failing to do so leaves root parameters unsharded and causes silent correctness bugs&mdash;
+        gradients from different ranks diverge after the first step.
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 3: Mixed Precision with BFloat16                    -->
+      <!-- ============================================================ -->
+      <h2 id="mixed-precision">Mixed Precision with BFloat16</h2>
+      <p>
+        FSDP's <code>MixedPrecision</code> policy controls three independent dtype knobs. Unlike
+        <code>torch.cuda.amp</code>, FSDP casts parameters <em>during the all-gather</em>, so communication
+        happens in the reduced dtype, cutting bandwidth by 2&times; when using bf16 over fp32.
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>param_dtype</h3>
+          <p>The dtype used for forward/backward computation. Set to <code>torch.bfloat16</code> for Ampere+ GPUs.
+          Parameters are cast to this dtype after all-gather, before entering the forward function.</p>
+        </div>
+        <div class="compare-card">
+          <h3>reduce_dtype</h3>
+          <p>The dtype used for gradient reduction (reduce-scatter). Keeping this at <code>torch.float32</code>
+          preserves gradient precision at the cost of 2&times; reduction bandwidth. Most LLM trainers set this to
+          bf16 for speed, relying on loss scaling or gradient clipping for stability.</p>
+        </div>
+        <div class="compare-card">
+          <h3>buffer_dtype</h3>
+          <p>The dtype for non-parameter buffers (e.g., LayerNorm running stats). Usually set to
+          <code>torch.bfloat16</code> to match <code>param_dtype</code> and avoid casting overhead.</p>
+        </div>
+        <div class="compare-card">
+          <h3>cast_forward_inputs</h3>
+          <p>When <code>True</code>, FSDP automatically casts the inputs to each FSDP unit to <code>param_dtype</code>.
+          This prevents dtype mismatch errors when an FSDP boundary falls between modules with different dtypes.</p>
+        </div>
+      </div>
+
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> MixedPrecision
+
+<span class="cm"># Recommended config for LLM training on A100/H100</span>
+bf16_policy = <span class="fn">MixedPrecision</span>(
+    param_dtype=torch.bfloat16,     <span class="cm"># compute in bf16</span>
+    reduce_dtype=torch.bfloat16,    <span class="cm"># reduce gradients in bf16</span>
+    buffer_dtype=torch.bfloat16,    <span class="cm"># buffers in bf16</span>
+    cast_forward_inputs=<span class="kw">True</span>,      <span class="cm"># auto-cast inputs at FSDP boundaries</span>
+)
+
+<span class="cm"># Higher-precision reduction for stability-sensitive models</span>
+fp32_reduce_policy = <span class="fn">MixedPrecision</span>(
+    param_dtype=torch.bfloat16,
+    reduce_dtype=torch.float32,     <span class="cm"># reduce in fp32 for stability</span>
+    buffer_dtype=torch.bfloat16,
+)
+
+model = <span class="fn">FSDP</span>(
+    model,
+    mixed_precision=bf16_policy,
+    auto_wrap_policy=auto_wrap_policy,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    device_id=torch.cuda.<span class="fn">current_device</span>(),
+)</div>
+
+      <div class="callout">
+        <strong>BFloat16 vs Float16:</strong> BFloat16 has the same exponent range as fp32 (8 exponent bits) but
+        only 7 mantissa bits. This means it rarely overflows/underflows, eliminating the need for loss scaling.
+        Float16 (5 exponent bits, 10 mantissa) has higher precision per value but a narrow dynamic range that
+        requires GradScaler. For LLM pretraining, bf16 is the standard choice on Ampere+ hardware.
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 4: Performance Tuning                               -->
+      <!-- ============================================================ -->
+      <h2 id="performance-tuning">Performance Tuning</h2>
+      <p>
+        FSDP exposes several knobs that control the overlap between computation and communication. Proper tuning
+        can improve throughput by 10&ndash;30% on large clusters. The key insight is that FSDP must all-gather
+        parameters <em>before</em> a unit's computation and can prefetch the <em>next</em> unit's parameters while the
+        current unit is still computing.
+      </p>
+
+      <h3>Backward Prefetch</h3>
+      <p>
+        Controls when FSDP issues the all-gather for the <em>next</em> FSDP unit during the backward pass.
+        <code>BACKWARD_PRE</code> (default) prefetches before the current unit's backward finishes, overlapping
+        communication with compute. <code>BACKWARD_POST</code> waits until after, which uses less memory but
+        serializes communication.
+      </p>
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> BackwardPrefetch
+
+model = <span class="fn">FSDP</span>(
+    model,
+    backward_prefetch=BackwardPrefetch.BACKWARD_PRE,   <span class="cm"># max overlap (default)</span>
+    <span class="cm"># backward_prefetch=BackwardPrefetch.BACKWARD_POST, # lower peak memory</span>
+)</div>
+
+      <h3>Forward Prefetch</h3>
+      <p>
+        When enabled, FSDP issues the all-gather for the next FSDP unit during the current unit's forward pass.
+        This is less impactful than backward prefetch because forward computations are typically faster, but
+        it helps on high-latency interconnects:
+      </p>
+      <div class="pseudo-code">model = <span class="fn">FSDP</span>(
+    model,
+    forward_prefetch=<span class="kw">True</span>,  <span class="cm"># overlap forward all-gather with compute</span>
+)</div>
+
+      <h3>Limit All-Gathers</h3>
+      <p>
+        <code>limit_all_gathers=True</code> prevents FSDP from launching more than one outstanding all-gather at a
+        time. Without this flag, on fast networks, multiple all-gathers can be in flight simultaneously, spiking
+        peak memory. Enable this when approaching GPU memory limits:
+      </p>
+      <div class="pseudo-code">model = <span class="fn">FSDP</span>(
+    model,
+    limit_all_gathers=<span class="kw">True</span>,  <span class="cm"># cap outstanding all-gathers to 1</span>
+    backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+)</div>
+
+      <h3>Full FSDP Configuration for 70B Training</h3>
+      <div class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> functools
+<span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> (
+    FullyShardedDataParallel <span class="kw">as</span> FSDP,
+    ShardingStrategy,
+    MixedPrecision,
+    BackwardPrefetch,
+    CPUOffload,
+)
+<span class="kw">from</span> torch.distributed.fsdp.wrap <span class="kw">import</span> transformer_auto_wrap_policy
+<span class="kw">from</span> transformers.models.llama.modeling_llama <span class="kw">import</span> LlamaDecoderLayer
+
+<span class="kw">def</span> <span class="fn">build_fsdp_model</span>(model, rank):
+    <span class="cm">"""Full production FSDP config for 70B-class LLMs."""</span>
+
+    wrap_policy = <span class="fn">functools.partial</span>(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={LlamaDecoderLayer},
+    )
+
+    mp_policy = <span class="fn">MixedPrecision</span>(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
+        buffer_dtype=torch.bfloat16,
+        cast_forward_inputs=<span class="kw">True</span>,
+    )
+
+    fsdp_model = <span class="fn">FSDP</span>(
+        model,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        auto_wrap_policy=wrap_policy,
+        mixed_precision=mp_policy,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        forward_prefetch=<span class="kw">True</span>,
+        limit_all_gathers=<span class="kw">True</span>,
+        device_id=rank,
+        use_orig_params=<span class="kw">True</span>,  <span class="cm"># required for torch.compile</span>
+    )
+    <span class="kw">return</span> fsdp_model</div>
+
+      <div class="callout">
+        <strong>use_orig_params=True:</strong> This flag preserves the original parameter names and structure,
+        which is required for <code>torch.compile()</code> compatibility and makes checkpoint saving/loading
+        more predictable. It also enables per-parameter optimizer groups (e.g., different learning rates for
+        embeddings vs attention layers). Always enable this for production training.
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 5: State Dict Types & Checkpointing                 -->
+      <!-- ============================================================ -->
+      <h2 id="state-dict-checkpointing">State Dict Types &amp; Checkpointing</h2>
+      <p>
+        Checkpointing with FSDP is non-trivial because parameters are sharded across ranks. FSDP provides three
+        state dict types, each with different trade-offs for memory, speed, and portability:
+      </p>
+
+      <div class="compare-grid">
+        <div class="compare-card">
+          <h3>FULL_STATE_DICT</h3>
+          <p>All-gathers the complete model onto rank 0. Produces a standard PyTorch state dict that can be loaded
+          without FSDP. Requires <code>O(model_size)</code> extra memory on rank 0.
+          Use for final checkpoint export or small models.</p>
+        </div>
+        <div class="compare-card">
+          <h3>SHARDED_STATE_DICT</h3>
+          <p>Each rank saves its own shard directly. No extra memory needed. Requires the same world size and wrapping
+          policy to reload. Best for <strong>mid-training checkpoints</strong> where you resume on the same cluster.</p>
+        </div>
+        <div class="compare-card">
+          <h3>LOCAL_STATE_DICT</h3>
+          <p>Each rank saves its local flat parameters without metadata. The fastest option but essentially
+          non-portable&mdash;only useful for crash recovery on the exact same configuration.</p>
+        </div>
+      </div>
+
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> (
+    FullStateDictConfig,
+    StateDictType,
+)
+
+<span class="cm"># === FULL_STATE_DICT: portable but memory-heavy ===</span>
+full_cfg = <span class="fn">FullStateDictConfig</span>(offload_to_cpu=<span class="kw">True</span>, rank0_only=<span class="kw">True</span>)
+<span class="kw">with</span> <span class="fn">FSDP.state_dict_type</span>(model, StateDictType.FULL_STATE_DICT, full_cfg):
+    state = model.<span class="fn">state_dict</span>()
+    <span class="kw">if</span> rank == 0:
+        torch.<span class="fn">save</span>(state, <span class="fn">f</span>"checkpoint_full.pt")</div>
+
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> ShardedStateDictConfig
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> save <span class="kw">as</span> dist_save
+
+<span class="cm"># === SHARDED_STATE_DICT: scalable mid-training checkpoints ===</span>
+sharded_cfg = <span class="fn">ShardedStateDictConfig</span>(offload_to_cpu=<span class="kw">True</span>)
+<span class="kw">with</span> <span class="fn">FSDP.state_dict_type</span>(model, StateDictType.SHARDED_STATE_DICT, sharded_cfg):
+    state = {<span class="fn">"model"</span>: model.<span class="fn">state_dict</span>(), <span class="fn">"optim"</span>: <span class="fn">FSDP.optim_state_dict</span>(model, optimizer)}
+    <span class="fn">dist_save</span>(state, checkpoint_id=<span class="fn">f</span>"ckpt_step_{step}")</div>
+
+      <div class="pseudo-code"><span class="cm"># === Loading a sharded checkpoint ===</span>
+<span class="kw">from</span> torch.distributed.checkpoint <span class="kw">import</span> load <span class="kw">as</span> dist_load
+
+<span class="kw">with</span> <span class="fn">FSDP.state_dict_type</span>(model, StateDictType.SHARDED_STATE_DICT):
+    state = {<span class="fn">"model"</span>: model.<span class="fn">state_dict</span>()}
+    <span class="fn">dist_load</span>(state, checkpoint_id=<span class="fn">f</span>"ckpt_step_{step}")
+    model.<span class="fn">load_state_dict</span>(state[<span class="fn">"model"</span>])
+
+<span class="cm"># Load optimizer state (must happen after model state)</span>
+optim_state = <span class="fn">FSDP.optim_state_dict_to_load</span>(
+    model, optimizer, optim_state_dict
+)
+optimizer.<span class="fn">load_state_dict</span>(optim_state)</div>
+
+      <div class="callout warn">
+        <strong>Optimizer state is tricky:</strong> You cannot simply <code>torch.save</code> and <code>torch.load</code>
+        optimizer state with FSDP. The optimizer tracks flat, sharded parameter references. Use
+        <code>FSDP.optim_state_dict()</code> to extract and <code>FSDP.optim_state_dict_to_load()</code> to reinject.
+        Mishandling this silently corrupts training&mdash;loss will appear normal for hundreds of steps before diverging.
+      </div>
+
+      <!-- ============================================================ -->
+      <!--  Section 6: FSDP Sharding Visualized (SVG)                   -->
+      <!-- ============================================================ -->
+      <h2 id="fsdp-sharding-visual">FSDP Sharding Visualized</h2>
+      <p>
+        The following diagram illustrates how FSDP distributes model parameters across 4 GPUs under
+        <code>FULL_SHARD</code>. Each GPU holds 1/4 of the parameters at rest. Before a layer's forward pass,
+        an all-gather reconstructs the full parameters; after backward, reduce-scatter distributes the gradients.
+      </p>
+
+      <svg id="lt-fsdp-diagram" viewBox="0 0 720 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:720px;margin:1.2rem auto;display:block;">
+        <!-- Background -->
+        <rect id="lt-bg" x="0" y="0" width="720" height="400" rx="12" fill="#f8f9fa" stroke="#ddd" stroke-width="1"/>
+
+        <!-- Title -->
+        <text id="lt-title" x="360" y="30" text-anchor="middle" font-family="Manrope,sans-serif" font-size="15" font-weight="700" fill="#1a1a2e">FULL_SHARD: Parameter Distribution Across 4 GPUs</text>
+
+        <!-- GPU 0 -->
+        <rect id="lt-gpu0-box" x="30" y="55" width="150" height="150" rx="10" fill="#fff" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-gpu0-label" x="105" y="78" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">GPU 0</text>
+        <rect id="lt-gpu0-shard" x="45" y="90" width="120" height="24" rx="4" fill="#0a8f6a" opacity="0.85"/>
+        <text id="lt-gpu0-s-text" x="105" y="107" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Params Shard 0</text>
+        <rect id="lt-gpu0-grad" x="45" y="122" width="120" height="24" rx="4" fill="#ff6b35" opacity="0.75"/>
+        <text id="lt-gpu0-g-text" x="105" y="139" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Grad Shard 0</text>
+        <rect id="lt-gpu0-optim" x="45" y="154" width="120" height="24" rx="4" fill="#4a90d9" opacity="0.75"/>
+        <text id="lt-gpu0-o-text" x="105" y="171" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Optim Shard 0</text>
+
+        <!-- GPU 1 -->
+        <rect id="lt-gpu1-box" x="200" y="55" width="150" height="150" rx="10" fill="#fff" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-gpu1-label" x="275" y="78" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">GPU 1</text>
+        <rect id="lt-gpu1-shard" x="215" y="90" width="120" height="24" rx="4" fill="#0a8f6a" opacity="0.85"/>
+        <text id="lt-gpu1-s-text" x="275" y="107" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Params Shard 1</text>
+        <rect id="lt-gpu1-grad" x="215" y="122" width="120" height="24" rx="4" fill="#ff6b35" opacity="0.75"/>
+        <text id="lt-gpu1-g-text" x="275" y="139" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Grad Shard 1</text>
+        <rect id="lt-gpu1-optim" x="215" y="154" width="120" height="24" rx="4" fill="#4a90d9" opacity="0.75"/>
+        <text id="lt-gpu1-o-text" x="275" y="171" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Optim Shard 1</text>
+
+        <!-- GPU 2 -->
+        <rect id="lt-gpu2-box" x="370" y="55" width="150" height="150" rx="10" fill="#fff" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-gpu2-label" x="445" y="78" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">GPU 2</text>
+        <rect id="lt-gpu2-shard" x="385" y="90" width="120" height="24" rx="4" fill="#0a8f6a" opacity="0.85"/>
+        <text id="lt-gpu2-s-text" x="445" y="107" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Params Shard 2</text>
+        <rect id="lt-gpu2-grad" x="385" y="122" width="120" height="24" rx="4" fill="#ff6b35" opacity="0.75"/>
+        <text id="lt-gpu2-g-text" x="445" y="139" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Grad Shard 2</text>
+        <rect id="lt-gpu2-optim" x="385" y="154" width="120" height="24" rx="4" fill="#4a90d9" opacity="0.75"/>
+        <text id="lt-gpu2-o-text" x="445" y="171" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Optim Shard 2</text>
+
+        <!-- GPU 3 -->
+        <rect id="lt-gpu3-box" x="540" y="55" width="150" height="150" rx="10" fill="#fff" stroke="#0a8f6a" stroke-width="2"/>
+        <text id="lt-gpu3-label" x="615" y="78" text-anchor="middle" font-family="Manrope,sans-serif" font-size="12" font-weight="700" fill="#0a8f6a">GPU 3</text>
+        <rect id="lt-gpu3-shard" x="555" y="90" width="120" height="24" rx="4" fill="#0a8f6a" opacity="0.85"/>
+        <text id="lt-gpu3-s-text" x="615" y="107" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Params Shard 3</text>
+        <rect id="lt-gpu3-grad" x="555" y="122" width="120" height="24" rx="4" fill="#ff6b35" opacity="0.75"/>
+        <text id="lt-gpu3-g-text" x="615" y="139" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Grad Shard 3</text>
+        <rect id="lt-gpu3-optim" x="555" y="154" width="120" height="24" rx="4" fill="#4a90d9" opacity="0.75"/>
+        <text id="lt-gpu3-o-text" x="615" y="171" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#fff">Optim Shard 3</text>
+
+        <!-- All-Gather arrow region -->
+        <rect id="lt-allgather-bg" x="30" y="225" width="660" height="50" rx="8" fill="#0a8f6a" opacity="0.08"/>
+        <text id="lt-allgather-label" x="360" y="248" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#0a8f6a">All-Gather: Reconstruct Full Params for Forward/Backward</text>
+        <text id="lt-allgather-desc" x="360" y="266" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Each GPU broadcasts its shard → all GPUs hold full parameters temporarily</text>
+
+        <!-- Reduce-Scatter arrow region -->
+        <rect id="lt-reducescatter-bg" x="30" y="290" width="660" height="50" rx="8" fill="#ff6b35" opacity="0.08"/>
+        <text id="lt-reducescatter-label" x="360" y="313" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#ff6b35">Reduce-Scatter: Distribute Gradient Shards After Backward</text>
+        <text id="lt-reducescatter-desc" x="360" y="331" text-anchor="middle" font-family="Manrope,sans-serif" font-size="10" fill="#666">Gradients are summed and scattered → each GPU holds only its gradient shard</text>
+
+        <!-- Legend -->
+        <rect id="lt-legend-params" x="180" y="360" width="14" height="14" rx="3" fill="#0a8f6a"/>
+        <text id="lt-legend-params-t" x="200" y="372" font-family="Manrope,sans-serif" font-size="11" fill="#333">Parameters</text>
+        <rect id="lt-legend-grad" x="290" y="360" width="14" height="14" rx="3" fill="#ff6b35"/>
+        <text id="lt-legend-grad-t" x="310" y="372" font-family="Manrope,sans-serif" font-size="11" fill="#333">Gradients</text>
+        <rect id="lt-legend-optim" x="395" y="360" width="14" height="14" rx="3" fill="#4a90d9"/>
+        <text id="lt-legend-optim-t" x="415" y="372" font-family="Manrope,sans-serif" font-size="11" fill="#333">Optimizer States</text>
+      </svg>
+
+      <!-- ============================================================ -->
+      <!--  Section 7: Common Gotchas & Debugging                       -->
+      <!-- ============================================================ -->
+      <h2 id="gotchas-debugging">Common Gotchas &amp; Debugging</h2>
+      <p>
+        FSDP failure modes are notoriously opaque. Below are the most frequent issues encountered when training
+        LLMs at scale, along with root causes and fixes.
+      </p>
+
+      <h3>1. Meta Device Initialization</h3>
+      <p>
+        Large models are instantiated on the <code>meta</code> device to avoid materializing 70B+ parameters on CPU.
+        FSDP's <code>param_init_fn</code> callback materializes each shard on the correct GPU. If you forget this,
+        you get <code>"Cannot copy out of meta tensor; no data!"</code>.
+      </p>
+      <div class="pseudo-code"><span class="kw">from</span> torch.distributed.fsdp <span class="kw">import</span> FullyShardedDataParallel <span class="kw">as</span> FSDP
+
+<span class="kw">def</span> <span class="fn">param_init_fn</span>(module):
+    <span class="cm"># Materialize meta-device params to the current GPU</span>
+    module.<span class="fn">to_empty</span>(device=torch.cuda.<span class="fn">current_device</span>(), recurse=<span class="kw">False</span>)
+    <span class="cm"># Re-initialize weights (meta params have no data)</span>
+    <span class="kw">if</span> <span class="fn">hasattr</span>(module, <span class="fn">"reset_parameters"</span>):
+        module.<span class="fn">reset_parameters</span>()
+
+<span class="cm"># Use with_device("meta") for zero-cost init</span>
+<span class="kw">with</span> torch.device(<span class="fn">"meta"</span>):
+    model = <span class="fn">LlamaForCausalLM</span>(config)
+
+model = <span class="fn">FSDP</span>(
+    model,
+    param_init_fn=param_init_fn,
+    auto_wrap_policy=wrap_policy,
+    sync_module_states=<span class="kw">True</span>,   <span class="cm"># broadcast rank-0 weights to all ranks</span>
+)</div>
+
+      <h3>2. dtype Mismatch Errors</h3>
+      <p>
+        The dreaded <code>"Expected all tensors to be on the same device"</code> or <code>"RuntimeError: expected
+        scalar type BFloat16 but found Float"</code> usually means your model has modules that produce fp32 outputs
+        (e.g., RMSNorm, embedding layers) feeding into FSDP units expecting bf16 inputs.
+      </p>
+      <div class="callout warn">
+        <strong>Fix:</strong> Set <code>cast_forward_inputs=True</code> in your MixedPrecision config. This tells
+        FSDP to automatically cast inputs at each unit boundary. Alternatively, explicitly cast in your model's
+        forward method, but this is fragile and hard to maintain across wrapping policy changes.
+      </div>
+
+      <h3>3. OOM During All-Gather</h3>
+      <p>
+        If you OOM during the forward pass (not backward), the cause is usually multiple all-gathers running
+        concurrently. Each all-gather temporarily allocates <code>O(full_unit_params)</code> memory:
+      </p>
+      <div class="pseudo-code"><span class="cm"># OOM Debugging checklist:</span>
+<span class="cm"># 1. Enable limit_all_gathers to cap concurrent collectives</span>
+model = <span class="fn">FSDP</span>(model, limit_all_gathers=<span class="kw">True</span>)
+
+<span class="cm"># 2. Switch backward prefetch to BACKWARD_POST</span>
+model = <span class="fn">FSDP</span>(model, backward_prefetch=BackwardPrefetch.BACKWARD_POST)
+
+<span class="cm"># 3. Ensure wrapping granularity is fine enough</span>
+<span class="cm">#    If the root FSDP unit is too large, its all-gather</span>
+<span class="cm">#    materializes the entire model at once</span>
+
+<span class="cm"># 4. Check for param duplication with use_orig_params</span>
+<span class="cm">#    When True, FSDP keeps both flat and original views</span>
+
+<span class="cm"># 5. Profile with torch.cuda.memory_stats()</span>
+stats = torch.cuda.<span class="fn">memory_stats</span>()
+<span class="fn">print</span>(<span class="fn">f</span>"Peak allocated: {stats[<span class="fn">'allocated_bytes.all.peak'</span>] / 1e9:.2f} GB")
+<span class="fn">print</span>(<span class="fn">f</span>"Peak reserved:  {stats[<span class="fn">'reserved_bytes.all.peak'</span>] / 1e9:.2f} GB")</div>
+
+      <h3>4. Hanging During Init or First Step</h3>
+      <p>
+        FSDP wrapping triggers collective operations. If any rank diverges in its wrapping order (e.g., conditional
+        wrapping based on layer index that differs across ranks), the process group hangs. Similarly,
+        <code>sync_module_states=True</code> performs a broadcast during <code>__init__</code>&mdash;if one rank
+        skips this, all ranks deadlock.
+      </p>
+      <div class="callout">
+        <strong>Debug tip:</strong> Set <code>TORCH_DISTRIBUTED_DEBUG=DETAIL</code> and <code>NCCL_DEBUG=INFO</code>
+        environment variables. This logs every collective operation with its caller, making it straightforward to
+        identify which rank is stuck and on which operation.
+      </div>
+
+      <h3>5. Gradient Accumulation</h3>
+      <p>
+        FSDP's <code>no_sync()</code> context manager skips the reduce-scatter, accumulating gradients locally. This
+        is essential for effective batch size scaling without proportional communication overhead:
+      </p>
+      <div class="pseudo-code"><span class="cm"># Gradient accumulation with FSDP</span>
+accumulation_steps = 4
+
+<span class="kw">for</span> step, batch <span class="kw">in</span> <span class="fn">enumerate</span>(dataloader):
+    <span class="cm"># Skip reduce-scatter for accumulation steps</span>
+    context = model.<span class="fn">no_sync</span>() <span class="kw">if</span> (step + 1) % accumulation_steps != 0 <span class="kw">else</span> <span class="fn">nullcontext</span>()
+
+    <span class="kw">with</span> context:
+        loss = model(batch).<span class="fn">loss</span>
+        loss = loss / accumulation_steps
+        loss.<span class="fn">backward</span>()
+
+    <span class="kw">if</span> (step + 1) % accumulation_steps == 0:
+        torch.nn.utils.<span class="fn">clip_grad_norm_</span>(model.<span class="fn">parameters</span>(), max_norm=1.0)
+        optimizer.<span class="fn">step</span>()
+        optimizer.<span class="fn">zero_grad</span>()</div>
+
+      <h3>6. torch.compile Compatibility</h3>
+      <p>
+        Combining FSDP with <code>torch.compile()</code> requires <code>use_orig_params=True</code>. Without it,
+        the compiler cannot trace through FSDP's flat parameter views. Additionally, compile the inner model
+        <em>before</em> FSDP wrapping, or use <code>torch.compile(model)</code> on the already-wrapped model
+        with fullgraph=False to allow graph breaks at FSDP boundaries:
+      </p>
+      <div class="pseudo-code"><span class="cm"># Option A: Compile before wrapping</span>
+model = <span class="fn">LlamaForCausalLM</span>(config)
+model = torch.<span class="fn">compile</span>(model)
+model = <span class="fn">FSDP</span>(model, use_orig_params=<span class="kw">True</span>)
+
+<span class="cm"># Option B: Compile after wrapping (with graph breaks)</span>
+model = <span class="fn">FSDP</span>(model, use_orig_params=<span class="kw">True</span>)
+model = torch.<span class="fn">compile</span>(model, fullgraph=<span class="kw">False</span>)</div>
+
+      <div class="callout">
+        <strong>FSDP2 (torch.distributed._composable.fsdp):</strong> PyTorch is developing a composable FSDP API
+        that works as a module-level transform rather than a wrapper. It integrates natively with
+        <code>torch.compile</code> and tensor parallelism. For new projects targeting PyTorch 2.3+, evaluate
+        FSDP2 as it will eventually replace the current FSDP API.
+      </div>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>
