@@ -1422,6 +1422,308 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'cp',
+    label: 'CP Math',
+    children: [
+      {
+        name: 'setup',
+        label: 'CP Foundations',
+        children: [
+          { title: 'Introduction to Competitive Programming', file: 'cp/setup/competitive-programming-intro.html', links: ['cp/setup/io-optimization.html'] },
+          { title: 'I/O Optimization for CP', file: 'cp/setup/io-optimization.html', links: ['cp/setup/competitive-programming-intro.html', 'cp/setup/template-setup.html'] },
+          { title: 'C++ CP Template Setup', file: 'cp/setup/template-setup.html', links: ['cp/setup/io-optimization.html', 'cp/setup/stl-for-cp.html'] },
+          { title: 'Advanced STL for CP', file: 'cp/setup/stl-for-cp.html', links: ['cp/setup/template-setup.html', 'cp/setup/debugging-stress-testing.html'] },
+          { title: 'Debugging &amp; Stress Testing', file: 'cp/setup/debugging-stress-testing.html', links: ['cp/setup/stl-for-cp.html', 'cp/setup/mathematical-thinking.html'] },
+          { title: 'Mathematical Thinking for CP', file: 'cp/setup/mathematical-thinking.html', links: ['cp/setup/debugging-stress-testing.html', 'cp/setup/contest-math-foundations.html'] },
+          { title: 'Contest Math Foundations', file: 'cp/setup/contest-math-foundations.html', links: ['cp/setup/mathematical-thinking.html', 'cp/setup/modular-arithmetic-setup.html'] },
+          { title: 'Modular Arithmetic Setup', file: 'cp/setup/modular-arithmetic-setup.html', links: ['cp/setup/contest-math-foundations.html'] }
+        ]
+      },
+      {
+        name: 'number-theory-1',
+        label: 'Number Theory I',
+        children: [
+          { title: 'Divisibility &amp; Primes', file: 'cp/number-theory-1/divisibility-primes.html', links: ['cp/number-theory-1/sieve-eratosthenes.html'] },
+          { title: 'Sieve of Eratosthenes &amp; Variants', file: 'cp/number-theory-1/sieve-eratosthenes.html', links: ['cp/number-theory-1/divisibility-primes.html', 'cp/number-theory-1/prime-factorization.html'] },
+          { title: 'Prime Factorization Techniques', file: 'cp/number-theory-1/prime-factorization.html', links: ['cp/number-theory-1/sieve-eratosthenes.html', 'cp/number-theory-1/gcd-lcm.html'] },
+          { title: 'GCD &amp; LCM Algorithms', file: 'cp/number-theory-1/gcd-lcm.html', links: ['cp/number-theory-1/prime-factorization.html', 'cp/number-theory-1/modular-arithmetic.html'] },
+          { title: 'Modular Arithmetic &amp; Overflow Handling', file: 'cp/number-theory-1/modular-arithmetic.html', links: ['cp/number-theory-1/gcd-lcm.html', 'cp/number-theory-1/fast-exponentiation.html'] },
+          { title: 'Fast Exponentiation — Binary Power &amp; Matrix Exponentiation', file: 'cp/number-theory-1/fast-exponentiation.html', links: ['cp/number-theory-1/modular-arithmetic.html', 'cp/number-theory-1/modular-inverse.html'] },
+          { title: 'Modular Inverse — Fermat, ExtGCD &amp; Precomputation', file: 'cp/number-theory-1/modular-inverse.html', links: ['cp/number-theory-1/fast-exponentiation.html', 'cp/number-theory-1/fermats-little-theorem.html'] },
+          { title: 'Fermat\'s Little Theorem', file: 'cp/number-theory-1/fermats-little-theorem.html', links: ['cp/number-theory-1/modular-inverse.html', 'cp/number-theory-1/euler-totient.html'] },
+          { title: 'Euler\'s Totient Function', file: 'cp/number-theory-1/euler-totient.html', links: ['cp/number-theory-1/fermats-little-theorem.html', 'cp/number-theory-1/extended-euclidean.html'] },
+          { title: 'Extended Euclidean Algorithm &amp; Bézout\'s Identity', file: 'cp/number-theory-1/extended-euclidean.html', links: ['cp/number-theory-1/euler-totient.html', 'cp/number-theory-1/linear-diophantine.html'] },
+          { title: 'Linear Diophantine Equations', file: 'cp/number-theory-1/linear-diophantine.html', links: ['cp/number-theory-1/extended-euclidean.html', 'cp/number-theory-1/chinese-remainder-theorem.html'] },
+          { title: 'Chinese Remainder Theorem', file: 'cp/number-theory-1/chinese-remainder-theorem.html', links: ['cp/number-theory-1/linear-diophantine.html', 'cp/number-theory-1/modular-equations.html'] },
+          { title: 'Modular Equations — Solving ax ≡ b (mod m)', file: 'cp/number-theory-1/modular-equations.html', links: ['cp/number-theory-1/chinese-remainder-theorem.html', 'cp/number-theory-1/multiplicative-functions.html'] },
+          { title: 'Multiplicative Functions — φ, σ, τ, μ &amp; Dirichlet Convolution', file: 'cp/number-theory-1/multiplicative-functions.html', links: ['cp/number-theory-1/modular-equations.html', 'cp/number-theory-1/sum-of-divisors.html'] },
+          { title: 'Sum &amp; Count of Divisors — σ(n), τ(n), Perfect Numbers', file: 'cp/number-theory-1/sum-of-divisors.html', links: ['cp/number-theory-1/multiplicative-functions.html', 'cp/number-theory-1/mobius-function.html'] },
+          { title: 'The Möbius Function — Inversion, Square-Free &amp; Coprime Counting', file: 'cp/number-theory-1/mobius-function.html', links: ['cp/number-theory-1/sum-of-divisors.html', 'cp/number-theory-1/order-primitive-roots.html'] },
+          { title: 'Multiplicative Order &amp; Primitive Roots', file: 'cp/number-theory-1/order-primitive-roots.html', links: ['cp/number-theory-1/mobius-function.html', 'cp/number-theory-1/discrete-logarithm.html'] },
+          { title: 'Discrete Logarithm: BSGS &amp; Pohlig-Hellman', file: 'cp/number-theory-1/discrete-logarithm.html', links: ['cp/number-theory-1/order-primitive-roots.html', 'cp/number-theory-1/quadratic-residues.html'] },
+          { title: 'Quadratic Residues &amp; Tonelli-Shanks', file: 'cp/number-theory-1/quadratic-residues.html', links: ['cp/number-theory-1/discrete-logarithm.html', 'cp/number-theory-1/number-theory-patterns.html'] },
+          { title: 'Number Theory Problem Patterns for CP', file: 'cp/number-theory-1/number-theory-patterns.html', links: ['cp/number-theory-1/quadratic-residues.html'] }
+        ]
+      },
+      {
+        name: 'number-theory-2',
+        label: 'Number Theory II',
+        children: [
+          { title: 'Miller–Rabin Primality Test', file: 'cp/number-theory-2/miller-rabin.html', links: ['cp/number-theory-2/pollard-rho.html'] },
+          { title: 'Pollard\'s Rho Factorization', file: 'cp/number-theory-2/pollard-rho.html', links: ['cp/number-theory-2/miller-rabin.html', 'cp/number-theory-2/lucas-theorem.html'] },
+          { title: 'Lucas\' Theorem', file: 'cp/number-theory-2/lucas-theorem.html', links: ['cp/number-theory-2/pollard-rho.html', 'cp/number-theory-2/p-adic-valuation.html'] },
+          { title: 'p-adic Valuation', file: 'cp/number-theory-2/p-adic-valuation.html', links: ['cp/number-theory-2/lucas-theorem.html', 'cp/number-theory-2/arithmetic-functions-sieve.html'] },
+          { title: 'Arithmetic Functions &amp; Sieves', file: 'cp/number-theory-2/arithmetic-functions-sieve.html', links: ['cp/number-theory-2/p-adic-valuation.html', 'cp/number-theory-2/floor-ceiling-sums.html'] },
+          { title: 'Floor &amp; Ceiling Sums', file: 'cp/number-theory-2/floor-ceiling-sums.html', links: ['cp/number-theory-2/arithmetic-functions-sieve.html', 'cp/number-theory-2/digit-sums.html'] },
+          { title: 'Digit Sums &amp; Digital Root', file: 'cp/number-theory-2/digit-sums.html', links: ['cp/number-theory-2/floor-ceiling-sums.html', 'cp/number-theory-2/smooth-numbers.html'] },
+          { title: 'Smooth Numbers', file: 'cp/number-theory-2/smooth-numbers.html', links: ['cp/number-theory-2/digit-sums.html', 'cp/number-theory-2/powerful-numbers.html'] },
+          { title: 'Powerful Numbers', file: 'cp/number-theory-2/powerful-numbers.html', links: ['cp/number-theory-2/smooth-numbers.html', 'cp/number-theory-2/ntt-number-theory.html'] },
+          { title: 'Number Theoretic Transform', file: 'cp/number-theory-2/ntt-number-theory.html', links: ['cp/number-theory-2/powerful-numbers.html', 'cp/number-theory-2/continued-fractions.html'] },
+          { title: 'Continued Fractions', file: 'cp/number-theory-2/continued-fractions.html', links: ['cp/number-theory-2/ntt-number-theory.html', 'cp/number-theory-2/stern-brocot-tree.html'] },
+          { title: 'Stern–Brocot Tree &amp; Farey Sequences', file: 'cp/number-theory-2/stern-brocot-tree.html', links: ['cp/number-theory-2/continued-fractions.html', 'cp/number-theory-2/pell-equation.html'] },
+          { title: 'Pell\'s Equation', file: 'cp/number-theory-2/pell-equation.html', links: ['cp/number-theory-2/stern-brocot-tree.html', 'cp/number-theory-2/pythagorean-triples.html'] },
+          { title: 'Pythagorean Triples', file: 'cp/number-theory-2/pythagorean-triples.html', links: ['cp/number-theory-2/pell-equation.html', 'cp/number-theory-2/min-25-sieve.html'] },
+          { title: 'Min-25 Sieve', file: 'cp/number-theory-2/min-25-sieve.html', links: ['cp/number-theory-2/pythagorean-triples.html', 'cp/number-theory-2/advanced-nt-patterns.html'] },
+          { title: 'Advanced Number Theory Patterns', file: 'cp/number-theory-2/advanced-nt-patterns.html', links: ['cp/number-theory-2/min-25-sieve.html'] }
+        ]
+      },
+      {
+        name: 'combinatorics-1',
+        label: 'Combinatorics I',
+        children: [
+          { title: 'Counting Principles: Addition, Multiplication &amp; Bijection', file: 'cp/combinatorics-1/counting-principles.html', links: ['cp/combinatorics-1/permutations.html'] },
+          { title: 'Permutations: Arrangements That Matter', file: 'cp/combinatorics-1/permutations.html', links: ['cp/combinatorics-1/counting-principles.html', 'cp/combinatorics-1/combinations.html'] },
+          { title: 'Combinations &amp; Pascal\'s Triangle', file: 'cp/combinatorics-1/combinations.html', links: ['cp/combinatorics-1/permutations.html', 'cp/combinatorics-1/binomial-coefficients.html'] },
+          { title: 'Binomial Coefficients: Precomputation &amp; Modular Arithmetic', file: 'cp/combinatorics-1/binomial-coefficients.html', links: ['cp/combinatorics-1/combinations.html', 'cp/combinatorics-1/stars-and-bars.html'] },
+          { title: 'Stars and Bars: Distributing Identical Objects', file: 'cp/combinatorics-1/stars-and-bars.html', links: ['cp/combinatorics-1/binomial-coefficients.html', 'cp/combinatorics-1/multinomial.html'] },
+          { title: 'Multinomial Coefficients &amp; the Multinomial Theorem', file: 'cp/combinatorics-1/multinomial.html', links: ['cp/combinatorics-1/stars-and-bars.html', 'cp/combinatorics-1/inclusion-exclusion.html'] },
+          { title: 'Inclusion-Exclusion Principle', file: 'cp/combinatorics-1/inclusion-exclusion.html', links: ['cp/combinatorics-1/multinomial.html', 'cp/combinatorics-1/pigeonhole.html'] },
+          { title: 'The Pigeonhole Principle', file: 'cp/combinatorics-1/pigeonhole.html', links: ['cp/combinatorics-1/inclusion-exclusion.html', 'cp/combinatorics-1/double-counting.html'] },
+          { title: 'Double Counting &amp; Combinatorial Proofs', file: 'cp/combinatorics-1/double-counting.html', links: ['cp/combinatorics-1/pigeonhole.html', 'cp/combinatorics-1/recurrence-relations.html'] },
+          { title: 'Recurrence Relations &amp; Characteristic Equations', file: 'cp/combinatorics-1/recurrence-relations.html', links: ['cp/combinatorics-1/double-counting.html', 'cp/combinatorics-1/generating-functions-intro.html'] },
+          { title: 'Generating Functions: OGF Basics', file: 'cp/combinatorics-1/generating-functions-intro.html', links: ['cp/combinatorics-1/recurrence-relations.html', 'cp/combinatorics-1/generating-functions-advanced.html'] },
+          { title: 'Advanced Generating Functions: Composition &amp; Partial Fractions', file: 'cp/combinatorics-1/generating-functions-advanced.html', links: ['cp/combinatorics-1/generating-functions-intro.html', 'cp/combinatorics-1/exponential-gf.html'] },
+          { title: 'Exponential Generating Functions &amp; Labeled Structures', file: 'cp/combinatorics-1/exponential-gf.html', links: ['cp/combinatorics-1/generating-functions-advanced.html', 'cp/combinatorics-1/catalan-numbers.html'] },
+          { title: 'Catalan Numbers: The Universal Counting Sequence', file: 'cp/combinatorics-1/catalan-numbers.html', links: ['cp/combinatorics-1/exponential-gf.html', 'cp/combinatorics-1/fibonacci-lucas.html'] },
+          { title: 'Fibonacci &amp; Lucas Numbers in Competitive Programming', file: 'cp/combinatorics-1/fibonacci-lucas.html', links: ['cp/combinatorics-1/catalan-numbers.html', 'cp/combinatorics-1/stirling-numbers.html'] },
+          { title: 'Stirling Numbers: First &amp; Second Kind', file: 'cp/combinatorics-1/stirling-numbers.html', links: ['cp/combinatorics-1/fibonacci-lucas.html', 'cp/combinatorics-1/bell-numbers.html'] },
+          { title: 'Bell Numbers &amp; Set Partitions', file: 'cp/combinatorics-1/bell-numbers.html', links: ['cp/combinatorics-1/stirling-numbers.html', 'cp/combinatorics-1/partition-function.html'] },
+          { title: 'Integer Partitions &amp; the Partition Function', file: 'cp/combinatorics-1/partition-function.html', links: ['cp/combinatorics-1/bell-numbers.html', 'cp/combinatorics-1/derangements.html'] },
+          { title: 'Derangements: When Nothing Stays in Place', file: 'cp/combinatorics-1/derangements.html', links: ['cp/combinatorics-1/partition-function.html', 'cp/combinatorics-1/lattice-paths.html'] },
+          { title: 'Lattice Paths, Dyck Paths &amp; the Ballot Problem', file: 'cp/combinatorics-1/lattice-paths.html', links: ['cp/combinatorics-1/derangements.html', 'cp/combinatorics-1/twelvefold-way.html'] },
+          { title: 'The Twelvefold Way: A Systematic Framework', file: 'cp/combinatorics-1/twelvefold-way.html', links: ['cp/combinatorics-1/lattice-paths.html', 'cp/combinatorics-1/counting-patterns.html'] },
+          { title: 'Counting Patterns: Problems from CF, ICPC &amp; Beyond', file: 'cp/combinatorics-1/counting-patterns.html', links: ['cp/combinatorics-1/twelvefold-way.html'] }
+        ]
+      },
+      {
+        name: 'combinatorics-2',
+        label: 'Combinatorics II',
+        children: [
+          { title: 'Group Theory Basics', file: 'cp/combinatorics-2/group-theory-basics.html', links: ['cp/combinatorics-2/burnside-lemma.html'] },
+          { title: 'Burnside\'s Lemma — Orbit Counting &amp; Symmetry Groups', file: 'cp/combinatorics-2/burnside-lemma.html', links: ['cp/combinatorics-2/group-theory-basics.html', 'cp/combinatorics-2/polya-enumeration.html'] },
+          { title: 'P&oacute;lya Enumeration Theorem', file: 'cp/combinatorics-2/polya-enumeration.html', links: ['cp/combinatorics-2/burnside-lemma.html', 'cp/combinatorics-2/young-tableaux.html'] },
+          { title: 'Young Tableaux — RSK Correspondence &amp; Hook Length Formula', file: 'cp/combinatorics-2/young-tableaux.html', links: ['cp/combinatorics-2/polya-enumeration.html', 'cp/combinatorics-2/symbolic-method.html'] },
+          { title: 'Symbolic Method — Analytic Combinatorics Basics', file: 'cp/combinatorics-2/symbolic-method.html', links: ['cp/combinatorics-2/young-tableaux.html', 'cp/combinatorics-2/species-theory.html'] },
+          { title: 'Combinatorial Species — Species Theory Overview', file: 'cp/combinatorics-2/species-theory.html', links: ['cp/combinatorics-2/symbolic-method.html', 'cp/combinatorics-2/transfer-matrix.html'] },
+          { title: 'Transfer Matrix Method — Counting Paths via Matrix Exponentiation', file: 'cp/combinatorics-2/transfer-matrix.html', links: ['cp/combinatorics-2/species-theory.html', 'cp/combinatorics-2/permanent-matrix.html'] },
+          { title: 'Permanent of a Matrix', file: 'cp/combinatorics-2/permanent-matrix.html', links: ['cp/combinatorics-2/transfer-matrix.html', 'cp/combinatorics-2/lindstrom-gessel-viennot.html'] },
+          { title: 'Lindström–Gessel–Viennot Lemma — Non-Intersecting Lattice Paths', file: 'cp/combinatorics-2/lindstrom-gessel-viennot.html', links: ['cp/combinatorics-2/permanent-matrix.html', 'cp/combinatorics-2/chromatic-polynomial.html'] },
+          { title: 'Chromatic Polynomial — Graph Coloring Polynomial', file: 'cp/combinatorics-2/chromatic-polynomial.html', links: ['cp/combinatorics-2/lindstrom-gessel-viennot.html', 'cp/combinatorics-2/mobius-inversion-posets.html'] },
+          { title: 'Möbius Inversion on Posets — Zeta &amp; Möbius Transforms', file: 'cp/combinatorics-2/mobius-inversion-posets.html', links: ['cp/combinatorics-2/chromatic-polynomial.html', 'cp/combinatorics-2/hypergeometric-identities.html'] },
+          { title: 'Hypergeometric Identities — WZ Method &amp; Vandermonde Convolution', file: 'cp/combinatorics-2/hypergeometric-identities.html', links: ['cp/combinatorics-2/mobius-inversion-posets.html', 'cp/combinatorics-2/ramsey-theory.html'] },
+          { title: 'Ramsey Theory — R(3,3) &amp; Applications in Competitive Programming', file: 'cp/combinatorics-2/ramsey-theory.html', links: ['cp/combinatorics-2/hypergeometric-identities.html', 'cp/combinatorics-2/extremal-combinatorics.html'] },
+          { title: 'Extremal Combinatorics — Dilworth, Erdős-Ko-Rado &amp; Sperner', file: 'cp/combinatorics-2/extremal-combinatorics.html', links: ['cp/combinatorics-2/ramsey-theory.html', 'cp/combinatorics-2/matroid-theory.html'] },
+          { title: 'Matroid Theory — Matroid Intersection &amp; Greedy on Matroids', file: 'cp/combinatorics-2/matroid-theory.html', links: ['cp/combinatorics-2/extremal-combinatorics.html', 'cp/combinatorics-2/advanced-counting-patterns.html'] },
+          { title: 'Advanced Counting Patterns', file: 'cp/combinatorics-2/advanced-counting-patterns.html', links: ['cp/combinatorics-2/matroid-theory.html'] }
+        ]
+      },
+      {
+        name: 'probability',
+        label: 'Probability',
+        children: [
+          { title: 'Probability Basics for Competitive Programming', file: 'cp/probability/probability-basics.html', links: ['cp/probability/expected-value.html'] },
+          { title: 'Expected Value &amp; Linearity of Expectation', file: 'cp/probability/expected-value.html', links: ['cp/probability/probability-basics.html', 'cp/probability/indicator-random-variables.html'] },
+          { title: 'Indicator Random Variables', file: 'cp/probability/indicator-random-variables.html', links: ['cp/probability/expected-value.html', 'cp/probability/geometric-distribution.html'] },
+          { title: 'Geometric Distribution &amp; Coupon Collector', file: 'cp/probability/geometric-distribution.html', links: ['cp/probability/indicator-random-variables.html', 'cp/probability/variance-concentration.html'] },
+          { title: 'Variance &amp; Concentration Inequalities', file: 'cp/probability/variance-concentration.html', links: ['cp/probability/geometric-distribution.html', 'cp/probability/bayes-theorem.html'] },
+          { title: 'Bayes\' Theorem &amp; Total Probability', file: 'cp/probability/bayes-theorem.html', links: ['cp/probability/variance-concentration.html', 'cp/probability/probability-dp.html'] },
+          { title: 'DP on Probability Distributions', file: 'cp/probability/probability-dp.html', links: ['cp/probability/bayes-theorem.html', 'cp/probability/expected-value-dp.html'] },
+          { title: 'Expected Value via DP', file: 'cp/probability/expected-value-dp.html', links: ['cp/probability/probability-dp.html', 'cp/probability/probability-mod-arithmetic.html'] },
+          { title: 'Probability with Modular Arithmetic', file: 'cp/probability/probability-mod-arithmetic.html', links: ['cp/probability/expected-value-dp.html', 'cp/probability/markov-chains.html'] },
+          { title: 'Markov Chains for Competitive Programming', file: 'cp/probability/markov-chains.html', links: ['cp/probability/probability-mod-arithmetic.html', 'cp/probability/random-walks.html'] },
+          { title: 'Random Walks &amp; Gambler\'s Ruin', file: 'cp/probability/random-walks.html', links: ['cp/probability/markov-chains.html', 'cp/probability/martingales-cp.html'] },
+          { title: 'Martingales in Competitive Programming', file: 'cp/probability/martingales-cp.html', links: ['cp/probability/random-walks.html', 'cp/probability/probability-on-trees.html'] },
+          { title: 'Probability on Trees', file: 'cp/probability/probability-on-trees.html', links: ['cp/probability/martingales-cp.html', 'cp/probability/randomized-algorithms.html'] },
+          { title: 'Randomized Algorithms in CP', file: 'cp/probability/randomized-algorithms.html', links: ['cp/probability/probability-on-trees.html', 'cp/probability/random-hashing.html'] },
+          { title: 'Random Hashing &amp; Birthday Paradox', file: 'cp/probability/random-hashing.html', links: ['cp/probability/randomized-algorithms.html', 'cp/probability/reservoir-sampling.html'] },
+          { title: 'Reservoir Sampling', file: 'cp/probability/reservoir-sampling.html', links: ['cp/probability/random-hashing.html', 'cp/probability/stochastic-games.html'] },
+          { title: 'Stochastic Games &amp; Expected Value', file: 'cp/probability/stochastic-games.html', links: ['cp/probability/reservoir-sampling.html', 'cp/probability/probability-patterns.html'] },
+          { title: 'Probability Patterns from CF &amp; ICPC', file: 'cp/probability/probability-patterns.html', links: ['cp/probability/stochastic-games.html'] }
+        ]
+      },
+      {
+        name: 'algebra',
+        label: 'Algebra & Polynomials',
+        children: [
+          { title: 'Polynomial Basics', file: 'cp/algebra/polynomial-basics.html', links: ['cp/algebra/polynomial-multiplication.html'] },
+          { title: 'Polynomial Multiplication', file: 'cp/algebra/polynomial-multiplication.html', links: ['cp/algebra/polynomial-basics.html', 'cp/algebra/polynomial-division.html'] },
+          { title: 'Polynomial Division', file: 'cp/algebra/polynomial-division.html', links: ['cp/algebra/polynomial-multiplication.html', 'cp/algebra/polynomial-gcd.html'] },
+          { title: 'Polynomial GCD &amp; Half-GCD', file: 'cp/algebra/polynomial-gcd.html', links: ['cp/algebra/polynomial-division.html', 'cp/algebra/lagrange-interpolation.html'] },
+          { title: 'Lagrange Interpolation', file: 'cp/algebra/lagrange-interpolation.html', links: ['cp/algebra/polynomial-gcd.html', 'cp/algebra/vietas-formulas.html'] },
+          { title: 'Vieta\'s Formulas', file: 'cp/algebra/vietas-formulas.html', links: ['cp/algebra/lagrange-interpolation.html', 'cp/algebra/newtons-identities.html'] },
+          { title: 'Newton\'s Identities', file: 'cp/algebra/newtons-identities.html', links: ['cp/algebra/vietas-formulas.html', 'cp/algebra/fft.html'] },
+          { title: 'Fast Fourier Transform', file: 'cp/algebra/fft.html', links: ['cp/algebra/newtons-identities.html', 'cp/algebra/fft-implementation.html'] },
+          { title: 'FFT Implementation', file: 'cp/algebra/fft-implementation.html', links: ['cp/algebra/fft.html', 'cp/algebra/fft-applications.html'] },
+          { title: 'FFT Applications', file: 'cp/algebra/fft-applications.html', links: ['cp/algebra/fft-implementation.html', 'cp/algebra/ntt.html'] },
+          { title: 'Number Theoretic Transform', file: 'cp/algebra/ntt.html', links: ['cp/algebra/fft-applications.html', 'cp/algebra/convolution-variants.html'] },
+          { title: 'Convolution Variants', file: 'cp/algebra/convolution-variants.html', links: ['cp/algebra/ntt.html', 'cp/algebra/formal-power-series.html'] },
+          { title: 'Formal Power Series', file: 'cp/algebra/formal-power-series.html', links: ['cp/algebra/convolution-variants.html', 'cp/algebra/fps-operations.html'] },
+          { title: 'FPS Composition &amp; Inverse', file: 'cp/algebra/fps-operations.html', links: ['cp/algebra/formal-power-series.html', 'cp/algebra/polynomial-hashing.html'] },
+          { title: 'Polynomial Hashing', file: 'cp/algebra/polynomial-hashing.html', links: ['cp/algebra/fps-operations.html', 'cp/algebra/matrix-exponentiation.html'] },
+          { title: 'Matrix Exponentiation', file: 'cp/algebra/matrix-exponentiation.html', links: ['cp/algebra/polynomial-hashing.html', 'cp/algebra/characteristic-polynomial.html'] },
+          { title: 'Characteristic Polynomial', file: 'cp/algebra/characteristic-polynomial.html', links: ['cp/algebra/matrix-exponentiation.html', 'cp/algebra/berlekamp-massey.html'] },
+          { title: 'Berlekamp–Massey Algorithm', file: 'cp/algebra/berlekamp-massey.html', links: ['cp/algebra/characteristic-polynomial.html', 'cp/algebra/kitamasa-method.html'] },
+          { title: 'Kitamasa\'s Method', file: 'cp/algebra/kitamasa-method.html', links: ['cp/algebra/berlekamp-massey.html', 'cp/algebra/multipoint-evaluation.html'] },
+          { title: 'Multipoint Evaluation', file: 'cp/algebra/multipoint-evaluation.html', links: ['cp/algebra/kitamasa-method.html', 'cp/algebra/resultant.html'] },
+          { title: 'Polynomial Resultant', file: 'cp/algebra/resultant.html', links: ['cp/algebra/multipoint-evaluation.html', 'cp/algebra/algebra-patterns.html'] },
+          { title: 'Algebra Problem Patterns', file: 'cp/algebra/algebra-patterns.html', links: ['cp/algebra/resultant.html'] }
+        ]
+      },
+      {
+        name: 'linear-algebra',
+        label: 'Linear Algebra',
+        children: [
+          { title: 'Vectors &amp; Matrices — Basics &amp; Representation in C++', file: 'cp/linear-algebra/vectors-matrices.html', links: ['cp/linear-algebra/matrix-multiplication.html'] },
+          { title: 'Matrix Multiplication', file: 'cp/linear-algebra/matrix-multiplication.html', links: ['cp/linear-algebra/vectors-matrices.html', 'cp/linear-algebra/gaussian-elimination.html'] },
+          { title: 'Gaussian Elimination — Row Reduction, RREF &amp; Pivoting', file: 'cp/linear-algebra/gaussian-elimination.html', links: ['cp/linear-algebra/matrix-multiplication.html', 'cp/linear-algebra/systems-of-equations.html'] },
+          { title: 'Systems of Linear Equations', file: 'cp/linear-algebra/systems-of-equations.html', links: ['cp/linear-algebra/gaussian-elimination.html', 'cp/linear-algebra/matrix-rank.html'] },
+          { title: 'Matrix Rank — Rank Computation &amp; Dimension Counting', file: 'cp/linear-algebra/matrix-rank.html', links: ['cp/linear-algebra/systems-of-equations.html', 'cp/linear-algebra/determinant.html'] },
+          { title: 'Determinants', file: 'cp/linear-algebra/determinant.html', links: ['cp/linear-algebra/matrix-rank.html', 'cp/linear-algebra/matrix-inverse.html'] },
+          { title: 'Matrix Inverse', file: 'cp/linear-algebra/matrix-inverse.html', links: ['cp/linear-algebra/determinant.html', 'cp/linear-algebra/lu-decomposition.html'] },
+          { title: 'LU Decomposition', file: 'cp/linear-algebra/lu-decomposition.html', links: ['cp/linear-algebra/matrix-inverse.html', 'cp/linear-algebra/matrix-exponentiation-la.html'] },
+          { title: 'Matrix Exponentiation — O(n³ log k)', file: 'cp/linear-algebra/matrix-exponentiation-la.html', links: ['cp/linear-algebra/lu-decomposition.html', 'cp/linear-algebra/binary-matrices.html'] },
+          { title: 'Binary Matrices — GF(2) Operations &amp; Light-Switching Puzzles', file: 'cp/linear-algebra/binary-matrices.html', links: ['cp/linear-algebra/matrix-exponentiation-la.html', 'cp/linear-algebra/kirchhoff-theorem.html'] },
+          { title: 'Kirchhoff\'s Theorem — Spanning Tree Counting', file: 'cp/linear-algebra/kirchhoff-theorem.html', links: ['cp/linear-algebra/binary-matrices.html', 'cp/linear-algebra/simplex-method.html'] },
+          { title: 'Simplex Method — Linear Programming for CP', file: 'cp/linear-algebra/simplex-method.html', links: ['cp/linear-algebra/kirchhoff-theorem.html', 'cp/linear-algebra/sweep-line-linalg.html'] },
+          { title: 'Sweep Line &amp; Linear Algebra', file: 'cp/linear-algebra/sweep-line-linalg.html', links: ['cp/linear-algebra/simplex-method.html', 'cp/linear-algebra/matrix-games.html'] },
+          { title: 'Matrix Games', file: 'cp/linear-algebra/matrix-games.html', links: ['cp/linear-algebra/sweep-line-linalg.html', 'cp/linear-algebra/linear-algebra-patterns.html'] },
+          { title: 'Linear Algebra Patterns in CP', file: 'cp/linear-algebra/linear-algebra-patterns.html', links: ['cp/linear-algebra/matrix-games.html'] }
+        ]
+      },
+      {
+        name: 'game-theory',
+        label: 'Game Theory',
+        children: [
+          { title: 'Combinatorial Games', file: 'cp/game-theory/combinatorial-games.html', links: ['cp/game-theory/nim-game.html'] },
+          { title: 'The Nim Game', file: 'cp/game-theory/nim-game.html', links: ['cp/game-theory/combinatorial-games.html', 'cp/game-theory/sprague-grundy.html'] },
+          { title: 'Sprague-Grundy Theorem', file: 'cp/game-theory/sprague-grundy.html', links: ['cp/game-theory/nim-game.html', 'cp/game-theory/nim-variants.html'] },
+          { title: 'Nim Variants — Staircase Nim, Wythoff\'s Game, Fibonacci Nim &amp; More', file: 'cp/game-theory/nim-variants.html', links: ['cp/game-theory/sprague-grundy.html', 'cp/game-theory/subtraction-games.html'] },
+          { title: 'Subtraction Games', file: 'cp/game-theory/subtraction-games.html', links: ['cp/game-theory/nim-variants.html', 'cp/game-theory/turning-turtles.html'] },
+          { title: 'Turning Turtles — Mock Turtles &amp; Coin-Turning Games', file: 'cp/game-theory/turning-turtles.html', links: ['cp/game-theory/subtraction-games.html', 'cp/game-theory/green-hackenbush.html'] },
+          { title: 'Green Hackenbush — Nim Equivalence on Graphs', file: 'cp/game-theory/green-hackenbush.html', links: ['cp/game-theory/turning-turtles.html', 'cp/game-theory/misere-games.html'] },
+          { title: 'Misère Games — Misère Nim &amp; Sprague-Grundy Under Misère Play', file: 'cp/game-theory/misere-games.html', links: ['cp/game-theory/green-hackenbush.html', 'cp/game-theory/games-on-graphs.html'] },
+          { title: 'Games on Graphs', file: 'cp/game-theory/games-on-graphs.html', links: ['cp/game-theory/misere-games.html', 'cp/game-theory/games-on-trees.html'] },
+          { title: 'Games on Trees', file: 'cp/game-theory/games-on-trees.html', links: ['cp/game-theory/games-on-graphs.html', 'cp/game-theory/game-dp.html'] },
+          { title: 'DP Approaches to Game Problems', file: 'cp/game-theory/game-dp.html', links: ['cp/game-theory/games-on-trees.html', 'cp/game-theory/partizan-games.html'] },
+          { title: 'Partizan Games', file: 'cp/game-theory/partizan-games.html', links: ['cp/game-theory/game-dp.html', 'cp/game-theory/multi-player-games.html'] },
+          { title: 'Multi-Player Games — Coalitions, Non-Zero-Sum &amp; Beyond Two Players', file: 'cp/game-theory/multi-player-games.html', links: ['cp/game-theory/partizan-games.html', 'cp/game-theory/strategy-stealing.html'] },
+          { title: 'Strategy Stealing Argument — First-Player Wins', file: 'cp/game-theory/strategy-stealing.html', links: ['cp/game-theory/multi-player-games.html', 'cp/game-theory/retrograde-analysis.html'] },
+          { title: 'Retrograde Analysis', file: 'cp/game-theory/retrograde-analysis.html', links: ['cp/game-theory/strategy-stealing.html', 'cp/game-theory/game-theory-patterns.html'] },
+          { title: 'Game Theory Patterns from CF/ICPC — Problem Classification &amp; Strategies', file: 'cp/game-theory/game-theory-patterns.html', links: ['cp/game-theory/retrograde-analysis.html'] }
+        ]
+      },
+      {
+        name: 'geometry',
+        label: 'Computational Geometry',
+        children: [
+          { title: 'Points &amp; Vectors: The Foundation', file: 'cp/geometry/points-vectors.html', links: ['cp/geometry/cross-product.html'] },
+          { title: 'The Cross Product: Orientation and Area', file: 'cp/geometry/cross-product.html', links: ['cp/geometry/points-vectors.html', 'cp/geometry/lines-segments.html'] },
+          { title: 'Lines &amp; Segments: Representation and Intersection', file: 'cp/geometry/lines-segments.html', links: ['cp/geometry/cross-product.html', 'cp/geometry/line-intersection.html'] },
+          { title: 'Line Intersection: All Cases Covered', file: 'cp/geometry/line-intersection.html', links: ['cp/geometry/lines-segments.html', 'cp/geometry/polygon-area.html'] },
+          { title: 'Polygon Area: The Shoelace Formula', file: 'cp/geometry/polygon-area.html', links: ['cp/geometry/line-intersection.html', 'cp/geometry/picks-theorem.html'] },
+          { title: 'Pick\'s Theorem: Counting Lattice Points', file: 'cp/geometry/picks-theorem.html', links: ['cp/geometry/polygon-area.html', 'cp/geometry/point-in-polygon.html'] },
+          { title: 'Point in Polygon: Ray Casting &amp; Winding Number', file: 'cp/geometry/point-in-polygon.html', links: ['cp/geometry/picks-theorem.html', 'cp/geometry/convex-hull.html'] },
+          { title: 'Convex Hull: Graham Scan &amp; Monotone Chain', file: 'cp/geometry/convex-hull.html', links: ['cp/geometry/point-in-polygon.html', 'cp/geometry/point-in-convex.html'] },
+          { title: 'Point in Convex Polygon: Binary Search Approach', file: 'cp/geometry/point-in-convex.html', links: ['cp/geometry/convex-hull.html', 'cp/geometry/rotating-calipers.html'] },
+          { title: 'Rotating Calipers: Diameter and Beyond', file: 'cp/geometry/rotating-calipers.html', links: ['cp/geometry/point-in-convex.html', 'cp/geometry/closest-pair.html'] },
+          { title: 'Closest Pair of Points', file: 'cp/geometry/closest-pair.html', links: ['cp/geometry/rotating-calipers.html', 'cp/geometry/sweep-line-geometry.html'] },
+          { title: 'Sweep Line in Geometry', file: 'cp/geometry/sweep-line-geometry.html', links: ['cp/geometry/closest-pair.html', 'cp/geometry/half-plane-intersection.html'] },
+          { title: 'Half-Plane Intersection', file: 'cp/geometry/half-plane-intersection.html', links: ['cp/geometry/sweep-line-geometry.html', 'cp/geometry/circle-operations.html'] },
+          { title: 'Circle Operations: Intersections and Tangents', file: 'cp/geometry/circle-operations.html', links: ['cp/geometry/half-plane-intersection.html', 'cp/geometry/circle-union-area.html'] },
+          { title: 'Area of Union of Circles', file: 'cp/geometry/circle-union-area.html', links: ['cp/geometry/circle-operations.html', 'cp/geometry/geometric-transforms.html'] },
+          { title: 'Geometric Transformations', file: 'cp/geometry/geometric-transforms.html', links: ['cp/geometry/circle-union-area.html', 'cp/geometry/convex-hull-tricks-geo.html'] },
+          { title: 'Convex Hull Tricks in Geometry', file: 'cp/geometry/convex-hull-tricks-geo.html', links: ['cp/geometry/geometric-transforms.html', 'cp/geometry/minkowski-sum.html'] },
+          { title: 'Minkowski Sum of Polygons', file: 'cp/geometry/minkowski-sum.html', links: ['cp/geometry/convex-hull-tricks-geo.html', 'cp/geometry/precision-handling.html'] },
+          { title: 'Precision Handling in Geometry', file: 'cp/geometry/precision-handling.html', links: ['cp/geometry/minkowski-sum.html', 'cp/geometry/geometry-integers.html'] },
+          { title: 'Integer Geometry: Avoiding Floats', file: 'cp/geometry/geometry-integers.html', links: ['cp/geometry/precision-handling.html', 'cp/geometry/3d-geometry.html'] },
+          { title: '3D Geometry Basics', file: 'cp/geometry/3d-geometry.html', links: ['cp/geometry/geometry-integers.html', 'cp/geometry/convex-hull-3d.html'] },
+          { title: '3D Convex Hull', file: 'cp/geometry/convex-hull-3d.html', links: ['cp/geometry/3d-geometry.html', 'cp/geometry/delaunay-triangulation.html'] },
+          { title: 'Delaunay Triangulation', file: 'cp/geometry/delaunay-triangulation.html', links: ['cp/geometry/convex-hull-3d.html', 'cp/geometry/voronoi-diagram.html'] },
+          { title: 'Voronoi Diagrams', file: 'cp/geometry/voronoi-diagram.html', links: ['cp/geometry/delaunay-triangulation.html', 'cp/geometry/geometry-patterns.html'] },
+          { title: 'Geometry Problem Patterns in Competitive Programming', file: 'cp/geometry/geometry-patterns.html', links: ['cp/geometry/voronoi-diagram.html'] }
+        ]
+      },
+      {
+        name: 'constructive',
+        label: 'Constructive & Interactive',
+        children: [
+          { title: 'Constructive Algorithms &mdash; Parity, Invariants &amp; Greedy Construction', file: 'cp/constructive/constructive-algorithms.html', links: ['cp/constructive/invariant-monovariant.html'] },
+          { title: 'Invariants &amp; Monovariants', file: 'cp/constructive/invariant-monovariant.html', links: ['cp/constructive/constructive-algorithms.html', 'cp/constructive/parity-arguments.html'] },
+          { title: 'Parity Arguments', file: 'cp/constructive/parity-arguments.html', links: ['cp/constructive/invariant-monovariant.html', 'cp/constructive/sequence-construction.html'] },
+          { title: 'Sequence Construction', file: 'cp/constructive/sequence-construction.html', links: ['cp/constructive/parity-arguments.html', 'cp/constructive/graph-construction.html'] },
+          { title: 'Graph Construction', file: 'cp/constructive/graph-construction.html', links: ['cp/constructive/sequence-construction.html', 'cp/constructive/matrix-construction.html'] },
+          { title: 'Matrix Construction', file: 'cp/constructive/matrix-construction.html', links: ['cp/constructive/graph-construction.html', 'cp/constructive/interactive-problems.html'] },
+          { title: 'Interactive Problems', file: 'cp/constructive/interactive-problems.html', links: ['cp/constructive/matrix-construction.html', 'cp/constructive/interactive-binary-search.html'] },
+          { title: 'Interactive Binary Search &mdash; Guessing Game, Comparator Oracle &amp; Searching with Lies', file: 'cp/constructive/interactive-binary-search.html', links: ['cp/constructive/interactive-problems.html', 'cp/constructive/interactive-sorting.html'] },
+          { title: 'Interactive Sorting — Minimum Comparisons &amp; Information-Theoretic Bounds', file: 'cp/constructive/interactive-sorting.html', links: ['cp/constructive/interactive-binary-search.html', 'cp/constructive/interactive-graph.html'] },
+          { title: 'Interactive Graph Problems — Exploring Hidden Structures with Queries', file: 'cp/constructive/interactive-graph.html', links: ['cp/constructive/interactive-sorting.html', 'cp/constructive/adaptive-adversary.html'] },
+          { title: 'Adaptive Adversary Arguments &mdash; Lower Bounds &amp; Worst-Case Analysis', file: 'cp/constructive/adaptive-adversary.html', links: ['cp/constructive/interactive-graph.html', 'cp/constructive/communication-complexity.html'] },
+          { title: 'Communication Complexity &mdash; Lower Bounds &amp; Interactive Query Strategies', file: 'cp/constructive/communication-complexity.html', links: ['cp/constructive/adaptive-adversary.html', 'cp/constructive/output-sensitive.html'] },
+          { title: 'Output-Sensitive Algorithms — Enumeration &amp; Output-Dependent Complexity', file: 'cp/constructive/output-sensitive.html', links: ['cp/constructive/communication-complexity.html', 'cp/constructive/constructive-patterns.html'] },
+          { title: 'Constructive &amp; Interactive Problem Patterns', file: 'cp/constructive/constructive-patterns.html', links: ['cp/constructive/output-sensitive.html'] }
+        ]
+      },
+      {
+        name: 'optimization',
+        label: 'Optimization',
+        children: [
+          { title: 'Ternary Search', file: 'cp/optimization/ternary-search.html', links: ['cp/optimization/golden-section.html'] },
+          { title: 'Golden Section Search &amp; Fibonacci Search', file: 'cp/optimization/golden-section.html', links: ['cp/optimization/ternary-search.html', 'cp/optimization/hill-climbing.html'] },
+          { title: 'Hill Climbing — Random Restart &amp; Plateau Handling', file: 'cp/optimization/hill-climbing.html', links: ['cp/optimization/golden-section.html', 'cp/optimization/simulated-annealing.html'] },
+          { title: 'Simulated Annealing for Competitive Programming', file: 'cp/optimization/simulated-annealing.html', links: ['cp/optimization/hill-climbing.html', 'cp/optimization/beam-search.html'] },
+          { title: 'Beam Search for Optimization', file: 'cp/optimization/beam-search.html', links: ['cp/optimization/simulated-annealing.html', 'cp/optimization/meet-in-middle.html'] },
+          { title: 'Meet in the Middle — Split-and-Merge &amp; Subset Sum', file: 'cp/optimization/meet-in-middle.html', links: ['cp/optimization/beam-search.html', 'cp/optimization/lagrangian-relaxation.html'] },
+          { title: 'Lagrangian Relaxation', file: 'cp/optimization/lagrangian-relaxation.html', links: ['cp/optimization/meet-in-middle.html', 'cp/optimization/lp-duality.html'] },
+          { title: 'LP Duality &amp; Complementary Slackness', file: 'cp/optimization/lp-duality.html', links: ['cp/optimization/lagrangian-relaxation.html', 'cp/optimization/ilp-branch-bound.html'] },
+          { title: 'Integer LP &amp; Branch and Bound', file: 'cp/optimization/ilp-branch-bound.html', links: ['cp/optimization/lp-duality.html', 'cp/optimization/hungarian-detailed.html'] },
+          { title: 'Hungarian Algorithm Walkthrough', file: 'cp/optimization/hungarian-detailed.html', links: ['cp/optimization/ilp-branch-bound.html', 'cp/optimization/min-cost-arborescence.html'] },
+          { title: 'Edmond\'s Algorithm — Min-Cost Arborescence', file: 'cp/optimization/min-cost-arborescence.html', links: ['cp/optimization/hungarian-detailed.html', 'cp/optimization/submodular-optimization.html'] },
+          { title: 'Submodular Functions — Greedy Guarantees &amp; Optimization', file: 'cp/optimization/submodular-optimization.html', links: ['cp/optimization/min-cost-arborescence.html', 'cp/optimization/matroid-intersection.html'] },
+          { title: 'Matroid Intersection Algorithm', file: 'cp/optimization/matroid-intersection.html', links: ['cp/optimization/submodular-optimization.html', 'cp/optimization/optimization-patterns.html'] },
+          { title: 'Optimization Patterns from CF/ICPC', file: 'cp/optimization/optimization-patterns.html', links: ['cp/optimization/matroid-intersection.html'] }
+        ]
+      },
+      {
+        name: 'contest-strategy',
+        label: 'Contest Strategy',
+        children: [
+          { title: 'Practice Methodology — Deliberate Practice, Topic Rotation &amp; Spaced Repetition', file: 'cp/contest-strategy/practice-methodology.html', links: ['cp/contest-strategy/problem-classification.html'] },
+          { title: 'Problem Classification — Pattern Recognition in CP', file: 'cp/contest-strategy/problem-classification.html', links: ['cp/contest-strategy/practice-methodology.html', 'cp/contest-strategy/editorial-reading.html'] },
+          { title: 'How to Read Editorials &amp; Upsolve Effectively', file: 'cp/contest-strategy/editorial-reading.html', links: ['cp/contest-strategy/problem-classification.html', 'cp/contest-strategy/stress-testing.html'] },
+          { title: 'Stress Testing — Generator, Brute Force &amp; Comparator Scripts', file: 'cp/contest-strategy/stress-testing.html', links: ['cp/contest-strategy/editorial-reading.html', 'cp/contest-strategy/template-advanced.html'] },
+          { title: 'Advanced CP Template Features — Custom Structures &amp; Debugging Macros', file: 'cp/contest-strategy/template-advanced.html', links: ['cp/contest-strategy/stress-testing.html', 'cp/contest-strategy/time-management.html'] },
+          { title: 'Time Management — Clock Management During Contests', file: 'cp/contest-strategy/time-management.html', links: ['cp/contest-strategy/template-advanced.html', 'cp/contest-strategy/mental-models.html'] },
+          { title: 'Mental Models for CP — Pattern Matching &amp; Problem Reduction', file: 'cp/contest-strategy/mental-models.html', links: ['cp/contest-strategy/time-management.html', 'cp/contest-strategy/codeforces-strategy.html'] },
+          { title: 'Codeforces Contest Strategy', file: 'cp/contest-strategy/codeforces-strategy.html', links: ['cp/contest-strategy/mental-models.html', 'cp/contest-strategy/icpc-strategy.html'] },
+          { title: 'ICPC Team Strategy', file: 'cp/contest-strategy/icpc-strategy.html', links: ['cp/contest-strategy/codeforces-strategy.html', 'cp/contest-strategy/ioi-strategy.html'] },
+          { title: 'IOI Strategy', file: 'cp/contest-strategy/ioi-strategy.html', links: ['cp/contest-strategy/icpc-strategy.html', 'cp/contest-strategy/rating-progression.html'] },
+          { title: 'Rating Progression: From Beginner to Grandmaster', file: 'cp/contest-strategy/rating-progression.html', links: ['cp/contest-strategy/ioi-strategy.html', 'cp/contest-strategy/resources-roadmap.html'] },
+          { title: 'Resources &amp; Roadmap — Newbie to Grandmaster', file: 'cp/contest-strategy/resources-roadmap.html', links: ['cp/contest-strategy/rating-progression.html'] }
+        ]
+      }
+    ]
   }
 
 ];
