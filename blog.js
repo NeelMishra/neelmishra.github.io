@@ -187,7 +187,8 @@ var BLOG_TREE = [
               { title: 'Building & Querying', file: 'dsa/trees/segment-tree/build-query.html', links: ['dsa/trees/segment-tree/intro.html', 'dsa/trees/segment-tree/updates.html'] },
               { title: 'Updates', file: 'dsa/trees/segment-tree/updates.html', links: ['dsa/trees/segment-tree/build-query.html', 'dsa/trees/segment-tree/lazy.html'] },
               { title: 'Lazy Propagation', file: 'dsa/trees/segment-tree/lazy.html', links: ['dsa/trees/segment-tree/updates.html', 'dsa/trees/segment-tree/patterns.html'] },
-              { title: 'Patterns & Practice', file: 'dsa/trees/segment-tree/patterns.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/fenwick-tree/intro.html'] }
+              { title: 'Patterns & Practice', file: 'dsa/trees/segment-tree/patterns.html', links: ['dsa/trees/segment-tree/lazy.html', 'dsa/trees/segment-tree/iterative.html'] },
+              { title: 'Iterative Segment Trees', file: 'dsa/trees/segment-tree/iterative.html', links: ['dsa/trees/segment-tree/patterns.html', 'dsa/trees/fenwick-tree/intro.html'] }
             ]
           },
           {
