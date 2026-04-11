@@ -54,10 +54,10 @@
       <div class="toc-section">
         <h4>Table of Contents</h4>
         <ul>
-          <li><a href="#what-does-this-class-do">What Does This Class Do?</a></li>
-          <li><a href="#class-structure">The Class Structure</a></li>
-          <li><a href="#forward-pass">The Forward Pass Line by Line</a></li>
-          <li><a href="#projections">The Projections: Q, K, V</a></li>
+          <li><a href="#operations-pipeline">Operations Pipeline</a></li>
+          <li><a href="#the-code">The Code</a></li>
+          <li><a href="#constructor">Constructor: Setting Up Layers</a></li>
+          <li><a href="#projections">Q, K, V Projections</a></li>
           <li><a href="#transpose">Why transpose(-2, -1)</a></li>
           <li class="depth-3"><a href="#transpose-goal">What We Are Computing</a></li>
           <li class="depth-3"><a href="#transpose-shape-problem">The Shape Problem</a></li>
@@ -65,9 +65,9 @@
           <li class="depth-3"><a href="#transpose-negative-idx">Why Negative Indices</a></li>
           <li class="depth-3"><a href="#transpose-batched">Batched matmul</a></li>
           <li class="depth-3"><a href="#transpose-animation">Interactive Animation</a></li>
-          <li><a href="#scaling">The Scaling: / sqrt(head_size)</a></li>
-          <li><a href="#causal-mask">The Causal Mask</a></li>
-          <li><a href="#softmax-final">Softmax and Final Matmul</a></li>
+          <li><a href="#scaling">Scaling by sqrt(head_size)</a></li>
+          <li><a href="#causal-mask">Causal Mask</a></li>
+          <li><a href="#softmax-final">Softmax and Weighted Sum</a></li>
           <li><a href="#shape-trace">Complete Shape Trace</a></li>
           <li><a href="#full-code">Full Code</a></li>
           <li><a href="#next">What Comes Next</a></li>
@@ -85,246 +85,120 @@
       <p class="post-meta">April 2026 &middot; C++ / LibTorch &middot; Transformers</p>
 
       <!-- ============================================================ -->
-      <section id="what-does-this-class-do">
-        <h2>What Does This Class Do?</h2>
+      <section id="operations-pipeline">
+        <h2>Operations Pipeline</h2>
 
-        <p>A <code>SingleHeadAttention</code> module takes a batch of token embeddings and produces a new representation for every token in which each token has "attended" to every other token that came before it (and itself). In concrete terms:</p>
-
-        <ul>
-          <li><strong>Input:</strong> a tensor of shape <code>(batch, seq_len, n_embd)</code>. Each of the <code>seq_len</code> tokens is represented by a vector of size <code>n_embd</code>.</li>
-          <li><strong>Output:</strong> a tensor of shape <code>(batch, seq_len, head_size)</code>. Every token now carries information gathered from the tokens it paid attention to, compressed into a vector of size <code>head_size</code>.</li>
-        </ul>
-
-        <p>The transformation happens in five stages: project the input into Query, Key, and Value vectors, compute pairwise attention scores, scale them, mask out future positions (causal masking), normalize with softmax, and finally use those weights to produce a weighted sum of Value vectors.</p>
+        <p>This class takes in token embeddings and returns attended representations. Here is every operation and its shape, top to bottom:</p>
 
         <div class="math-block">
-Input:   (batch, seq_len, n_embd)
-           |
-     Q, K, V projections   (three separate linear layers)
-           |
-         Q, K, V each: (batch, seq_len, head_size)
-           |
-     raw_attn = Q @ K^T / sqrt(head_size)    -> (batch, seq_len, seq_len)
-           |
-     causal mask + softmax
-           |
-     output = attn_weights @ V               -> (batch, seq_len, head_size)
+x                                  (batch, S, n_embd)       input embeddings
+  |
+  |-- Q(x)   linear projection --> (batch, S, H)            query vectors
+  |-- K(x)   linear projection --> (batch, S, H)            key vectors
+  |-- V(x)   linear projection --> (batch, S, H)            value vectors
+  |
+  |-- matmul(Q, K^T)           --> (batch, S, S)            raw attention scores
+  |-- / sqrt(H)                --> (batch, S, S)            scaled scores
+  |-- masked_fill (causal)     --> (batch, S, S)            future tokens set to -1e9
+  |-- softmax (row-wise)       --> (batch, S, S)            attention weights (rows sum to 1)
+  |-- matmul(weights, V)       --> (batch, S, H)            weighted sum of value vectors
+  |
+output                             (batch, S, H)            attended representations
         </div>
 
-        <p>If the input embedding dimension <code>n_embd</code> is 64 and <code>head_size</code> is 16, the class projects each 64-dimensional token into a 16-dimensional attended representation. The dimensionality reduction is intentional: in a full Transformer, multiple heads run in parallel, each with a smaller <code>head_size</code>, and their outputs are concatenated back to the full embedding size.</p>
+        <p>Where <code>S</code> = sequence length, <code>H</code> = head_size. Input dimension <code>n_embd</code> gets projected down to <code>H</code>. In a full Transformer, multiple heads run in parallel with smaller <code>H</code>, and their outputs are concatenated back to <code>n_embd</code>.</p>
+
+        <p>The rest of this page walks through each operation in the C++ code, focusing on what happens to the tensor shapes at every step.</p>
       </section>
 
       <!-- ============================================================ -->
-      <section id="class-structure">
-        <h2>The Class Structure</h2>
+      <section id="the-code">
+        <h2>The Code</h2>
 
-        <p>Here is the complete class declaration and constructor. Every line is doing something deliberate.</p>
+        <p>Here is the complete class. Read it once to get the full picture, then we will break down each part below.</p>
 
         <div class="pseudo-code">
 <span class="kw">class</span> <span class="tp">SingleHeadAttention</span> : <span class="kw">public</span> <span class="tp">torch::nn::Module</span>{
-    <span class="cm">/*
-    The input embedding vector comes in (size n_embd) and the output vector is of size head_size
-    */</span>
     <span class="tp">int</span> n_embd, head_size;
     <span class="tp">torch::nn::Linear</span> K{<span class="kw">nullptr</span>}, Q{<span class="kw">nullptr</span>}, V{<span class="kw">nullptr</span>};
     <span class="kw">public</span>:
     <span class="fn">SingleHeadAttention</span>(<span class="tp">int</span> n_embd, <span class="tp">int</span> head_size) : n_embd(n_embd), head_size(head_size) {
-        K = <span class="fn">register_module</span>(
-            <span class="str">"K"</span>,
-            <span class="tp">torch::nn::Linear</span>(
-                <span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-            )
-        );
-
-        Q = <span class="fn">register_module</span>(
-            <span class="str">"Q"</span>,
-            <span class="tp">torch::nn::Linear</span>(
-                <span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-            )
-        );
-
-        V = <span class="fn">register_module</span>(
-            <span class="str">"V"</span>,
-            <span class="tp">torch::nn::Linear</span>(
-                <span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)
-            )
-        );
-
+        K = <span class="fn">register_module</span>(<span class="str">"K"</span>, <span class="tp">torch::nn::Linear</span>(<span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
+        Q = <span class="fn">register_module</span>(<span class="str">"Q"</span>, <span class="tp">torch::nn::Linear</span>(<span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
+        V = <span class="fn">register_module</span>(<span class="str">"V"</span>, <span class="tp">torch::nn::Linear</span>(<span class="tp">torch::nn::LinearOptions</span>(n_embd, head_size).<span class="fn">bias</span>(<span class="kw">false</span>)));
     }
-        </div>
 
-        <p>Let us break down the non-obvious parts of this code.</p>
+    <span class="tp">torch::Tensor</span> <span class="fn">forward</span>(<span class="tp">torch::Tensor</span> x){
+        <span class="tp">int</span> seq_len = x.<span class="fn">size</span>(1);
+        <span class="tp">torch::Tensor</span> output, k_vec, q_vec, v_vec, raw_attn, mask;
 
-        <h3>Why <code>torch::nn::Linear K{nullptr}</code>?</h3>
+        q_vec = <span class="fn">Q</span>(x);
+        k_vec = <span class="fn">K</span>(x);
+        v_vec = <span class="fn">V</span>(x);
 
-        <div class="step-card" data-step="nullptr initialization">
-          <p>In C++, member variables are constructed when the object is created. But <code>torch::nn::Linear</code> requires dimensions (<code>n_embd</code> and <code>head_size</code>) at construction time. Those values come from the constructor parameters, which are not available during member initialization in the class body. So we initialize <code>K</code>, <code>Q</code>, and <code>V</code> as null holders first, then assign real layers inside the constructor body where the dimensions are known.</p>
-          <p>The <code>{nullptr}</code> syntax creates the <code>torch::nn::Linear</code> wrapper in an "empty" state. It holds no weight matrix and no parameters. Think of it as a placeholder that says "I will be a linear layer, but I do not know my size yet."</p>
-        </div>
+        raw_attn = <span class="fn">torch::matmul</span>(q_vec, k_vec.<span class="fn">transpose</span>(-2, -1)) / ((<span class="tp">float</span>) <span class="fn">sqrt</span>(head_size));
+        mask = <span class="fn">torch::tril</span>(<span class="fn">torch::ones</span>({seq_len, seq_len}, x.<span class="fn">options</span>()));
+        raw_attn.<span class="fn">masked_fill_</span>(mask == 0, -1e9f);
 
-        <h3>Why <code>register_module</code>?</h3>
+        output = <span class="fn">torch::softmax</span>(raw_attn, -1);
+        output = <span class="fn">torch::matmul</span>(output, v_vec);
 
-        <div class="step-card" data-step="register_module">
-          <p><code>register_module</code> does three critical things:</p>
-          <ol>
-            <li><strong>Parameter discovery.</strong> It adds every parameter inside the linear layer (the weight matrix) to the module's parameter list. When you call <code>model-&gt;parameters()</code> to pass parameters to an optimizer, these weights will be found and updated during training. Without registration, the optimizer has no way to discover them.</li>
-            <li><strong>Named hierarchy.</strong> The string argument (<code>"K"</code>, <code>"Q"</code>, <code>"V"</code>) gives each sub-module a name. When saving checkpoints, the weights are stored under keys like <code>K.weight</code>, <code>Q.weight</code>, <code>V.weight</code>. Loading a checkpoint matches by name, so the names must be consistent.</li>
-            <li><strong>Device management.</strong> When you call <code>model-&gt;to(torch::kCUDA)</code>, every registered sub-module moves to GPU. An unregistered linear layer stays on CPU, causing a device mismatch crash at runtime.</li>
-          </ol>
-        </div>
-
-        <h3>Why <code>.bias(false)</code>?</h3>
-
-        <div class="step-card" data-step="No bias">
-          <p>The Q, K, V projections are pure matrix multiplications: <code>Q = X * W_Q</code>, <code>K = X * W_K</code>, <code>V = X * W_V</code>. No bias vector is added. This follows the original "Attention Is All You Need" paper. The rationale: the input embeddings already encode position and meaning. Adding a constant bias to every query, key, and value would introduce a uniform shift that provides no useful information for computing which tokens should attend to which. In practice, models trained with and without bias in Q/K/V projections converge to nearly identical performance, so the bias is omitted to save parameters.</p>
-        </div>
-
-        <h3>What is <code>torch::nn::LinearOptions</code>?</h3>
-
-        <div class="step-card" data-step="LinearOptions">
-          <p>LibTorch uses the options pattern for module configuration. Instead of passing multiple arguments directly to the <code>Linear</code> constructor, you create a <code>LinearOptions</code> object that specifies the input features, output features, and optional settings like <code>.bias(false)</code>. This is a C++ convention in LibTorch to mirror PyTorch's keyword arguments. <code>torch::nn::LinearOptions(n_embd, head_size)</code> says "create a linear layer that maps from <code>n_embd</code> input features to <code>head_size</code> output features." The <code>.bias(false)</code> chain disables the bias term.</p>
-        </div>
-
-        <div class="callout">
-          <strong>Internally,</strong> <code>torch::nn::Linear(LinearOptions(n_embd, head_size).bias(false))</code> creates a weight tensor of shape <code>(head_size, n_embd)</code> with Kaiming uniform initialization and <code>requires_grad = true</code>. When called as <code>Q(x)</code>, it computes <code>x @ weight.T</code>. The weight is stored transposed for memory layout efficiency, but the math is equivalent to a standard matrix multiply.
+        <span class="kw">return</span> output;
+    }
+};
         </div>
       </section>
 
       <!-- ============================================================ -->
-      <section id="forward-pass">
-        <h2>The Forward Pass Line by Line</h2>
+      <section id="constructor">
+        <h2>Constructor: Setting Up Layers</h2>
 
-        <p>This is where the attention computation happens. Here is the complete forward method with every line highlighted:</p>
+        <p>Three linear layers (Q, K, V), each mapping <code>n_embd</code> inputs to <code>head_size</code> outputs, no bias.</p>
 
-        <div class="pseudo-code">
-<span class="tp">torch::Tensor</span> <span class="fn">forward</span>(<span class="tp">torch::Tensor</span> x){
-    <span class="tp">int</span> seq_len = x.<span class="fn">size</span>(1);
-    <span class="tp">torch::Tensor</span> output, k_vec, q_vec, v_vec, raw_attn, mask;
+        <table class="shape-table">
+          <tr><th>Layer</th><th>Weight shape</th><th>Parameters</th></tr>
+          <tr><td><code>Q</code></td><td><code>(head_size, n_embd)</code></td><td>head_size * n_embd</td></tr>
+          <tr><td><code>K</code></td><td><code>(head_size, n_embd)</code></td><td>head_size * n_embd</td></tr>
+          <tr><td><code>V</code></td><td><code>(head_size, n_embd)</code></td><td>head_size * n_embd</td></tr>
+        </table>
 
-    q_vec = <span class="fn">Q</span>(x);
-    k_vec = <span class="fn">K</span>(x);
-    v_vec = <span class="fn">V</span>(x);
-
-    raw_attn = <span class="fn">torch::matmul</span>(q_vec, k_vec.<span class="fn">transpose</span>(-2, -1)) / ((<span class="tp">float</span>) <span class="fn">sqrt</span>(head_size));
-    mask = <span class="fn">torch::tril</span>(<span class="fn">torch::ones</span>({seq_len, seq_len}, x.<span class="fn">options</span>()));
-    raw_attn.<span class="fn">masked_fill_</span>(mask == 0, -1e9f);
-
-    output = <span class="fn">torch::softmax</span>(raw_attn, -1);
-    output = <span class="fn">torch::matmul</span>(output, v_vec);
-
-    <span class="kw">return</span> output;
-}
+        <div class="step-card" data-step="Why nullptr?">
+          <p><code>torch::nn::Linear K{nullptr}</code> creates an empty placeholder. We cannot construct the layer in the class body because the dimensions (<code>n_embd</code>, <code>head_size</code>) come from constructor arguments. So we initialize as null first, then assign real layers inside the constructor body.</p>
         </div>
 
-        <p>Let us trace through each line. The input <code>x</code> has shape <code>(batch, seq_len, n_embd)</code>.</p>
+        <div class="step-card" data-step="register_module">
+          <p><code>register_module("K", ...)</code> does three things: (1) adds the layer's parameters to the module's parameter list so the optimizer can find them, (2) gives it a named key for checkpoint saving/loading, and (3) ensures it moves to GPU when you call <code>model->to(torch::kCUDA)</code>.</p>
+        </div>
 
-        <h3><code>int seq_len = x.size(1);</code></h3>
-        <p><code>x.size(1)</code> extracts the second dimension of the tensor. For a 3D tensor of shape <code>(batch, seq_len, n_embd)</code>, dimension 0 is <code>batch</code>, dimension 1 is <code>seq_len</code>, and dimension 2 is <code>n_embd</code>. We store this because the causal mask needs to be <code>seq_len x seq_len</code>.</p>
+        <div class="step-card" data-step=".bias(false)">
+          <p><code>LinearOptions(n_embd, head_size).bias(false)</code> creates a pure matrix multiply with no bias term. This follows the original Transformer paper. The <code>LinearOptions</code> pattern is LibTorch's C++ equivalent of PyTorch's keyword arguments.</p>
+        </div>
 
-        <h3><code>torch::Tensor output, k_vec, q_vec, v_vec, raw_attn, mask;</code></h3>
-        <p>This declares all the intermediate tensors used in the forward pass. In C++, <code>torch::Tensor</code> is a smart pointer type. Declaring them without initialization creates empty tensors that will be assigned later. This is a style choice, declaring all variables at the top of the function to make the data flow visible at a glance.</p>
+        <div class="callout">
+          <strong>Under the hood,</strong> <code>torch::nn::Linear(LinearOptions(n_embd, head_size).bias(false))</code> creates a weight tensor of shape <code>(head_size, n_embd)</code> with Kaiming uniform initialization. When called as <code>Q(x)</code>, it computes <code>x @ weight.T</code>.
+        </div>
       </section>
 
       <!-- ============================================================ -->
       <section id="projections">
-        <h2>The Projections: Q(x), K(x), V(x)</h2>
+        <h2>Q, K, V Projections</h2>
 
         <div class="pseudo-code">
-q_vec = <span class="fn">Q</span>(x);     <span class="cm">// (batch, seq_len, n_embd) -> (batch, seq_len, head_size)</span>
-k_vec = <span class="fn">K</span>(x);     <span class="cm">// (batch, seq_len, n_embd) -> (batch, seq_len, head_size)</span>
-v_vec = <span class="fn">V</span>(x);     <span class="cm">// (batch, seq_len, n_embd) -> (batch, seq_len, head_size)</span>
+<span class="tp">int</span> seq_len = x.<span class="fn">size</span>(1);                <span class="cm">// extract S from dim 1 of (batch, S, n_embd)</span>
+<span class="tp">torch::Tensor</span> output, k_vec, q_vec, v_vec, raw_attn, mask;
+
+q_vec = <span class="fn">Q</span>(x);     <span class="cm">// (batch, S, n_embd) @ (n_embd, H) = (batch, S, H)</span>
+k_vec = <span class="fn">K</span>(x);     <span class="cm">// (batch, S, n_embd) @ (n_embd, H) = (batch, S, H)</span>
+v_vec = <span class="fn">V</span>(x);     <span class="cm">// (batch, S, n_embd) @ (n_embd, H) = (batch, S, H)</span>
         </div>
 
-        <p>Each call invokes the <code>forward</code> method of a <code>torch::nn::Linear</code> module. The linear layer stores a weight matrix of shape <code>(head_size, n_embd)</code>. When called with input <code>x</code> of shape <code>(batch, seq_len, n_embd)</code>, it computes <code>x @ weight.T</code>, which is a matrix multiplication of the last dimension:</p>
+        <p>Each linear layer multiplies the last dimension of <code>x</code> by its weight matrix. The operation is applied independently to every token in every sequence. It is a per-token projection from <code>n_embd</code> dimensions down to <code>head_size</code> dimensions.</p>
 
         <div class="math-block">
-(batch, seq_len, n_embd) @ (n_embd, head_size) = (batch, seq_len, head_size)
-        </div>
+(batch, S, n_embd) @ (n_embd, head_size) = (batch, S, head_size)
 
-        <p>The operation is applied independently to every token in every sequence. Token 0 in batch 0 gets multiplied by the same weight matrix as token 5 in batch 3. The linear layer does not look at relationships between tokens. It simply projects each token's embedding from <code>n_embd</code> dimensions down to <code>head_size</code> dimensions.</p>
-
-        <h3>Why three separate projections?</h3>
-
-        <p>Each projection serves a different role in the attention mechanism:</p>
-
-        <div class="step-card" data-step="Query (Q)">
-          <p>The Query projection learns to extract "what is this token looking for?" For example, if a pronoun like "it" has learned its Query representation, that representation encodes "I am looking for the noun I refer to." The Query is the question that a token asks.</p>
-        </div>
-
-        <div class="step-card" data-step="Key (K)">
-          <p>The Key projection learns to extract "what does this token contain?" Each token advertises its content through its Key. A noun like "mat" might have a Key that signals "I am a concrete noun." The Key is the label a token presents to incoming queries.</p>
-        </div>
-
-        <div class="step-card" data-step="Value (V)">
-          <p>The Value projection learns to extract "what information should this token contribute?" When a token is attended to, its Value is what gets passed forward. The Value may encode different information than the Key. A word might advertise "I am a noun" through its Key, but its Value might carry semantic features like "physical object, flat surface, indoor item."</p>
-        </div>
-
-        <p>Having three separate weight matrices means the model learns three independent transformations. The Query and Key spaces are optimized for matching (computing which tokens are relevant to each other), while the Value space is optimized for content (what information to extract once relevance is determined). If we used the same projection for all three, the model would have to compromise between these competing objectives.</p>
-
-        <div class="callout">
-          <strong>Concrete example:</strong> Consider the sentence "The cat sat on the mat because it was soft." The word "it" needs its Query to match the Key of "mat" (to determine reference). But the Value of "mat" should carry semantic content (softness, physical object), not the matching signal. Separate projections allow Q/K to specialize in matching and V to specialize in information transfer.
-        </div>
-
-        <div style="margin:1.5rem 0;overflow-x:auto">
-          <svg viewBox="0 0 960 255" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:960px;display:block;margin:0 auto;border-radius:14px;background:linear-gradient(160deg,#fdfaf6 0%,#f6f9f7 100%);box-shadow:0 2px 16px rgba(0,0,0,.05)" font-family="'Manrope',sans-serif">
-            <defs>
-              <marker id="aw-strong" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#0a8f6a"/></marker>
-              <marker id="aw-mid" markerWidth="9" markerHeight="6.3" refX="9" refY="3.15" orient="auto"><polygon points="0 0,9 3.15,0 6.3" fill="#0a8f6a" opacity="0.5"/></marker>
-              <marker id="aw-weak" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#bbb"/></marker>
-            </defs>
-
-            <!-- Annotation labels -->
-            <text x="595" y="34" text-anchor="middle" font-family="Syne,sans-serif" font-size="11.5" font-weight="700" fill="#0a8f6a">Highest Key match</text>
-            <line x1="595" y1="38" x2="595" y2="52" stroke="#0a8f6a" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
-            <text x="810" y="34" text-anchor="middle" font-family="Syne,sans-serif" font-size="11.5" font-weight="700" fill="#e67e22">Query: "What do I refer to?"</text>
-            <line x1="810" y1="38" x2="810" y2="52" stroke="#e67e22" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
-
-            <!-- Token boxes -->
-            <rect x="20" y="56" width="68" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="54" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">The</text>
-
-            <rect x="118" y="56" width="60" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="148" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">cat</text>
-
-            <rect x="208" y="56" width="58" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="237" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">sat</text>
-
-            <rect x="296" y="56" width="50" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="321" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">on</text>
-
-            <rect x="376" y="56" width="58" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="405" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">the</text>
-
-            <!-- mat: highlighted key -->
-            <rect x="558" y="54" width="74" height="38" rx="9" fill="#d5f5e3" stroke="#0a8f6a" stroke-width="2.2"/>
-            <text x="595" y="79" text-anchor="middle" font-size="14" font-weight="700" fill="#0a8f6a">mat</text>
-
-            <rect x="662" y="56" width="88" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="706" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">because</text>
-
-            <!-- it: highlighted query -->
-            <rect x="778" y="54" width="64" height="38" rx="9" fill="#fdebd0" stroke="#e67e22" stroke-width="2.2"/>
-            <text x="810" y="79" text-anchor="middle" font-size="14" font-weight="700" fill="#e67e22">it</text>
-
-            <rect x="870" y="56" width="58" height="34" rx="8" fill="#fff" stroke="#c8bdd6" stroke-width="1.3"/>
-            <text x="899" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="#555">was</text>
-
-            <!-- Attention arcs (quadratic bezier, nesting by depth) -->
-            <!-- Strong: it -> mat  w=0.62 -->
-            <path d="M810,92 Q702,162 595,92" fill="none" stroke="#0a8f6a" stroke-width="2.8" stroke-linecap="round" marker-end="url(#aw-strong)"/>
-            <text x="702" y="155" text-anchor="middle" font-family="Consolas,monospace" font-size="12" font-weight="700" fill="#0a8f6a">0.62</text>
-
-            <!-- Medium: it -> cat  w=0.15 -->
-            <path d="M810,92 Q479,230 148,92" fill="none" stroke="#0a8f6a" stroke-width="1.5" stroke-linecap="round" opacity="0.4" marker-end="url(#aw-mid)"/>
-            <text x="479" y="218" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#0a8f6a" opacity="0.6">0.15</text>
-
-            <!-- Weak: it -> sat  w=0.04 -->
-            <path d="M810,92 Q524,198 237,92" fill="none" stroke="#c0c0c0" stroke-width="1" stroke-linecap="round" opacity="0.45" marker-end="url(#aw-weak)"/>
-            <text x="524" y="190" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#aaa">0.04</text>
-
-            <!-- Legend -->
-            <text x="480" y="248" text-anchor="middle" font-size="10.5" fill="#999" font-style="italic">Arc thickness and opacity proportional to attention weight. "it" attends most strongly to "mat" (coreference).</text>
-          </svg>
+Token 0 in batch 0 gets the same weight matrix as token 5 in batch 3.
+No cross-token interaction happens here, just a per-token linear transform.
         </div>
       </section>
 
@@ -676,262 +550,75 @@ matmul(A, B) where A is (batch, S, H) and B is (batch, H, S):
 
       <!-- ============================================================ -->
       <section id="scaling">
-        <h2>The Scaling: / sqrt(head_size)</h2>
+        <h2>Scaling by sqrt(head_size)</h2>
 
         <div class="pseudo-code">
 raw_attn = <span class="fn">torch::matmul</span>(q_vec, k_vec.<span class="fn">transpose</span>(-2, -1)) / ((<span class="tp">float</span>) <span class="fn">sqrt</span>(head_size));
         </div>
 
-        <p>After computing the raw dot products, we divide by the square root of <code>head_size</code>. This scaling is essential for stable training. Here is why.</p>
-
-        <h3>The problem with large dot products</h3>
-
-        <p>Each dot product sums over <code>head_size</code> dimensions. If the query and key vectors have elements drawn from a standard normal distribution (mean 0, variance 1), the dot product is the sum of <code>head_size</code> products of two standard normals. The variance of each product is 1, and the variance of their sum is <code>head_size</code>. So the dot product has standard deviation <code>sqrt(head_size)</code>.</p>
+        <p>After the raw dot products, we divide by <code>sqrt(head_size)</code>. Without this, the dot products grow with the dimension: if <code>head_size = 64</code>, typical scores range from -16 to +16. Large inputs push softmax into saturation (nearly one-hot), which kills gradient flow.</p>
 
         <div class="math-block">
-If head_size = 64:
-  dot product std dev = sqrt(64) = 8
-  Typical scores range from roughly -16 to +16
+head_size = 64  =>  dot product std dev = sqrt(64) = 8   =>  scores in [-16, +16]
+head_size = 512 =>  dot product std dev = sqrt(512) = 22 =>  scores in [-45, +45]
 
-If head_size = 512:
-  dot product std dev = sqrt(512) = 22.6
-  Typical scores range from roughly -45 to +45
+After dividing by sqrt(head_size):  std dev = 1, scores in moderate range.
         </div>
 
-        <p>When these large values enter softmax, the function saturates. Softmax with large inputs pushes most of its probability mass onto the single largest value, making the output nearly one-hot (one entry close to 1, all others close to 0). This kills diversity in the attention pattern and, more critically, produces extremely small gradients. The model stops learning.</p>
-
-        <h3>How scaling fixes it</h3>
-
-        <p>Dividing by <code>sqrt(head_size)</code> normalizes the dot products back to unit variance:</p>
-
-        <div class="math-block">
-Variance of raw dot product:           head_size
-Divide by sqrt(head_size):             variance becomes head_size / head_size = 1
-Standard deviation after scaling:      1
-        </div>
-
-        <p>Now the scores are in a moderate range regardless of the head dimension. Softmax receives well-behaved inputs, produces smooth probability distributions, and gradients flow normally.</p>
-
-        <h3>The <code>(float)</code> cast</h3>
-
-        <div class="step-card" data-step="Why (float)?">
-          <p><code>head_size</code> is an <code>int</code>. The C++ <code>sqrt</code> function, when given an <code>int</code>, promotes it to <code>double</code> and returns <code>double</code>. Dividing a <code>float</code> tensor by a <code>double</code> can cause type promotion warnings or unexpected behavior. The <code>(float)</code> cast explicitly converts the result of <code>sqrt</code> to <code>float</code>, matching the tensor's data type. This is a defensive cast that ensures the division produces a <code>float</code> tensor, not a <code>double</code> tensor.</p>
-        </div>
-
-        <div class="callout warn">
-          <strong>What happens without scaling?</strong> Training becomes unstable. Early in training the random Q/K vectors produce large dot products. Softmax saturates, attention becomes nearly one-hot, gradients vanish, and the model either fails to converge or converges much more slowly. The <code>1/sqrt(d_k)</code> scaling was introduced in the original Transformer paper precisely to solve this problem.
+        <div class="step-card" data-step="The (float) cast">
+          <p><code>head_size</code> is <code>int</code>. C++ <code>sqrt</code> on an int returns <code>double</code>. Dividing a float tensor by a double can cause type promotion issues. The <code>(float)</code> cast ensures the division stays in float32.</p>
         </div>
       </section>
 
       <!-- ============================================================ -->
       <section id="causal-mask">
-        <h2>The Causal Mask</h2>
+        <h2>Causal Mask</h2>
 
         <div class="pseudo-code">
 mask = <span class="fn">torch::tril</span>(<span class="fn">torch::ones</span>({seq_len, seq_len}, x.<span class="fn">options</span>()));
 raw_attn.<span class="fn">masked_fill_</span>(mask == 0, -1e9f);
         </div>
 
-        <p>This is the mechanism that prevents tokens from "looking into the future." In a language model, when predicting what comes after token 3, the model must only see tokens 0, 1, 2, and 3. It must not see tokens 4, 5, 6, and beyond, because those have not been generated yet. The causal mask enforces this constraint.</p>
-
-        <h3><code>torch::tril</code></h3>
-
-        <p><code>torch::ones({seq_len, seq_len})</code> creates a matrix filled with 1s. <code>torch::tril</code> (triangular lower) zeroes out everything above the main diagonal:</p>
+        <p>Prevents tokens from attending to future positions. <code>torch::tril</code> zeros out everything above the diagonal. <code>masked_fill_</code> sets those positions to <code>-1e9</code>, which softmax converts to ~0 weight.</p>
 
         <div class="math-block">
-torch::tril(torch::ones({4, 4})):
+mask (4x4):                After masked_fill_:
 
-  [ 1  0  0  0 ]
-  [ 1  1  0  0 ]
-  [ 1  1  1  0 ]
-  [ 1  1  1  1 ]
+[ 1  0  0  0 ]            [ 0.5  -1e9  -1e9  -1e9 ]
+[ 1  1  0  0 ]            [ 0.2   0.7  -1e9  -1e9 ]
+[ 1  1  1  0 ]            [ 0.9   0.1   0.5  -1e9 ]
+[ 1  1  1  1 ]            [ 0.4   0.8   0.2   0.7 ]
+
+Token i can attend to tokens 0..i only.
         </div>
 
-        <p>Row <code>i</code> has 1s in columns 0 through <code>i</code> and 0s everywhere else. This means token <code>i</code> is allowed to attend to tokens 0 through <code>i</code> (itself and all previous tokens) but not to tokens <code>i+1</code> and beyond (future tokens).</p>
-
-        <h3><code>x.options()</code></h3>
-
-        <div class="step-card" data-step="x.options()">
-          <p>The <code>x.options()</code> call returns the tensor options (device, dtype) of the input tensor <code>x</code>. This ensures the mask is created on the same device (CPU or GPU) and with the same data type as the input. Without this, the mask would default to CPU float, and if <code>x</code> is on GPU, the <code>masked_fill_</code> call would crash with a device mismatch error.</p>
+        <div class="step-card" data-step="C++ details">
+          <p><code>x.options()</code> creates the mask on the same device/dtype as the input (avoids CPU vs GPU mismatch). The trailing underscore in <code>masked_fill_</code> means in-place modification, avoiding a tensor copy. We use <code>-1e9</code> instead of <code>-INFINITY</code> to avoid potential NaN issues in edge cases.</p>
         </div>
 
-        <h3><code>masked_fill_</code></h3>
-
-        <p><code>raw_attn.masked_fill_(mask == 0, -1e9f)</code> does two things in sequence:</p>
-
-        <ol>
-          <li><code>mask == 0</code> creates a boolean tensor that is <code>true</code> where the mask is 0 (the upper triangle) and <code>false</code> where the mask is 1 (the lower triangle and diagonal).</li>
-          <li><code>.masked_fill_(..., -1e9f)</code> sets every position where the boolean is <code>true</code> to <code>-1e9</code> (negative one billion). Positions where the boolean is <code>false</code> are left unchanged.</li>
-        </ol>
-
-        <div class="math-block">
-raw_attn before masking (example 4x4):
-
-  [ 0.5   0.3   0.8   0.1 ]
-  [ 0.2   0.7   0.4   0.6 ]
-  [ 0.9   0.1   0.5   0.3 ]
-  [ 0.4   0.8   0.2   0.7 ]
-
-After masked_fill_(mask == 0, -1e9f):
-
-  [ 0.5  -1e9  -1e9  -1e9 ]
-  [ 0.2   0.7  -1e9  -1e9 ]
-  [ 0.9   0.1   0.5  -1e9 ]
-  [ 0.4   0.8   0.2   0.7 ]
-        </div>
-
-        <p>The upper triangle is flooded with <code>-1e9</code>. When softmax processes each row, <code>exp(-1e9)</code> is effectively 0, so those positions receive zero attention weight. Token 0 can only attend to itself. Token 1 attends to tokens 0 and 1. Token 2 attends to tokens 0, 1, and 2. And so on.</p>
-
-        <!-- SVG: Mask visualization -->
-        <div style="margin:1.2rem 0;text-align:center">
-          <svg viewBox="0 0 340 340" width="260" height="260" xmlns="http://www.w3.org/2000/svg" font-family="'Manrope', sans-serif">
-            <text x="170" y="20" text-anchor="middle" font-size="12" font-weight="700" fill="#333">Causal Mask (seq_len=5)</text>
-            <text x="170" y="36" text-anchor="middle" font-size="10" fill="#888">Green = attend, Red = blocked</text>
-            <!-- Column headers -->
-            <text x="100" y="60" text-anchor="middle" font-size="9" fill="#555">K_0</text>
-            <text x="155" y="60" text-anchor="middle" font-size="9" fill="#555">K_1</text>
-            <text x="210" y="60" text-anchor="middle" font-size="9" fill="#555">K_2</text>
-            <text x="265" y="60" text-anchor="middle" font-size="9" fill="#555">K_3</text>
-            <text x="320" y="60" text-anchor="middle" font-size="9" fill="#555">K_4</text>
-            <!-- Rows -->
-            <text x="55" y="92" text-anchor="end" font-size="9" fill="#555">Q_0</text>
-            <text x="55" y="147" text-anchor="end" font-size="9" fill="#555">Q_1</text>
-            <text x="55" y="202" text-anchor="end" font-size="9" fill="#555">Q_2</text>
-            <text x="55" y="257" text-anchor="end" font-size="9" fill="#555">Q_3</text>
-            <text x="55" y="312" text-anchor="end" font-size="9" fill="#555">Q_4</text>
-            <!-- Grid cells -->
-            <!-- Row 0 -->
-            <rect x="68" y="68" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="93" y="97" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="123" y="68" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="148" y="97" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="178" y="68" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="203" y="97" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="233" y="68" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="258" y="97" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="288" y="68" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="313" y="97" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <!-- Row 1 -->
-            <rect x="68" y="123" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="93" y="152" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="123" y="123" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="148" y="152" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="178" y="123" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="203" y="152" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="233" y="123" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="258" y="152" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="288" y="123" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="313" y="152" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <!-- Row 2 -->
-            <rect x="68" y="178" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="93" y="207" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="123" y="178" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="148" y="207" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="178" y="178" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="203" y="207" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="233" y="178" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="258" y="207" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <rect x="288" y="178" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="313" y="207" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <!-- Row 3 -->
-            <rect x="68" y="233" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="93" y="262" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="123" y="233" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="148" y="262" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="178" y="233" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="203" y="262" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="233" y="233" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="258" y="262" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="288" y="233" width="50" height="50" rx="4" fill="rgba(231,76,60,0.15)" stroke="#e74c3c" stroke-width="0.5"/>
-            <text x="313" y="262" text-anchor="middle" font-size="10" fill="#e74c3c">0</text>
-            <!-- Row 4 -->
-            <rect x="68" y="288" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="93" y="317" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="123" y="288" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="148" y="317" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="178" y="288" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="203" y="317" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="233" y="288" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="258" y="317" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-            <rect x="288" y="288" width="50" height="50" rx="4" fill="rgba(10,143,106,0.25)" stroke="#0a8f6a" stroke-width="1"/>
-            <text x="313" y="317" text-anchor="middle" font-size="10" fill="#0a8f6a" font-weight="700">1</text>
-          </svg>
-        </div>
-
-        <div class="step-card" data-step="Why -1e9 not -infinity?">
-          <p><code>-INFINITY</code> would also work mathematically since <code>exp(-inf) = 0</code>. However, in edge cases (like when an entire row is masked, or during certain gradient computations), true infinity can produce <code>NaN</code> values. Using <code>-1e9</code> (negative one billion) is numerically safer while being practically equivalent: <code>exp(-1e9)</code> is so close to 0 that it rounds to zero in <code>float32</code>.</p>
-        </div>
-
-        <div class="step-card" data-step="The underscore in masked_fill_">
-          <p><code>masked_fill_</code> (with trailing underscore) modifies the tensor in place. <code>masked_fill</code> (without underscore) would return a new tensor, leaving the original unchanged. The in-place version is faster because it avoids allocating a new tensor. Since we do not need the unmasked scores again, in-place is the correct choice here.</p>
-        </div>
-
-        <h3>Broadcasting the mask</h3>
-
-        <p>The mask has shape <code>(seq_len, seq_len)</code>, a 2D tensor. But <code>raw_attn</code> has shape <code>(batch, seq_len, seq_len)</code>, a 3D tensor. How does a 2D mask apply to a 3D tensor?</p>
-
-        <p>LibTorch uses broadcasting. It automatically treats the mask as <code>(1, seq_len, seq_len)</code> and repeats it across the batch dimension. The same mask is applied to every sequence in the batch, which is correct because the causal constraint is the same for all sequences.</p>
-
-        <div class="math-block">
-raw_attn shape:   (batch, seq_len, seq_len)  =  (4, 8, 8)
-mask shape:              (seq_len, seq_len)   =     (8, 8)
-
-Broadcasting treats mask as:  (1, 8, 8)
-Effective mask:               (4, 8, 8)  -- same mask for each batch element
-        </div>
+        <p>The mask is <code>(S, S)</code> but <code>raw_attn</code> is <code>(batch, S, S)</code>. Broadcasting treats the mask as <code>(1, S, S)</code> and applies it identically across the batch.</p>
       </section>
 
       <!-- ============================================================ -->
       <section id="softmax-final">
-        <h2>Softmax and Final Matmul</h2>
+        <h2>Softmax and Weighted Sum</h2>
 
         <div class="pseudo-code">
-output = <span class="fn">torch::softmax</span>(raw_attn, -1);
-output = <span class="fn">torch::matmul</span>(output, v_vec);
+output = <span class="fn">torch::softmax</span>(raw_attn, -1);   <span class="cm">// (batch, S, S) - each row sums to 1</span>
+output = <span class="fn">torch::matmul</span>(output, v_vec);   <span class="cm">// (batch, S, S) @ (batch, S, H) = (batch, S, H)</span>
         </div>
 
-        <h3><code>torch::softmax(raw_attn, -1)</code></h3>
-
-        <p>Softmax converts raw scores into a probability distribution. The <code>-1</code> argument specifies the dimension along which to normalize. Since <code>raw_attn</code> has shape <code>(batch, S, S)</code>, dimension <code>-1</code> is the last dimension (the key/column dimension). This means softmax normalizes each row independently.</p>
+        <p><code>softmax(..., -1)</code> normalizes each row of the score matrix into a probability distribution. Masked positions (<code>-1e9</code>) become ~0 weight. Then the final matmul computes a weighted sum of value vectors for each token:</p>
 
         <div class="math-block">
-For one row of raw_attn (after masking), say token 2:
+For token 2 with weights [0.47, 0.21, 0.32, 0.00]:
 
-  raw scores: [ 0.9,  0.1,  0.5, -1e9 ]
+output[2] = 0.47 * V_0 + 0.21 * V_1 + 0.32 * V_2 + 0.00 * V_3
 
-  softmax:
-    exp(0.9) = 2.46,  exp(0.1) = 1.11,  exp(0.5) = 1.65,  exp(-1e9) = 0.0
-    sum = 2.46 + 1.11 + 1.65 + 0.0 = 5.22
-
-    weights: [ 2.46/5.22,  1.11/5.22,  1.65/5.22,  0.0/5.22 ]
-           = [ 0.47,       0.21,       0.32,       0.00      ]
-           sum = 1.00
+Result shape: (batch, S, head_size)
         </div>
 
-        <p>After softmax, each row sums to 1.0. The masked positions (which were set to <code>-1e9</code>) become 0.0 because <code>exp(-1e9)</code> is effectively zero. The remaining weights form a valid probability distribution telling us how much each query token attends to each key token.</p>
-
-        <h3><code>torch::matmul(output, v_vec)</code></h3>
-
-        <p>This is the weighted sum of value vectors. The attention weights have shape <code>(batch, S, S)</code>, and <code>v_vec</code> has shape <code>(batch, S, head_size)</code>. The matmul computes:</p>
-
-        <div class="math-block">
-(batch, S, S) @ (batch, S, head_size) = (batch, S, head_size)
-
-For each query token i:
-  output[i] = sum over j of (weight[i][j] * V[j])
-        </div>
-
-        <p>Each output row is a weighted combination of all value vectors, where the weights come from the attention distribution. Token <code>i</code>'s output is mostly composed of the values of tokens it attended to strongly. Tokens it did not attend to (weight near 0, including future tokens) contribute nothing.</p>
-
-        <div class="step-card" data-step="Concrete example">
-          <p>If token 2 has attention weights <code>[0.47, 0.21, 0.32, 0.00]</code> over tokens 0 through 3, then:<br>
-          <code>output[2] = 0.47 * V_0 + 0.21 * V_1 + 0.32 * V_2 + 0.00 * V_3</code><br>
-          Token 2's output is mostly V_0 (47%), mixed with some V_2 (32%) and a bit of V_1 (21%). Token 3 contributes nothing because it is a future token and was masked out.</p>
-        </div>
-
-        <h3>Why reuse the variable name <code>output</code>?</h3>
-
-        <p>The code assigns to <code>output</code> twice: first the softmax result, then the final matmul result. This is a memory-efficient pattern. After the second assignment, the softmax tensor is no longer referenced and can be garbage collected. In a language model with long sequences, the <code>(batch, S, S)</code> attention weight matrix can be large (for S=2048, that is 4 million floats per batch element), so releasing it promptly matters.</p>
+        <p>The variable <code>output</code> is reused for both softmax and the final matmul. After the second assignment, the intermediate <code>(batch, S, S)</code> softmax tensor is released, which matters for long sequences where that matrix is large.</p>
       </section>
 
       <!-- ============================================================ -->
