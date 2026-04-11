@@ -913,13 +913,15 @@ var BLOG_TREE = [
                 children: [
                   { title: 'Overview', file: 'ml/transformers/from-scratch/cpp/index.html' },
                   {
-                    name: 'basic-blocks',
-                    label: 'Basic Blocks',
+                    name: 'building-blocks',
+                    label: 'Building Blocks',
                     children: [
-                      { title: 'Single Attention Head', file: 'ml/transformers/from-scratch/cpp/basic-blocks/single-attention-head.html' },
-                      { title: 'Multi-Head Attention', file: 'ml/transformers/from-scratch/cpp/basic-blocks/multi-head-attention.html' },
-                      { title: 'Feed-Forward Network', file: 'ml/transformers/from-scratch/cpp/basic-blocks/feed-forward.html' },
-                      { title: 'Transformer Block', file: 'ml/transformers/from-scratch/cpp/basic-blocks/transformer-block.html' }
+                      { title: 'SingleHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/single-head-attention.html' },
+                      { title: 'MultiHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/multi-head-attention.html' },
+                      { title: 'FeedForward', file: 'ml/transformers/from-scratch/cpp/building-blocks/feed-forward.html' },
+                      { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
+                      { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
+                      { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
                     ]
                   }
                 ]
