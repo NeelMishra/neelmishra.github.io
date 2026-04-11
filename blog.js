@@ -862,12 +862,17 @@ var BLOG_TREE = [
         children: [
           { title: 'Overview', file: 'ml/transformers/index.html' },
           {
-            name: 'attention',
-            label: 'Attention Mechanism',
+            name: 'building-blocks',
+            label: 'Building Blocks',
             children: [
-              { title: 'Self-Attention', file: 'ml/transformers/attention/index.html' },
-              { title: 'Multi-Head Attention', file: 'ml/transformers/attention/multi-head.html' },
-              { title: 'Scaled Dot-Product', file: 'ml/transformers/attention/scaled-dot.html' }
+              { title: 'Overview', file: 'ml/transformers/building-blocks/index.html' },
+              { title: 'Single-Head Attention', file: 'ml/transformers/building-blocks/single-head-attention.html' },
+              { title: 'Multi-Head Attention', file: 'ml/transformers/building-blocks/multi-head-attention.html' },
+              { title: 'Feed-Forward Network', file: 'ml/transformers/building-blocks/feed-forward.html' },
+              { title: 'Transformer Block', file: 'ml/transformers/building-blocks/transformer-block.html' },
+              { title: 'Positional Encoding', file: 'ml/transformers/building-blocks/positional-encoding.html' },
+              { title: 'Layer Normalization', file: 'ml/transformers/building-blocks/layer-norm.html' },
+              { title: 'Embedding Layer', file: 'ml/transformers/building-blocks/embedding-layer.html' }
             ]
           },
           {
@@ -876,8 +881,7 @@ var BLOG_TREE = [
             children: [
               { title: 'Encoder-Decoder Overview', file: 'ml/transformers/architecture/index.html' },
               { title: 'Encoder Block', file: 'ml/transformers/architecture/encoder.html' },
-              { title: 'Decoder Block', file: 'ml/transformers/architecture/decoder.html' },
-              { title: 'Positional Encoding', file: 'ml/transformers/architecture/positional-encoding.html' }
+              { title: 'Decoder Block', file: 'ml/transformers/architecture/decoder.html' }
             ]
           },
           {
@@ -885,8 +889,7 @@ var BLOG_TREE = [
             label: 'Training',
             children: [
               { title: 'Training Overview', file: 'ml/transformers/training/index.html' },
-              { title: 'Tokenization', file: 'ml/transformers/training/tokenization.html' },
-              { title: 'Normalization', file: 'ml/transformers/training/normalization.html' }
+              { title: 'Tokenization', file: 'ml/transformers/training/tokenization.html' }
             ]
           },
           {
