@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Ring Attention: distributing long-sequence attention across multiple GPUs using a ring topology. KV blocks circulate around the ring while each device computes local attention, enabling near-infinite context lengths.">
+  <title>Ring Attention | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .pseudo-code{white-space:pre;font-family:Consolas,monospace;font-size:0.92rem;background:#1a2b22;color:#d4e8dc;padding:1.2rem;border-radius:10px;overflow-x:auto;line-height:1.6}
+    .pseudo-code .kw{color:#ff9f43;font-weight:700}
+    .pseudo-code .fn{color:#0a8f6a}
+    .pseudo-code .cm{color:#7f8c8d}
+    .pseudo-code .tp{color:#3498db}
+    .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.92rem;overflow-x:auto}
+    .callout{background:#f0faf6;border-left:4px solid #0a8f6a;padding:1rem 1.2rem;margin:1.5rem 0;border-radius:0 8px 8px 0;font-size:.93rem;line-height:1.55}
+    .callout strong{color:#0a8f6a}
+    .callout.warn{border-left-color:#e67e22;background:#fffbf0}
+    .callout.warn strong{color:#e67e22}
+    .comparison-table{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:.93rem}
+    .comparison-table th,.comparison-table td{padding:.6rem .85rem;border:1.5px solid #d9cfba;text-align:left}
+    .comparison-table th{background:#f0ece4;font-family:'Syne',sans-serif;font-weight:700;font-size:.84rem;color:#13201a}
+    .comparison-table td{font-family:'Manrope',sans-serif}
+    .comparison-table tr:nth-child(even) td{background:#faf8f5}
+    .step-card{border:1px solid #d0e0d0;border-radius:14px;padding:1.2rem;margin:1.2rem 0;background:rgba(255,255,255,0.85);position:relative}
+    .step-card::before{content:attr(data-step);position:absolute;top:-12px;left:16px;background:#0a8f6a;color:#fff;font-family:"Syne",sans-serif;font-weight:700;font-size:0.75rem;padding:3px 12px;border-radius:6px}
+    .anim-container{background:#f8faf8;border:1px solid #d0e0d0;border-radius:12px;padding:1.2rem;margin:1.5rem 0}
+    .anim-container h4{margin:0 0 0.3rem;font-family:Syne,sans-serif;color:#1a2b22}
+    .anim-controls{display:flex;gap:0.6rem;align-items:center;margin-top:0.8rem;flex-wrap:wrap}
+    .anim-btn{background:#0a8f6a;color:#fff;border:none;padding:0.45rem 1rem;border-radius:6px;cursor:pointer;font-family:Manrope,sans-serif;font-size:0.85rem;font-weight:600}
+    .anim-btn:hover{background:#078a5e}
+    .anim-btn:disabled{background:#aaa;cursor:default}
+    .anim-output{font-family:Consolas,monospace;font-size:0.85rem;color:#555}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#memory-wall">The Memory Wall</a></li>
+          <li><a href="#core-idea">The Ring Idea</a></li>
+          <li><a href="#topology">Ring Topology</a></li>
+          <li><a href="#algorithm">The Algorithm</a></li>
+          <li><a href="#overlap">Compute-Comm Overlap</a></li>
+          <li><a href="#animation">Interactive Animation</a></li>
+          <li><a href="#math">The Math</a></li>
+          <li><a href="#causal">Causal Masking</a></li>
+          <li><a href="#implementation">Implementation</a></li>
+          <li><a href="#scaling">Scaling Analysis</a></li>
+          <li><a href="#models">Applications</a></li>
+          <li><a href="#summary">Summary</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">ML &middot; Transformers</a> &raquo; <a href="index.html">Variants</a>
+      </div>
+
+      <h1>Ring Attention</h1>
+      <p class="post-meta">ML Series &middot; Transformers &middot; Variants</p>
+
+      <!-- 1 -->
+      <h2 id="memory-wall">1 &middot; The Memory Wall</h2>
+
+      <p>Flash Attention solved the <em>compute</em> efficiency of attention by tiling. But it doesn't solve the <em>memory</em> problem for extremely long sequences: the Q, K, V tensors themselves must fit on a single GPU. For a 1M-token sequence with d=128:</p>
+
+      <div class="math-block">
+Q, K, V memory per head:
+  3 × 1,000,000 × 128 × 2 bytes = 768 MB per head
+  × 32 heads = 24 GB just for Q, K, V (one layer!)
+
+KV cache across 80 layers:
+  2 × 80 × 32 × 1,000,000 × 128 × 2 = 1.3 TB
+
+No single GPU can hold this. We need to distribute across devices.
+      </div>
+
+      <p>Ring Attention distributes the sequence across P devices, so each device only handles N/P tokens — making the context length scale linearly with the number of GPUs.</p>
+
+      <!-- 2 -->
+      <h2 id="core-idea">2 &middot; The Ring Idea</h2>
+
+      <p>Arrange P GPUs in a ring. Each GPU holds one chunk of the sequence (N/P tokens). To compute attention, each GPU needs to see all K/V chunks — so the K/V blocks <strong>circulate</strong> around the ring:</p>
+
+      <div class="step-card" data-step="Setup">
+        <p>Split the sequence into P chunks. GPU p holds Q_p, K_p, V_p (tokens p·N/P to (p+1)·N/P).</p>
+      </div>
+
+      <div class="step-card" data-step="Rotation">
+        <p>In each step, every GPU sends its current K/V chunk to the next GPU in the ring and receives a K/V chunk from the previous GPU. After P-1 rotations, every GPU has seen every K/V chunk.</p>
+      </div>
+
+      <div class="step-card" data-step="Local Compute">
+        <p>At each step, while K/V are being transferred, the GPU computes attention between its local Q chunk and the K/V chunk it currently holds. Uses Flash Attention's online softmax to incrementally accumulate results.</p>
+      </div>
+
+      <!-- 3 -->
+      <h2 id="topology">3 &middot; Ring Topology</h2>
+
+      <div class="math-block">
+Ring of P = 4 GPUs:
+
+  GPU 0 → GPU 1 → GPU 2 → GPU 3 → GPU 0  (circular)
+
+Step 0: GPU p computes attn(Q_p, K_p, V_p)     — local chunk
+Step 1: K/V rotate: GPU p receives K_{p-1}, V_{p-1}
+        GPU p computes attn(Q_p, K_{p-1}, V_{p-1})
+Step 2: K/V rotate again
+        GPU p computes attn(Q_p, K_{p-2}, V_{p-2})
+Step 3: Final rotation
+        GPU p computes attn(Q_p, K_{p-3}, V_{p-3})
+
+After P steps: each GPU has attended to ALL K/V chunks
+      </div>
+
+      <div class="callout">
+        <strong>Why a ring?</strong> Ring all-reduce is the most bandwidth-efficient collective for homogeneous interconnects (NVLink, InfiniBand). Each device sends/receives exactly (P-1)/P of the total data, and all P links are utilized simultaneously.
+      </div>
+
+      <!-- 4 -->
+      <h2 id="algorithm">4 &middot; The Algorithm</h2>
+
+      <div class="pseudo-code">
+<span class="cm"># Ring Attention — each GPU p runs this in parallel</span>
+<span class="kw">def</span> <span class="fn">ring_attention</span>(Q_p, K_p, V_p, rank, world_size):
+    O_p = zeros_like(Q_p)
+    l_p = zeros(Q_p.shape[0])        <span class="cm"># running log-sum-exp</span>
+    m_p = full(Q_p.shape[0], -∞)     <span class="cm"># running max</span>
+
+    kv_recv = (K_p, V_p)              <span class="cm"># start with local KV</span>
+
+    <span class="kw">for</span> step <span class="kw">in</span> range(world_size):
+        K_cur, V_cur = kv_recv
+
+        <span class="cm"># Async: send KV to next, receive KV from previous</span>
+        <span class="kw">if</span> step < world_size - 1:
+            send_async(kv_recv, dest=(rank + 1) % world_size)
+            kv_recv = recv_async(src=(rank - 1) % world_size)
+
+        <span class="cm"># Compute: flash attention on local Q vs current KV block</span>
+        O_block, l_block, m_block = <span class="fn">flash_attn_block</span>(Q_p, K_cur, V_cur)
+
+        <span class="cm"># Merge: online softmax accumulation</span>
+        m_new = max(m_p, m_block)
+        scale_old = exp(m_p - m_new)
+        scale_new = exp(m_block - m_new)
+        l_p = scale_old * l_p + scale_new * l_block
+        O_p = (scale_old.unsqueeze(-1) * O_p +
+               scale_new.unsqueeze(-1) * O_block)
+        m_p = m_new
+
+        <span class="cm"># Wait for communication to complete</span>
+        sync_comm()
+
+    <span class="cm"># Final normalization</span>
+    O_p = O_p / l_p.unsqueeze(-1)
+    <span class="kw">return</span> O_p
+      </div>
+
+      <!-- 5 -->
+      <h2 id="overlap">5 &middot; Compute-Communication Overlap</h2>
+
+      <p>The key to Ring Attention's efficiency: <strong>communication happens simultaneously with computation</strong>. While GPU p computes attention with the current K/V chunk, it's already sending that chunk to GPU p+1 and receiving the next chunk from GPU p-1.</p>
+
+      <div class="math-block">
+Overlap condition:
+  T_compute ≥ T_communicate
+
+  T_compute = (N/P)² × d × 2 / GPU_FLOPS     (attention for one chunk pair)
+  T_communicate = 2 × (N/P) × d × 2 / bandwidth  (send K + V for one chunk)
+
+  For N=1M, P=8, d=128, A100 (312 TFLOP/s, NVLink 600 GB/s):
+    T_compute ≈ 2.6 ms
+    T_comm    ≈ 0.05 ms
+    → Communication fully hidden! (52× more compute than comm)
+      </div>
+
+      <div class="callout">
+        <strong>When overlap breaks down:</strong> For short sequences or many GPUs (small N/P), compute per chunk shrinks and communication can't be fully hidden. Rule of thumb: N/P should be at least 1024 tokens for good overlap on NVLink systems.
+      </div>
+
+      <!-- 6 -->
+      <h2 id="animation">6 &middot; Interactive Animation</h2>
+
+      <p>Watch K/V blocks rotate around a 4-GPU ring:</p>
+
+      <div class="anim-container">
+        <h4>Ring Attention — 4 GPUs</h4>
+        <p style="font-size:0.85rem;color:#666;margin:0.2rem 0 0.6rem">KV blocks circulate while each GPU computes local attention</p>
+
+        <svg id="ring-svg" viewBox="0 0 500 240" width="500" height="240" xmlns="http://www.w3.org/2000/svg" font-family="'Manrope',sans-serif">
+          <!-- GPU nodes -->
+          <circle cx="250" cy="40" r="30" fill="#3498db22" stroke="#3498db" stroke-width="2"/>
+          <text x="250" y="44" text-anchor="middle" font-size="11" font-weight="700" fill="#3498db">GPU 0</text>
+
+          <circle cx="430" cy="120" r="30" fill="#e67e2222" stroke="#e67e22" stroke-width="2"/>
+          <text x="430" y="124" text-anchor="middle" font-size="11" font-weight="700" fill="#e67e22">GPU 1</text>
+
+          <circle cx="250" cy="200" r="30" fill="#9b59b622" stroke="#9b59b6" stroke-width="2"/>
+          <text x="250" y="204" text-anchor="middle" font-size="11" font-weight="700" fill="#9b59b6">GPU 2</text>
+
+          <circle cx="70" cy="120" r="30" fill="#0a8f6a22" stroke="#0a8f6a" stroke-width="2"/>
+          <text x="70" y="124" text-anchor="middle" font-size="11" font-weight="700" fill="#0a8f6a">GPU 3</text>
+
+          <!-- Ring arrows (static) -->
+          <path d="M275 30 Q350 20 410 95" fill="none" stroke="#ccc" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path d="M440 150 Q450 200 280 200" fill="none" stroke="#ccc" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path d="M225 205 Q150 220 90 150" fill="none" stroke="#ccc" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+          <path d="M65 90 Q50 40 225 38" fill="none" stroke="#ccc" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+          <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+              <polygon points="0 0, 8 3, 0 6" fill="#999"/>
+            </marker>
+          </defs>
+
+          <!-- KV labels (updated by JS) -->
+          <g id="ring-kv-labels"></g>
+
+          <text id="ring-label" x="250" y="235" text-anchor="middle" font-size="11" fill="#666">Click Step to begin</text>
+        </svg>
+
+        <div class="anim-controls">
+          <button class="anim-btn" id="ring-step-btn" onclick="ringStep()">Step</button>
+          <button class="anim-btn" onclick="ringReset()" style="background:#666">Reset</button>
+          <span class="anim-output" id="ring-info">KV blocks rotate clockwise</span>
+        </div>
+      </div>
+
+      <!-- 7 -->
+      <h2 id="math">7 &middot; The Math</h2>
+
+      <div class="math-block">
+Memory per GPU:
+  Standard attention: O(N × d) for Q, K, V + O(N²) for attention matrix
+  Ring attention:     O(N/P × d) for local Q + O(N/P × d) for current K,V block
+                      + O(N/P × d) for incoming K,V block (double buffering)
+
+  Total: O(N/P × d) — linear in N/P per GPU
+
+Compute per GPU:
+  Each GPU computes P chunk-attention operations: (N/P) × (N/P) each
+  Total per GPU: P × (N/P)² × d = N²d / P
+  → Perfect linear scaling: each GPU does 1/P of total work
+      </div>
+
+      <div class="math-block">
+Communication volume per GPU:
+  Each step: send and receive 2 × (N/P) × d values  (K + V)
+  P-1 steps total: 2 × (P-1) × (N/P) × d ≈ 2Nd values
+
+  Bandwidth requirement: 2Nd / T_total
+  With compute-comm overlap: no additional time cost (hidden behind compute)
+      </div>
+
+      <!-- 8 -->
+      <h2 id="causal">8 &middot; Causal Masking in Ring Attention</h2>
+
+      <p>For causal (autoregressive) attention, GPU p's Q chunk should only attend to K/V chunks with earlier or equal positions. This means some chunk pairs produce all-masked-out scores:</p>
+
+      <div class="math-block">
+GPU p holds Q for positions [p·N/P, (p+1)·N/P)
+
+K/V chunk from GPU q covers positions [q·N/P, (q+1)·N/P)
+
+If q·N/P > (p+1)·N/P → entire chunk is masked (skip computation!)
+
+  For P=4: GPU 0 only needs KV from GPU 0 (1 step instead of 4)
+           GPU 3 needs KV from all GPUs (4 steps)
+           Average: 2.5 steps (vs 4 for bidirectional) → 1.6× faster
+      </div>
+
+      <div class="callout warn">
+        <strong>Load imbalance:</strong> With causal masking, earlier GPUs do less work than later ones. Solutions: (1) overlap the skipped computation with communication from later chunks, (2) use "zigzag" token assignment that balances causal workload, (3) pair Ring Attention with tensor parallelism.
+      </div>
+
+      <!-- 9 -->
+      <h2 id="implementation">9 &middot; Implementation</h2>
+
+      <p>Key implementation details:</p>
+
+      <ul>
+        <li><strong>Double buffering:</strong> Allocate two K/V buffers per GPU. While computing with buffer A, receive the next chunk into buffer B. Swap after each step.</li>
+        <li><strong>Flash Attention integration:</strong> Each local attention computation uses Flash Attention for the tiled, IO-efficient inner computation. Ring handles the cross-device distribution.</li>
+        <li><strong>Online softmax:</strong> The merge step uses the same running max/log-sum-exp trick as Flash Attention, ensuring numerical stability when combining partial attention results from different K/V chunks.</li>
+        <li><strong>Backward pass:</strong> Reverse the ring direction. Each GPU sends dO (output gradients) around the ring while computing local dQ, dK, dV contributions.</li>
+      </ul>
+
+      <!-- 10 -->
+      <h2 id="scaling">10 &middot; Scaling Analysis</h2>
+
+      <table class="comparison-table">
+        <tr>
+          <th>GPUs (P)</th>
+          <th>Seq Length (N)</th>
+          <th>Tokens/GPU</th>
+          <th>Memory/GPU</th>
+          <th>Compute/GPU</th>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td>128K</td>
+          <td>128K</td>
+          <td>Baseline</td>
+          <td>Baseline</td>
+        </tr>
+        <tr>
+          <td>8</td>
+          <td>1M</td>
+          <td>128K</td>
+          <td>~Same</td>
+          <td>~Same</td>
+        </tr>
+        <tr>
+          <td>64</td>
+          <td>8M</td>
+          <td>128K</td>
+          <td>~Same</td>
+          <td>~Same</td>
+        </tr>
+        <tr>
+          <td>256</td>
+          <td>32M</td>
+          <td>128K</td>
+          <td>~Same</td>
+          <td>~Same</td>
+        </tr>
+      </table>
+
+      <div class="callout">
+        <strong>Near-linear scaling:</strong> Each GPU maintains constant memory and compute regardless of total sequence length — you just add more GPUs. The communication overhead is hidden behind compute. In practice, Ring Attention achieves &gt;95% scaling efficiency on NVLink-connected clusters.
+      </div>
+
+      <!-- 11 -->
+      <h2 id="models">11 &middot; Applications</h2>
+
+      <ul>
+        <li><strong>Long-context LLMs:</strong> Ring Attention enables training and inference with 1M+ token contexts. Used in research for book-length understanding, codebase analysis, and long-document summarization.</li>
+        <li><strong>Video understanding:</strong> Video models process thousands of frames; Ring Attention distributes frame-level attention across GPUs.</li>
+        <li><strong>Scientific computing:</strong> Protein sequences (10K+ amino acids) and genomic sequences benefit from long-range attention across distributed GPUs.</li>
+        <li><strong>Stripe (Liu et al., 2023):</strong> "Striped" Ring Attention with zigzag token assignment for better load balancing with causal masks.</li>
+        <li><strong>LightSeq / DistFlashAttn:</strong> Production implementations of ring attention with additional optimizations for heterogeneous clusters.</li>
+      </ul>
+
+      <!-- 12 -->
+      <h2 id="summary">12 &middot; Summary</h2>
+
+      <ul>
+        <li>Ring Attention distributes sequences across P GPUs in a ring, circulating K/V blocks while computing local attention in parallel.</li>
+        <li>Communication is overlapped with computation using double buffering and async send/receive.</li>
+        <li>Memory per GPU: O(N/P) — context length scales linearly with GPU count.</li>
+        <li>Uses Flash Attention's online softmax for numerically stable cross-device result merging.</li>
+        <li>Causal masking introduces load imbalance that can be mitigated with zigzag assignment.</li>
+        <li>Enables million-token contexts and beyond on multi-GPU clusters.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>One-line summary:</strong> Ring Attention circulates KV blocks around a GPU ring, overlapping communication with computation to scale context length linearly with device count.
+      </div>
+
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script>
+  (function(){
+    var step=0,P=4;
+    var colors=['#3498db','#e67e22','#9b59b6','#0a8f6a'];
+    var pos=[[250,40],[430,120],[250,200],[70,120]]; // GPU positions
+    var labelOff=[[0,70],[0,70],[0,-50],[0,70]]; // label offset from GPU center
+    // Initial KV assignment: GPU i has KV_i. After each step, KV rotates clockwise.
+    var state=[0,1,2,3]; // state[gpuIdx] = which KV chunk it holds
+
+    function drawLabels(){
+      var g=document.getElementById('ring-kv-labels');g.innerHTML='';
+      for(var i=0;i<P;i++){
+        var kvIdx=state[i];
+        // small colored rect + text near GPU
+        var lx=pos[i][0]-25,ly=pos[i][1]+35;
+        var r=document.createElementNS('http://www.w3.org/2000/svg','rect');
+        r.setAttribute('x',lx);r.setAttribute('y',ly);r.setAttribute('width',50);r.setAttribute('height',18);
+        r.setAttribute('rx','4');r.setAttribute('fill',colors[kvIdx]+'33');r.setAttribute('stroke',colors[kvIdx]);r.setAttribute('stroke-width','1.5');
+        g.appendChild(r);
+        var t=document.createElementNS('http://www.w3.org/2000/svg','text');
+        t.setAttribute('x',lx+25);t.setAttribute('y',ly+13);t.setAttribute('text-anchor','middle');
+        t.setAttribute('font-size','9');t.setAttribute('font-weight','700');t.setAttribute('fill',colors[kvIdx]);
+        t.textContent='KV'+kvIdx;g.appendChild(t);
+      }
+    }
+
+    window.ringStep=function(){
+      if(step>=P)return;
+      if(step===0){drawLabels();}
+      else{
+        // Rotate: each GPU sends to next, receives from prev
+        var last=state[P-1];
+        for(var i=P-1;i>0;i--)state[i]=state[i-1];
+        state[0]=last;
+        drawLabels();
+      }
+      var msgs=['Step 0: Each GPU computes attention with its LOCAL KV chunk',
+        'Step 1: KV rotated — each GPU now has its neighbor\'s KV',
+        'Step 2: Another rotation — compute with 3rd KV chunk',
+        'Step 3: Final rotation — all KV chunks seen, attention complete!'];
+      document.getElementById('ring-label').textContent=msgs[step];
+      document.getElementById('ring-info').textContent='Step '+(step+1)+' of '+P;
+      step++;
+      if(step>=P)document.getElementById('ring-step-btn').disabled=true;
+    };
+    window.ringReset=function(){
+      step=0;state=[0,1,2,3];
+      document.getElementById('ring-kv-labels').innerHTML='';
+      document.getElementById('ring-label').textContent='Click Step to begin';
+      document.getElementById('ring-info').textContent='KV blocks rotate clockwise';
+      document.getElementById('ring-step-btn').disabled=false;
+    };
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

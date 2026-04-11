@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Multi-Query Attention (MQA): sharing a single key-value head across all query heads for maximum KV cache compression, implementation, quality tradeoffs, and real-world usage in PaLM, Falcon, and StarCoder.">
+  <title>Multi-Query Attention (MQA) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .pseudo-code{white-space:pre;font-family:Consolas,monospace;font-size:0.92rem;background:#1a2b22;color:#d4e8dc;padding:1.2rem;border-radius:10px;overflow-x:auto;line-height:1.6}
+    .pseudo-code .kw{color:#ff9f43;font-weight:700}
+    .pseudo-code .fn{color:#0a8f6a}
+    .pseudo-code .cm{color:#7f8c8d}
+    .pseudo-code .tp{color:#3498db}
+    .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.92rem;overflow-x:auto}
+    .callout{background:#f0faf6;border-left:4px solid #0a8f6a;padding:1rem 1.2rem;margin:1.5rem 0;border-radius:0 8px 8px 0;font-size:.93rem;line-height:1.55}
+    .callout strong{color:#0a8f6a}
+    .callout.warn{border-left-color:#e67e22;background:#fffbf0}
+    .callout.warn strong{color:#e67e22}
+    .comparison-table{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:.93rem}
+    .comparison-table th,.comparison-table td{padding:.6rem .85rem;border:1.5px solid #d9cfba;text-align:left}
+    .comparison-table th{background:#f0ece4;font-family:'Syne',sans-serif;font-weight:700;font-size:.84rem;color:#13201a}
+    .comparison-table td{font-family:'Manrope',sans-serif}
+    .comparison-table tr:nth-child(even) td{background:#faf8f5}
+    .step-card{border:1px solid #d0e0d0;border-radius:14px;padding:1.2rem;margin:1.2rem 0;background:rgba(255,255,255,0.85);position:relative}
+    .step-card::before{content:attr(data-step);position:absolute;top:-12px;left:16px;background:#0a8f6a;color:#fff;font-family:"Syne",sans-serif;font-weight:700;font-size:0.75rem;padding:3px 12px;border-radius:6px}
+    .anim-container{background:#f8faf8;border:1px solid #d0e0d0;border-radius:12px;padding:1.2rem;margin:1.5rem 0}
+    .anim-container h4{margin:0 0 0.3rem;font-family:Syne,sans-serif;color:#1a2b22}
+    .anim-controls{display:flex;gap:0.6rem;align-items:center;margin-top:0.8rem;flex-wrap:wrap}
+    .anim-btn{background:#0a8f6a;color:#fff;border:none;padding:0.45rem 1rem;border-radius:6px;cursor:pointer;font-family:Manrope,sans-serif;font-size:0.85rem;font-weight:600}
+    .anim-btn:hover{background:#078a5e}
+    .anim-btn:disabled{background:#aaa;cursor:default}
+    .anim-output{font-family:Consolas,monospace;font-size:0.85rem;color:#555}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#origin">Origin &amp; Motivation</a></li>
+          <li><a href="#idea">The MQA Idea</a></li>
+          <li><a href="#math">The Math</a></li>
+          <li><a href="#memory">Memory &amp; Bandwidth</a></li>
+          <li><a href="#animation">Interactive Animation</a></li>
+          <li><a href="#implementation">Implementation</a></li>
+          <li><a href="#quality">Quality Impact</a></li>
+          <li><a href="#mqa-vs-gqa">MQA vs GQA</a></li>
+          <li><a href="#conversion">Converting MHA → MQA</a></li>
+          <li><a href="#models">Models Using MQA</a></li>
+          <li><a href="#summary">Summary</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">ML &middot; Transformers</a> &raquo; <a href="index.html">Variants</a>
+      </div>
+
+      <h1>Multi-Query Attention (MQA)</h1>
+      <p class="post-meta">ML Series &middot; Transformers &middot; Variants</p>
+
+      <!-- 1 -->
+      <h2 id="origin">1 &middot; Origin &amp; Motivation</h2>
+
+      <p>Multi-Query Attention was introduced by Noam Shazeer in 2019 — years before KV caches became the headline bottleneck. The core observation: during autoregressive decoding, the model generates one token at a time, and the dominant cost is <strong>loading KV cache from HBM into SRAM</strong>, not the matrix multiplications themselves.</p>
+
+      <p>With standard Multi-Head Attention (MHA), each of <code>H</code> heads has its own K and V projection. The KV cache grows as:</p>
+
+      <div class="math-block">
+KV cache per layer = 2 × H × seq_len × d_head × bytes
+
+For H=32, seq=4096, d_head=128, FP16:
+= 2 × 32 × 4096 × 128 × 2 = 67 MB per layer
+= 67 MB × 32 layers = 2.1 GB total
+      </div>
+
+      <p>The insight: if we share K and V across all heads, the cache shrinks by a factor of H. For a 32-head model, that's <strong>32×</strong> less memory bandwidth per decoding step.</p>
+
+      <!-- 2 -->
+      <h2 id="idea">2 &middot; The MQA Idea</h2>
+
+      <p>MQA keeps multiple query heads but uses only <strong>one</strong> shared key head and <strong>one</strong> shared value head:</p>
+
+      <div class="math-block">
+MHA:  Q₀,K₀,V₀  Q₁,K₁,V₁  Q₂,K₂,V₂  ...  Q_H,K_H,V_H   (H sets of Q,K,V)
+MQA:  Q₀,K,V     Q₁,K,V     Q₂,K,V     ...  Q_H,K,V        (H queries, 1 K, 1 V)
+      </div>
+
+      <p>Each query head still has its own learned projection W_Qᵢ, so each head computes a <strong>different attention pattern</strong>. But all heads attend over the same keys and values. The diversity comes from the queries, not the keys/values.</p>
+
+      <div class="callout">
+        <strong>Analogy:</strong> Think of a library. MHA gives each researcher their own private book collection. MQA gives each researcher their own unique search criteria (queries), but they all search the same shared library (keys and values). Different researchers still find different things because they're looking for different things.
+      </div>
+
+      <!-- 3 -->
+      <h2 id="math">3 &middot; The Math</h2>
+
+      <div class="math-block">
+Projections:
+  Qᵢ = x · W_Qᵢ     for i = 0, ..., H-1     (H separate Q projections)
+  K  = x · W_K        (single shared K projection)
+  V  = x · W_V        (single shared V projection)
+
+Where:
+  W_Qᵢ ∈ ℝ^(d_model × d_head)    — one per head
+  W_K  ∈ ℝ^(d_model × d_head)     — shared
+  W_V  ∈ ℝ^(d_model × d_head)     — shared
+      </div>
+
+      <div class="math-block">
+Attention for head i:
+  Attn_i = softmax(Qᵢ · K^T / √d_head) · V
+
+Output:
+  out = Concat(Attn₀, Attn₁, ..., Attn_{H-1}) · W_O
+      </div>
+
+      <div class="math-block">
+Parameter count comparison (K + V projections only):
+  MHA:  2 × H × d_model × d_head    (e.g., 2 × 32 × 4096 × 128 = 33.6M)
+  MQA:  2 × 1 × d_model × d_head    (e.g., 2 × 1 × 4096 × 128 = 1.05M)
+
+  Ratio: 1/H  (32× fewer KV parameters for H=32)
+      </div>
+
+      <!-- 4 -->
+      <h2 id="memory">4 &middot; Memory &amp; Bandwidth Savings</h2>
+
+      <table class="comparison-table">
+        <tr>
+          <th>Metric</th>
+          <th>MHA (H=32)</th>
+          <th>MQA (H=32)</th>
+          <th>Reduction</th>
+        </tr>
+        <tr>
+          <td>KV params per layer</td>
+          <td>2 × 32 × d² / H</td>
+          <td>2 × 1 × d² / H</td>
+          <td>32×</td>
+        </tr>
+        <tr>
+          <td>KV cache (4K seq, FP16)</td>
+          <td>67 MB/layer</td>
+          <td>2.1 MB/layer</td>
+          <td>32×</td>
+        </tr>
+        <tr>
+          <td>Bandwidth per decode step</td>
+          <td>Loads 32 K + 32 V</td>
+          <td>Loads 1 K + 1 V</td>
+          <td>32×</td>
+        </tr>
+        <tr>
+          <td>Decode latency (bandwidth-bound)</td>
+          <td>Baseline</td>
+          <td>~1.7× faster</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>Max batch size (fixed GPU memory)</td>
+          <td>Baseline</td>
+          <td>~8–16× larger</td>
+          <td>—</td>
+        </tr>
+      </table>
+
+      <div class="callout warn">
+        <strong>Why not 32× faster latency?</strong> The 32× bandwidth reduction applies only to KV loading. The Q computation, output projection, and MLP layers are unchanged. In practice, MQA improves end-to-end decode throughput by ~1.5–2× depending on model size and hardware.
+      </div>
+
+      <!-- 5 -->
+      <h2 id="animation">5 &middot; Interactive Animation</h2>
+
+      <p>Compare how attention heads map to KV projections in MHA vs MQA:</p>
+
+      <div class="anim-container">
+        <h4>MHA vs MQA Mapping</h4>
+        <p style="font-size:0.85rem;color:#666;margin:0.2rem 0 0.6rem">Watch KV sharing collapse from many-to-many to many-to-one</p>
+
+        <svg id="mqa-svg" viewBox="0 0 550 200" width="550" height="200" xmlns="http://www.w3.org/2000/svg" font-family="'Manrope',sans-serif">
+          <text id="mqa-title" x="275" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#333">Click Step to begin</text>
+          <text x="10" y="55" font-size="10" font-weight="700" fill="#555">Q heads</text>
+          <g id="mqa-q"></g>
+          <g id="mqa-arrows"></g>
+          <text x="10" y="155" font-size="10" font-weight="700" fill="#555">K,V</text>
+          <g id="mqa-kv"></g>
+        </svg>
+
+        <div class="anim-controls">
+          <button class="anim-btn" id="mqa-step-btn" onclick="mqaStep()">Step</button>
+          <button class="anim-btn" onclick="mqaReset()" style="background:#666">Reset</button>
+          <span class="anim-output" id="mqa-info">Click Step to see the transition</span>
+        </div>
+      </div>
+
+      <!-- 6 -->
+      <h2 id="implementation">6 &middot; Implementation</h2>
+
+      <div class="pseudo-code">
+<span class="kw">class</span> <span class="tp">MultiQueryAttention</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, n_heads):
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        <span class="cm"># H separate query projections, 1 shared K, 1 shared V</span>
+        self.W_Q = Linear(d_model, n_heads * self.head_dim)   <span class="cm"># full rank</span>
+        self.W_K = Linear(d_model, self.head_dim)              <span class="cm"># single head</span>
+        self.W_V = Linear(d_model, self.head_dim)              <span class="cm"># single head</span>
+        self.W_O = Linear(d_model, d_model)
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x, cache_k=None, cache_v=None):
+        B, S, _ = x.shape
+
+        <span class="cm"># Project queries (all heads) and keys/values (single head)</span>
+        Q = self.W_Q(x).view(B, S, self.n_heads, self.head_dim)
+        K = self.W_K(x).view(B, S, 1, self.head_dim)
+        V = self.W_V(x).view(B, S, 1, self.head_dim)
+
+        <span class="cm"># Update KV cache for autoregressive decoding</span>
+        <span class="kw">if</span> cache_k <span class="kw">is not</span> None:
+            K = cat([cache_k, K], dim=1)
+            V = cat([cache_v, V], dim=1)
+
+        <span class="cm"># Broadcast K, V across all query heads</span>
+        K = K.expand(B, -1, self.n_heads, self.head_dim)
+        V = V.expand(B, -1, self.n_heads, self.head_dim)
+
+        <span class="cm"># Scaled dot-product attention</span>
+        scores = (Q @ K.transpose(-2, -1)) / sqrt(self.head_dim)
+        weights = softmax(scores, dim=-1)
+        out = weights @ V
+
+        out = out.reshape(B, S, -1)
+        <span class="kw">return</span> self.W_O(out), K, V
+      </div>
+
+      <div class="callout">
+        <strong>Broadcast vs repeat:</strong> We use <code>expand</code> (broadcast) instead of <code>repeat</code> to avoid copying data. The single K/V tensor is logically shared across heads without allocating H copies in memory.
+      </div>
+
+      <!-- 7 -->
+      <h2 id="quality">7 &middot; Quality Impact</h2>
+
+      <p>MQA's single shared KV head means all query heads attend over the same representation. This can limit the model's ability to simultaneously capture different types of relationships:</p>
+
+      <ul>
+        <li><strong>Training from scratch:</strong> Shazeer (2019) reported &lt; 0.3% quality loss on translation tasks with MQA. The model learns to compensate during training.</li>
+        <li><strong>Converting MHA → MQA post-training:</strong> More significant degradation without uptraining. The model was trained expecting diverse K/V heads.</li>
+        <li><strong>Tasks most affected:</strong> Multi-hop reasoning, coreference resolution, and tasks requiring fine-grained token comparison suffer most.</li>
+        <li><strong>Tasks least affected:</strong> Generation, summarization, and single-hop QA are robust to MQA.</li>
+      </ul>
+
+      <table class="comparison-table">
+        <tr>
+          <th>Benchmark</th>
+          <th>MHA (baseline)</th>
+          <th>MQA</th>
+          <th>GQA-8</th>
+        </tr>
+        <tr>
+          <td>Translation BLEU</td>
+          <td>100%</td>
+          <td>99.7%</td>
+          <td>99.9%</td>
+        </tr>
+        <tr>
+          <td>Summarization ROUGE</td>
+          <td>100%</td>
+          <td>99.3%</td>
+          <td>99.8%</td>
+        </tr>
+        <tr>
+          <td>Multi-hop QA</td>
+          <td>100%</td>
+          <td>97.5%</td>
+          <td>99.5%</td>
+        </tr>
+        <tr>
+          <td>Decode throughput</td>
+          <td>1×</td>
+          <td>1.7×</td>
+          <td>1.5×</td>
+        </tr>
+      </table>
+
+      <!-- 8 -->
+      <h2 id="mqa-vs-gqa">8 &middot; MQA vs GQA</h2>
+
+      <p>GQA (Grouped Query Attention) is the generalization of MQA. MQA uses 1 KV group; GQA uses G groups (where 1 &lt; G &lt; H). The key differences:</p>
+
+      <table class="comparison-table">
+        <tr>
+          <th>Aspect</th>
+          <th>MQA</th>
+          <th>GQA (e.g., G=8)</th>
+        </tr>
+        <tr>
+          <td>KV heads</td>
+          <td>1</td>
+          <td>G (e.g., 8)</td>
+        </tr>
+        <tr>
+          <td>Cache reduction</td>
+          <td>H× (e.g., 32×)</td>
+          <td>H/G× (e.g., 4×)</td>
+        </tr>
+        <tr>
+          <td>Quality</td>
+          <td>Slight degradation</td>
+          <td>≈ MHA</td>
+        </tr>
+        <tr>
+          <td>Best for</td>
+          <td>Extreme memory constraints</td>
+          <td>General-purpose LLMs</td>
+        </tr>
+        <tr>
+          <td>Industry trend</td>
+          <td>Declining (replaced by GQA)</td>
+          <td>Now the default</td>
+        </tr>
+      </table>
+
+      <div class="callout warn">
+        <strong>Industry shift:</strong> MQA was the pioneer, but GQA has largely replaced it. Most modern LLMs (LLaMA-3, Mistral, Gemma) use GQA-8 because the memory savings are "good enough" (4–8×) without the quality compromise of a single KV head. MQA remains relevant for latency-critical applications or very large batch sizes.
+      </div>
+
+      <!-- 9 -->
+      <h2 id="conversion">9 &middot; Converting MHA → MQA</h2>
+
+      <p>There are three approaches to creating an MQA model:</p>
+
+      <div class="step-card" data-step="Train from Scratch">
+        <p>Design the model with MQA from the start. The model learns to use the single shared KV effectively. This gives the best MQA quality.</p>
+      </div>
+
+      <div class="step-card" data-step="Mean-Pool + Uptrain">
+        <p>Take a pretrained MHA model, average all KV heads into one: <code>W_K_new = mean(W_K₀, ..., W_K_H)</code>. Then continue training for 5–10% of original tokens. This is the approach used by the GQA paper and works well in practice.</p>
+      </div>
+
+      <div class="step-card" data-step="Select Best Head">
+        <p>Instead of averaging, pick the single KV head that has the lowest loss when used alone. This preserves the most informative head's learned representations but is more expensive to evaluate.</p>
+      </div>
+
+      <!-- 10 -->
+      <h2 id="models">10 &middot; Models Using MQA</h2>
+
+      <ul>
+        <li><strong>PaLM</strong> (Google, 2022) — 540B model, one of the first large-scale uses of MQA</li>
+        <li><strong>PaLM-2</strong> (Google, 2023) — continued use of MQA for efficiency</li>
+        <li><strong>Falcon-40B</strong> (TII, 2023) — MQA for all 40B parameters</li>
+        <li><strong>StarCoder</strong> (BigCode, 2023) — MQA for fast code completion</li>
+        <li><strong>ChatGLM2-6B</strong> (Tsinghua) — MQA variant for Chinese-English</li>
+        <li><strong>MPT-7B / MPT-30B</strong> (MosaicML) — early open-source MQA adopters</li>
+      </ul>
+
+      <!-- 11 -->
+      <h2 id="summary">11 &middot; Summary</h2>
+
+      <ul>
+        <li>MQA uses a single shared K/V head across all query heads, reducing KV cache by H× (e.g., 32× for a 32-head model).</li>
+        <li>The primary benefit is <strong>memory bandwidth</strong>: less data to load per decode step → faster inference and larger batch sizes.</li>
+        <li>Quality impact is small (&lt;1% on most benchmarks) when trained from scratch, but noticeable on multi-hop reasoning tasks.</li>
+        <li>GQA has largely superseded MQA as the default choice, offering a better quality/efficiency tradeoff.</li>
+        <li>MQA remains valuable for extreme latency or memory constraints.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>One-line summary:</strong> MQA is the extreme end of KV sharing — all query heads read from one set of keys and values, maximizing inference speed at a small quality cost.
+      </div>
+
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script>
+  (function(){
+    var step=0, nQ=6, colors=['#3498db','#e67e22','#9b59b6','#0a8f6a','#e74c3c','#f39c12'];
+    var configs=[
+      {title:'Step 1: MHA — 6 Q heads, 6 KV heads',nKV:6,map:[0,1,2,3,4,5]},
+      {title:'Step 2: MQA — 6 Q heads, 1 KV head',nKV:1,map:[0,0,0,0,0,0]}
+    ];
+    var ox=70,qy=38,kvy=145,bw=60,bh=28,gap=10;
+    function draw(cfg){
+      document.getElementById('mqa-title').textContent=cfg.title;
+      ['mqa-q','mqa-arrows','mqa-kv'].forEach(function(id){document.getElementById(id).innerHTML='';});
+      var qg=document.getElementById('mqa-q'),ag=document.getElementById('mqa-arrows'),kvg=document.getElementById('mqa-kv');
+      for(var i=0;i<nQ;i++){
+        var x=ox+i*(bw+gap);
+        var r=document.createElementNS('http://www.w3.org/2000/svg','rect');
+        r.setAttribute('x',x);r.setAttribute('y',qy);r.setAttribute('width',bw);r.setAttribute('height',bh);
+        r.setAttribute('rx','6');r.setAttribute('fill',colors[cfg.map[i]]+'30');r.setAttribute('stroke',colors[cfg.map[i]]);r.setAttribute('stroke-width','2');
+        qg.appendChild(r);
+        var t=document.createElementNS('http://www.w3.org/2000/svg','text');
+        t.setAttribute('x',x+bw/2);t.setAttribute('y',qy+bh/2+4);t.setAttribute('text-anchor','middle');
+        t.setAttribute('font-size','10');t.setAttribute('font-weight','700');t.setAttribute('fill',colors[cfg.map[i]]);
+        t.textContent='Q'+i;qg.appendChild(t);
+      }
+      var kvTotalW=cfg.nKV*(bw+gap)-gap;
+      var kvOx=ox+(nQ*(bw+gap)-gap-kvTotalW)/2;
+      for(var k=0;k<cfg.nKV;k++){
+        var x=kvOx+k*(bw+gap);
+        var r=document.createElementNS('http://www.w3.org/2000/svg','rect');
+        r.setAttribute('x',x);r.setAttribute('y',kvy);r.setAttribute('width',bw);r.setAttribute('height',bh);
+        r.setAttribute('rx','6');r.setAttribute('fill',colors[k]+'22');r.setAttribute('stroke',colors[k]);r.setAttribute('stroke-width','2');
+        kvg.appendChild(r);
+        var t=document.createElementNS('http://www.w3.org/2000/svg','text');
+        t.setAttribute('x',x+bw/2);t.setAttribute('y',kvy+bh/2+4);t.setAttribute('text-anchor','middle');
+        t.setAttribute('font-size','10');t.setAttribute('font-weight','700');t.setAttribute('fill',colors[k]);
+        t.textContent='KV'+k;kvg.appendChild(t);
+      }
+      for(var i=0;i<nQ;i++){
+        var qx=ox+i*(bw+gap)+bw/2;
+        var kvx=kvOx+cfg.map[i]*(bw+gap)+bw/2;
+        var l=document.createElementNS('http://www.w3.org/2000/svg','line');
+        l.setAttribute('x1',qx);l.setAttribute('y1',qy+bh);l.setAttribute('x2',kvx);l.setAttribute('y2',kvy);
+        l.setAttribute('stroke',colors[cfg.map[i]]);l.setAttribute('stroke-width','1.5');l.setAttribute('opacity','0.55');
+        ag.appendChild(l);
+      }
+    }
+    window.mqaStep=function(){
+      if(step>=configs.length)return;draw(configs[step]);step++;
+      document.getElementById('mqa-info').textContent=step>=configs.length?'MQA: all queries fan into one shared KV — 6× cache reduction':'MHA: each Q has its own KV (no sharing)';
+      if(step>=configs.length)document.getElementById('mqa-step-btn').disabled=true;
+    };
+    window.mqaReset=function(){
+      step=0;['mqa-q','mqa-arrows','mqa-kv'].forEach(function(id){document.getElementById(id).innerHTML='';});
+      document.getElementById('mqa-title').textContent='Click Step to begin';
+      document.getElementById('mqa-info').textContent='Click Step to see the transition';
+      document.getElementById('mqa-step-btn').disabled=false;
+    };
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

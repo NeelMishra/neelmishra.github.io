@@ -1,0 +1,1198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into KV Caching — the key technique that makes autoregressive transformer inference efficient by storing and reusing Key and Value tensors across generation steps.">
+  <title>KV Caching | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .pseudo-code{white-space:pre;font-family:Consolas,monospace;font-size:0.92rem;background:#1a2b22;color:#d4e8dc;padding:1.2rem;border-radius:10px;overflow-x:auto;line-height:1.6}
+    .pseudo-code .kw{color:#ff9f43;font-weight:700}
+    .pseudo-code .fn{color:#0a8f6a}
+    .pseudo-code .cm{color:#7f8c8d}
+    .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.92rem;overflow-x:auto}
+    .callout{background:#f0faf6;border-left:4px solid #0a8f6a;padding:1rem 1.2rem;margin:1.5rem 0;border-radius:0 8px 8px 0;font-size:.93rem;line-height:1.55}
+    .callout strong{color:#0a8f6a}
+    .callout.warn{border-left-color:#e67e22;background:#fffbf0}
+    .callout.warn strong{color:#e67e22}
+    .comparison-table{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:.93rem}
+    .comparison-table th,.comparison-table td{padding:.6rem .85rem;border:1.5px solid #d9cfba;text-align:left}
+    .comparison-table th{background:#f0ece4;font-family:'Syne',sans-serif;font-weight:700;font-size:.84rem;color:#13201a}
+    .comparison-table td{font-family:'Manrope',sans-serif}
+    .comparison-table tr:nth-child(even) td{background:#faf8f5}
+    .step-card{border:1px solid var(--line);border-radius:14px;padding:1.2rem;margin:1.2rem 0;background:rgba(255,255,255,0.85);position:relative}
+    .step-card::before{content:attr(data-step);position:absolute;top:-12px;left:16px;background:var(--brand,#0a8f6a);color:#fff;font-family:"Syne",sans-serif;font-weight:700;font-size:0.75rem;padding:3px 12px;border-radius:6px}
+    .anim-container{background:#f8faf8;border:1px solid #d0e0d0;border-radius:12px;padding:1.2rem;margin:1.5rem 0}
+    .anim-container h4{margin:0 0 0.3rem;font-family:Syne,sans-serif;color:#1a2b22}
+    .anim-controls{display:flex;gap:0.6rem;align-items:center;margin-top:0.8rem;flex-wrap:wrap}
+    .anim-btn{background:#0a8f6a;color:#fff;border:none;padding:0.45rem 1rem;border-radius:6px;cursor:pointer;font-family:Manrope,sans-serif;font-size:0.85rem;font-weight:600}
+    .anim-btn:hover{background:#078a5e}
+    .anim-btn:disabled{background:#aaa;cursor:default}
+    .anim-output{font-family:Consolas,monospace;font-size:0.85rem;color:#555}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul>
+          <li><a href="#redundancy-problem">1 &middot; The Redundancy Problem</a></li>
+          <li><a href="#core-idea">2 &middot; Cache What Doesn't Change</a></li>
+          <li><a href="#prefill-decode">3 &middot; Prefill vs Decode Phases</a></li>
+          <li><a href="#the-math">4 &middot; The Math</a></li>
+          <li><a href="#interactive-animation">5 &middot; Interactive Animation</a></li>
+          <li><a href="#memory-analysis">6 &middot; Memory Analysis</a></li>
+          <li><a href="#memory-compute-tradeoff">7 &middot; Memory-Compute Tradeoff</a></li>
+          <li><a href="#implementation">8 &middot; Implementation</a></li>
+          <li><a href="#multi-layer-cache">9 &middot; Multi-Layer Cache</a></li>
+          <li><a href="#optimization-techniques">10 &middot; Optimization Techniques</a></li>
+          <li><a href="#connection-other-techniques">11 &middot; Connection to Other Techniques</a></li>
+          <li><a href="#summary">12 &middot; Summary</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">ML &middot; Transformers</a> &raquo; <a href="index.html">Variants</a>
+      </div>
+
+      <h1>KV Caching</h1>
+      <p class="post-meta">ML Series &middot; Transformers &middot; Variants</p>
+
+      <p>
+        When you chat with a large language model and watch tokens appear one at a time,
+        there is an engineering trick silently running behind the scenes that makes the
+        whole experience practical: <strong>KV Caching</strong>. Without it, generating a
+        single 512-token response from a model like LLaMA-70B would take orders of magnitude
+        longer and waste enormous amounts of compute re-deriving results the model already knows.
+      </p>
+      <p>
+        KV caching is one of those ideas that is deceptively simple in principle&mdash;store the
+        Key and Value projections so you don&rsquo;t recompute them&mdash;yet touches nearly
+        every part of the inference stack: memory management, batching, quantisation,
+        hardware utilisation, and even model architecture itself. In this post we will build
+        up the full picture from first principles, derive the math, implement it in code,
+        animate it step by step, and then survey the landscape of optimisation techniques
+        that have grown around it.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 1                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="redundancy-problem">1 &middot; The Redundancy Problem in Autoregressive Generation</h2>
+
+      <p>
+        Transformer language models are trained with <em>teacher forcing</em>: at training time
+        the model receives the entire sequence at once, and the causal mask ensures each position
+        can only attend to earlier positions. The key and value matrices are computed for every
+        token in one efficient batched operation and never need to be revisited.
+      </p>
+      <p>
+        Inference, however, is fundamentally different. Autoregressive generation proceeds
+        one token at a time. At step <em>t</em> the model takes all tokens produced so far
+        &mdash; <code>x₁, x₂, &hellip;, x_t</code> &mdash; and predicts <code>x_{t+1}</code>.
+        If we naively treat each step like a mini forward pass over the full sequence, the
+        computation graph looks like this:
+      </p>
+
+      <div class="math-block">
+Step 1:  Q₁, K₁, V₁  = Linear(x₁)                               &larr; 1 token
+Step 2:  Q₂, K₁, K₂, V₁, V₂  = Linear(x₁, x₂)                  &larr; 2 tokens
+Step 3:  Q₃, K₁, K₂, K₃, V₁, V₂, V₃  = Linear(x₁, x₂, x₃)    &larr; 3 tokens
+  &vellip;
+Step t:  Q_t, K₁&hellip;K_t, V₁&hellip;V_t = Linear(x₁ &hellip; x_t)          &larr; t tokens
+      </div>
+
+      <p>
+        Notice that at <strong>every step</strong>, we recompute <code>K₁, V₁</code> even
+        though token <code>x₁</code> has not changed. Similarly <code>K₂, V₂</code> are
+        recomputed at every step after step 2, and so on. The only <em>new</em> information at
+        step <em>t</em> is the projection of the newest token <code>x_t</code>.
+      </p>
+      <p>
+        How bad is the redundancy? Consider generating <code>n</code> tokens in total. At step
+        <em>t</em>, the naive approach runs the projection linear layers on <em>t</em> tokens.
+        The total projection work across all steps is:
+      </p>
+
+      <div class="math-block">
+Total projections = 1 + 2 + 3 + &hellip; + n = n(n+1)/2 = O(n²)
+      </div>
+
+      <p>
+        But <em>each</em> token only needs to be projected <em>once</em> &mdash; it never changes.
+        So the truly necessary work is just <code>n</code> projections &mdash; a factor of
+        <code>n/2</code> less. For a 2048-token generation, we are doing roughly
+        <strong>1000&times;</strong> more projection work than necessary.
+      </p>
+      <p>
+        And that is only the projection cost. The attention computation itself (the dot product
+        of queries with keys) also balloons: at step <em>t</em> the attention score matrix is
+        <code>1 &times; t</code> (for a single query against <em>t</em> keys), giving a total
+        attention cost of <code>&sum; t = O(n²)</code>. Without caching, we would recompute the
+        full <code>t &times; t</code> attention at each step, yielding <code>O(n³)</code> total
+        work. This is catastrophically inefficient.
+      </p>
+
+      <div class="callout warn">
+        <strong>Key insight:</strong> In causal (decoder-only) generation, the K and V
+        projections for tokens <code>1&hellip;t-1</code> are <em>identical</em> at step
+        <code>t</code> and step <code>t-1</code>. Recomputing them is pure waste.
+      </div>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 2                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="core-idea">2 &middot; The Core Idea: Cache What Doesn&rsquo;t Change</h2>
+
+      <p>
+        The fix is beautifully simple: <strong>keep the K and V tensors from all previous
+        steps in memory</strong> (the &ldquo;KV cache&rdquo;) and only compute the projection
+        for the newest token.
+      </p>
+
+      <div class="step-card" data-step="Step t (with cache)">
+        <ol>
+          <li>
+            <strong>Project only the new token:</strong>
+            <code>q_t, k_t, v_t = W_Q x_t, W_K x_t, W_V x_t</code>
+          </li>
+          <li>
+            <strong>Append to cache:</strong>
+            <code>K_cache = concat(K_cache, k_t)</code> &nbsp;|&nbsp;
+            <code>V_cache = concat(V_cache, v_t)</code>
+          </li>
+          <li>
+            <strong>Attend:</strong>
+            <code>attn = softmax(q_t &middot; K_cache&sup1; / &radic;d) &middot; V_cache</code>
+          </li>
+          <li>
+            <strong>Produce output:</strong> pass the attention output through the rest
+            of the transformer layer (output projection, feed-forward, etc.)
+          </li>
+        </ol>
+      </div>
+
+      <p>
+        That&rsquo;s it. At every decode step we compute projections for <em>one</em> token
+        instead of <em>t</em> tokens, and we compute attention scores of shape
+        <code>1 &times; t</code> instead of <code>t &times; t</code>.
+      </p>
+      <p>
+        The cache grows by one row per step per layer per head. The memory required is
+        proportional to the generated sequence length, which we will quantify precisely
+        in Section 6. But the compute savings are dramatic: we trade memory for speed.
+      </p>
+
+      <p>
+        Why don&rsquo;t we cache the query? Because at each decode step we only need
+        <code>q_t</code>&mdash;the query for the new token. The query is used once,
+        to dot-product against the full key cache, and is never needed again. Keys and
+        values, by contrast, are needed at <em>every future step</em>, which is precisely
+        why caching them pays off.
+      </p>
+
+      <div class="callout">
+        <strong>Terminology:</strong> The KV cache is sometimes called the <em>past key
+        values</em> (as in Hugging Face&rsquo;s <code>past_key_values</code> argument),
+        <em>inference cache</em>, or simply <em>the cache</em>. These all refer to the same
+        concept: stored K and V tensors from previous decoding steps.
+      </div>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 3                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="prefill-decode">3 &middot; Prefill vs Decode Phases</h2>
+
+      <p>
+        Real inference has two distinct phases, and understanding them is essential for
+        reasoning about KV cache behaviour, latency, and throughput.
+      </p>
+
+      <h3>Prefill Phase (Prompt Processing)</h3>
+      <p>
+        When a user submits a prompt of length <code>P</code>, the model processes the
+        <em>entire prompt at once</em> in a single forward pass, exactly like training.
+        This is the <strong>prefill</strong> (or &ldquo;prompt encoding&rdquo;) phase.
+      </p>
+      <ul>
+        <li>All <code>P</code> tokens are projected in parallel to produce
+            <code>Q, K, V</code> of shape <code>(P, d)</code>.</li>
+        <li>Full causal attention is computed: <code>Attn = softmax(QK&sup1;/&radic;d) &middot; V</code>
+            with a causal mask of shape <code>(P, P)</code>.</li>
+        <li>The resulting <code>K</code> and <code>V</code> tensors (for every layer) are
+            stored as the <strong>initial KV cache</strong>.</li>
+        <li>The logits at position <code>P</code> give the first generated token.</li>
+      </ul>
+      <p>
+        Prefill is <strong>compute-bound</strong>: we are doing a lot of matrix multiplications
+        in a single, highly parallelizable pass. GPU utilization is high.
+      </p>
+
+      <h3>Decode Phase (Token Generation)</h3>
+      <p>
+        After prefill, generation enters the <strong>decode</strong> (or &ldquo;autoregressive&rdquo;)
+        phase, producing one token per step:
+      </p>
+      <ul>
+        <li>Only the <em>newest</em> token is projected: <code>q_t, k_t, v_t</code>.</li>
+        <li><code>k_t</code> and <code>v_t</code> are appended to the cache.</li>
+        <li>Attention is computed as <code>softmax(q_t &middot; K_cache&sup1;/&radic;d) &middot; V_cache</code>.</li>
+        <li>The logits give the next token, and the loop repeats.</li>
+      </ul>
+      <p>
+        Decode is <strong>memory-bandwidth-bound</strong>: each step does very little arithmetic
+        (one query against the full cache) but must <em>read</em> the entire KV cache from GPU
+        memory. The ratio of compute to memory access (arithmetic intensity) is very low,
+        which is why decode speed is dominated by how fast you can stream data from HBM.
+      </p>
+
+      <div class="step-card" data-step="Prefill">
+        <p>
+          <strong>Input:</strong> full prompt <code>[x₁, x₂, &hellip;, x_P]</code><br>
+          <strong>Computation:</strong> full <code>P&times;P</code> causal attention<br>
+          <strong>Output:</strong> initial KV cache of shape <code>(P, d)</code> per layer + first generated token<br>
+          <strong>Bottleneck:</strong> Compute (FLOPs)
+        </p>
+      </div>
+
+      <div class="step-card" data-step="Decode (repeated)">
+        <p>
+          <strong>Input:</strong> single new token <code>x_t</code><br>
+          <strong>Computation:</strong> <code>1&times;t</code> attention using KV cache<br>
+          <strong>Output:</strong> updated KV cache of shape <code>(t, d)</code> per layer + next token<br>
+          <strong>Bottleneck:</strong> Memory bandwidth (reading the cache)
+        </p>
+      </div>
+
+      <p>
+        This two-phase structure has major implications for system design. Prefill and decode
+        have different hardware utilisation profiles, which is why systems like Splitwise
+        and DistServe separate them onto different hardware.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 4                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="the-math">4 &middot; The Math</h2>
+
+      <p>
+        Let us formalize KV caching mathematically. We define the projections, the cache
+        update rule, and the cache-augmented attention computation.
+      </p>
+
+      <h3>Projection</h3>
+      <p>
+        At decode step <em>t</em>, the model receives a single token embedding
+        <code>x_t &isin; &reals;^d_model</code>. The projection matrices produce:
+      </p>
+
+      <div class="math-block">
+q_t = x_t W_Q    &isin; &reals;^(1 &times; d_k)        (query for the new token)
+k_t = x_t W_K    &isin; &reals;^(1 &times; d_k)        (key for the new token)
+v_t = x_t W_V    &isin; &reals;^(1 &times; d_v)        (value for the new token)
+      </div>
+
+      <p>
+        where <code>W_Q, W_K &isin; &reals;^(d_model &times; d_k)</code> and
+        <code>W_V &isin; &reals;^(d_model &times; d_v)</code>. For standard multi-head
+        attention, <code>d_k = d_v = d_model / n_heads</code>.
+      </p>
+
+      <h3>Cache Update</h3>
+      <p>
+        Let <code>K_{cache}^{(t-1)} &isin; &reals;^((t-1) &times; d_k)</code> and
+        <code>V_{cache}^{(t-1)} &isin; &reals;^((t-1) &times; d_v)</code> be the cached
+        keys and values from steps <code>1</code> through <code>t-1</code>. After projecting
+        token <code>t</code>, we update:
+      </p>
+
+      <div class="math-block">
+K_cache^(t) = concat( K_cache^(t-1),  k_t )    &isin; &reals;^(t &times; d_k)
+V_cache^(t) = concat( V_cache^(t-1),  v_t )    &isin; &reals;^(t &times; d_v)
+      </div>
+
+      <p>
+        In practice, implementations pre-allocate a buffer of size
+        <code>(max_seq_len, d_k)</code> and write <code>k_t</code> into position <code>t</code>
+        to avoid repeated memory allocation and copying.
+      </p>
+
+      <h3>Attention with Cache</h3>
+      <p>
+        The attention output for the new token is:
+      </p>
+
+      <div class="math-block">
+scores_t = q_t &middot; (K_cache^(t))&sup1; / &radic;d_k    &isin; &reals;^(1 &times; t)
+
+&alpha;_t = softmax(scores_t)                        &isin; &reals;^(1 &times; t)
+
+output_t = &alpha;_t &middot; V_cache^(t)                 &isin; &reals;^(1 &times; d_v)
+      </div>
+
+      <p>
+        Compare this with naive full recomputation, where we would compute
+        <code>Q &isin; &reals;^(t &times; d_k)</code>, <code>K &isin; &reals;^(t &times; d_k)</code>,
+        <code>V &isin; &reals;^(t &times; d_v)</code>, and then compute the full
+        <code>t &times; t</code> attention matrix &mdash; only to discard all rows except the
+        last one. KV caching eliminates this waste entirely.
+      </p>
+
+      <h3>Multi-Head Extension</h3>
+      <p>
+        For multi-head attention with <code>H</code> heads, we maintain separate caches per head:
+      </p>
+
+      <div class="math-block">
+For head h = 1 &hellip; H:
+    K_cache_h^(t) = concat( K_cache_h^(t-1),  k_t_h )
+    V_cache_h^(t) = concat( V_cache_h^(t-1),  v_t_h )
+    output_t_h    = softmax( q_t_h &middot; (K_cache_h^(t))&sup1; / &radic;d_k ) &middot; V_cache_h^(t)
+
+final_output_t = concat(output_t_1, &hellip;, output_t_H) &middot; W_O
+      </div>
+
+      <p>
+        Each head has its own slice of the cache. In practice, the cache tensor has shape
+        <code>(n_heads, seq_len, d_k)</code>, and all heads are computed in parallel.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 5                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="interactive-animation">5 &middot; Interactive Animation</h2>
+
+      <p>
+        The animation below visualizes token-by-token generation with a growing KV cache.
+        Click <strong>Next Step</strong> to advance through the prefill phase (processing
+        the prompt) and then through five decode steps. Watch how the K and V caches grow
+        by one row at each decode step, while the query is always a single token.
+      </p>
+
+      <div class="anim-container">
+        <h4>KV Cache Growth During Generation</h4>
+        <svg id="kv-anim-svg" viewBox="0 0 760 420" width="100%" style="max-width:760px;font-family:Manrope,sans-serif">
+          <!-- Labels -->
+          <text x="40" y="30" font-size="13" font-weight="700" fill="#1a2b22">Tokens</text>
+          <text x="220" y="30" font-size="13" font-weight="700" fill="#0a8f6a">K Cache</text>
+          <text x="430" y="30" font-size="13" font-weight="700" fill="#9b59b6">V Cache</text>
+          <text x="630" y="30" font-size="13" font-weight="700" fill="#e67e22">Query</text>
+
+          <!-- Prompt tokens (static) -->
+          <g id="kv-tokens-group"></g>
+
+          <!-- K cache rectangles -->
+          <g id="kv-kcache-group"></g>
+
+          <!-- V cache rectangles -->
+          <g id="kv-vcache-group"></g>
+
+          <!-- Query indicator -->
+          <g id="kv-query-group"></g>
+
+          <!-- Phase label -->
+          <text id="kv-phase-label" x="380" y="405" text-anchor="middle" font-size="13" font-weight="700" fill="#555"></text>
+        </svg>
+
+        <div class="anim-controls">
+          <button class="anim-btn" id="kv-prev-btn" disabled>&#9664; Prev</button>
+          <button class="anim-btn" id="kv-next-btn">Next Step &#9654;</button>
+          <button class="anim-btn" id="kv-reset-btn">Reset</button>
+          <span class="anim-output" id="kv-step-label">Step 0 / 8 &mdash; Ready</span>
+        </div>
+      </div>
+
+      <script>
+      (function() {
+        const tokens = ["The", "cat", "sat", "on", "the", "mat", ".", "and"];
+        const promptLen = 3; // "The cat sat" = prefill
+        const totalSteps = 8; // 3 prefill + 5 decode
+        let step = 0;
+
+        const svg        = document.getElementById("kv-anim-svg");
+        const tokG       = document.getElementById("kv-tokens-group");
+        const kcG        = document.getElementById("kv-kcache-group");
+        const vcG        = document.getElementById("kv-vcache-group");
+        const qG         = document.getElementById("kv-query-group");
+        const phaseLabel = document.getElementById("kv-phase-label");
+        const stepLabel  = document.getElementById("kv-step-label");
+        const prevBtn    = document.getElementById("kv-prev-btn");
+        const nextBtn    = document.getElementById("kv-next-btn");
+        const resetBtn   = document.getElementById("kv-reset-btn");
+
+        const ROW_H = 34, START_Y = 50, COL_TOK = 20, COL_K = 180, COL_V = 390, COL_Q = 610;
+        const CACHE_W = 160, TOK_W = 100, Q_W = 100;
+
+        function clearGroup(g) { while (g.firstChild) g.removeChild(g.firstChild); }
+
+        function addRect(group, x, y, w, h, fill, opacity) {
+          const r = document.createElementNS("http://www.w3.org/2000/svg","rect");
+          r.setAttribute("x", x); r.setAttribute("y", y);
+          r.setAttribute("width", w); r.setAttribute("height", h);
+          r.setAttribute("rx", "5"); r.setAttribute("fill", fill);
+          r.setAttribute("opacity", opacity || "1");
+          group.appendChild(r);
+          return r;
+        }
+
+        function addText(group, x, y, text, fill, size) {
+          const t = document.createElementNS("http://www.w3.org/2000/svg","text");
+          t.setAttribute("x", x); t.setAttribute("y", y);
+          t.setAttribute("font-size", size || "12"); t.setAttribute("fill", fill || "#1a2b22");
+          t.textContent = text;
+          group.appendChild(t);
+          return t;
+        }
+
+        function render() {
+          clearGroup(tokG); clearGroup(kcG); clearGroup(vcG); clearGroup(qG);
+
+          let nTokens, isPrefill;
+          if (step === 0) {
+            nTokens = 0; isPrefill = true;
+          } else if (step <= promptLen) {
+            nTokens = promptLen; isPrefill = true;
+          } else {
+            nTokens = promptLen + (step - promptLen);
+            isPrefill = false;
+          }
+
+          // Draw tokens
+          for (let i = 0; i < nTokens && i < tokens.length; i++) {
+            const y = START_Y + i * ROW_H;
+            const isNew = isPrefill ? (step >= 1 && i < promptLen) :
+                          (i === nTokens - 1);
+            const fill = isNew && !isPrefill ? "#ffeaa7" : "#e8f5e9";
+            const border = isNew && !isPrefill ? "#e67e22" : "#0a8f6a";
+            addRect(tokG, COL_TOK, y, TOK_W, ROW_H - 4, fill, "0.9");
+            addRect(tokG, COL_TOK, y, 3, ROW_H - 4, border, "1");
+            addText(tokG, COL_TOK + 12, y + 21, tokens[i], "#1a2b22", "12");
+          }
+
+          // Draw K cache
+          const cacheLen = nTokens;
+          for (let i = 0; i < cacheLen; i++) {
+            const y = START_Y + i * ROW_H;
+            const isNew = isPrefill ? true : (i === cacheLen - 1);
+            const op = isNew ? "0.95" : "0.55";
+            addRect(kcG, COL_K, y, CACHE_W, ROW_H - 4, "#0a8f6a", op);
+            addText(kcG, COL_K + 8, y + 21, "K_" + (i+1) + " [1×d_k]", "#fff", "11");
+          }
+
+          // Draw V cache
+          for (let i = 0; i < cacheLen; i++) {
+            const y = START_Y + i * ROW_H;
+            const isNew = isPrefill ? true : (i === cacheLen - 1);
+            const op = isNew ? "0.95" : "0.55";
+            addRect(vcG, COL_V, y, CACHE_W, ROW_H - 4, "#9b59b6", op);
+            addText(vcG, COL_V + 8, y + 21, "V_" + (i+1) + " [1×d_v]", "#fff", "11");
+          }
+
+          // Draw query
+          if (step >= 1) {
+            let qIdx;
+            if (isPrefill) {
+              // During prefill, show query for all prompt tokens
+              for (let i = 0; i < promptLen; i++) {
+                const y = START_Y + i * ROW_H;
+                addRect(qG, COL_Q, y, Q_W, ROW_H - 4, "#e67e22", "0.9");
+                addText(qG, COL_Q + 8, y + 21, "Q_" + (i+1), "#fff", "11");
+              }
+            } else {
+              qIdx = nTokens - 1;
+              const y = START_Y + qIdx * ROW_H;
+              addRect(qG, COL_Q, y, Q_W, ROW_H - 4, "#e67e22", "0.95");
+              addText(qG, COL_Q + 8, y + 21, "Q_" + (qIdx+1), "#fff", "11");
+            }
+          }
+
+          // Phase label
+          if (step === 0) {
+            phaseLabel.textContent = "Press Next Step to begin";
+          } else if (step <= promptLen) {
+            phaseLabel.textContent = "PREFILL — processing prompt (" + promptLen + " tokens in parallel)";
+          } else {
+            phaseLabel.textContent = "DECODE step " + (step - promptLen) + " — new token \"" + tokens[nTokens-1] + "\" → cache grows to " + nTokens + " rows";
+          }
+
+          stepLabel.textContent = "Step " + step + " / " + totalSteps +
+            (step === 0 ? " — Ready" : step <= promptLen ? " — Prefill" : " — Decode");
+          prevBtn.disabled = (step === 0);
+          nextBtn.disabled = (step === totalSteps);
+        }
+
+        nextBtn.addEventListener("click", function() { if (step < totalSteps) { step++; render(); }});
+        prevBtn.addEventListener("click", function() { if (step > 0) { step--; render(); }});
+        resetBtn.addEventListener("click", function() { step = 0; render(); });
+
+        render();
+      })();
+      </script>
+
+      <p>
+        <strong>What to notice:</strong> During prefill (step 1), all three prompt tokens
+        fill the cache at once and all three queries are present. During decode (steps 2&ndash;8),
+        only a <em>single</em> new query appears (orange highlight) while the cache grows by
+        exactly one row per step. The query always attends to the <em>entire</em> cache.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 6                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="memory-analysis">6 &middot; Memory Analysis</h2>
+
+      <p>
+        The KV cache can become the dominant memory consumer during inference, especially
+        for long sequences or large models. Let&rsquo;s derive the formula and compute
+        concrete numbers.
+      </p>
+
+      <h3>Formula</h3>
+      <p>
+        For a single sequence, the total KV cache memory is:
+      </p>
+
+      <div class="math-block">
+KV_memory = 2 &times; L &times; H &times; S &times; d_k &times; B_dtype
+
+where:
+  2       = one tensor for K, one for V
+  L       = number of transformer layers
+  H       = number of attention heads
+  S       = current sequence length (grows during generation)
+  d_k     = dimension per head = d_model / H
+  B_dtype = bytes per element (2 for FP16/BF16, 4 for FP32)
+      </div>
+
+      <p>
+        This simplifies to:
+      </p>
+
+      <div class="math-block">
+KV_memory = 2 &times; L &times; d_model &times; S &times; B_dtype
+
+(since H &times; d_k = d_model)
+      </div>
+
+      <p>
+        Note that the number of heads <em>cancels out</em>&mdash;it&rsquo;s the total
+        model dimension that matters (at least for standard MHA; MQA and GQA change this,
+        as we&rsquo;ll see later).
+      </p>
+
+      <h3>Concrete Examples</h3>
+
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Layers (L)</th>
+            <th>d_model</th>
+            <th>Heads (H)</th>
+            <th>d_k</th>
+            <th>Max Seq Len</th>
+            <th>KV Cache (FP16, 1 seq)</th>
+            <th>KV Cache (FP16, batch=32)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>GPT-2 Small</strong></td>
+            <td>12</td>
+            <td>768</td>
+            <td>12</td>
+            <td>64</td>
+            <td>1024</td>
+            <td>~37.7 MB</td>
+            <td>~1.2 GB</td>
+          </tr>
+          <tr>
+            <td><strong>GPT-2 XL</strong></td>
+            <td>48</td>
+            <td>1600</td>
+            <td>25</td>
+            <td>64</td>
+            <td>1024</td>
+            <td>~314 MB</td>
+            <td>~9.8 GB</td>
+          </tr>
+          <tr>
+            <td><strong>LLaMA-7B</strong></td>
+            <td>32</td>
+            <td>4096</td>
+            <td>32</td>
+            <td>128</td>
+            <td>4096</td>
+            <td>~2.1 GB</td>
+            <td>~67.1 GB</td>
+          </tr>
+          <tr>
+            <td><strong>LLaMA-13B</strong></td>
+            <td>40</td>
+            <td>5120</td>
+            <td>40</td>
+            <td>128</td>
+            <td>4096</td>
+            <td>~3.3 GB</td>
+            <td>~104 GB</td>
+          </tr>
+          <tr>
+            <td><strong>LLaMA-70B</strong></td>
+            <td>80</td>
+            <td>8192</td>
+            <td>64</td>
+            <td>128</td>
+            <td>4096</td>
+            <td>~10.5 GB</td>
+            <td>~335 GB</td>
+          </tr>
+          <tr>
+            <td><strong>LLaMA-70B (GQA, 8 KV heads)</strong></td>
+            <td>80</td>
+            <td>8192</td>
+            <td>64 (8 KV)</td>
+            <td>128</td>
+            <td>4096</td>
+            <td>~1.3 GB</td>
+            <td>~41.9 GB</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Memory dominates at scale:</strong> For LLaMA-70B with a batch of 32
+        sequences, the KV cache alone requires ~335 GB of GPU memory&mdash;more than
+        the model weights themselves (~140 GB in FP16). This is why KV cache management
+        (paged attention, quantisation) is so critical in production systems.
+      </div>
+
+      <h3>Worked Example: LLaMA-7B</h3>
+      <p>Let&rsquo;s trace through the calculation for LLaMA-7B at max sequence length:</p>
+      <div class="math-block">
+KV_memory = 2 &times; 32 &times; 4096 &times; 4096 &times; 2 bytes
+          = 2 &times; 32 &times; 4096 &times; 4096 &times; 2
+          = 2,147,483,648 bytes
+          = 2.0 GB (per sequence)
+      </div>
+      <p>
+        With a batch of 8 concurrent requests, that is <strong>16 GB</strong> just for the
+        cache&mdash;consuming most of an A100-40GB&rsquo;s memory after the model weights
+        are loaded (~14 GB in FP16). This is the fundamental tension that drives all the
+        optimisation techniques in Section 10.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 7                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="memory-compute-tradeoff">7 &middot; Memory-Compute Tradeoff</h2>
+
+      <p>
+        KV caching is a textbook <strong>space-time tradeoff</strong>: we spend memory to
+        save computation. Let&rsquo;s quantify the savings precisely.
+      </p>
+
+      <h3>Per-Token Compute Cost</h3>
+
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>Operation</th>
+            <th>Without KV Cache</th>
+            <th>With KV Cache</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Projection (Q, K, V) at step t</td>
+            <td>O(t &middot; d²) — project all t tokens</td>
+            <td>O(d²) — project 1 token</td>
+          </tr>
+          <tr>
+            <td>Attention score computation at step t</td>
+            <td>O(t² &middot; d) — full t&times;t attention</td>
+            <td>O(t &middot; d) — 1&times;t attention</td>
+          </tr>
+          <tr>
+            <td><strong>Total per step</strong></td>
+            <td><strong>O(t &middot; d² + t² &middot; d)</strong></td>
+            <td><strong>O(d² + t &middot; d)</strong></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Total Generation Cost (n tokens)</h3>
+      <p>
+        Summing the per-step cost over <code>n</code> generation steps:
+      </p>
+
+      <div class="math-block">
+Without cache:
+  &sum;_{t=1}^{n} O(t &middot; d² + t² &middot; d)  =  O(n² &middot; d² + n³ &middot; d)
+
+With cache:
+  &sum;_{t=1}^{n} O(d² + t &middot; d)  =  O(n &middot; d² + n² &middot; d)
+      </div>
+
+      <p>
+        The dominant terms shift from <code>O(n³)</code> (cubic!) without cache to
+        <code>O(n²)</code> (quadratic) with cache. For a 2048-token generation, this is
+        roughly a <strong>1000&times;</strong> reduction in compute for the attention
+        component alone.
+      </p>
+
+      <h3>What We Pay</h3>
+      <ul>
+        <li><strong>Memory:</strong> <code>O(n &middot; L &middot; d)</code> per sequence in the batch.
+            This grows linearly with sequence length.</li>
+        <li><strong>Memory bandwidth:</strong> Each decode step must read the entire cache
+            from GPU HBM, which becomes the bottleneck. For LLaMA-70B at sequence length
+            4096, that is ~10.5 GB read per step per sequence.</li>
+        <li><strong>Cache management complexity:</strong> Memory must be allocated, tracked,
+            and freed efficiently, especially when serving many concurrent requests.</li>
+      </ul>
+
+      <p>
+        Despite these costs, the tradeoff is overwhelmingly favorable. No production
+        inference system operates without KV caching.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 8                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="implementation">8 &middot; Implementation</h2>
+
+      <p>
+        Below is a PyTorch-style pseudocode implementation showing how KV caching integrates
+        into a transformer decoder layer. The key change is a <code>cache</code> dictionary
+        that persists across generation steps.
+      </p>
+
+      <div class="pseudo-code"><span class="cm"># ─── KV-Cached Multi-Head Attention (PyTorch pseudocode) ───</span>
+
+<span class="kw">class</span> <span class="fn">CachedMultiHeadAttention</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, n_heads):
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+
+        self.W_Q = nn.Linear(d_model, d_model)
+        self.W_K = nn.Linear(d_model, d_model)
+        self.W_V = nn.Linear(d_model, d_model)
+        self.W_O = nn.Linear(d_model, d_model)
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x, cache=<span class="kw">None</span>, use_cache=<span class="kw">True</span>):
+        <span class="cm"># x: (batch, seq_len, d_model)</span>
+        <span class="cm"># During decode: seq_len = 1</span>
+        <span class="cm"># During prefill: seq_len = prompt_length</span>
+
+        B, S, _ = x.shape
+
+        <span class="cm"># Step 1: Project the new token(s)</span>
+        Q = self.W_Q(x).view(B, S, self.n_heads, self.d_k).transpose(1,2)
+        K = self.W_K(x).view(B, S, self.n_heads, self.d_k).transpose(1,2)
+        V = self.W_V(x).view(B, S, self.n_heads, self.d_k).transpose(1,2)
+        <span class="cm"># Q, K, V: (batch, n_heads, seq_len, d_k)</span>
+
+        <span class="cm"># Step 2: Update the cache</span>
+        <span class="kw">if</span> cache <span class="kw">is not None</span>:
+            K_prev, V_prev = cache          <span class="cm"># (batch, n_heads, prev_len, d_k)</span>
+            K = torch.cat([K_prev, K], dim=2) <span class="cm"># → (batch, n_heads, prev_len + S, d_k)</span>
+            V = torch.cat([V_prev, V], dim=2) <span class="cm"># → (batch, n_heads, prev_len + S, d_k)</span>
+
+        <span class="cm"># Step 3: Store updated cache for next step</span>
+        new_cache = (K, V) <span class="kw">if</span> use_cache <span class="kw">else None</span>
+
+        <span class="cm"># Step 4: Compute attention</span>
+        <span class="cm"># Q: (batch, n_heads, S, d_k) — S=1 during decode</span>
+        <span class="cm"># K: (batch, n_heads, T, d_k) — T = total seq len so far</span>
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_k ** 0.5)
+
+        <span class="cm"># Apply causal mask (only needed during prefill)</span>
+        <span class="kw">if</span> S > 1:
+            mask = torch.triu(torch.ones(S, K.size(2)), diagonal=K.size(2)-S+1)
+            scores = scores.masked_fill(mask == 1, float(<span class="cm">'-inf'</span>))
+
+        attn = torch.softmax(scores, dim=-1)       <span class="cm"># (batch, n_heads, S, T)</span>
+        out  = torch.matmul(attn, V)                <span class="cm"># (batch, n_heads, S, d_k)</span>
+
+        <span class="cm"># Step 5: Concatenate heads and project</span>
+        out = out.transpose(1,2).contiguous().view(B, S, self.d_model)
+        out = self.W_O(out)
+
+        <span class="kw">return</span> out, new_cache
+
+
+<span class="cm"># ─── Generation Loop ───</span>
+
+<span class="kw">def</span> <span class="fn">generate</span>(model, prompt_ids, max_new_tokens):
+    <span class="cm"># Phase 1: Prefill — process entire prompt</span>
+    x = model.embed(prompt_ids)                  <span class="cm"># (1, P, d_model)</span>
+    caches = [<span class="kw">None</span>] * model.n_layers
+
+    <span class="kw">for</span> i, layer <span class="kw">in</span> enumerate(model.layers):
+        x, caches[i] = layer(x, cache=<span class="kw">None</span>)      <span class="cm"># prefill: no prior cache</span>
+
+    next_token = sample(model.lm_head(x[:, -1, :]))
+
+    <span class="cm"># Phase 2: Decode — one token at a time</span>
+    generated = [next_token]
+
+    <span class="kw">for</span> _ <span class="kw">in</span> range(max_new_tokens - 1):
+        x = model.embed(next_token.unsqueeze(1))  <span class="cm"># (1, 1, d_model)</span>
+
+        <span class="kw">for</span> i, layer <span class="kw">in</span> enumerate(model.layers):
+            x, caches[i] = layer(x, cache=caches[i])  <span class="cm"># use & update cache</span>
+
+        next_token = sample(model.lm_head(x[:, -1, :]))
+        generated.append(next_token)
+
+    <span class="kw">return</span> generated</div>
+
+      <p>
+        <strong>Key details:</strong>
+      </p>
+      <ul>
+        <li>During <strong>prefill</strong>, <code>cache=None</code> is passed: K and V
+            are built from scratch for the full prompt and returned as the initial cache.</li>
+        <li>During <strong>decode</strong>, each layer receives its cache from the previous
+            step, concatenates the new K/V, and returns the updated cache.</li>
+        <li>The <code>torch.cat</code> on every step is actually wasteful in production.
+            Real implementations pre-allocate a buffer and write into a slot, avoiding
+            repeated allocation. vLLM&rsquo;s paged attention takes this further with
+            virtual memory-style block management.</li>
+      </ul>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 9                                                          -->
+      <!-- ================================================================== -->
+      <h2 id="multi-layer-cache">9 &middot; Multi-Layer Cache</h2>
+
+      <p>
+        A transformer with <code>L</code> layers requires a separate KV cache for each layer.
+        The keys and values at layer 3 depend on the output of layers 1 and 2, so they are
+        distinct from those at layer 1. The full cache data structure is:
+      </p>
+
+      <div class="math-block">
+cache = {
+  layer_0: (K_cache_0, V_cache_0),    # shapes: (batch, n_heads, seq_len, d_k)
+  layer_1: (K_cache_1, V_cache_1),
+  &vellip;
+  layer_{L-1}: (K_cache_{L-1}, V_cache_{L-1})
+}
+      </div>
+
+      <p>
+        In frameworks like Hugging Face Transformers, this is represented as a tuple of tuples:
+      </p>
+
+      <div class="math-block">
+past_key_values = (
+  (K_0, V_0),    # layer 0
+  (K_1, V_1),    # layer 1
+  ...
+  (K_{L-1}, V_{L-1})  # layer L-1
+)
+      </div>
+
+      <h3>Memory Implication</h3>
+      <p>
+        The total cache memory scales linearly with the number of layers. This is why
+        the formula in Section 6 includes <code>L</code> as a multiplier. For a 80-layer
+        model like LLaMA-70B, the cache is 80&times; larger than for a single layer.
+      </p>
+
+      <h3>Execution Order</h3>
+      <p>
+        During a decode step, we process layers sequentially:
+      </p>
+      <ol>
+        <li><strong>Layer 0:</strong> Project the new token embedding → compute attention
+            using <code>cache[0]</code> → update <code>cache[0]</code> → pass output
+            through FFN → output <code>h_0</code></li>
+        <li><strong>Layer 1:</strong> Project <code>h_0</code> → compute attention using
+            <code>cache[1]</code> → update <code>cache[1]</code> → FFN → output
+            <code>h_1</code></li>
+        <li>… and so on through layer <code>L-1</code></li>
+      </ol>
+      <p>
+        Each layer reads <em>its own</em> cache slice and writes back to it. Layers cannot
+        be parallelized (each depends on the previous layer&rsquo;s output), but the
+        cache lookups at each layer are independent of other layers&rsquo; caches.
+      </p>
+
+      <div class="callout">
+        <strong>Implementation tip:</strong> When profiling memory, remember that the
+        KV cache is the <em>largest</em> dynamic allocation during inference. Model weights
+        are static. Activations (for a single token) are tiny. The cache is what grows
+        and what you need to manage carefully — especially when serving many concurrent
+        users with different sequence lengths.
+      </div>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 10                                                         -->
+      <!-- ================================================================== -->
+      <h2 id="optimization-techniques">10 &middot; KV Cache Optimization Techniques</h2>
+
+      <p>
+        Because the KV cache is the primary memory bottleneck in LLM serving, a rich
+        ecosystem of optimization techniques has emerged. Here are the most important ones.
+      </p>
+
+      <h3>10.1 Quantized KV Cache (INT8 / FP8)</h3>
+      <p>
+        Instead of storing cache entries in FP16 (2 bytes per element), we can quantize
+        them to INT8 (1 byte) or FP8 (1 byte), halving cache memory.
+      </p>
+      <ul>
+        <li><strong>Per-token quantization:</strong> Each <code>k_t</code> and <code>v_t</code>
+            vector is quantized independently with its own scale factor. This preserves
+            accuracy well because each token&rsquo;s magnitude can be captured by its scale.</li>
+        <li><strong>Per-channel quantization:</strong> Quantize along the head dimension.
+            Can be more efficient on hardware with native INT8 support.</li>
+        <li><strong>Impact:</strong> Reduces cache memory by ~2&times; with minimal quality
+            degradation (typically &lt;0.5% perplexity increase). NVIDIA&rsquo;s TensorRT-LLM
+            and vLLM both support INT8 KV caches.</li>
+      </ul>
+
+      <h3>10.2 KV Cache Compression</h3>
+      <p>
+        Instead of keeping every token&rsquo;s K/V, we can <em>evict</em> or <em>compress</em>
+        entries that are least important:
+      </p>
+      <ul>
+        <li><strong>H₂O (Heavy Hitter Oracle):</strong> Observes that a small fraction of
+            tokens (&ldquo;heavy hitters&rdquo;) accumulate most of the attention mass. Keeps
+            the heavy hitters plus the most recent tokens, evicting the rest.</li>
+        <li><strong>Scissorhands:</strong> Similar idea — identifies &ldquo;pivotal tokens&rdquo;
+            that are consistently important across layers and keeps only those.</li>
+        <li><strong>Token merging:</strong> Instead of eviction, merge similar tokens by
+            averaging their K/V representations.</li>
+        <li><strong>Impact:</strong> Can reduce cache to 20&ndash;50% of original size
+            while maintaining 95%+ of quality. Works best for long contexts where many
+            tokens in the middle contribute little to the output.</li>
+      </ul>
+
+      <h3>10.3 Sliding Window Cache (Local Attention)</h3>
+      <p>
+        Models like Mistral use a <strong>sliding window attention</strong> pattern where
+        each token only attends to the most recent <code>W</code> tokens (e.g., W = 4096).
+        This caps the KV cache at a fixed size regardless of total sequence length:
+      </p>
+      <div class="math-block">
+Cache size (sliding window) = 2 &times; L &times; d_model &times; W &times; B_dtype
+
+For Mistral-7B (W=4096):  ~2 GB regardless of total context
+      </div>
+      <p>
+        The model can still reason over longer contexts through information flowing across
+        layers (a token at position <code>P</code> in layer <code>l</code> can access position
+        <code>P-W</code> directly, but position <code>P-2W</code> indirectly through
+        representations computed at layer <code>l-1</code>).
+      </p>
+
+      <h3>10.4 Shared Prefix Caching (Prompt Caching)</h3>
+      <p>
+        In many applications, multiple requests share the same system prompt or prefix
+        (e.g., a chatbot&rsquo;s persona instructions). Instead of computing and storing
+        duplicate KV caches for the shared prefix, we compute it <strong>once</strong>
+        and share the cache across all requests:
+      </p>
+      <ul>
+        <li><strong>Prefix caching in vLLM:</strong> Automatically detects shared prefixes
+            across requests in a batch and reuses the KV cache for the common portion.</li>
+        <li><strong>RadixAttention (SGLang):</strong> Uses a radix tree to efficiently
+            match and reuse cached prefixes across requests, enabling sub-tree sharing.</li>
+        <li><strong>Impact:</strong> Eliminates redundant prefill computation for shared
+            prefixes. For a 2000-token system prompt shared by 100 requests, this saves
+            100&times; the prefill compute and memory for those tokens.</li>
+      </ul>
+
+      <div class="callout">
+        <strong>These techniques compose:</strong> You can combine quantized KV cache
+        (INT8) with paged attention for memory management, shared prefix caching for
+        common prompts, and GQA for reduced KV heads. Modern serving stacks like vLLM
+        apply several of these simultaneously.
+      </div>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 11                                                         -->
+      <!-- ================================================================== -->
+      <h2 id="connection-other-techniques">11 &middot; Connection to Other Techniques</h2>
+
+      <p>
+        KV caching doesn&rsquo;t exist in isolation. Several major architectural and
+        systems innovations are intimately connected to how we manage and reduce the
+        KV cache.
+      </p>
+
+      <h3>Multi-Query Attention (MQA)</h3>
+      <p>
+        Standard multi-head attention (MHA) has separate K and V projections for each head.
+        <strong>Multi-Query Attention</strong> (Shazeer 2019) uses a <em>single</em> K/V
+        head shared across all query heads:
+      </p>
+      <div class="math-block">
+MHA cache per layer:  2 &times; H &times; S &times; d_k     (H K/V heads)
+MQA cache per layer:  2 &times; 1 &times; S &times; d_k     (1 K/V head)
+
+Reduction factor:  H&times;  (e.g., 32&times; for LLaMA-7B)
+      </div>
+      <p>
+        MQA dramatically shrinks the cache but can hurt quality for very large models.
+        It is used in PaLM, Falcon, and StarCoder.
+      </p>
+
+      <h3>Grouped-Query Attention (GQA)</h3>
+      <p>
+        GQA (Ainslie et al. 2023) is the practical middle ground between MHA and MQA.
+        Instead of <code>H</code> KV heads (MHA) or 1 KV head (MQA), GQA uses
+        <code>G</code> KV head groups, where <code>1 &lt; G &lt; H</code>:
+      </p>
+      <div class="math-block">
+GQA cache per layer:  2 &times; G &times; S &times; d_k     (G KV head groups)
+
+LLaMA-2 70B: H=64 query heads, G=8 KV groups → 8&times; cache reduction
+      </div>
+      <p>
+        GQA preserves nearly all of MHA&rsquo;s quality while providing substantial cache
+        savings. It is the default in LLaMA-2 70B, LLaMA-3, Gemma, and most modern LLMs.
+      </p>
+
+      <h3>Paged Attention (vLLM)</h3>
+      <p>
+        Traditional KV cache implementations pre-allocate a contiguous buffer of
+        <code>max_seq_len</code> for every request, leading to massive internal
+        fragmentation (most requests don&rsquo;t use the full context window).
+      </p>
+      <p>
+        <strong>Paged Attention</strong> (Kwon et al. 2023, vLLM) applies virtual memory
+        concepts to the KV cache:
+      </p>
+      <ul>
+        <li>The cache is divided into fixed-size <strong>blocks</strong> (e.g., 16 tokens
+            per block).</li>
+        <li>Blocks are allocated on demand as the sequence grows, like pages in virtual
+            memory.</li>
+        <li>A <strong>block table</strong> maps logical positions to physical memory locations.</li>
+        <li>Blocks can be non-contiguous in physical memory, eliminating fragmentation.</li>
+      </ul>
+      <p>
+        This increases effective GPU memory utilization from ~50% to ~95%, allowing
+        significantly higher batch sizes and throughput. Paged attention has become the
+        standard approach in production LLM serving.
+      </p>
+
+      <h3>Flash Attention</h3>
+      <p>
+        While Flash Attention (Dao et al. 2022) is primarily a training optimization
+        (reducing memory via tiling and avoiding materializing the full attention matrix),
+        it also applies to the decode phase with KV caching. Flash Decoding optimizes the
+        case where a single query attends to a long KV cache by parallelizing across
+        the key/value sequence dimension, improving GPU utilization during the
+        memory-bandwidth-bound decode phase.
+      </p>
+
+      <h3>Speculative Decoding</h3>
+      <p>
+        Speculative decoding uses a small &ldquo;draft&rdquo; model to propose multiple
+        tokens at once, which the large model then verifies in parallel. The KV cache
+        plays a crucial role: if the large model rejects a token, the cache must be
+        &ldquo;rolled back&rdquo; to the last accepted position. Efficient cache management
+        (especially with paged attention) makes this rollback cheap.
+      </p>
+
+      <!-- ================================================================== -->
+      <!--  SECTION 12                                                         -->
+      <!-- ================================================================== -->
+      <h2 id="summary">12 &middot; Summary</h2>
+
+      <p>
+        KV caching is one of the most important practical techniques in transformer inference.
+        Let&rsquo;s recap the key points:
+      </p>
+
+      <div class="step-card" data-step="Core Idea">
+        <p>
+          During autoregressive generation, the Key and Value projections for previous tokens
+          never change. Store them in a cache and only compute K/V for the new token at
+          each step.
+        </p>
+      </div>
+
+      <div class="step-card" data-step="Two Phases">
+        <p>
+          <strong>Prefill:</strong> Process the full prompt in parallel (compute-bound),
+          creating the initial cache.<br>
+          <strong>Decode:</strong> Generate one token at a time using the cache
+          (memory-bandwidth-bound).
+        </p>
+      </div>
+
+      <div class="step-card" data-step="Savings">
+        <p>
+          Total generation compute drops from <code>O(n³)</code> to <code>O(n²)</code>.
+          Per-step projection work drops from <code>O(t)</code> to <code>O(1)</code>.
+          The cost is <code>O(n · L · d)</code> memory for the cache.
+        </p>
+      </div>
+
+      <div class="step-card" data-step="Memory Challenge">
+        <p>
+          For large models, the KV cache can exceed the model weights in memory. LLaMA-70B
+          at batch size 32 requires ~335 GB of cache in FP16. This drives optimization
+          techniques: quantization (INT8), compression, sliding windows, prefix sharing,
+          and paged attention.
+        </p>
+      </div>
+
+      <div class="step-card" data-step="Architecture Connection">
+        <p>
+          MQA and GQA reduce the number of KV heads, directly shrinking the cache by up to
+          H&times;. Paged attention eliminates memory fragmentation. These techniques compose
+          and are used together in modern serving stacks.
+        </p>
+      </div>
+
+      <p>
+        KV caching transforms autoregressive generation from a theoretical curiosity into
+        a practical reality. Without it, the language models we interact with daily would
+        be orders of magnitude slower. Understanding it deeply — the math, the memory
+        implications, and the optimization landscape — is essential for anyone working on
+        LLM inference at scale.
+      </p>
+
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
