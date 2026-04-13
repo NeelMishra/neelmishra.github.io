@@ -919,6 +919,7 @@ var BLOG_TREE = [
                       { title: 'SingleHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/single-head-attention.html' },
                       { title: 'MultiHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/multi-head-attention.html' },
                       { title: 'FeedForward', file: 'ml/transformers/from-scratch/cpp/building-blocks/feed-forward.html' },
+                      { title: 'Dropout', file: 'ml/transformers/from-scratch/cpp/building-blocks/dropout.html' },
                       { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
                       { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
                       { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
