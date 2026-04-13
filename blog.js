@@ -920,6 +920,7 @@ var BLOG_TREE = [
                       { title: 'MultiHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/multi-head-attention.html' },
                       { title: 'FeedForward', file: 'ml/transformers/from-scratch/cpp/building-blocks/feed-forward.html' },
                       { title: 'Dropout', file: 'ml/transformers/from-scratch/cpp/building-blocks/dropout.html' },
+                      { title: 'LayerNorm', file: 'ml/transformers/from-scratch/cpp/building-blocks/layer-norm.html' },
                       { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
                       { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
                       { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
