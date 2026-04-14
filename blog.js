@@ -925,6 +925,17 @@ var BLOG_TREE = [
                       { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
                       { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
                     ]
+                  },
+                  {
+                    name: 'training',
+                    label: 'Training Pipeline',
+                    children: [
+                      { title: 'BPE Tokenizer', file: 'ml/transformers/from-scratch/cpp/training/bpe-tokenizer.html' },
+                      { title: 'DataLoader', file: 'ml/transformers/from-scratch/cpp/training/dataloader.html' },
+                      { title: 'Cross-Entropy Loss', file: 'ml/transformers/from-scratch/cpp/training/loss-function.html' },
+                      { title: 'Training Loop', file: 'ml/transformers/from-scratch/cpp/training/training-loop.html' },
+                      { title: 'Text Generation', file: 'ml/transformers/from-scratch/cpp/training/text-generation.html' }
+                    ]
                   }
                 ]
               },
