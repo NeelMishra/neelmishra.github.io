@@ -575,6 +575,16 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'digit-dp',
+        label: 'Digit DP',
+        children: [
+          { title: 'Overview', file: 'dsa/digit-dp/index.html', links: ['dsa/digit-dp/foundations.html'] },
+          { title: 'Foundations: Template & Tight Flag', file: 'dsa/digit-dp/foundations.html', links: ['dsa/digit-dp/index.html', 'dsa/digit-dp/classic-problems.html'] },
+          { title: 'Classic Problems', file: 'dsa/digit-dp/classic-problems.html', links: ['dsa/digit-dp/foundations.html', 'dsa/digit-dp/advanced.html'] },
+          { title: 'Advanced Patterns', file: 'dsa/digit-dp/advanced.html', links: ['dsa/digit-dp/classic-problems.html'] }
+        ]
+      },
+      {
         name: 'graphs',
         label: 'Graphs',
         children: [
@@ -876,6 +886,25 @@ var BLOG_TREE = [
             ]
           },
           {
+            name: 'attention-variants',
+            label: 'Attention Variants',
+            children: [
+              { title: 'Self-Attention', file: 'ml/transformers/building-blocks/self-attention.html' },
+              { title: 'Softmax Attention', file: 'ml/transformers/building-blocks/softmax-attention.html' },
+              { title: 'Causal Attention', file: 'ml/transformers/building-blocks/causal-attention.html' },
+              { title: 'Cross-Attention', file: 'ml/transformers/building-blocks/cross-attention.html' },
+              { title: 'Sliding Window Attention', file: 'ml/transformers/building-blocks/sliding-window-attention.html' },
+              { title: 'Global Attention', file: 'ml/transformers/building-blocks/global-attention.html' },
+              { title: 'Linear Attention', file: 'ml/transformers/building-blocks/linear-attention.html' },
+              { title: 'Flash Attention', file: 'ml/transformers/building-blocks/flash-attention.html' },
+              { title: 'Multi-Head Attention (MHA)', file: 'ml/transformers/building-blocks/mha.html' },
+              { title: 'Multi-Query Attention (MQA)', file: 'ml/transformers/building-blocks/mqa.html' },
+              { title: 'Grouped-Query Attention (GQA)', file: 'ml/transformers/building-blocks/gqa.html' },
+              { title: 'Multi-Head Latent Attention (MLA)', file: 'ml/transformers/building-blocks/mla.html' },
+              { title: 'Interleaved Head Attention (IHA)', file: 'ml/transformers/building-blocks/iha.html' }
+            ]
+          },
+          {
             name: 'architecture',
             label: 'Architecture',
             children: [
@@ -924,6 +953,25 @@ var BLOG_TREE = [
                       { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
                       { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
                       { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
+                    ]
+                  },
+                  {
+                    name: 'attention-variants',
+                    label: 'Attention Variants (C++)',
+                    children: [
+                      { title: 'SelfAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/self-attention.html' },
+                      { title: 'SoftmaxAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/softmax-attention.html' },
+                      { title: 'CausalAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/causal-attention.html' },
+                      { title: 'CrossAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/cross-attention.html' },
+                      { title: 'SlidingWindowAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/sliding-window-attention.html' },
+                      { title: 'GlobalAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/global-attention.html' },
+                      { title: 'LinearAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/linear-attention.html' },
+                      { title: 'FlashAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/flash-attention.html' },
+                      { title: 'MHA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mha.html' },
+                      { title: 'MQA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mqa.html' },
+                      { title: 'GQA', file: 'ml/transformers/from-scratch/cpp/building-blocks/gqa.html' },
+                      { title: 'MLA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mla.html' },
+                      { title: 'IHA', file: 'ml/transformers/from-scratch/cpp/building-blocks/iha.html' }
                     ]
                   },
                   {

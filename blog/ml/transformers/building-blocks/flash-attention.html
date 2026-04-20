@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Flash Attention: eliminating the IO bottleneck in attention via tiling and online softmax. 2–4x speedup, 10–20x memory reduction for long sequences.">
+  <title>Flash Attention: IO-Aware Tiling and Online Softmax | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a href="../../../../blog.html" class="active">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">ML &middot; Transformers &middot; Attention Variants</a><span>&middot; Part 8 of 13</span></div>
+
+      <h1>Flash Attention: Accelerating Attention via IO-Aware Tiling</h1>
+      <p class="post-meta">January 2025 &middot; 12 min read</p>
+
+      <p>Standard scaled-dot-product attention computes $\mathrm{Softmax}(QK^T / \sqrt{d_k})V$. The math is simple; the implementation nightmare is memory I/O. For long sequences, the intermediate matrices $QK^T$ (shape $n \times n$, cost $O(n^2)$ memory and bandwidth) dominate wall-clock time. Flash Attention (Dao et al., 2022) rewires the computation to do most work in fast SRAM and minimizes traffic to slow HBM (high-bandwidth memory). The result: 2–4× speedup and 10–20× memory reduction on long sequences, with identical outputs.</p>
+
+      <h2 id="the-io-problem">The IO Problem: Why Standard Attention Is Bandwidth-Bound</h2>
+      <p>Modern GPUs have fast compute (TFLOPS) but limited memory bandwidth (GB/s). Attention's roofline model:</p>
+      <ul>
+        <li>Compute: $O(n^2 d_k)$ FLOPs (two matrices $Q \in \mathbb{R}^{n \times d_k}$ and $K^T \in \mathbb{R}^{d_k \times n}$).</li>
+        <li>Memory access: $O(n^2)$ elements (the intermediate $QK^T$ logits matrix), plus reads of $Q, K, V$ and writes of output. Total: $\Theta(n^2)$ bytes.</li>
+        <li>Arithmetic intensity (compute/memory): $O(n^2 d_k) / \Theta(n^2 d_k) = O(1)$ — <em>constant</em>, not increasing with $n$.</li>
+      </ul>
+      <p>With constant intensity, wall time is dominated by memory bandwidth. On modern A100s with ~2 TB/s bandwidth and TFLOPS in the thousands, this is a <em>severe</em> limitation. For $n = 4096$ and $d_k = 128$, the $16$ MB intermediate matrix is ~100× larger than typical SRAM ($\sim 100$ KB per streaming multiprocessor). It spills to HBM, and we spend most time waiting.</p>
+
+      <h2 id="tiling-idea">The Tiling Idea: Work in SRAM-Sized Blocks</h2>
+      <p>The key insight: reshape the computation to operate on blocks that fit in SRAM (typically $\sim 16$–$32$ KB useful per SM). Load a block of $Q$ rows (say, $B_r$ rows), a block of $K$ columns ($B_c$ columns), compute the dot products, and write partial results back — all within SRAM. The intermediate $B_r \times B_c$ softmax matrix stays in cache; we never materialize the full $n \times n$ matrix.</p>
+      <p>Concretely, partition $Q$ into row blocks (each $B_r \times d_k$) and $K, V$ into column blocks (each $d_k \times B_c$). For each (row-block, col-block) pair:
+      <ol>
+        <li>Load $Q_i$ (shape $B_r \times d_k$) and $K_j$ (shape $d_k \times B_c$) into SRAM.</li>
+        <li>Compute $S_{ij} = Q_i K_j^T / \sqrt{d_k}$ (shape $B_r \times B_c$, stays in SRAM).</li>
+        <li>Compute softmax and weighted sum, updating running accumulators.</li>
+        <li>Write output block back to HBM.</li>
+        <li>Move to the next (col-block) — reuse $Q_i$, stream new $K_j, V_j$ in.</li>
+      </ol>
+      Memory transfers: $O(n d_k)$ for $Q, K, V$ (one pass each, amortized) rather than $O(n^2)$ for the logits matrix. A $16–20×$ reduction in memory traffic.</p>
+
+      <h2 id="online-softmax">The Online Softmax: Incremental Stability</h2>
+      <p>The challenge: softmax requires a global max (for numerical stability) and a denominator sum over the entire row. But in a tiled computation, we process the row in chunks. We can't compute the full $\mathrm{Softmax}(Q_i K_j^T)$ until we've seen all $K_j$.</p>
+      <p>Solution: <em>online softmax</em> with running statistics. Let $m_i^{(t)}$ be the running max of row $i$ through block $t$, and $\ell_i^{(t)}$ be the running denominator. After processing block $t+1$:</p>
+      $$m_i^{(t+1)} = \max(m_i^{(t)}, \max_k S_k^{(t+1)})$$
+      $$\ell_i^{(t+1)} = e^{m_i^{(t)} - m_i^{(t+1)}} \ell_i^{(t)} + \sum_k e^{S_k^{(t+1)} - m_i^{(t+1)}}$$
+      $$O_i^{(t+1)} = \frac{e^{m_i^{(t)} - m_i^{(t+1)}} O_i^{(t)} + e^{(S_i^{(t+1)} - m_i^{(t+1)}) \otimes \mathbf{1}^T} V_{(t+1)}}{{\ell_i^{(t+1)}}}$$
+      <p>These updates are <em>numerically equivalent</em> to the standard softmax computed all at once, but computed incrementally in SRAM, tile by tile. The rescaling $(m^{\text{old}} - m^{\text{new}})$ ensures underflow doesn't corrupt already-accumulated terms.</p>
+
+      <h2 id="complexity-comparison">Complexity and Memory Gains</h2>
+      <p>With tile size $B_r = B_c = B$:</p>
+      <table style="margin: 1.5rem 0; width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr style="background: #f2ebd9; border-bottom: 2px solid var(--line);">
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">Metric</th>
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">Standard Attention</th>
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">Flash Attention</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">FLOPs</td>
+            <td style="padding: 0.6rem;">$2n^2 d_k$</td>
+            <td style="padding: 0.6rem;">$2n^2 d_k$ (same)</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">Intermediate memory</td>
+            <td style="padding: 0.6rem;">$O(n^2)$ — full logits</td>
+            <td style="padding: 0.6rem;">$O(B^2)$ — one block</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">HBM I/O</td>
+            <td style="padding: 0.6rem;">$O(n^2 d_k)$</td>
+            <td style="padding: 0.6rem;">$O(n d_k + n^2 / B)$ (amortized)</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">Numerical output</td>
+            <td style="padding: 0.6rem;">$\mathrm{Softmax}(QK^T)V$</td>
+            <td style="padding: 0.6rem;">Identical (up to rounding)</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>Typical gains on A100 (40 GB/s bandwidth, ~100 KB SRAM per SM):</p>
+      <ul>
+        <li>$n = 1024$, $d_k = 64$: ~2.2× speedup.</li>
+        <li>$n = 4096$, $d_k = 128$: ~3.5× speedup.</li>
+        <li>Memory: standard needs $\sim 16$ MB for the logits; Flash needs $\sim 1.6$ MB total (SRAM blocks only).</li>
+      </ul>
+
+      <h2 id="flash2-3">FlashAttention-2 and -3</h2>
+      <p><strong>FlashAttention-2</strong> (Dao et al., 2023) refines the tiling strategy, reducing redundant softmax reductions per SM and overlapping I/O with compute. Further 1.5–2× speedup.</p>
+      <p><strong>FlashAttention-3</strong> (2024) adds even finer-grained kernel fusion and tensor-core optimizations. Marginal gains on newer hardware, but the principle remains: avoid the intermediate matrix, compute in tile-sized chunks, and keep hot data in SRAM.</p>
+
+      <h2 id="pseudocode">Implementation Sketch</h2>
+      <pre><code>def flash_attention(Q, K, V, block_size=128):
+    """
+    Q, K, V: (batch, n_heads, seq_len, d_k)
+    block_size: tile size (B_r = B_c)
+    """
+    N, d_k = Q.shape[-2:]
+    # Normalize by sqrt(d_k) at outset
+    Q = Q / math.sqrt(d_k)
+    
+    # Initialize running state
+    m = torch.full((N,), -inf)  # running max per row
+    ell = torch.zeros((N,))      # running softmax denominator
+    O = torch.zeros((N, d_k))    # running output
+    
+    # Tile loop
+    for block_start in range(0, N, block_size):
+        block_end = min(block_start + block_size, N)
+        Q_block = Q[block_start:block_end]  # (B_r, d_k)
+        
+        # Compute softmax row-by-row over K blocks
+        for kv_start in range(0, N, block_size):
+            kv_end = min(kv_start + block_size, N)
+            K_block = K[kv_start:kv_end]     # (B_c, d_k)
+            V_block = V[kv_start:kv_end]     # (B_c, d_k)
+            
+            # Scores: (B_r, B_c)
+            S = Q_block @ K_block.T
+            
+            # Online softmax update
+            m_new = torch.max(m[block_start:block_end, None], S.max(dim=1).values)
+            ell_rescale = torch.exp(m[block_start:block_end] - m_new)
+            ell[block_start:block_end] = (
+                ell_rescale * ell[block_start:block_end] +
+                torch.exp(S - m_new[:, None]).sum(dim=1)
+            )
+            m[block_start:block_end] = m_new
+            
+            # Update O: numerator
+            P = torch.exp(S - m_new[:, None])  # softmax (numerator only)
+            O_incr = P @ V_block
+            O[block_start:block_end] = (
+                (ell_rescale[:, None] * O[block_start:block_end]) + O_incr
+            ) / ell[block_start:block_end, None]
+    
+    return O</code></pre>
+
+      <h2 id="practical-impact">Practical Impact and Deployment</h2>
+      <p>Flash Attention powers the inference and training of nearly all modern LLMs. It's integrated into PyTorch's <code>torch.nn.functional.scaled_dot_product_attention</code> backend and is essential for long-context models (e.g., Claude's 100K context, LLaMA's extended contexts). On consumer hardware with limited bandwidth, the speedup is less dramatic but still substantial (2–3×). On enterprise GPUs (H100, B100), the gains are in parity with compute speedups.</p>
+
+      <div class="anim-container" id="flash-anim">
+        <h4>&#9654; Tiled Block Computation</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step through the tiling of Q (rows) and K/V (columns). Each tile processes a block of softmax scores, updating running (m, ℓ, O) state incrementally.</p>
+        <svg id="flash-svg" width="720" height="320" viewBox="0 0 720 320"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="flash-step">Step &rarr;</button>
+          <button class="anim-btn" id="flash-reset">Reset</button>
+          <span class="anim-output" id="flash-output"></span>
+        </div>
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="./linear-attention.html"><span>Previous</span><span>&#8592; Linear Attention</span></a>
+        <a class="next" href="./mha.html"><span>Next</span><span>Multi-Head Attention &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    function txt(s,a){var t=el('text',a);t.textContent=s;return t;}
+    function clr(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    var svg=document.getElementById('flash-svg'),out=document.getElementById('flash-output');
+    
+    // Visualize tiling: Q has 4 row blocks, K/V has 4 col blocks. Step through each (row, col) tile.
+    var n_blocks = 4;
+    var frames = [];
+    
+    function buildFrames(){
+      frames = [];
+      // Initial state
+      frames.push({step: 0, msg: 'Initialize: Q split into 4 row blocks, K/V into 4 col blocks.', state: null});
+      
+      var idx = 1;
+      for(var ri = 0; ri < n_blocks; ri++){
+        // For each row block, process all col blocks
+        for(var ci = 0; ci < n_blocks; ci++){
+          frames.push({
+            step: idx,
+            row: ri,
+            col: ci,
+            msg: 'Process tile (row='+ ri + ', col=' + ci + '): load Q[row_' + ri + '], K[col_' + ci + '], compute scores, update (m, ℓ, O).',
+            state: {row: ri, col: ci}
+          });
+          idx++;
+        }
+      }
+      frames.push({step: idx, msg: 'Complete: all blocks processed. O accumulated in SRAM.', state: 'done'});
+    }
+    
+    buildFrames();
+    var i = -1;
+    
+    function draw(f){
+      clr(svg);
+      
+      if(!f){
+        svg.appendChild(txt('Flash Attention Tiling', {x: '20', y: '28', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)'}));
+        svg.appendChild(txt('Q (rows)', {x: '20', y: '65', 'font-family': 'Syne,sans-serif', 'font-size': '12', 'font-weight': '600', fill: 'var(--ink)'}));
+        
+        // Draw Q row blocks (gray, unselected)
+        for(var ri = 0; ri < n_blocks; ri++){
+          var y = 80 + ri * 30;
+          svg.appendChild(el('rect', {x: '20', y: y, width: '100', height: '24', rx: '4', fill: '#f5f2ea', stroke: 'var(--line)', 'stroke-width': '1'}));
+          svg.appendChild(txt('Q_row_' + ri, {x: '70', y: y + 17, 'text-anchor': 'middle', 'font-family': 'Consolas,monospace', 'font-size': '11', fill: '#13201a'}));
+        }
+        
+        svg.appendChild(txt('K/V (cols)', {x: '160', y: '65', 'font-family': 'Syne,sans-serif', 'font-size': '12', 'font-weight': '600', fill: 'var(--ink)'}));
+        
+        // Draw K/V col blocks (gray)
+        for(var ci = 0; ci < n_blocks; ci++){
+          var x = 160 + ci * 35;
+          svg.appendChild(el('rect', {x: x, y: '80', width: '30', height: '150', rx: '4', fill: '#f5f2ea', stroke: 'var(--line)', 'stroke-width': '1'}));
+          svg.appendChild(txt('K_' + ci, {x: x + 15, y: '100', 'text-anchor': 'middle', 'font-family': 'Consolas,monospace', 'font-size': '9', fill: '#13201a'}));
+        }
+        
+        svg.appendChild(txt('Click Step to begin tiling.', {x: '20', y: '270', 'font-family': 'Manrope,sans-serif', 'font-size': '13', fill: 'var(--ink-muted)'}));
+        out.textContent = '';
+        return;
+      }
+      
+      if(f.state === 'done'){
+        svg.appendChild(txt('Flash Attention Tiling — Complete', {x: '20', y: '28', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)'}));
+        svg.appendChild(txt('All blocks processed. (m, ℓ, O) finalized.', {x: '20', y: '270', 'font-family': 'Manrope,sans-serif', 'font-size': '13', fill: 'var(--ink)'}));
+        out.textContent = 'done: ' + frames.length + ' / ' + frames.length;
+        return;
+      }
+      
+      svg.appendChild(txt('Flash Attention Tiling', {x: '20', y: '28', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)'}));
+      svg.appendChild(txt('Q (rows)', {x: '20', y: '65', 'font-family': 'Syne,sans-serif', 'font-size': '12', 'font-weight': '600', fill: 'var(--ink)'}));
+      
+      // Highlight current row block
+      for(var ri = 0; ri < n_blocks; ri++){
+        var y = 80 + ri * 30;
+        var isActive = f.state && ri === f.state.row;
+        var fill = isActive ? '#0a8f6a' : '#f5f2ea';
+        var fg = isActive ? '#fff' : '#13201a';
+        var sw = isActive ? '2' : '1';
+        svg.appendChild(el('rect', {x: '20', y: y, width: '100', height: '24', rx: '4', fill: fill, stroke: isActive ? '#078a5e' : 'var(--line)', 'stroke-width': sw}));
+        svg.appendChild(txt('Q_row_' + ri, {x: '70', y: y + 17, 'text-anchor': 'middle', 'font-family': 'Consolas,monospace', 'font-weight': isActive ? '700' : '400', 'font-size': '11', fill: fg}));
+      }
+      
+      svg.appendChild(txt('K/V (cols)', {x: '160', y: '65', 'font-family': 'Syne,sans-serif', 'font-size': '12', 'font-weight': '600', fill: 'var(--ink)'}));
+      
+      // Highlight current col block
+      for(var ci = 0; ci < n_blocks; ci++){
+        var x = 160 + ci * 35;
+        var isActive = f.state && ci === f.state.col;
+        var fill = isActive ? '#b04a3a' : '#f5f2ea';
+        var fg = isActive ? '#fff' : '#13201a';
+        var sw = isActive ? '2' : '1';
+        svg.appendChild(el('rect', {x: x, y: '80', width: '30', height: '150', rx: '4', fill: fill, stroke: isActive ? '#9a3a2b' : 'var(--line)', 'stroke-width': sw}));
+        svg.appendChild(txt('K_' + ci, {x: x + 15, y: '100', 'text-anchor': 'middle', 'font-family': 'Consolas,monospace', 'font-weight': isActive ? '700' : '400', 'font-size': '9', fill: fg}));
+      }
+      
+      svg.appendChild(txt(f.msg, {x: '20', y: '270', 'font-family': 'Manrope,sans-serif', 'font-size': '13', fill: 'var(--ink)'}));
+      
+      var progress = (f.step + 1) + ' / ' + frames.length;
+      out.textContent = 'step ' + progress;
+    }
+    
+    draw(null);
+    document.getElementById('flash-step').addEventListener('click', function(){
+      if(i >= frames.length - 1) return;
+      i++;
+      draw(frames[i]);
+    });
+    document.getElementById('flash-reset').addEventListener('click', function(){
+      i = -1;
+      draw(null);
+    });
+  })();
+  </script>
+</body>
+</html>

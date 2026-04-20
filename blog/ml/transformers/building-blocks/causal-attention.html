@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Causal masking in autoregressive models: why decoder-only models need triangular masks, the -inf trick, and how it enforces the no-lookahead constraint.">
+  <title>Causal-Attention | ML · Transformers · Attention Variants</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .anim-container { background:#fafbf9; border:1px solid var(--line); border-radius:8px; padding:1.2rem; margin:1.5rem 0; }
+    .anim-container h4 { margin:0 0 0.8rem; font-size:0.95rem; }
+    .anim-container svg { display:block; margin:0.8rem 0; background:white; border-radius:4px; }
+    .anim-controls { display:flex; gap:0.6rem; align-items:center; margin-top:0.8rem; }
+    .anim-btn { background:var(--ink); color:white; border:none; padding:0.4rem 0.8rem; border-radius:4px; font-size:0.85rem; cursor:pointer; }
+    .anim-btn:hover { background:var(--ink-muted); }
+    .anim-output { font-size:0.8rem; color:var(--ink-muted); margin-left:1rem; }
+    code { background:#f2ebd9; padding:0.2rem 0.4rem; border-radius:3px; font-family:Consolas,monospace; font-size:0.9rem; }
+    pre code { padding:1rem; display:block; background:#f5f2ea; border-radius:4px; overflow-x:auto; }
+    .callout { background:#fafbf9; border-left:4px solid #0a8f6a; padding:0.8rem 1rem; margin:1rem 0; border-radius:4px; }
+    table { border-collapse:collapse; width:100%; margin:1rem 0; }
+    th, td { border:1px solid var(--line); padding:0.6rem; text-align:left; }
+    th { background:#f2ebd9; font-weight:700; }
+  </style>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a href="../../../../blog.html" class="active">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">ML &middot; Transformers &middot; Attention Variants</a><span>&middot; Part 3 of 13</span></div>
+
+      <h1>Causal-Attention: The Autoregressive Mask</h1>
+      <p class="post-meta">January 2026 &middot; 10 min read</p>
+
+      <p>Decoder-only models (GPT, Llama) generate text token-by-token, left-to-right. They must never "look ahead" to tokens yet to be generated. Part 2 showed how softmax creates attention weights; this part adds a crucial constraint: the causal mask, which forces each token to attend only to its past (and itself).</p>
+
+      <h2 id="why-causal">Why Causality?</h2>
+      <p>During *autoregressive* generation, at inference time, the model generates tokens one by one. If training allowed the model to attend to future tokens, it would see answers to problems it hasn't solved yet—a form of cheating. At test time, those future tokens don't exist yet, so the model would suddenly fail.</p>
+
+      <p>The fix: apply a causal mask during training that mirrors the test-time constraint. The model learns that it cannot attend to tokens $j > i$ when computing output position $i$.</p>
+
+      <div class="callout"><strong>Generative vs. Bidirectional:</strong> Encoder models (BERT) use <em>full</em> self-attention: each position attends to all others. Decoder/generative models (GPT) use <em>causal</em> self-attention: only to the past. This is not a quirk—it's a requirement for autoregressive generation to work correctly.</div>
+
+      <h2 id="the-mask">The Causal Mask Mechanism</h2>
+      <p>Before applying softmax, we modify the attention scores:</p>
+      $$s'_{ij} = \begin{cases} s_{ij} & \text{if } j \leq i \\ -\infty & \text{if } j > i \end{cases}$$
+
+      <p>Then softmax proceeds normally:</p>
+      $$w_{ij} = \text{softmax}(s'_{ij})$$
+
+      <p>When $s'_{ij} = -\infty$, the exponential $e^{-\infty}$ is effectively 0. The softmax row renormalizes, and the masked position gets exactly 0 attention.</p>
+
+      <p>In code, the mask is a triangular matrix added before softmax:</p>
+      <pre><code>import torch
+import torch.nn.functional as F
+
+def apply_causal_mask(scores, mask_value=-1e9):
+    """
+    scores: (batch, n_heads, seq_len, seq_len)
+    Returns masked scores (future positions set to mask_value)
+    """
+    batch, heads, n, _ = scores.shape
+    # Create lower triangular mask (1 where j <= i, 0 where j > i)
+    causal_mask = torch.tril(torch.ones(n, n, device=scores.device))
+    # Expand and apply
+    mask = causal_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, n, n)
+    masked_scores = scores.masked_fill(mask == 0, mask_value)
+    attn_weights = F.softmax(masked_scores, dim=-1)
+    return attn_weights</code></pre>
+
+      <h2 id="matrix-shape">The Attention Matrix Shape</h2>
+      <p>In standard (non-causal) attention, the $n \times n$ matrix is unrestricted. In causal attention, it has a specific structure:</p>
+      <ul>
+        <li>Main diagonal and lower triangle: computed normally, then softmaxed.</li>
+        <li>Upper triangle: all zeros (after masking and softmax).</li>
+      </ul>
+
+      <p>This is efficient in one sense: you only need to compute $n(n+1)/2$ attention scores instead of $n^2$. In practice, most implementations still compute the full matrix then mask, accepting the wasted computation as a trade-off for simplicity.</p>
+
+      <h2 id="training-vs-inference">Training vs. Inference Dynamics</h2>
+      <p><strong>Training:</strong> Causal masking is applied. All $n$ positions are processed in one forward pass, each attending only to positions $\leq i$. This is efficient (parallel).</p>
+
+      <p><strong>Inference:</strong> Tokens are generated one at a time. Position 0 attends only to itself (weight 1.0). Position 1 attends to 0 and 1. Etc. In many implementations, the mask is implicit during inference because only past tokens exist in the KV cache.</p>
+
+      <h2 id="kv-cache">KV Cache and Causal Masking</h2>
+      <p>Modern generation uses a KV cache to avoid recomputing attention. At each step, we keep the full history of K and V, but only compute Q for the new token. The causal structure is automatic: new Q only attends to past K/V by construction.</p>
+
+      <div class="anim-container" id="causal-anim">
+        <h4>&#9654; Building the Causal Mask (8-token sequence)</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch as we build the mask step-by-step: zero out upper triangle, then softmax each row.</p>
+        <svg id="causal-svg" width="100%" height="420" viewBox="0 0 700 420"></svg>
+        <div id="causal-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:1.3rem"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="causal-step">Step &rarr;</button>
+          <button class="anim-btn" id="causal-reset">Reset</button>
+          <span class="anim-output" id="causal-output"></span>
+        </div>
+      </div>
+
+      <h2 id="inference-speed">Impact on Generation Speed</h2>
+      <table>
+        <tr><th>Setting</th><th>Compute</th><th>Memory</th><th>Notes</th></tr>
+        <tr><td>Training (batch, all-at-once)</td><td>$O(n^2)$ (full matrix)</td><td>$O(n^2)$ attention</td><td>Causal mask eliminates redundant computation</td></tr>
+        <tr><td>Inference (KV cache)</td><td>$O(n)$ per token</td><td>$O(n d)$ KV history</td><td>No full matrix ever built; positions handled sequentially</td></tr>
+      </table>
+
+      <h2 id="without-cache">Generation Without KV Cache (Naive)</h2>
+      <p>A model without KV caching recomputes attention for all past positions at each step. For a 1000-token sequence, the last token sees a $1000 \times 1000$ matrix, then you generate one more token and re-compute a $1001 \times 1001$ matrix. This is $O(n^3)$ total work—very slow. This is why caching is critical.</p>
+
+      <nav class="post-nav">
+        <a class="prev" href="softmax-attention.html"><span>Previous</span><span>&#8592; Softmax-Attention</span></a>
+        <a class="next" href="cross-attention.html"><span>Next</span><span>Cross-Attention &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    function txt(s,a){var t=el('text',a);t.textContent=s;return t;}
+    function rect(a){return el('rect',a);}
+    function clr(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    var svg=document.getElementById('causal-svg'), info=document.getElementById('causal-info'), out=document.getElementById('causal-output');
+    
+    var n=8;
+    var frames=[
+      {stage:'scores', msg:'Start: 8×8 attention scores (before mask). Full matrix computed.'},
+      {stage:'mask_row0', msg:'Row 0: Only position 0 is in the past (i=0). Mask columns 1–7 to -∞.', row:0},
+      {stage:'mask_row1', msg:'Row 1: Positions 0–1 are in past (i=1). Mask columns 2–7 to -∞.', row:1},
+      {stage:'mask_row2', msg:'Row 2: Keep 0–2, mask 3–7.', row:2},
+      {stage:'mask_row3', msg:'Row 3: Keep 0–3, mask 4–7.', row:3},
+      {stage:'mask_row4', msg:'Row 4: Keep 0–4, mask 5–7.', row:4},
+      {stage:'mask_row5', msg:'Row 5: Keep 0–5, mask 6–7.', row:5},
+      {stage:'mask_row6', msg:'Row 6: Keep 0–6, mask 7 only.', row:6},
+      {stage:'mask_row7', msg:'Row 7: All positions 0–7 in past. No masking. Full row softmaxed.', row:7},
+      {stage:'final', msg:'✓ Causal mask applied. Upper triangle is all zeros. Model cannot attend to future.'}
+    ];
+    
+    var i=-1;
+    function drawFrame(f){
+      clr(svg);
+      var startY=20, cellW=38;
+      
+      // Draw matrix
+      var y0=startY+40;
+      for(var i_=0; i_<n; i_++){
+        for(var j=0; j<n; j++){
+          var x=80+j*cellW;
+          var y=y0+i_*cellW;
+          var isLower = j<=i_;
+          var isCurrent = (f.stage.indexOf('mask_row')===0 && f.row===i_);
+          var isMasked = (isCurrent && j>i_);
+          var fill = isMasked ? '#f2ebd9' : (isLower ? '#e8f4f1' : '#ffffff');
+          var stroke = isMasked ? '#b04a3a' : (isCurrent ? '#078a5e' : 'var(--line)');
+          var sw = isCurrent ? '2' : '1';
+          svg.appendChild(rect({x:x, y:y, width:cellW, height:cellW, rx:'2', fill:fill, stroke:stroke, 'stroke-width':sw}));
+          if(isMasked){
+            txt('−∞', {x:x+cellW/2, y:y+cellW/2+3, 'text-anchor':'middle', 'font-family':'Consolas,monospace', 'font-size':'10', fill:'#b04a3a'});
+          }
+        }
+      }
+      
+      // Row/column labels
+      for(var k=0; k<n; k++){
+        txt(''+k, {x:80+k*cellW+cellW/2, y:y0-8, 'text-anchor':'middle', 'font-family':'Consolas,monospace', 'font-size':'10', fill:'var(--ink-muted)'});
+        txt(''+k, {x:65, y:y0+k*cellW+cellW/2+3, 'text-anchor':'end', 'font-family':'Consolas,monospace', 'font-size':'10', fill:'var(--ink-muted)'});
+      }
+      
+      txt('j (keys)', {x:80+n*cellW/2, y:y0-25, 'text-anchor':'middle', 'font-family':'Manrope,sans-serif', 'font-size':'11', fill:'var(--ink-muted)'});
+      txt('i (queries)', {x:40, y:y0+n*cellW/2, 'text-anchor':'middle', 'font-family':'Manrope,sans-serif', 'font-size':'11', fill:'var(--ink-muted)', 'writing-mode':'tb'});
+      
+      txt(f.msg, {x:'20', y:y0+n*cellW+40, 'font-family':'Manrope,sans-serif', 'font-size':'12', fill:'var(--ink)'});
+      
+      if(f.stage==='final'){
+        txt('Lower triangle (j ≤ i): normal attention. Upper triangle (j > i): all zeros after softmax.', {x:'20', y:y0+n*cellW+70, 'font-family':'Manrope,sans-serif', 'font-size':'11', fill:'var(--ink-muted)'});
+      }
+      
+      info.textContent=f.msg;
+      out.textContent='step '+(i+1)+'/'+frames.length;
+    }
+    
+    drawFrame({stage:'scores', msg:'Start: 8×8 attention scores (before mask). Full matrix computed.'});
+    document.getElementById('causal-step').addEventListener('click',function(){if(i>=frames.length-1)return;i++;drawFrame(frames[i]);});
+    document.getElementById('causal-reset').addEventListener('click',function(){i=-1;drawFrame({stage:'scores', msg:'Start: 8×8 attention scores (before mask). Full matrix computed.'});});
+  })();
+  </script>
+</body>
+</html>

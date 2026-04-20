@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Multi-Head Latent Attention (MLA, DeepSeek-V2): compress K/V into low-rank latent, reconstruct on-the-fly, cache only latent. Ultra-efficient KV cache.">
+  <title>Multi-Head Latent Attention: Low-Rank KV Caching | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a href="../../../../blog.html" class="active">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../blog.html">ML &middot; Transformers &middot; Attention Variants</a><span>&middot; Part 12 of 13</span></div>
+
+      <h1>Multi-Head Latent Attention: Extreme Compression via Low-Rank Projection</h1>
+      <p class="post-meta">January 2025 &middot; 12 min read</p>
+
+      <p>GQA (part 11) reduces the KV cache by grouping heads. Multi-Head Latent Attention (MLA, DeepSeek-V2) goes further: instead of caching full Key and Value vectors, compress them into a low-rank latent space $\mathbf{c}_{KV} \in \mathbb{R}^{d_c}$ (where $d_c \ll d_{\mathrm{head}}$), cache the latent, and reconstruct $K, V$ on-the-fly during attention. This reduces cache by a factor of $(d_{\mathrm{head}} / d_c) \times H$ compared to standard MHA. MLA also decouples position embeddings (RoPE) into a separate rotated path for efficiency. DeepSeek-V2 achieves 1.7× longer context than comparable models on the same memory budget, or inference 2.3× faster with comparable quality.</p>
+
+      <h2 id="motivation">The Compression Idea</h2>
+      <p>In standard attention, each token position caches the full $d_{\mathrm{head}}$-dimensional Key and Value vectors for all $H$ heads (or $G$ heads in GQA). This is expensive. MLA observes that over multiple positions, much of the variation in $K$ and $V$ is redundant or low-rank. We can project $K$ and $V$ into a smaller latent space $d_c$ (e.g., $d_c = 512$ instead of $8 \times 128 = 1024$ for 8 heads), cache the latent codes, and reconstruct full $K, V$ during attention via an up-projection. The reconstruction is <em>on-the-fly and differentiable</em>, so training is unchanged; only caching and inference patterns shift.</p>
+
+      <h2 id="forward-pass">Forward Pass: Compression and Reconstruction</h2>
+      <p>Given input $X_t$ at position $t$:</p>
+      <ol>
+        <li><strong>Project to latent:</strong> $\mathbf{c}_{K,t} = X_t W^{DK} \in \mathbb{R}^{d_c}$, $\mathbf{c}_{V,t} = X_t W^{DV} \in \mathbb{R}^{d_c}$, where $W^{DK}, W^{DV} \in \mathbb{R}^{d_{\mathrm{model}} \times d_c}$ are down-projection matrices (smaller).</li>
+        <li><strong>Cache latent:</strong> Store $\mathbf{c}_{K,t}$ and $\mathbf{c}_{V,t}$ (only $2 d_c$ scalars per position, tiny!).</li>
+        <li><strong>Query projection:</strong> Project current input to queries as usual: $Q_t = X_t W^Q \in \mathbb{R}^{H \times d_k}$.</li>
+        <li><strong>On-the-fly reconstruction (per cached position $\tau$):</strong> For each cached position $\tau$, reconstruct:
+          $$K_\tau = \mathbf{c}_{K,\tau} W^{UK} \in \mathbb{R}^{H \times d_k}, \quad V_\tau = \mathbf{c}_{V,\tau} W^{UV} \in \mathbb{R}^{H \times d_k}$$
+          where $W^{UK}, W^{UV} \in \mathbb{R}^{d_c \times (H \times d_k)}$ are up-projection matrices.
+        </li>
+        <li><strong>Attention:</strong> Compute standard scaled-dot-product attention with the reconstructed $K, V$ — no structural changes to the attention mechanism.</li>
+      </ol>
+      <p>The trade-off: we pay a small cost (matrix multiplies for up-projection) during attention, but cache memory shrinks dramatically.</p>
+
+      <h2 id="rotary-decoupling">Decoupled Rotary Embeddings</h2>
+      <p>MLA also decouples RoPE (Rotary Position Embeddings) from the main attention. Instead of applying RoPE to $Q$ and $K$ directly, MLA maintains a separate small <em>rotated query/key</em> path:</p>
+      <ul>
+        <li><strong>Main attention:</strong> Uses the latent-reconstructed $K, V$ (unrotated or rotated as one block).</li>
+        <li><strong>Rotated attention (small):</strong> Projects $Q$ and $K$ to a smaller rotated subspace, applies RoPE there, and concatenates outputs.</li>
+      </ul>
+      <p>This allows precise position tracking without per-head RoPE overhead, further reducing computation and cache costs.</p>
+
+      <h2 id="complexity">Complexity and Memory Gains</h2>
+      <table style="margin: 1.5rem 0; width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr style="background: #f2ebd9; border-bottom: 2px solid var(--line);">
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">Aspect</th>
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">MHA</th>
+            <th style="padding: 0.6rem; text-align: left; font-family: Syne, sans-serif; font-weight: 700;">MLA (DeepSeek-V2)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">KV cache per layer per token</td>
+            <td style="padding: 0.6rem;">$2H d_k$ (e.g., $16 \times 128 = 2048$ for 16 heads)</td>
+            <td style="padding: 0.6rem;">$2 d_c$ (e.g., 512 for $d_c = 256$)</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">Total cache (100 layers, $t$ tokens)</td>
+            <td style="padding: 0.6rem;">$2H d_k \times 100 \times t$</td>
+            <td style="padding: 0.6rem;">$2 d_c \times 100 \times t$ (~4× smaller)</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">Reconstruction cost per step</td>
+            <td style="padding: 0.6rem;">N/A</td>
+            <td style="padding: 0.6rem;">$O(d_c \times H d_k)$ FLOPs (small, batched)</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--line-faint);">
+            <td style="padding: 0.6rem;">Quality (on benchmark)</td>
+            <td style="padding: 0.6rem;">Baseline 100%</td>
+            <td style="padding: 0.6rem;">~99–100% (minimal loss)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="deepseek-v2">DeepSeek-V2 Deployment</h2>
+      <p>DeepSeek-V2 (2024) is a 236B parameter mixture-of-experts model that uses MLA throughout. Reported results:</p>
+      <ul>
+        <li><strong>Context length:</strong> Supports 128K context (vs. ~4–32K for typical models of similar size).</li>
+        <li><strong>Inference speed:</strong> 2.3× faster than standard attention on long sequences.</li>
+        <li><strong>Quality:</strong> Matches or exceeds comparable models (e.g., Llama 2 70B, GPT-3.5) on standard benchmarks.</li>
+        <li><strong>Training efficiency:</strong> Reduced cache during training speeds up backprop and allows larger batch sizes.</li>
+      </ul>
+      <p>MLA is a key ingredient in DeepSeek-V2's ability to achieve high quality at long context on limited memory.</p>
+
+      <h2 id="implementation">Implementation Sketch</h2>
+      <pre><code>def multi_head_latent_attention(X, d_c=512):
+    """
+    X: input tensor (batch, seq_len, d_model)
+    d_c: latent compression dimension (e.g., 512)
+    """
+    # Down-projection to latent
+    c_k = X @ W_DK  # (batch, seq_len, d_c)
+    c_v = X @ W_DV  # (batch, seq_len, d_c)
+    
+    # Cache latent (very small)
+    kv_cache_latent = (c_k, c_v)  # total: 2 * d_c per position
+    
+    # Query projection (standard)
+    Q = X @ W_Q  # (batch, seq_len, H * d_k)
+    Q = Q.view(batch, seq_len, H, d_k)
+    
+    # Retrieve cached latents (autoregressive)
+    c_k_cache, c_v_cache = kv_cache_latent  # from previous positions
+    
+    # Up-project cached latents on-the-fly
+    K_cached = c_k_cache @ W_UK  # (batch, past_len, H * d_k)
+    V_cached = c_v_cache @ W_UV  # (batch, past_len, H * d_k)
+    K_cached = K_cached.view(batch, past_len, H, d_k)
+    V_cached = V_cached.view(batch, past_len, H, d_k)
+    
+    # Standard attention (scores against reconstructed K, V)
+    scores = Q @ K_cached.transpose(-2, -1) / math.sqrt(d_k)
+    attn_weights = softmax(scores, dim=-1)
+    output = attn_weights @ V_cached
+    
+    # Output projection
+    output = output.view(batch, seq_len, H * d_k) @ W_O
+    return output</code></pre>
+
+      <h2 id="trade-offs">Trade-offs and Considerations</h2>
+      <p><strong>Computation vs. Memory:</strong> MLA shifts cost from memory to compute (reconstruction FLOPs). On memory-bound hardware (GPUs during inference), this is a win. On compute-bound scenarios, the gain is smaller.</p>
+      <p><strong>Latent dimension $d_c$:</strong> Smaller $d_c$ saves memory but may hurt quality. DeepSeek-V2 uses $d_c = 512$ with $H = 16$ heads ($d_k = 128$), achieving good balance.</p>
+      <p><strong>Training cost:</strong> MLA introduces no structural changes; training is standard. The latent projections are learned end-to-end. No special initialization tricks are needed.</p>
+
+      <div class="anim-container" id="mla-anim">
+        <h4>&#9654; MLA Dimension Pipeline</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Trace the flow: input → compress to latent ($d_c$) → cache (tiny) → reconstruct (on-the-fly) → attention. Each step shows the dimension change.</p>
+        <svg id="mla-svg" width="720" height="280" viewBox="0 0 720 280"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="mla-step">Step &rarr;</button>
+          <button class="anim-btn" id="mla-reset">Reset</button>
+          <span class="anim-output" id="mla-output"></span>
+        </div>
+      </div>
+
+      <nav class="post-nav">
+        <a class="prev" href="./gqa.html"><span>Previous</span><span>&#8592; Grouped-Query Attention</span></a>
+        <a class="next" href="./iha.html"><span>Next</span><span>Interleaved Head Attention &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+  <script src="../../../../script.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script>
+  <script>
+  (function(){
+    var NS='http://www.w3.org/2000/svg';
+    function el(t,a){var e=document.createElementNS(NS,t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    function txt(s,a){var t=el('text',a);t.textContent=s;return t;}
+    function clr(s){while(s.firstChild)s.removeChild(s.firstChild);}
+    var svg=document.getElementById('mla-svg'), out=document.getElementById('mla-output');
+    
+    var steps = [
+      {label: 'Input X', dim: '(B, n, 4096)', width: 120, desc: 'Batch of tokens, d_model=4096'},
+      {label: 'Down-project', dim: '(B, n, 512)', width: 100, desc: 'Compress K/V to latent d_c=512'},
+      {label: 'Cache latent', dim: '(n, 512)', width: 100, desc: 'Store compressed KV (tiny!)'},
+      {label: 'Up-project', dim: '(B, n, 2048)', width: 110, desc: 'Reconstruct full K,V on-the-fly'},
+      {label: 'Attention', dim: '(B, n, 2048)', width: 110, desc: 'Standard scaled-dot-product'},
+      {label: 'Output', dim: '(B, n, 4096)', width: 120, desc: 'Project back to d_model'}
+    ];
+    
+    var i = -1;
+    
+    function draw(f){
+      clr(svg);
+      
+      if(!f){
+        svg.appendChild(txt('MLA Dimension Pipeline: Compression & Reconstruction', {x: '20', y: '28', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)'}));
+        svg.appendChild(txt('Click Step to trace through the low-rank KV compression flow.', {x: '20', y: '240', 'font-family': 'Manrope,sans-serif', 'font-size': '13', fill: 'var(--ink-muted)'}));
+        out.textContent = '';
+        return;
+      }
+      
+      svg.appendChild(txt('MLA Dimension Pipeline: Compression & Reconstruction', {x: '20', y: '28', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)'}));
+      
+      var label = f.label;
+      var dim = f.dim;
+      var desc = f.desc;
+      var width = f.width;
+      
+      // Draw step box
+      svg.appendChild(el('rect', {x: '20', y: '65', width: '680', height: '70', rx: '8', fill: '#f5f2ea', stroke: 'var(--line)', 'stroke-width': '1'}));
+      
+      svg.appendChild(txt(label, {x: '40', y: '85', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '14', fill: 'var(--ink)'}));
+      svg.appendChild(txt(dim, {x: '40', y: '110', 'font-family': 'Consolas,monospace', 'font-size': '12', fill: '#0a8f6a', 'font-weight': '600'}));
+      svg.appendChild(txt(desc, {x: '40', y: '135', 'font-family': 'Manrope,sans-serif', 'font-size': '12', fill: 'var(--ink-muted)'}));
+      
+      // Bar showing relative dimension size
+      var maxWidth = 200;
+      var relWidth = (width / 120) * maxWidth; // normalize to input width
+      svg.appendChild(el('rect', {x: '400', y: '85', width: relWidth, height: '40', rx: '4', fill: '#d6f0f7', stroke: '#1e8d9a', 'stroke-width': '1'}));
+      svg.appendChild(txt(width + ' dim', {x: 400 + relWidth / 2, y: '110', 'text-anchor': 'middle', 'font-family': 'Consolas,monospace', 'font-size': '11', fill: '#1e8d9a', 'font-weight': '600'}));
+      
+      // Progress
+      var currentStep = i + 1;
+      svg.appendChild(txt('Stage ' + currentStep + ' of ' + steps.length, {x: '20', y: '160', 'font-family': 'Manrope,sans-serif', 'font-size': '12', fill: 'var(--ink)'}));
+      
+      // Progress bar
+      svg.appendChild(el('rect', {x: '20', y: '175', width: '680', height: '8', rx: '4', fill: '#f2ebd9'}));
+      var prog_width = (680 * currentStep / steps.length);
+      svg.appendChild(el('rect', {x: '20', y: '175', width: prog_width.toString(), height: '8', rx: '4', fill: '#0a8f6a'}));
+      
+      // Compression insight
+      if(i >= 1 && i <= 2){
+        svg.appendChild(txt('↓ Compression: 4096 → 512 (8× smaller)', {x: '20', y: '230', 'font-family': 'Manrope,sans-serif', 'font-size': '12', fill: '#b04a3a', 'font-weight': '600'}));
+      } else if(i >= 3 && i <= 4){
+        svg.appendChild(txt('↑ Reconstruction on-the-fly: 512 → 2048 (latent decoded for attention)', {x: '20', y: '230', 'font-family': 'Manrope,sans-serif', 'font-size': '12', fill: '#0a8f6a', 'font-weight': '600'}));
+      }
+      
+      out.textContent = 'step ' + currentStep + ' / ' + steps.length;
+    }
+    
+    draw(null);
+    document.getElementById('mla-step').addEventListener('click', function(){
+      if(i >= steps.length - 1) return;
+      i++;
+      draw(steps[i]);
+    });
+    document.getElementById('mla-reset').addEventListener('click', function(){
+      i = -1;
+      draw(null);
+    });
+  })();
+  </script>
+</body>
+</html>

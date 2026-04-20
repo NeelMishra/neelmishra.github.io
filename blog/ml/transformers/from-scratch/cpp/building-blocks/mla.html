@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Multi-Head Latent Attention (MLA, DeepSeek-V2): compress KV to latent, decompose head computation, optional low-rank RoPE. LibTorch implementation with projection and reconstruction paths.">
+  <title>Multi-Head Latent Attention in C++ (LibTorch) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../../styles.css">
+  <link rel="stylesheet" href="../../../../../../blog.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .pseudo-code{white-space:pre;font-family:Consolas,monospace;font-size:0.85rem;background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;overflow-x:auto;line-height:1.8;margin:1.2rem 0}
+    .pseudo-code .kw{color:#ff6b35;font-weight:700}
+    .pseudo-code .fn{color:#0a8f6a}
+    .pseudo-code .cm{color:#666;font-style:italic}
+    .pseudo-code .tp{color:#3498db}
+    .pseudo-code .str{color:#e6db74}
+    .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.9rem;overflow-x:auto;line-height:1.7}
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+    .shape-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .shape-table th,.shape-table td{border:1px solid var(--line);padding:0.5rem 0.8rem;text-align:left}
+    .shape-table th{background:rgba(10,143,106,0.08);font-weight:700}
+    .shape-table code{background:rgba(0,0,0,0.04);padding:1px 4px;border-radius:3px;font-size:0.85rem}
+    .anim-container{background:#f8faf8;border:1px solid #d0e0d0;border-radius:12px;padding:1.2rem;margin:1.5rem 0}
+    .anim-container h4{margin:0 0 0.3rem;font-family:Syne,sans-serif;color:#1a2b22}
+    .anim-controls{display:flex;gap:0.6rem;align-items:center;margin-top:0.8rem;flex-wrap:wrap}
+    .anim-btn{background:#0a8f6a;color:#fff;border:none;padding:0.45rem 1rem;border-radius:6px;cursor:pointer;font-family:Manrope,sans-serif;font-size:0.85rem;font-weight:600}
+    .anim-btn:hover{background:#078a5e}
+    .anim-btn:disabled{background:#aaa;cursor:default}
+    .anim-output{font-family:Consolas,monospace;font-size:0.85rem;color:#555}
+    #mla-anim-svg{width:100%;max-width:760px;display:block;margin:0 auto}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../../../index.html">Home</a>
+      <a href="../../../../../../experience.html">Experience</a>
+      <a href="../../../../../../projects.html">Projects</a>
+      <a href="../../../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../../blog.html">ML &middot; Transformers &middot; From Scratch (C++) &middot; Attention Variants</a><span>&middot; Part 12 of 13</span></div>
+
+      <h1>Multi-Head Latent Attention (MLA) in C++ (LibTorch)</h1>
+      <p class="post-meta">May 2026 &middot; 17 min read</p>
+
+      <p>Multi-Head Latent Attention (MLA) is a technique from DeepSeek-V2 that compresses K and V into a small latent space before caching, then reconstructs them for each attention step. This dramatically reduces KV cache size while maintaining quality through careful information bottleneck design. We'll implement the core mechanism in C++: compress X → c_KV, and reconstruct c_KV → K, V each forward pass.</p>
+
+      <h2>1 &middot; The Motivation</h2>
+
+      <p>Standard attention caches K and V with shape (batch, heads, seq_len, d_k) per layer. For long contexts and many layers, this becomes a memory bottleneck. MLA takes a different approach: instead of caching K and V directly, we cache only a small bottleneck representation c_KV, and reconstruct K and V on-the-fly during decoding. The reconstruction is fast (a small projection), but the cache savings are huge.</p>
+
+      <h2>2 &middot; MLA Architecture</h2>
+
+      <p>Let d_c be a small latent dimension (e.g., d_c = 128 vs d_model = 2048).</p>
+
+      <div class="math-block">
+Forward pass:
+  c_KV = W_DKV(X)           [compress to latent: (batch, time, d_c)]
+  K = W_UK(c_KV)            [reconstruct K: (batch, time, d_model)]
+  V = W_UV(c_KV)            [reconstruct V: (batch, time, d_model)]
+  Q = W_Q(X)
+  O = Attention(Q, K, V)
+
+During cache (generation):
+  Cache c_KV instead of K, V
+  Each decode step: read c_KV, reconstruct K, V, compute attn
+  Saves 1/(h * d_k / d_c) ≈ 10-20× with clever d_c choice
+      </div>
+
+      <h2>3 &middot; Optional: Low-Rank RoPE Path</h2>
+
+      <p>DeepSeek also decomposes positional encoding into a separate low-rank path: W_KR projects X to a small d_r dimension, applies RoPE, and fuses with standard K before attention. This further decouples the frequency response of different Q heads from KV structure. For simplicity, we'll focus on the compression path but mention the pattern.</p>
+
+      <h2>4 &middot; LibTorch Implementation</h2>
+
+      <div class="pseudo-code">
+<span class="kw">struct</span> <span class="tp">MultiHeadLatentAttentionImpl</span> : <span class="kw">public</span> <span class="tp">torch::nn::Module</span> {
+  <span class="tp">int</span> n_heads, d_model, d_k, d_c;  <span class="cm">// d_c = latent dim</span>
+  <span class="tp">torch::nn::Linear</span> W_q{<span class="kw">nullptr</span>}, W_dkv{<span class="kw">nullptr</span>},
+                         W_uk{<span class="kw">nullptr</span>}, W_uv{<span class="kw">nullptr</span>},
+                         W_o{<span class="kw">nullptr</span>};
+
+  <span class="fn">MultiHeadLatentAttentionImpl</span>(<span class="tp">int</span> h, <span class="tp">int</span> d, <span class="tp">int</span> dc)
+      : n_heads(h), d_model(d), d_k(d / h), d_c(dc) {
+    <span class="cm">// Q projection: full heads</span>
+    W_q = <span class="fn">register_module</span>(<span class="str">"W_q"</span>, <span class="tp">torch::nn::Linear</span>(d, d));
+
+    <span class="cm">// Compression: X → c_KV (small latent)</span>
+    W_dkv = <span class="fn">register_module</span>(<span class="str">"W_dkv"</span>, <span class="tp">torch::nn::Linear</span>(d, d_c));
+
+    <span class="cm">// Reconstruction: c_KV → K, V (full heads)</span>
+    W_uk = <span class="fn">register_module</span>(<span class="str">"W_uk"</span>, <span class="tp">torch::nn::Linear</span>(d_c, d));
+    W_uv = <span class="fn">register_module</span>(<span class="str">"W_uv"</span>, <span class="tp">torch::nn::Linear</span>(d_c, d));
+
+    <span class="cm">// Output projection</span>
+    W_o = <span class="fn">register_module</span>(<span class="str">"W_o"</span>, <span class="tp">torch::nn::Linear</span>(d, d));
+  }
+
+  <span class="tp">torch::Tensor</span> <span class="fn">forward</span>(<span class="tp">torch::Tensor</span> x) {
+    <span class="tp">int</span> batch = x.<span class="fn">size</span>(0), time = x.<span class="fn">size</span>(1);
+
+    <span class="cm">// Step 1: Compress X to latent c_KV</span>
+    <span class="tp">torch::Tensor</span> c_kv = <span class="fn">W_dkv</span>-&gt;(<span class="fn">forward</span>)(x);  <span class="cm">// (batch, time, d_c)</span>
+
+    <span class="cm">// Step 2: Reconstruct K and V from latent</span>
+    <span class="tp">torch::Tensor</span> K_full = <span class="fn">W_uk</span>-&gt;(<span class="fn">forward</span>)(c_kv);  <span class="cm">// (batch, time, d_model)</span>
+    <span class="tp">torch::Tensor</span> V_full = <span class="fn">W_uv</span>-&gt;(<span class="fn">forward</span>)(c_kv);  <span class="cm">// (batch, time, d_model)</span>
+
+    <span class="cm">// Step 3: Standard MHA on reconstructed K, V</span>
+    <span class="tp">torch::Tensor</span> Q = <span class="fn">W_q</span>-&gt;(<span class="fn">forward</span>)(x);
+    Q = Q.<span class="fn">view</span>({batch, time, n_heads, d_k}).<span class="fn">transpose</span>(1, 2);
+
+    K_full = K_full.<span class="fn">view</span>({batch, time, n_heads, d_k}).<span class="fn">transpose</span>(1, 2);
+    V_full = V_full.<span class="fn">view</span>({batch, time, n_heads, d_k}).<span class="fn">transpose</span>(1, 2);
+
+    <span class="cm">// Attention</span>
+    <span class="tp">torch::Tensor</span> scores = <span class="fn">torch::matmul</span>(Q, K_full.<span class="fn">transpose</span>(-1, -2));
+    scores = scores / std::sqrt(d_k);
+    scores = <span class="fn">torch::softmax</span>(scores, -1);
+
+    <span class="tp">torch::Tensor</span> out = <span class="fn">torch::matmul</span>(scores, V_full);
+    out = out.<span class="fn">transpose</span>(1, 2);
+    out = out.<span class="fn">contiguous</span>().<span class="fn">view</span>({batch, time, d_model});
+
+    <span class="kw">return</span> <span class="fn">W_o</span>-&gt;(<span class="fn">forward</span>)(out);
+  }
+
+  <span class="cm">// For caching during generation:</span>
+  <span class="tp">torch::Tensor</span> <span class="fn">compress_for_cache</span>(<span class="tp">torch::Tensor</span> x) {
+    <span class="kw">return</span> <span class="fn">W_dkv</span>-&gt;(<span class="fn">forward</span>)(x);  <span class="cm">// Cache only c_KV</span>
+  }
+
+  <span class="tp">torch::Tensor</span> <span class="fn">forward_cached</span>(<span class="tp">torch::Tensor</span> x, <span class="tp">torch::Tensor</span> c_kv_cache) {
+    <span class="cm">// Decode step: use cached c_KV to reconstruct K, V</span>
+    <span class="tp">torch::Tensor</span> Q = <span class="fn">W_q</span>-&gt;(<span class="fn">forward</span>)(x);  <span class="cm">// (batch, 1, d_model) for next token</span>
+    <span class="tp">torch::Tensor</span> K_full = <span class="fn">W_uk</span>-&gt;(<span class="fn">forward</span>)(c_kv_cache);  <span class="cm">// reconstruct from cache</span>
+    <span class="tp">torch::Tensor</span> V_full = <span class="fn">W_uv</span>-&gt;(<span class="fn">forward</span>)(c_kv_cache);
+    <span class="cm">// ... attend as usual ...</span>
+    <span class="kw">return</span> <span class="fn">W_o</span>-&gt;(<span class="fn">forward</span>)(torch::zeros({1, 1, d_model}));  <span class="cm">// placeholder</span>
+  }
+};
+<span class="kw">TORCH_MODULE</span>(<span class="tp">MultiHeadLatentAttention</span>);
+      </div>
+
+      <h2>5 &middot; Shape Progression</h2>
+
+      <table class="shape-table">
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Operation</th>
+            <th>Output Shape</th>
+            <th>Memory Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td><code>c_KV = W_DKV(X)</code></td>
+            <td>(batch, time, d_c)</td>
+            <td>Small bottleneck</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><code>K = W_UK(c_KV)</code></td>
+            <td>(batch, time, d_model)</td>
+            <td>Full K reconstructed</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><code>V = W_UV(c_KV)</code></td>
+            <td>(batch, time, d_model)</td>
+            <td>Full V reconstructed</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td><code>Q = W_Q(X)</code></td>
+            <td>(batch, time, d_model)</td>
+            <td>Full Q for all heads</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td>Reshape & transpose</td>
+            <td>(batch, n_heads, time, d_k)</td>
+            <td>Per-head preparation</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td><code>scores = Q @ K^T</code></td>
+            <td>(batch, n_heads, time, time)</td>
+            <td>Attention weights</td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td><code>out = scores @ V</code></td>
+            <td>(batch, n_heads, time, d_k)</td>
+            <td>Per-head output</td>
+          </tr>
+          <tr>
+            <td>8</td>
+            <td>Reshape & project W_O</td>
+            <td>(batch, time, d_model)</td>
+            <td>Final output</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>6 &middot; KV Cache Compression Animation</h2>
+
+      <div class="anim-container">
+        <h4>MLA Latent Compression & Reconstruction</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how input X is compressed to small c_KV, cached, then reconstructed on each decode step.</p>
+        <svg id="mla-anim-svg" viewBox="0 0 760 380"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="mla-step">Step &rarr;</button>
+          <button class="anim-btn" id="mla-reset">Reset</button>
+          <span class="anim-output" id="mla-output"></span>
+        </div>
+      </div>
+
+      <h2>7 &middot; Compression Ratio & Cache Savings</h2>
+
+      <p>For d_model = 2048, d_c = 128, n_heads = 32, sequence length = 4096:</p>
+
+      <div class="math-block">
+Standard MHA cache per layer:
+  2 × (32 heads × 4096 seq × 64 d_k × 4 bytes) = 33.6 MB
+
+MLA cache per layer:
+  1 × (4096 seq × 128 d_c × 4 bytes) = 2.0 MB
+
+Ratio: 33.6 / 2.0 ≈ 17× reduction
+
+Decode reconstruction cost (one step):
+  W_UK: (128 × 2048) ≈ 0.3M params, O(128 × 2048) FLOPs
+  [Negligible vs attention's O(seq × 2048) FLOPs]
+      </div>
+
+      <div class="callout warn">
+        <strong>Trade-off:</strong> MLA trades full K, V representation for a bottleneck c_KV. If d_c is too small, information loss may hurt quality. DeepSeek tuned d_c = 128 for d_model = 2048, achieving ~97% quality vs full MHA.
+      </div>
+
+      <h2>8 &middot; Extension: Dual-Stream with Low-Rank RoPE</h2>
+
+      <p>DeepSeek-V2 adds a separate "rope stream": W_KR projects to d_r (small), applies RoPE, and concatenates or fuses with K. This allows position information to flow independently of the KV-compressed path. Implementation is similar but adds another projection pair (W_KR, W_VR).</p>
+
+      <footer class="post-nav">
+        <a href="gqa.html" class="nav-prev">← Part 11: GQA</a>
+        <a href="iha.html" class="nav-next">Part 13: IHA →</a>
+      </footer>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>&copy; 2026 Neel Mishra. All rights reserved.</p>
+  </footer>
+
+  <script src="../../../../../../anim-speed.js"></script>
+  <script src="../../../../../../blog.js"></script>
+  <script>
+    (function() {
+      const svg = document.getElementById('mla-anim-svg');
+      const out = document.getElementById('mla-output');
+      function el(tag, attrs) {
+        const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        return e;
+      }
+      function txt(s, attrs) {
+        const t = el('text', attrs || {});
+        t.textContent = s;
+        return t;
+      }
+      function clr(e) { while (e.firstChild) e.removeChild(e.firstChild); }
+
+      const frames = [
+        { msg: 'Training: X → compress to small c_KV.', step: 'compress' },
+        { msg: 'Reconstruct: c_KV → K, V (full).', step: 'reconstruct' },
+        { msg: 'Attention: Q @ K^T, scores @ V.', step: 'attn' },
+        { msg: 'Cache during generation: store only c_KV (small).', step: 'cache' },
+        { msg: 'Decode: read c_KV, reconstruct K, V, one-step attention.', step: 'decode' },
+      ];
+
+      let i = -1;
+      function draw(f) {
+        clr(svg);
+        svg.appendChild(txt('MLA: Latent Compression Path', { x: '20', y: '25', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)' }));
+
+        if (!f) {
+          svg.appendChild(txt('Click Step to trace the compression and reconstruction.', { x: '20', y: '100', 'font-size': '13', fill: 'var(--ink-muted)' }));
+          out.textContent = '';
+          return;
+        }
+
+        // Draw flow boxes
+        const boxes = [];
+        if (f.step === 'compress') {
+          boxes.push({ x: 60, w: 80, label: 'X\n(d_model)', color: '#cfe8dc' });
+          boxes.push({ x: 180, w: 80, label: 'W_DKV', color: '#e8d4f1' });
+          boxes.push({ x: 300, w: 80, label: 'c_KV\n(d_c)', color: '#b8e6d5' });
+        } else if (f.step === 'reconstruct') {
+          boxes.push({ x: 60, w: 80, label: 'c_KV', color: '#b8e6d5' });
+          boxes.push({ x: 180, w: 80, label: 'W_UK, W_UV', color: '#e8d4f1' });
+          boxes.push({ x: 300, w: 80, label: 'K, V\n(full)', color: '#cfe8dc' });
+        } else if (f.step === 'attn') {
+          boxes.push({ x: 60, w: 70, label: 'Q', color: '#ffe0b2' });
+          boxes.push({ x: 160, w: 70, label: 'K', color: '#cfe8dc' });
+          boxes.push({ x: 260, w: 70, label: 'V', color: '#cfe8dc' });
+          boxes.push({ x: 380, w: 80, label: 'Attention', color: '#f0bee8' });
+        } else if (f.step === 'cache') {
+          boxes.push({ x: 60, w: 100, label: 'Cache:\nc_KV only\n(17× smaller)', color: '#b8e6d5' });
+          boxes.push({ x: 200, w: 100, label: 'vs MHA:\nK, V full', color: '#ffcccc' });
+        } else if (f.step === 'decode') {
+          boxes.push({ x: 60, w: 80, label: 'Read\nc_KV', color: '#b8e6d5' });
+          boxes.push({ x: 180, w: 80, label: 'Reconstruct\nK, V', color: '#e8d4f1' });
+          boxes.push({ x: 300, w: 80, label: 'Attend\n(1 token)', color: '#cfe8dc' });
+        }
+
+        for (const box of boxes) {
+          svg.appendChild(el('rect', { x: box.x, y: '120', width: box.w, height: '80', rx: '6', fill: box.color, stroke: '#333', 'stroke-width': '1.5' }));
+          svg.appendChild(txt(box.label, { x: box.x + box.w / 2, y: '165', 'text-anchor': 'middle', 'font-size': '11', 'font-weight': '700', fill: '#1a2b22' }));
+        }
+
+        // Message
+        svg.appendChild(txt(f.msg, { x: '20', y: '280', 'font-size': '13', fill: 'var(--ink)' }));
+
+        // Highlight
+        if (f.step === 'compress') {
+          svg.appendChild(txt('Bottleneck:', { x: '20', y: '320', 'font-size': '11', 'font-style': 'italic', fill: '#0a8f6a' }));
+          svg.appendChild(txt('X: d_model dims → c_KV: d_c ≪ d_model dims', { x: '20', y: '340', 'font-size': '11', fill: '#0a8f6a' }));
+        } else if (f.step === 'cache') {
+          svg.appendChild(txt('Memory saved:', { x: '20', y: '320', 'font-size': '11', 'font-style': 'italic', fill: '#0a8f6a' }));
+          svg.appendChild(txt('d_model / d_c ≈ 2048 / 128 = 16×; stacked layers ⟹ 17× total reduction', { x: '20', y: '340', 'font-size': '11', fill: '#0a8f6a' }));
+        }
+
+        out.textContent = `step ${i + 1}/${frames.length}`;
+      }
+
+      draw(null);
+      document.getElementById('mla-step').addEventListener('click', function() {
+        if (i >= frames.length - 1) return;
+        i++;
+        draw(frames[i]);
+      });
+      document.getElementById('mla-reset').addEventListener('click', function() {
+        i = -1;
+        draw(null);
+      });
+    })();
+  </script>
+</body>
+</html>

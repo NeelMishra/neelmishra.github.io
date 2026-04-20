@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="FlashAttention: online softmax algorithm for efficient attention computation. CPU-side pseudo-implementation with block tiling, running statistics m and ℓ, and block-wise operations in C++ using LibTorch.">
+  <title>FlashAttention in C++ (LibTorch) | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../../styles.css">
+  <link rel="stylesheet" href="../../../../../../blog.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .pseudo-code{white-space:pre;font-family:Consolas,monospace;font-size:0.85rem;background:#1a1a2e;color:#e0e0e0;padding:1.4rem 1.6rem;border-radius:10px;overflow-x:auto;line-height:1.8;margin:1.2rem 0}
+    .pseudo-code .kw{color:#ff6b35;font-weight:700}
+    .pseudo-code .fn{color:#0a8f6a}
+    .pseudo-code .cm{color:#666;font-style:italic}
+    .pseudo-code .tp{color:#3498db}
+    .pseudo-code .str{color:#e6db74}
+    .math-block{white-space:pre;background:#f8f4ff;border-left:4px solid #9b59b6;padding:1rem 1.2rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-family:Consolas,monospace;font-size:0.9rem;overflow-x:auto;line-height:1.7}
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .shape-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.88rem}
+    .shape-table th,.shape-table td{border:1px solid var(--line);padding:0.5rem 0.8rem;text-align:left}
+    .shape-table th{background:rgba(10,143,106,0.08);font-weight:700}
+    .shape-table code{background:rgba(0,0,0,0.04);padding:1px 4px;border-radius:3px;font-size:0.85rem}
+    .anim-container{background:#f8faf8;border:1px solid #d0e0d0;border-radius:12px;padding:1.2rem;margin:1.5rem 0}
+    .anim-container h4{margin:0 0 0.3rem;font-family:Syne,sans-serif;color:#1a2b22}
+    .anim-controls{display:flex;gap:0.6rem;align-items:center;margin-top:0.8rem;flex-wrap:wrap}
+    .anim-btn{background:#0a8f6a;color:#fff;border:none;padding:0.45rem 1rem;border-radius:6px;cursor:pointer;font-family:Manrope,sans-serif;font-size:0.85rem;font-weight:600}
+    .anim-btn:hover{background:#078a5e}
+    .anim-btn:disabled{background:#aaa;cursor:default}
+    .anim-output{font-family:Consolas,monospace;font-size:0.85rem;color:#555}
+    .diagram-box{display:flex;justify-content:center;margin:1.5rem 0}
+    .diagram-box svg{max-width:100%}
+    #fa-anim-svg{width:100%;max-width:760px;display:block;margin:0 auto}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../../../index.html">Home</a>
+      <a href="../../../../../../experience.html">Experience</a>
+      <a href="../../../../../../projects.html">Projects</a>
+      <a href="../../../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../../blog.html">ML &middot; Transformers &middot; From Scratch (C++) &middot; Attention Variants</a><span>&middot; Part 8 of 13</span></div>
+
+      <h1>FlashAttention in C++ (LibTorch)</h1>
+      <p class="post-meta">May 2026 &middot; 18 min read</p>
+
+      <p>FlashAttention (Dao et al., 2022) revolutionized transformer efficiency by reordering attention computation to minimize HBM (memory bandwidth) bottlenecks. This post walks through the core algorithm: tiling the Q, K, V matrices into blocks, performing online softmax updates, and rewriting attention as a sequence of sequential GEMM+softmax operations. We'll implement a CPU-friendly pseudocode version in C++ using LibTorch, then visualize the tiling and accumulator flow.</p>
+
+      <h2>1 &middot; The Key Insight: Block-Wise Softmax</h2>
+
+      <p>Standard attention computes $S = QK^T$, $P = \text{softmax}(S)$, $O = PV$ all in one pass. For long sequences, this requires materializing $S$ and $P$ as (seq_len, seq_len) matrices — quadratic memory and register pressure.</p>
+
+      <p>FlashAttention observes that softmax can be computed <strong>online</strong> in a single forward pass over the blocks. Instead of computing $\text{softmax}(QK^T)$ over the entire K dimension at once, we split K and V into blocks $K_j$, $V_j$, process each pair $(K_j, V_j)$ in sequence, and maintain running statistics: a running max $m_i$ and exponential sum $\ell_i$ per Q block. After each KV block, we rescale the output accumulators.</p>
+
+      <p>This is the essence of <strong>online softmax</strong> and reduces intermediate memory from $O(N^2)$ to $O(N \cdot d_k)$ (only storing the current KV block and a small O(N) running state).</p>
+
+      <h2>2 &middot; Algorithm Outline</h2>
+
+      <p>Let:</p>
+      <ul>
+        <li>$B_r$ = block size for Q (rows of Q)</li>
+        <li>$B_c$ = block size for K, V (columns, or time dimension)</li>
+        <li>$T$ = sequence length (multiples of $B_c$ for simplicity)</li>
+        <li>$N$ = T / $B_r$ (number of Q blocks)</li>
+        <li>$M$ = T / $B_c$ (number of KV blocks)</li>
+      </ul>
+
+      <p>For each Q block $Q_i$ (rows from $i \cdot B_r$ to $(i+1) \cdot B_r - 1$):</p>
+      <ol>
+        <li>Initialize: $m_i \leftarrow -\infty$ (per-row max of attention scores), $\ell_i \leftarrow 0$ (exponential sum), $O_i \leftarrow 0$ (output accumulator).</li>
+        <li>For each KV block $K_j$, $V_j$ (with $j = 0 \ldots M-1$):</li>
+        <ul>
+          <li>Compute $S_{ij} = Q_i K_j^T$ (shape: $B_r \times B_c$).</li>
+          <li>Compute max-plus softmax: for each row of $S_{ij}$, find $m_{ij}^{\text{new}}$ (the new max), compute $e^{S_{ij} - m_{ij}^{\text{new}}}$, and track $\ell_{ij}^{\text{new}}$ (the exponential sum).</li>
+          <li>Rescale previous accumulators: $O_i \leftarrow e^{m_i - m_{ij}^{\text{new}}} \cdot O_i$, $\ell_i \leftarrow e^{m_i - m_{ij}^{\text{new}}} \cdot \ell_i$.</li>
+          <li>Accumulate: $O_i \leftarrow O_i + e^{S_{ij} - m_{ij}^{\text{new}}} \cdot V_j$, $\ell_i \leftarrow \ell_i + \text{sum}(e^{S_{ij} - m_{ij}^{\text{new}}}, \text{axis}=1)$.</li>
+          <li>Update: $m_i \leftarrow m_{ij}^{\text{new}}$.</li>
+        </ul>
+        <li>Final normalize: $O_i \leftarrow O_i / \ell_i$ (broadcast divide per row).</li>
+      </ol>
+
+      <h2>3 &middot; C++ Pseudocode with LibTorch</h2>
+
+      <p>Below is a pseudo-implementation showing the two-level loop structure and the online softmax mechanics using LibTorch operations:</p>
+
+      <div class="pseudo-code">
+<span class="kw">torch::Tensor</span> <span class="fn">flash_attention_cpu</span>(
+    <span class="tp">torch::Tensor</span> Q, <span class="tp">torch::Tensor</span> K, <span class="tp">torch::Tensor</span> V,
+    <span class="tp">int</span> Br, <span class="tp">int</span> Bc) {
+  <span class="cm">// Q, K, V: (seq_len, d_k) [simplified: batch=1]</span>
+  <span class="cm">// Br, Bc: block row, block col sizes</span>
+  <span class="tp">int</span> T = Q.<span class="fn">size</span>(0), d_k = Q.<span class="fn">size</span>(1);
+  <span class="tp">int</span> N = (T + Br - 1) / Br;  <span class="cm">// # Q blocks</span>
+  <span class="tp">int</span> M = (T + Bc - 1) / Bc;  <span class="cm">// # KV blocks</span>
+
+  <span class="tp">torch::Tensor</span> O = <span class="fn">torch::zeros</span>({T, d_k}, Q.<span class="fn">options</span>());
+  <span class="tp">torch::Tensor</span> m = <span class="fn">torch::full</span>({T}, -1e9, Q.<span class="fn">options</span>());  <span class="cm">// row-wise max</span>
+  <span class="tp">torch::Tensor</span> ℓ = <span class="fn">torch::zeros</span>({T}, Q.<span class="fn">options</span>());   <span class="cm">// exp sum per row</span>
+
+  <span class="cm">// Outer loop: Q blocks</span>
+  <span class="kw">for</span> (<span class="tp">int</span> i = 0; i &lt; N; i++) {
+    <span class="tp">int</span> q_start = i * Br, q_end = <span class="fn">min</span>(q_start + Br, T);
+    <span class="tp">int</span> q_len = q_end - q_start;
+    <span class="tp">torch::Tensor</span> Q_i = Q.<span class="fn">slice</span>(0, q_start, q_end);  <span class="cm">// (q_len, d_k)</span>
+
+    <span class="tp">torch::Tensor</span> m_i = <span class="fn">torch::full</span>({q_len}, -1e9, Q.<span class="fn">options</span>());
+    <span class="tp">torch::Tensor</span> ℓ_i = <span class="fn">torch::zeros</span>({q_len}, Q.<span class="fn">options</span>());
+    <span class="tp">torch::Tensor</span> O_i = <span class="fn">torch::zeros</span>({q_len, d_k}, Q.<span class="fn">options</span>());
+
+    <span class="cm">// Inner loop: KV blocks</span>
+    <span class="kw">for</span> (<span class="tp">int</span> j = 0; j &lt; M; j++) {
+      <span class="tp">int</span> kv_start = j * Bc, kv_end = <span class="fn">min</span>(kv_start + Bc, T);
+      <span class="tp">int</span> kv_len = kv_end - kv_start;
+      <span class="tp">torch::Tensor</span> K_j = K.<span class="fn">slice</span>(0, kv_start, kv_end);  <span class="cm">// (kv_len, d_k)</span>
+      <span class="tp">torch::Tensor</span> V_j = V.<span class="fn">slice</span>(0, kv_start, kv_end);  <span class="cm">// (kv_len, d_k)</span>
+
+      <span class="cm">// Compute S_ij = Q_i @ K_j^T  [shape: (q_len, kv_len)]</span>
+      <span class="tp">torch::Tensor</span> S_ij = <span class="fn">torch::matmul</span>(Q_i, K_j.<span class="fn">t</span>());
+      
+      <span class="cm">// Online softmax: compute m_ij_new, exp-weights</span>
+      <span class="tp">torch::Tensor</span> m_ij = S_ij.<span class="fn">max</span>(1).<span class="fn">values</span>;  <span class="cm">// (q_len,) row-wise max</span>
+      <span class="tp">torch::Tensor</span> m_ij_new = <span class="fn">torch::max</span>(m_i, m_ij);
+      
+      <span class="tp">torch::Tensor</span> alpha = <span class="fn">torch::exp</span>(m_i.<span class="fn">unsqueeze</span>(1) - m_ij_new.<span class="fn">unsqueeze</span>(1));
+      <span class="tp">torch::Tensor</span> beta = <span class="fn">torch::exp</span>(S_ij - m_ij_new.<span class="fn">unsqueeze</span>(1));
+
+      <span class="cm">// Rescale accumulators</span>
+      O_i = alpha * O_i;
+      ℓ_i = alpha.<span class="fn">squeeze</span>(1) * ℓ_i;
+
+      <span class="cm">// Accumulate</span>
+      O_i = O_i + <span class="fn">torch::matmul</span>(beta, V_j);
+      ℓ_i = ℓ_i + beta.<span class="fn">sum</span>(1);
+
+      <span class="cm">// Update max</span>
+      m_i = m_ij_new;
+    }
+
+    <span class="cm">// Normalize: O_i / ℓ_i (per-row division)</span>
+    O_i = O_i / ℓ_i.<span class="fn">unsqueeze</span>(1);
+    O.<span class="fn">slice</span>(0, q_start, q_end).<span class="fn">copy_</span>(O_i);
+  }
+
+  <span class="kw">return</span> O;
+}
+      </div>
+
+      <h2>4 &middot; Shape Flow Walkthrough</h2>
+
+      <table class="shape-table">
+        <thead>
+          <tr>
+            <th>Operation</th>
+            <th>Input Shapes</th>
+            <th>Output Shape</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>Q_i = Q[q_start:q_end]</code></td>
+            <td>Q: (T, d_k)</td>
+            <td>(q_len, d_k)</td>
+            <td>Extract Q block</td>
+          </tr>
+          <tr>
+            <td><code>K_j, V_j = slice</code></td>
+            <td>K, V: (T, d_k)</td>
+            <td>(kv_len, d_k)</td>
+            <td>Extract KV block</td>
+          </tr>
+          <tr>
+            <td><code>S_ij = Q_i @ K_j^T</code></td>
+            <td>Q_i: (q_len, d_k), K_j^T: (d_k, kv_len)</td>
+            <td>(q_len, kv_len)</td>
+            <td>Attention scores</td>
+          </tr>
+          <tr>
+            <td><code>m_ij = max(S_ij, axis=1)</code></td>
+            <td>S_ij: (q_len, kv_len)</td>
+            <td>(q_len,)</td>
+            <td>Row-wise max for online softmax</td>
+          </tr>
+          <tr>
+            <td><code>beta = exp(S_ij - m_ij_new)</code></td>
+            <td>S_ij: (q_len, kv_len), m_ij_new: (q_len,)</td>
+            <td>(q_len, kv_len)</td>
+            <td>Normalized attention weights</td>
+          </tr>
+          <tr>
+            <td><code>O_i += beta @ V_j</code></td>
+            <td>beta: (q_len, kv_len), V_j: (kv_len, d_k)</td>
+            <td>(q_len, d_k)</td>
+            <td>Accumulate weighted values</td>
+          </tr>
+          <tr>
+            <td><code>O_i / ℓ_i</code></td>
+            <td>O_i: (q_len, d_k), ℓ_i: (q_len,)</td>
+            <td>(q_len, d_k)</td>
+            <td>Final normalization per row</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>5 &middot; The Two-Level Tiling Animation</h2>
+
+      <div class="anim-container">
+        <h4>Block-Wise Attention Flow</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Watch how each Q block processes all KV blocks sequentially, updating (m, ℓ, O) accumulators.</p>
+        <svg id="fa-anim-svg" viewBox="0 0 760 420"></svg>
+        <div class="anim-controls">
+          <button class="anim-btn" id="fa-step">Step &rarr;</button>
+          <button class="anim-btn" id="fa-reset">Reset</button>
+          <span class="anim-output" id="fa-output"></span>
+        </div>
+      </div>
+
+      <h2>6 &middot; Why This Matters</h2>
+
+      <p>The tiling strategy dramatically reduces memory movement. Instead of materializing the full (T, T) attention matrix, we process (Br × Bc) tiles, and intermediate accumulators (m, ℓ, O) stay in fast memory across block iterations. In CUDA, this maps to SRAM reads and writes for S, P, and smaller tensors, while V is loaded sequentially from HBM. For long sequences, FlashAttention is 2–4× faster than standard attention on modern GPUs.</p>
+
+      <p>This implementation is CPU-side pseudocode (no CUDA kernel fusion). A true GPU FlashAttention kernel further exploits tiling to maximize compute intensity. But the algorithmic core — online softmax with block-wise accumulation — is exactly what we've walked through.</p>
+
+      <h2>7 &middot; Multi-Batch and Head-Wise Extension</h2>
+
+      <p>For batched inputs with multiple attention heads, wrap the pseudocode in outer loops over batch and head. Each (batch, head) pair runs the block-wise algorithm independently. LibTorch's parallelization via <code>torch::parallel_for</code> or thread pool can accelerate these loops.</p>
+
+      <div class="callout">
+        <strong>Production note:</strong> Real-world implementations use CUDA kernels for tiling with fused operations. This C++ skeleton is for understanding the algorithm. Integrate with <code>at::parallel_for</code> for CPU parallelism, or call optimized CUDA routines from PyTorch/Flash-Attention libraries for production use.
+      </div>
+
+      <footer class="post-nav">
+        <a href="linear-attention.html" class="nav-prev">← Part 7: Linear Attention</a>
+        <a href="mha.html" class="nav-next">Part 9: MHA →</a>
+      </footer>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>&copy; 2026 Neel Mishra. All rights reserved.</p>
+  </footer>
+
+  <script src="../../../../../../anim-speed.js"></script>
+  <script src="../../../../../../blog.js"></script>
+  <script>
+    (function() {
+      const svg = document.getElementById('fa-anim-svg');
+      const out = document.getElementById('fa-output');
+      function el(tag, attrs) {
+        const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        return e;
+      }
+      function txt(s, attrs) {
+        const t = el('text', attrs || {});
+        t.textContent = s;
+        return t;
+      }
+      function clr(e) { while (e.firstChild) e.removeChild(e.firstChild); }
+
+      const frames = [];
+      // Q-block rows, KV-block cols
+      const NQ = 3, NK = 4;
+      frames.push({ msg: 'Start: Initialize m_i, ℓ_i, O_i for Q-block 0.', q: 0, kv: -1, stage: 'init' });
+      for (let kv = 0; kv < NK; kv++) {
+        frames.push({ msg: `Q-block 0 processes KV-block ${kv}: compute S, update m, ℓ, O.`, q: 0, kv: kv, stage: 'process' });
+      }
+      frames.push({ msg: 'Q-block 0 normalize: O_i ← O_i / ℓ_i. Done.', q: 0, kv: -2, stage: 'norm' });
+      for (let q = 1; q < NQ; q++) {
+        frames.push({ msg: `Initialize m_i, ℓ_i, O_i for Q-block ${q}.`, q: q, kv: -1, stage: 'init' });
+        for (let kv = 0; kv < NK; kv++) {
+          frames.push({ msg: `Q-block ${q} processes KV-block ${kv}.`, q: q, kv: kv, stage: 'process' });
+        }
+        frames.push({ msg: `Q-block ${q} normalize. Done.`, q: q, kv: -2, stage: 'norm' });
+      }
+
+      let i = -1;
+      function draw(f) {
+        clr(svg);
+        svg.appendChild(txt('FlashAttention: Two-Level Tiling', { x: '20', y: '25', 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '16', fill: 'var(--ink)' }));
+
+        // Draw Q blocks (rows) and KV blocks (cols)
+        const qh = 40, kvw = 40, px = 280, py = 60;
+        svg.appendChild(txt('KV blocks →', { x: px - 70, y: py + 20, 'font-size': '11', fill: 'var(--ink-muted)' }));
+        svg.appendChild(txt('Q blocks ↓', { x: px - 70, y: py - 20, 'font-size': '11', fill: 'var(--ink-muted)' }));
+
+        // Draw grid
+        for (let q = 0; q < NQ; q++) {
+          for (let kv = 0; kv < NK; kv++) {
+            const x = px + kv * (kvw + 6);
+            const y = py + q * (qh + 6);
+            const isCurrent = (f && f.q === q && f.kv === kv);
+            const fill = isCurrent ? '#b8e6d5' : '#f5f5f5';
+            const stroke = isCurrent ? '#0a8f6a' : '#ddd';
+            svg.appendChild(el('rect', { x: x, y: y, width: kvw, height: qh, rx: '4', fill: fill, stroke: stroke, 'stroke-width': isCurrent ? '2' : '1' }));
+            svg.appendChild(txt(`Q${q}`, { x: x + 5, y: y + 14, 'font-size': '10', fill: 'var(--ink-muted)' }));
+            svg.appendChild(txt(`K${kv}`, { x: x + 20, y: y + 14, 'font-size': '10', fill: 'var(--ink-muted)' }));
+          }
+        }
+
+        // Draw accumulators on the right
+        const accx = px + NK * (kvw + 6) + 40;
+        svg.appendChild(txt('Accumulators:', { x: accx, y: py - 10, 'font-family': 'Syne,sans-serif', 'font-weight': '700', 'font-size': '12', fill: 'var(--ink)' }));
+        if (f && f.q !== undefined) {
+          for (let q = 0; q < NQ; q++) {
+            const y = py + q * (qh + 6);
+            const isCurrent = f.q === q;
+            const fill = isCurrent ? '#fff3e0' : '#f8f8f8';
+            svg.appendChild(el('rect', { x: accx, y: y, width: 90, height: qh, rx: '4', fill: fill, stroke: isCurrent ? '#e67e22' : '#ddd', 'stroke-width': isCurrent ? '2' : '1' }));
+            svg.appendChild(txt(`O${q}`, { x: accx + 5, y: y + 12, 'font-size': '9', fill: 'var(--ink)' }));
+            svg.appendChild(txt(`m${q}, ℓ${q}`, { x: accx + 5, y: y + 28, 'font-size': '9', fill: 'var(--ink)' }));
+          }
+        }
+
+        // Message
+        svg.appendChild(txt(f ? f.msg : 'Click Step to begin tiling animation.', { x: '20', y: '360', 'font-size': '13', fill: 'var(--ink)' }));
+        out.textContent = f ? `step ${i + 1}/${frames.length}` : '';
+      }
+
+      draw(null);
+      document.getElementById('fa-step').addEventListener('click', function() {
+        if (i >= frames.length - 1) return;
+        i++;
+        draw(frames[i]);
+      });
+      document.getElementById('fa-reset').addEventListener('click', function() {
+        i = -1;
+        draw(null);
+      });
+    })();
+  </script>
+</body>
+</html>
