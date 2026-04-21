@@ -52,6 +52,7 @@
           <li><a href="#training">Training</a></li>
           <li><a href="#encoding">Encoding</a></li>
           <li><a href="#decoding">Decoding</a></li>
+          <li><a href="#scaling">Scaling to Large Datasets</a></li>
           <li><a href="#putting-it-together">Putting It Together</a></li>
         </ul>
       </div>
@@ -390,7 +391,119 @@ tokens == [ "A", "é", "😀" ]   <span class="cm">// each element is a complete
 }</div>
       </section>
 
-      <!-- ======== Putting It Together ======== -->
+      <!-- ======== Scaling ======== -->
+      <section id="scaling">
+        <h2>Scaling to Large Datasets</h2>
+        <p>
+          The code above works on one in-memory string. Real training corpora are very different&mdash;hundreds of gigabytes, possibly a trillion rows of <code>(x, y)</code> text pairs, stored across many shards on disk. You cannot <code>std::string text = readAll(corpus)</code>; it will not fit. And even if it did, the inner merge loop rewrites the entire token sequence on every iteration, which for a trillion tokens and tens of thousands of merges is catastrophic.
+        </p>
+        <p>The production trick is to never operate on the full sequence at all. Instead, operate on <em>word frequencies</em>:</p>
+
+        <h3>Idea 1 &mdash; Word-frequency dictionary (the real BPE)</h3>
+        <p>
+          Text has huge redundancy: the word &ldquo;the&rdquo; may appear a billion times. Representing it as a billion separate character sequences is wasteful&mdash;it&rsquo;s the same work, billion times over. The original BPE paper instead pre-tokenizes on whitespace/punctuation, stores <em>each unique word exactly once</em>, and keeps a count. Pair counts are then computed as a weighted sum over the dictionary.
+        </p>
+
+<div class="pseudo-code"><span class="cm">// Compact representation: word → (character sequence, frequency)</span>
+<span class="tp">std::unordered_map</span>&lt;<span class="tp">std::string</span>, <span class="tp">uint64_t</span>&gt; word_freq;
+
+<span class="kw">void</span> <span class="fn">count_words_streaming</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; path) {
+    <span class="tp">std::ifstream</span> in(path);
+    <span class="tp">std::string</span> line;
+    <span class="kw">while</span> (std::getline(in, line)) {             <span class="cm">// one row at a time — O(1) memory per row</span>
+        <span class="kw">for</span> (<span class="kw">auto</span>&amp; w : split_on_whitespace(line))
+            word_freq[w]++;
+    }
+}</div>
+
+        <p>
+          A trillion rows collapse into maybe a few million <em>unique</em> words. That fits comfortably in RAM. Now every operation that used to sweep a trillion tokens instead sweeps a few million dictionary entries, weighted by their frequency.
+        </p>
+
+<div class="pseudo-code"><span class="cm">// Each word is stored as its current token split (starts as characters).</span>
+<span class="tp">std::unordered_map</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt;&gt; word_tokens;
+<span class="kw">for</span> (<span class="kw">auto</span>&amp; [w, f] : word_freq)
+    word_tokens[w] = utf8_split(w);
+
+<span class="cm">// Pair counts, weighted by word frequency.</span>
+<span class="tp">std::unordered_map</span>&lt;<span class="tp">Pair</span>, <span class="tp">uint64_t</span>, <span class="tp">PairHash</span>&gt; pair_counts;
+<span class="kw">for</span> (<span class="kw">auto</span>&amp; [w, f] : word_freq) {
+    <span class="kw">auto</span>&amp; toks = word_tokens[w];
+    <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i + <span class="num">1</span> &lt; toks.size(); ++i)
+        pair_counts[{toks[i], toks[i+<span class="num">1</span>]}] += f;     <span class="cm">// ← frequency-weighted</span>
+}</div>
+
+        <p>
+          The rewrite step only touches the words that <em>contain</em> the winning pair. You don&rsquo;t need to scan the whole dictionary after every merge; keep an index <code>pair &rarr; set&lt;words containing it&gt;</code> and update incrementally. This alone turns each merge step from O(corpus) into O(affected words), usually &lt; 1% of the dictionary.
+        </p>
+
+        <h3>Idea 2 &mdash; Priority queue instead of <code>max_element</code></h3>
+        <p>
+          Our naive code called <code>std::max_element</code> over <em>all</em> pair counts on every iteration: O(P) per merge where P is the number of distinct pairs. With a max-heap keyed on count, picking the winner becomes O(log P), and each count update is O(log P) as well. For a 50k-merge vocabulary this is the difference between hours and minutes.
+        </p>
+
+<div class="pseudo-code"><span class="tp">std::priority_queue</span>&lt;<span class="tp">PairCount</span>&gt; heap;   <span class="cm">// top() = most frequent pair</span>
+<span class="kw">for</span> (<span class="kw">auto</span>&amp; [p, c] : pair_counts) heap.push({c, p});
+
+<span class="kw">while</span> (next_id &lt; target_vocab_size &amp;&amp; !heap.empty()) {
+    <span class="kw">auto</span> top = heap.top(); heap.pop();
+    <span class="cm">// Lazy invalidation: the heap may hold stale counts from earlier updates.</span>
+    <span class="kw">if</span> (top.count != pair_counts[top.pair]) <span class="kw">continue</span>;   <span class="cm">// stale entry, discard</span>
+    <span class="fn">apply_merge</span>(top.pair);
+    <span class="fn">update_neighbors_and_heap</span>(top.pair);
+}</div>
+
+        <p>
+          The &ldquo;lazy invalidation&rdquo; pattern is the standard way to avoid expensive heap <em>update-key</em> operations: you re-push an entry with the new count and simply skip stale entries when they surface.
+        </p>
+
+        <h3>Idea 3 &mdash; Sharded counting (map-reduce)</h3>
+        <p>
+          If the corpus is truly massive (hundreds of GB of <code>(x, y)</code> rows), even the streaming word-count does not fit on one machine. Split the data into <em>N</em> shards, count <code>word_freq</code> per shard in parallel, then reduce:
+        </p>
+
+<div class="pseudo-code"><span class="cm">// Map stage — one thread/process per shard, independent</span>
+<span class="kw">for</span> (<span class="tp">int</span> s = <span class="num">0</span>; s &lt; N; ++s)
+    shard_counts[s] = <span class="fn">count_words_streaming</span>(shard_path(s));
+
+<span class="cm">// Reduce stage — merge dictionaries</span>
+<span class="tp">std::unordered_map</span>&lt;<span class="tp">std::string</span>, <span class="tp">uint64_t</span>&gt; global;
+<span class="kw">for</span> (<span class="kw">auto</span>&amp; sc : shard_counts)
+    <span class="kw">for</span> (<span class="kw">auto</span>&amp; [w, f] : sc) global[w] += f;</div>
+
+        <p>
+          Once you have the global <code>word_freq</code>, the BPE training loop itself runs on a single machine (it&rsquo;s operating on the compressed dictionary, which is small). Only the <em>counting</em> phase needs the map-reduce.
+        </p>
+
+        <h3>Idea 4 &mdash; You don&rsquo;t need the whole corpus</h3>
+        <p>
+          A perhaps surprising point: <strong>BPE statistics saturate quickly</strong>. The merge ordering learned from a uniform 1&ndash;10 GB sample of a trillion-row dataset is essentially identical to what you&rsquo;d learn from the full corpus&mdash;the top-frequency pairs are already stable. GPT-2&rsquo;s tokenizer was trained on roughly 40 GB; it tokenizes trillion-token corpora just fine. For production, <em>sample</em> a representative slice, train on that, then apply the fixed tokenizer to the entire dataset in parallel.
+        </p>
+
+        <h3>Idea 5 &mdash; Handling <code>(x, y)</code> pairs</h3>
+        <p>
+          For supervised data with inputs <code>x</code> and targets <code>y</code> (translation, summarization, instruction tuning), the choice depends on goal:
+        </p>
+        <ul>
+          <li><strong>Shared vocabulary</strong> (most common): concatenate the two columns during counting so both sides share the same tokenizer. Necessary when you want the model to reuse embeddings across input and output (e.g., GPT-style decoder-only, where <code>y</code> is appended to <code>x</code>).</li>
+          <li><strong>Separate vocabularies</strong>: count <code>x</code> and <code>y</code> independently, train two tokenizers. Used by some translation systems with very different source/target languages.</li>
+          <li><strong>Language-balanced sampling</strong>: if one column is mostly English and the other mostly code, uniform sampling will under-represent code. Weight the sampling so each language/domain contributes a target share of the counted tokens&mdash;this is what modern multilingual tokenizers do.</li>
+        </ul>
+
+        <h3>Putting the pieces together</h3>
+        <p>A realistic training pipeline for a trillion-row dataset looks like:</p>
+        <ol>
+          <li>Stream each shard line-by-line; build a per-shard <code>word_freq</code> map. Spill to disk if a shard is too large.</li>
+          <li>Reduce the per-shard maps into a global <code>word_freq</code> (or sample a ~10 GB representative slice and skip the reduce).</li>
+          <li>Build <code>word_tokens</code> (UTF-8 split of each unique word) and the weighted <code>pair_counts</code>.</li>
+          <li>Push pair counts into a heap. Loop: pop winner, apply merge to affected words only, update neighbor pair counts in the index, push updated entries back.</li>
+          <li>Serialize <code>merges</code> and <code>vocab</code> to disk. <em>Apply</em> the tokenizer to the full dataset in parallel (encoding is embarrassingly parallel&mdash;each row is independent).</li>
+        </ol>
+
+        <div class="callout">
+          <strong>Takeaway:</strong> The algorithm in the rest of this post is conceptually correct&mdash;every production tokenizer does the same greedy-pair-merge thing. The difference is purely in the <em>bookkeeping</em>: word-frequency dictionaries, heap-based selection, incremental pair-count updates, and (optionally) sampled training data.
+        </div>
+      </section>
       <section id="putting-it-together">
         <h2>Putting It Together</h2>
         <p>A minimal driver that trains on a small corpus, encodes a string, and decodes back:</p>
