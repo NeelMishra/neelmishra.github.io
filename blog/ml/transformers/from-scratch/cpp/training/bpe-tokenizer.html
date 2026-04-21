@@ -91,13 +91,25 @@
       <!-- ======== Data Structures ======== -->
       <section id="data-structures">
         <h2>Data Structures</h2>
-        <p>The whole tokenizer is just <strong>three containers</strong>: an ordered list of merge rules, and two maps that translate between strings and integer IDs. That&rsquo;s it&mdash;no trees, no tries, no fancy state:</p>
+        <p>The whole tokenizer is a small class with three containers: an ordered list of merge rules, and two maps for string ↔ ID translation. The constructor pre-seeds the vocabulary with all 256 byte values so every possible input byte is already a known token&mdash;training only ever <em>adds</em> merged pairs on top of that base:</p>
 
-<div class="pseudo-code"><span class="kw">struct</span> <span class="tp">BPETokenizer</span> {
-    <span class="tp">std::vector</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt;&gt; merges;   <span class="cm">// ordered merge rules</span>
-    <span class="tp">std::unordered_map</span>&lt;<span class="tp">std::string</span>, <span class="tp">int</span>&gt; vocab;                <span class="cm">// token → ID</span>
-    <span class="tp">std::unordered_map</span>&lt;<span class="tp">int</span>, <span class="tp">std::string</span>&gt; inverse_vocab;        <span class="cm">// ID → token</span>
-    <span class="tp">int</span> vocab_size;                                              <span class="cm">// target size</span>
+<div class="pseudo-code"><span class="kw">class</span> <span class="tp">BPE</span> {
+    <span class="tp">int</span> vocab_size = <span class="num">0</span>;
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt;&gt; merges;           <span class="cm">// learned merge rules (order matters)</span>
+    <span class="tp">std::unordered_map</span>&lt;<span class="tp">int</span>, <span class="tp">std::string</span>&gt; id_to_token;                  <span class="cm">// ID → token (for decode)</span>
+    <span class="tp">std::unordered_map</span>&lt;<span class="tp">std::string</span>, <span class="tp">int</span>&gt; token_to_id;                  <span class="cm">// token → ID (for encode)</span>
+
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; <span class="fn">extract_token</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text);     <span class="cm">// UTF-8 split</span>
+
+<span class="kw">public</span>:
+    <span class="fn">BPE</span>() {
+        <span class="cm">// Seed vocab with all 256 possible byte values as single-byte tokens.</span>
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; <span class="num">256</span>; i++) {
+            <span class="tp">std::string</span> tok(<span class="num">1</span>, (<span class="tp">char</span>)i);
+            id_to_token[i] = tok;
+            token_to_id[tok] = vocab_size++;
+        }
+    }
 
     <span class="kw">void</span> <span class="fn">train</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text, <span class="tp">int</span> target_vocab_size);
     <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; <span class="fn">encode</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text);
@@ -108,13 +120,17 @@
           <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
           <tbody>
             <tr><td>merges</td><td>Pairs learned during training, <em>in the order they were learned</em>. Encoding replays them in this exact order.</td></tr>
-            <tr><td>vocab / inverse_vocab</td><td>Bidirectional string ↔ ID mapping. One is for encode, the other for decode.</td></tr>
-            <tr><td>vocab_size</td><td>Target size; training stops when we reach it.</td></tr>
+            <tr><td>id_to_token / token_to_id</td><td>Bidirectional string ↔ ID mapping. One is for encode, the other for decode.</td></tr>
+            <tr><td>vocab_size</td><td>Running counter; also the next free ID.</td></tr>
           </tbody>
         </table>
 
         <div class="callout">
           <strong>Why a <code>vector</code> of merges and not a <code>set</code>?</strong> Order matters. The merge learned first is more &ldquo;primitive&rdquo; than later ones and must be applied first during encoding&mdash;otherwise we&rsquo;d produce tokens that were never in training. A <code>vector</code> preserves the learning order for free; a <code>set</code> would lose it.
+        </div>
+
+        <div class="callout">
+          <strong>Why pre-seed 256 bytes?</strong> Any byte the tokenizer ever sees during <code>encode()</code> is guaranteed to be in <code>token_to_id</code>&mdash;no missing-key lookups, no UNK token needed. This is the same &ldquo;byte-level BPE&rdquo; trick GPT-2 uses.
         </div>
       </section>
 
@@ -125,13 +141,68 @@
           Training is a greedy loop: <em>count every adjacent pair, merge the most frequent one, repeat</em>. The merge rules we record along the way <em>are</em> the tokenizer.
         </p>
 
-        <p>Before the code, a quick mental model of the four phases inside <code>train()</code>:</p>
+        <p>Before the code, a quick mental model of what happens inside <code>train()</code>:</p>
         <ol>
-          <li><strong>UTF-8 split.</strong> Turn the raw string into a list of one-character tokens. C++ <code>std::string</code> is just bytes, so we must respect UTF-8 boundaries (details below).</li>
-          <li><strong>Seed the vocabulary.</strong> Every unique character gets its own ID. These are the <em>base</em> tokens.</li>
-          <li><strong>Count pairs.</strong> Walk the sequence once, tallying every adjacent pair into a map.</li>
-          <li><strong>Pick the winner &amp; merge.</strong> Rewrite the sequence replacing every occurrence of the top pair with its concatenation, add the new token to the vocab, record the rule, and loop until the target vocab size is reached.</li>
+          <li><strong>UTF-8 split.</strong> Turn the raw string into a list of one-character tokens via <code>extract_token()</code>. C++ <code>std::string</code> is just bytes, so we must respect UTF-8 boundaries (details below).</li>
+          <li><strong>Count pairs.</strong> Walk the sequence once, tallying every adjacent pair into a map. Track the running max inline&mdash;no separate pass needed.</li>
+          <li><strong>Record the merge.</strong> Add the winning pair&rsquo;s concatenation to the vocab, record the rule in <code>merges</code>, bump <code>vocab_size</code>.</li>
+          <li><strong>Rewrite the sequence.</strong> Replace every occurrence of the winning pair with the merged token, then loop until the target vocab size is reached.</li>
         </ol>
+        <p>(The base 256-byte alphabet is already in place from the constructor, so training has no separate &ldquo;seed vocab&rdquo; step.)</p>
+
+<div class="pseudo-code"><span class="kw">void</span> <span class="tp">BPE</span>::<span class="fn">train</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text, <span class="tp">int</span> target_vocab_size) {
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; tokens = <span class="fn">extract_token</span>(text);
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; new_tokens;
+
+    <span class="kw">while</span> (vocab_size &lt; target_vocab_size) {
+        <span class="tp">std::map</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt;, <span class="tp">int</span>&gt; freq;
+        <span class="tp">std::pair</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt;, <span class="tp">int</span>&gt; best;
+
+        <span class="cm">// Count adjacent pairs and track the max inline.</span>
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i + <span class="num">1</span> &lt; (<span class="tp">int</span>)tokens.size(); i++) {
+            <span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt; p{tokens[i], tokens[i+<span class="num">1</span>]};
+            freq[p]++;
+            <span class="kw">if</span> (freq[p] &gt; best.second) best = {p, freq[p]};
+        }
+
+        <span class="cm">// Record the merge rule + new token.</span>
+        merges.push_back(best.first);
+        <span class="tp">std::string</span> merged = best.first.first + best.first.second;
+        token_to_id[merged] = vocab_size;
+        id_to_token[vocab_size] = merged;
+        vocab_size++;
+
+        <span class="cm">// Apply the merge to the token sequence.</span>
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; (<span class="tp">int</span>)tokens.size(); i++) {
+            <span class="kw">if</span> (i + <span class="num">1</span> &lt; (<span class="tp">int</span>)tokens.size()
+                &amp;&amp; tokens[i] == best.first.first
+                &amp;&amp; tokens[i+<span class="num">1</span>] == best.first.second) {
+                new_tokens.push_back(merged);
+                i++;                  <span class="cm">// skip the token we just consumed</span>
+            } <span class="kw">else</span> {
+                new_tokens.push_back(tokens[i]);
+            }
+        }
+        tokens = std::move(new_tokens);
+        new_tokens.clear();
+    }
+}</div>
+
+        <p>And the shared UTF-8 splitter used by both <code>train</code> and <code>encode</code>:</p>
+
+<div class="pseudo-code"><span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; <span class="tp">BPE</span>::<span class="fn">extract_token</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text) {
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; tokens;
+    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; (<span class="tp">int</span>)text.size(); i++) {
+        <span class="tp">int</span> len = <span class="num">1</span>;
+        <span class="tp">unsigned char</span> c = text[i];
+        <span class="kw">if</span>      (c &gt;= <span class="num">0xF0</span>) len = <span class="num">4</span>;
+        <span class="kw">else if</span> (c &gt;= <span class="num">0xE0</span>) len = <span class="num">3</span>;
+        <span class="kw">else if</span> (c &gt;= <span class="num">0xC0</span>) len = <span class="num">2</span>;
+        tokens.push_back(text.substr(i, len));
+        i += len - <span class="num">1</span>;                      <span class="cm">// the for-loop adds the last +1</span>
+    }
+    <span class="kw">return</span> tokens;
+}</div>
 
         <div class="diagram-box">
           <svg viewBox="0 0 620 220" width="100%" style="max-width:620px">
@@ -191,68 +262,7 @@
             <text x="310" y="205" text-anchor="middle" font-size="10.5" fill="#888" font-family="Manrope, sans-serif">New token "lo" added to vocabulary &amp; merge list</text>
           </svg>
         </div>
-
-<div class="pseudo-code"><span class="kw">void</span> <span class="tp">BPETokenizer</span>::<span class="fn">train</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text, <span class="tp">int</span> target_vocab_size) {
-    <span class="cm">// 1. Split text into individual UTF-8 characters as initial tokens</span>
-    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; tokens;
-    <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i &lt; text.size(); ) {
-        <span class="tp">int</span> len = <span class="num">1</span>;
-        <span class="tp">unsigned char</span> c = text[i];
-        <span class="kw">if</span>      (c &gt;= <span class="num">0xF0</span>) len = <span class="num">4</span>;
-        <span class="kw">else if</span> (c &gt;= <span class="num">0xE0</span>) len = <span class="num">3</span>;
-        <span class="kw">else if</span> (c &gt;= <span class="num">0xC0</span>) len = <span class="num">2</span>;
-        tokens.push_back(text.substr(i, len));
-        i += len;
-    }
-
-    <span class="cm">// 2. Build base vocabulary from unique characters</span>
-    <span class="tp">int</span> next_id = <span class="num">0</span>;
-    <span class="kw">for</span> (<span class="kw">auto</span>&amp; t : tokens) {
-        <span class="kw">if</span> (vocab.find(t) == vocab.end()) {
-            vocab[t] = next_id;
-            inverse_vocab[next_id] = t;
-            next_id++;
-        }
-    }
-
-    <span class="cm">// 3. Iteratively merge the most frequent pair</span>
-    <span class="kw">while</span> (next_id &lt; target_vocab_size) {
-        <span class="cm">// Count adjacent pairs</span>
-        <span class="tp">std::map</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>,<span class="tp">std::string</span>&gt;, <span class="tp">int</span>&gt; pair_counts;
-        <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i + <span class="num">1</span> &lt; tokens.size(); i++)
-            pair_counts[{tokens[i], tokens[i+<span class="num">1</span>]}]++;
-
-        <span class="kw">if</span> (pair_counts.empty()) <span class="kw">break</span>;
-
-        <span class="cm">// Find the pair with the highest count</span>
-        <span class="kw">auto</span> best = std::max_element(pair_counts.begin(), pair_counts.end(),
-            [](<span class="kw">auto</span>&amp; a, <span class="kw">auto</span>&amp; b) { <span class="kw">return</span> a.second &lt; b.second; });
-
-        <span class="tp">std::string</span> merged = best-&gt;first.first + best-&gt;first.second;
-
-        <span class="cm">// Record the merge rule</span>
-        merges.push_back(best-&gt;first);
-        vocab[merged] = next_id;
-        inverse_vocab[next_id] = merged;
-        next_id++;
-
-        <span class="cm">// Apply the merge to the token sequence</span>
-        <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; new_tokens;
-        <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i &lt; tokens.size(); i++) {
-            <span class="kw">if</span> (i + <span class="num">1</span> &lt; tokens.size() &amp;&amp;
-                tokens[i] == best-&gt;first.first &amp;&amp;
-                tokens[i+<span class="num">1</span>] == best-&gt;first.second) {
-                new_tokens.push_back(merged);
-                i++;  <span class="cm">// skip next token (consumed by merge)</span>
-            } <span class="kw">else</span> {
-                new_tokens.push_back(tokens[i]);
-            }
-        }
-        tokens = std::move(new_tokens);
-    }
-
-    vocab_size = next_id;
-}</div>
+
 
         <div class="callout">
           <strong>Key point:</strong> The merge rules are order-dependent. During encoding we must replay them in the same order they were learned.
@@ -294,14 +304,14 @@
 <span class="cm">byte:   0x41  0xC3 0xA9  0xF0 0x9F 0x98 0x80</span>
 <span class="cm">            └── é ──┘   └─────── 😀 ────────┘</span></div>
 
-        <p>Step-by-step loop execution:</p>
+        <p>Step-by-step loop execution (the inner <code>i += len - 1</code> plus the for-loop&rsquo;s own <code>i++</code> together advance <code>i</code> by exactly <code>len</code> each iteration):</p>
 
 <div class="pseudo-code"><span class="cm">i = 0: text[0] = 0x41 (= 65).  Not ≥ 0xC0, so len = 1.</span>
-       push_back("A");   i = 1.
+       push_back("A");   i += 0; then for-loop i++ → i = 1.
 <span class="cm">i = 1: text[1] = 0xC3 (= 195). ≥ 0xC0, not ≥ 0xE0, so len = 2.</span>
-       push_back("é");   <span class="cm">// = bytes [0xC3, 0xA9]</span>  i = 3.
+       push_back("é");   <span class="cm">// = bytes [0xC3, 0xA9]</span>  i += 1; for-loop i++ → i = 3.
 <span class="cm">i = 3: text[3] = 0xF0 (= 240). ≥ 0xF0, so len = 4.</span>
-       push_back("😀"); <span class="cm">// = bytes [0xF0, 0x9F, 0x98, 0x80]</span>  i = 7. Loop ends.
+       push_back("😀"); <span class="cm">// = bytes [0xF0, 0x9F, 0x98, 0x80]</span>  i += 3; for-loop i++ → i = 7. Loop ends.
 
 tokens == [ "A", "é", "😀" ]   <span class="cm">// each element is a complete UTF-8 character</span></div>
 
@@ -309,16 +319,14 @@ tokens == [ "A", "é", "😀" ]   <span class="cm">// each element is a complete
 
         <p>Finally, <code>text.substr(i, len)</code> copies exactly those bytes into a new <code>std::string</code>&mdash;a small, self-contained UTF-8 character&mdash;and we push it into <code>tokens</code>. After the loop, <code>tokens</code> contains one entry per <em>visual</em> character, not per byte, which is exactly what BPE needs as its starting alphabet.</p>
 
-        <p><strong>2. The <code>max_element</code> lambda.</strong>
-          <code>std::max_element</code> returns the largest element according to a &ldquo;less-than&rdquo; comparator. Our lambda <code>a.second &lt; b.second</code> says &ldquo;compare by pair-frequency&rdquo;, so <code>max_element</code> returns the pair with the highest count. The <code>-&gt;first</code> on the result is the key (<code>(left,right)</code> pair of strings) and <code>-&gt;second</code> is the count.
-        </p>
+        <p><strong>2. Inline max-tracking.</strong> Rather than a separate <code>std::max_element</code> pass over the frequency map, we keep a <code>best</code> variable and update it every time we bump a count. This visits each pair once instead of twice. The initial <code>best</code> is default-constructed so its count is <code>0</code>&mdash;any real pair with count <code>&ge; 1</code> will replace it on the first comparison.</p>
 
         <p><strong>3. The <code>i++</code> after appending a merged token.</strong>
           When we find the pair <code>(tokens[i], tokens[i+1])</code>, we push one combined token <code>merged</code> and then <code>i++</code> on top of the loop&rsquo;s own <code>i++</code>&mdash;effectively skipping <code>tokens[i+1]</code> because it&rsquo;s already been consumed. Without this, a sequence like <code>l o l o</code> merged on <code>(l,o)</code> would produce <code>lo</code>, then immediately try to merge <code>(o, l)</code> starting from index 1, which is a token that no longer exists in the rewritten sequence. The double increment keeps our reading position aligned with the rewritten output.
         </p>
 
-        <p><strong>4. Why <code>std::move(new_tokens)</code>?</strong>
-          <code>new_tokens</code> is a fresh vector we just built; after the assignment we don&rsquo;t need it anymore. <code>std::move</code> hands its internal buffer to <code>tokens</code> in O(1) instead of copying every string element&mdash;a meaningful speed-up inside the merge loop.
+        <p><strong>4. Why <code>std::move(new_tokens)</code> + <code>clear()</code>?</strong>
+          <code>std::move</code> hands <code>new_tokens</code>&rsquo; internal buffer to <code>tokens</code> in O(1) instead of copying every string element. After the move, <code>new_tokens</code> is in a valid-but-unspecified state, so we call <code>clear()</code> to guarantee it&rsquo;s empty before the next iteration reuses it. This one-vector-reused-across-iterations pattern avoids per-iteration allocations.
         </p>
       </section>
 
@@ -332,62 +340,50 @@ tokens == [ "A", "é", "😀" ]   <span class="cm">// each element is a complete
           Why replay in training order? Imagine merge #5 was <code>(lo, w) &rarr; low</code>. That token &ldquo;low&rdquo; can only exist if <code>(l, o) &rarr; lo</code> (merge #1) was applied first. Running merges out of order would either skip valid tokens or produce a sequence that was never in the vocab&mdash;an instant crash at the <code>vocab.at(t)</code> lookup.
         </p>
 
-<div class="pseudo-code"><span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; <span class="tp">BPETokenizer</span>::<span class="fn">encode</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text) {
-    <span class="cm">// Split into UTF-8 characters</span>
-    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; tokens;
-    <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i &lt; text.size(); ) {
-        <span class="tp">int</span> len = <span class="num">1</span>;
-        <span class="tp">unsigned char</span> c = text[i];
-        <span class="kw">if</span>      (c &gt;= <span class="num">0xF0</span>) len = <span class="num">4</span>;
-        <span class="kw">else if</span> (c &gt;= <span class="num">0xE0</span>) len = <span class="num">3</span>;
-        <span class="kw">else if</span> (c &gt;= <span class="num">0xC0</span>) len = <span class="num">2</span>;
-        tokens.push_back(text.substr(i, len));
-        i += len;
-    }
+<div class="pseudo-code"><span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; <span class="tp">BPE</span>::<span class="fn">encode</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text) {
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; tokens = <span class="fn">extract_token</span>(text);
+    <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; new_tokens;
 
-    <span class="cm">// Apply each merge rule in order</span>
-    <span class="kw">for</span> (<span class="kw">auto</span>&amp; [left, right] : merges) {
-        <span class="tp">std::vector</span>&lt;<span class="tp">std::string</span>&gt; new_tokens;
-        <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i &lt; tokens.size(); i++) {
-            <span class="kw">if</span> (i + <span class="num">1</span> &lt; tokens.size() &amp;&amp;
-                tokens[i] == left &amp;&amp; tokens[i+<span class="num">1</span>] == right) {
-                new_tokens.push_back(left + right);
-                i++;
+    <span class="cm">// Apply each merge rule in the order it was learned.</span>
+    <span class="kw">for</span> (<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt; rule : merges) {
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; (<span class="tp">int</span>)tokens.size(); i++) {
+            <span class="kw">if</span> (i + <span class="num">1</span> &lt; (<span class="tp">int</span>)tokens.size()
+                &amp;&amp; tokens[i] == rule.first
+                &amp;&amp; tokens[i+<span class="num">1</span>] == rule.second) {
+                new_tokens.push_back(rule.first + rule.second);
+                i++;                                    <span class="cm">// skip the next token</span>
             } <span class="kw">else</span> {
                 new_tokens.push_back(tokens[i]);
             }
         }
         tokens = std::move(new_tokens);
+        new_tokens.clear();
     }
 
-    <span class="cm">// Map tokens to IDs</span>
+    <span class="cm">// Map final tokens to IDs.</span>
     <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; ids;
-    <span class="kw">for</span> (<span class="kw">auto</span>&amp; t : tokens)
-        ids.push_back(vocab.at(t));
+    <span class="kw">for</span> (<span class="kw">const</span> <span class="tp">std::string</span>&amp; t : tokens)
+        ids.push_back(token_to_id[t]);
     <span class="kw">return</span> ids;
 }</div>
 
         <div class="callout warn">
           <strong>Complexity note:</strong> This na&iuml;ve approach is O(merges &times; sequence_length) per encode call&mdash;every learned rule does one full pass over the token sequence. Production tokenizers (e.g. <em>tiktoken</em>, <em>SentencePiece</em>) use priority queues keyed on merge rank to get O(n log n), but the greedy replay above is clearer and fine for learning.
         </div>
-
-        <p>
-          A subtle point: the structured binding <code>auto&amp; [left, right] : merges</code> unpacks each <code>std::pair</code> into the two halves of the merge rule. It&rsquo;s the same data as <code>merges[k].first</code> / <code>merges[k].second</code>, just easier to read.
-        </p>
       </section>
 
       <!-- ======== Decoding ======== -->
       <section id="decoding">
         <h2>Decoding</h2>
         <p>
-          Decoding is delightfully boring: walk the ID list, look each one up in <code>inverse_vocab</code>, concatenate. Because every token string already contains <em>all</em> of its characters (the merge <code>"low"</code> literally stores the three bytes <code>l</code>, <code>o</code>, <code>w</code>), no reverse-merge logic is needed&mdash;appending the strings reassembles the original text byte-for-byte.
+          Decoding is delightfully boring: walk the ID list, look each one up in <code>id_to_token</code>, concatenate. Because every token string already contains <em>all</em> of its characters (the merge <code>"low"</code> literally stores the three bytes <code>l</code>, <code>o</code>, <code>w</code>), no reverse-merge logic is needed&mdash;appending the strings reassembles the original text byte-for-byte.
         </p>
 
-<div class="pseudo-code"><span class="tp">std::string</span> <span class="tp">BPETokenizer</span>::<span class="fn">decode</span>(<span class="kw">const</span> <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt;&amp; ids) {
-    <span class="tp">std::string</span> result;
+<div class="pseudo-code"><span class="tp">std::string</span> <span class="tp">BPE</span>::<span class="fn">decode</span>(<span class="kw">const</span> <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt;&amp; ids) {
+    <span class="tp">std::string</span> output;
     <span class="kw">for</span> (<span class="tp">int</span> id : ids)
-        result += inverse_vocab.at(id);
-    <span class="kw">return</span> result;
+        output += id_to_token[id];
+    <span class="kw">return</span> output;
 }</div>
       </section>
 
@@ -513,51 +509,30 @@ tokens == [ "A", "é", "😀" ]   <span class="cm">// each element is a complete
 <span class="kw">#include</span> &lt;string&gt;
 <span class="kw">#include</span> &lt;map&gt;
 <span class="kw">#include</span> &lt;unordered_map&gt;
-<span class="kw">#include</span> &lt;algorithm&gt;
 
-<span class="cm">// ... BPETokenizer struct defined above ...</span>
+<span class="cm">// ... BPE class defined above ...</span>
 
 <span class="tp">int</span> <span class="fn">main</span>() {
-    <span class="tp">BPETokenizer</span> tok;
+    <span class="tp">BPE</span> tok;                                             <span class="cm">// constructor seeds 256 byte tokens</span>
 
     <span class="tp">std::string</span> corpus = <span class="str">"low lower newest widest low lower"</span>;
-    tok.<span class="fn">train</span>(corpus, <span class="num">30</span>);
+    tok.<span class="fn">train</span>(corpus, <span class="num">280</span>);                              <span class="cm">// 256 base + up to 24 merged</span>
 
-    std::cout &lt;&lt; <span class="str">"Vocab size: "</span> &lt;&lt; tok.vocab_size &lt;&lt; <span class="str">"\n"</span>;
-    std::cout &lt;&lt; <span class="str">"Merges learned: "</span> &lt;&lt; tok.merges.size() &lt;&lt; <span class="str">"\n\n"</span>;
-
-    <span class="cm">// Print merge rules</span>
-    <span class="kw">for</span> (<span class="kw">auto</span>&amp; [a, b] : tok.merges)
-        std::cout &lt;&lt; <span class="str">"  ("</span> &lt;&lt; a &lt;&lt; <span class="str">", "</span> &lt;&lt; b &lt;&lt; <span class="str">") → "</span> &lt;&lt; a + b &lt;&lt; <span class="str">"\n"</span>;
-
-    <span class="cm">// Encode</span>
     <span class="tp">std::string</span> input = <span class="str">"lower"</span>;
-    <span class="kw">auto</span> ids = tok.<span class="fn">encode</span>(input);
+    <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; ids = tok.<span class="fn">encode</span>(input);
 
-    std::cout &lt;&lt; <span class="str">"\nEncode \""</span> &lt;&lt; input &lt;&lt; <span class="str">"\": ["</span>;
+    std::cout &lt;&lt; <span class="str">"Encode \""</span> &lt;&lt; input &lt;&lt; <span class="str">"\": ["</span>;
     <span class="kw">for</span> (<span class="tp">size_t</span> i = <span class="num">0</span>; i &lt; ids.size(); i++)
         std::cout &lt;&lt; ids[i] &lt;&lt; (i + <span class="num">1</span> &lt; ids.size() ? <span class="str">", "</span> : <span class="str">""</span>);
     std::cout &lt;&lt; <span class="str">"]\n"</span>;
 
-    <span class="cm">// Decode</span>
-    <span class="tp">std::string</span> decoded = tok.<span class="fn">decode</span>(ids);
-    std::cout &lt;&lt; <span class="str">"Decode back: \""</span> &lt;&lt; decoded &lt;&lt; <span class="str">"\"\n"</span>;
-
+    std::cout &lt;&lt; <span class="str">"Decode back: \""</span> &lt;&lt; tok.<span class="fn">decode</span>(ids) &lt;&lt; <span class="str">"\"\n"</span>;
     <span class="kw">return</span> <span class="num">0</span>;
 }</div>
 
-        <p>Expected output (exact merges depend on tie-breaking):</p>
+        <p>Expected output (exact IDs depend on tie-breaking, but encode &rarr; decode is always lossless):</p>
 
-<div class="pseudo-code"><span class="cm">Vocab size: 30
-Merges learned: 19
-
-  (l, o) → lo
-  (lo, w) → low
-  (e, r) → er
-  (low, er) → lower
-  ...
-
-Encode "lower": [17]
+<div class="pseudo-code"><span class="cm">Encode "lower": [275]
 Decode back: "lower"</span></div>
 
         <div class="callout">
