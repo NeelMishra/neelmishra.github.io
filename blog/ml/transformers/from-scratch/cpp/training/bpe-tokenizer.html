@@ -71,17 +71,26 @@
       <section id="what-is-bpe">
         <h2>What Is BPE</h2>
         <p>
-          Byte-Pair Encoding starts with individual characters (or bytes) as the base vocabulary, then iteratively merges the most frequent adjacent pair into a new token. After enough merges the vocabulary contains subword units that balance between character-level and word-level granularity&mdash;and can represent any text without out-of-vocabulary tokens. For the full theory, see the <a href="../../training/tokenization.html">tokenization theory blog</a>.
+          Byte-Pair Encoding (BPE) starts with individual characters (or bytes) as the base vocabulary, then <em>repeatedly glues together the most frequent adjacent pair</em> and gives that new glued-pair its own token ID. After enough merges the vocabulary contains subword units that land between character-level and word-level granularity&mdash;small enough to represent any text (no out-of-vocabulary tokens), large enough that common words become a single token. For the full theory, see the <a href="../../training/tokenization.html">tokenization theory blog</a>.
         </p>
+
+        <p><strong>Tiny worked example.</strong> Train on the corpus <code>"low low lower"</code>:</p>
+        <ol>
+          <li>Start with characters: <code>l o w &middot; l o w &middot; l o w e r</code> (spaces shown as <code>&middot;</code>).</li>
+          <li>Count adjacent pairs. <code>(l,o)</code> appears 3 times&mdash;the winner.</li>
+          <li>Merge it everywhere: <code>lo w &middot; lo w &middot; lo w e r</code>, and add <code>"lo"</code> to the vocabulary.</li>
+          <li>Recount. <code>(lo,w)</code> now appears 3 times. Merge &rarr; <code>"low"</code> is born.</li>
+          <li>Stop when we hit the target vocab size. The learned <em>merge order</em> is the tokenizer&rsquo;s recipe.</li>
+        </ol>
         <p>
-          Here we build the whole thing from scratch in C++: train merge rules from a corpus, encode text to IDs, decode back.
+          Encoding later text means <em>replaying the exact same recipe</em>: split into characters, then apply each merge rule in the order it was learned. Decoding is even simpler: map IDs back to strings and concatenate. That&rsquo;s the whole algorithm&mdash;the rest of this post is the C++ for it.
         </p>
       </section>
 
       <!-- ======== Data Structures ======== -->
       <section id="data-structures">
         <h2>Data Structures</h2>
-        <p>The tokenizer state is small&mdash;an ordered list of merge rules plus the vocabulary maps:</p>
+        <p>The whole tokenizer is just <strong>three containers</strong>: an ordered list of merge rules, and two maps that translate between strings and integer IDs. That&rsquo;s it&mdash;no trees, no tries, no fancy state:</p>
 
 <div class="pseudo-code"><span class="kw">struct</span> <span class="tp">BPETokenizer</span> {
     <span class="tp">std::vector</span>&lt;<span class="tp">std::pair</span>&lt;<span class="tp">std::string</span>, <span class="tp">std::string</span>&gt;&gt; merges;   <span class="cm">// ordered merge rules</span>
@@ -97,19 +106,31 @@
         <table class="dim-table">
           <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
           <tbody>
-            <tr><td>merges</td><td>Pairs learned during training, applied in order during encoding</td></tr>
-            <tr><td>vocab / inverse_vocab</td><td>Bidirectional string ↔ ID mapping</td></tr>
-            <tr><td>vocab_size</td><td>Controls when training stops</td></tr>
+            <tr><td>merges</td><td>Pairs learned during training, <em>in the order they were learned</em>. Encoding replays them in this exact order.</td></tr>
+            <tr><td>vocab / inverse_vocab</td><td>Bidirectional string ↔ ID mapping. One is for encode, the other for decode.</td></tr>
+            <tr><td>vocab_size</td><td>Target size; training stops when we reach it.</td></tr>
           </tbody>
         </table>
+
+        <div class="callout">
+          <strong>Why a <code>vector</code> of merges and not a <code>set</code>?</strong> Order matters. The merge learned first is more &ldquo;primitive&rdquo; than later ones and must be applied first during encoding&mdash;otherwise we&rsquo;d produce tokens that were never in training. A <code>vector</code> preserves the learning order for free; a <code>set</code> would lose it.
+        </div>
       </section>
 
       <!-- ======== Training ======== -->
       <section id="training">
         <h2>Training</h2>
         <p>
-          Training builds the merge table greedily: count every adjacent pair, merge the most frequent one, repeat.
+          Training is a greedy loop: <em>count every adjacent pair, merge the most frequent one, repeat</em>. The merge rules we record along the way <em>are</em> the tokenizer.
         </p>
+
+        <p>Before the code, a quick mental model of the four phases inside <code>train()</code>:</p>
+        <ol>
+          <li><strong>UTF-8 split.</strong> Turn the raw string into a list of one-character tokens. C++ <code>std::string</code> is just bytes, so we must respect UTF-8 boundaries (details below).</li>
+          <li><strong>Seed the vocabulary.</strong> Every unique character gets its own ID. These are the <em>base</em> tokens.</li>
+          <li><strong>Count pairs.</strong> Walk the sequence once, tallying every adjacent pair into a map.</li>
+          <li><strong>Pick the winner &amp; merge.</strong> Rewrite the sequence replacing every occurrence of the top pair with its concatenation, add the new token to the vocab, record the rule, and loop until the target vocab size is reached.</li>
+        </ol>
 
         <div class="diagram-box">
           <svg viewBox="0 0 620 220" width="100%" style="max-width:620px">
@@ -235,13 +256,44 @@
         <div class="callout">
           <strong>Key point:</strong> The merge rules are order-dependent. During encoding we must replay them in the same order they were learned.
         </div>
+
+        <h3>Reading the tricky bits</h3>
+
+        <p><strong>1. The UTF-8 split (lines with <code>0xC0 / 0xE0 / 0xF0</code>).</strong> A <code>std::string</code> is a sequence of <code>char</code>s (bytes), not Unicode code points. A single emoji or accented character may span 1&ndash;4 bytes. UTF-8 encodes the length into the leading byte:</p>
+
+        <table class="dim-table">
+          <thead><tr><th>Leading byte</th><th>Binary prefix</th><th>Bytes in this character</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td>&lt; 0x80</td><td><code>0xxxxxxx</code></td><td>1 (plain ASCII)</td><td><code>a</code>, <code>!</code></td></tr>
+            <tr><td>&ge; 0xC0</td><td><code>110xxxxx</code></td><td>2</td><td><code>&eacute;</code> (&eacute;)</td></tr>
+            <tr><td>&ge; 0xE0</td><td><code>1110xxxx</code></td><td>3</td><td><code>&#x20AC;</code> (euro)</td></tr>
+            <tr><td>&ge; 0xF0</td><td><code>11110xxx</code></td><td>4</td><td>emoji &#x1F600;</td></tr>
+          </tbody>
+        </table>
+
+        <p>So the <code>if / else if</code> ladder is just a lookup: peek at one byte, decide how many bytes the current character spans, then <code>substr(i, len)</code> copies the whole character and we advance <code>i += len</code>. Without this we&rsquo;d produce garbled half-characters for any non-ASCII input.</p>
+
+        <p><strong>2. The <code>max_element</code> lambda.</strong>
+          <code>std::max_element</code> returns the largest element according to a &ldquo;less-than&rdquo; comparator. Our lambda <code>a.second &lt; b.second</code> says &ldquo;compare by pair-frequency&rdquo;, so <code>max_element</code> returns the pair with the highest count. The <code>-&gt;first</code> on the result is the key (<code>(left,right)</code> pair of strings) and <code>-&gt;second</code> is the count.
+        </p>
+
+        <p><strong>3. The <code>i++</code> after appending a merged token.</strong>
+          When we find the pair <code>(tokens[i], tokens[i+1])</code>, we push one combined token <code>merged</code> and then <code>i++</code> on top of the loop&rsquo;s own <code>i++</code>&mdash;effectively skipping <code>tokens[i+1]</code> because it&rsquo;s already been consumed. Without this, a sequence like <code>l o l o</code> merged on <code>(l,o)</code> would produce <code>lo</code>, then immediately try to merge <code>(o, l)</code> starting from index 1, which is a token that no longer exists in the rewritten sequence. The double increment keeps our reading position aligned with the rewritten output.
+        </p>
+
+        <p><strong>4. Why <code>std::move(new_tokens)</code>?</strong>
+          <code>new_tokens</code> is a fresh vector we just built; after the assignment we don&rsquo;t need it anymore. <code>std::move</code> hands its internal buffer to <code>tokens</code> in O(1) instead of copying every string element&mdash;a meaningful speed-up inside the merge loop.
+        </p>
       </section>
 
       <!-- ======== Encoding ======== -->
       <section id="encoding">
         <h2>Encoding</h2>
         <p>
-          Encoding replays the learned merges on new text. Split into characters, then apply each merge rule in training order:
+          Encoding is where the &ldquo;tokenizer is just a recipe&rdquo; idea pays off. We take new text the model has never seen, split it into characters the same way we did during training, then <em>apply every learned merge in the order it was learned</em>. After all merges have been replayed, every surviving token is guaranteed to be in <code>vocab</code>&mdash;so we just look up its ID.
+        </p>
+        <p>
+          Why replay in training order? Imagine merge #5 was <code>(lo, w) &rarr; low</code>. That token &ldquo;low&rdquo; can only exist if <code>(l, o) &rarr; lo</code> (merge #1) was applied first. Running merges out of order would either skip valid tokens or produce a sequence that was never in the vocab&mdash;an instant crash at the <code>vocab.at(t)</code> lookup.
         </p>
 
 <div class="pseudo-code"><span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt; <span class="tp">BPETokenizer</span>::<span class="fn">encode</span>(<span class="kw">const</span> <span class="tp">std::string</span>&amp; text) {
@@ -280,14 +332,20 @@
 }</div>
 
         <div class="callout warn">
-          <strong>Complexity note:</strong> This na&iuml;ve approach is O(merges &times; sequence_length) per encode call. Production tokenizers use priority queues for O(n log n), but the greedy replay above is clearer and fine for learning.
+          <strong>Complexity note:</strong> This na&iuml;ve approach is O(merges &times; sequence_length) per encode call&mdash;every learned rule does one full pass over the token sequence. Production tokenizers (e.g. <em>tiktoken</em>, <em>SentencePiece</em>) use priority queues keyed on merge rank to get O(n log n), but the greedy replay above is clearer and fine for learning.
         </div>
+
+        <p>
+          A subtle point: the structured binding <code>auto&amp; [left, right] : merges</code> unpacks each <code>std::pair</code> into the two halves of the merge rule. It&rsquo;s the same data as <code>merges[k].first</code> / <code>merges[k].second</code>, just easier to read.
+        </p>
       </section>
 
       <!-- ======== Decoding ======== -->
       <section id="decoding">
         <h2>Decoding</h2>
-        <p>Decoding is trivial&mdash;map each ID back to its string and concatenate:</p>
+        <p>
+          Decoding is delightfully boring: walk the ID list, look each one up in <code>inverse_vocab</code>, concatenate. Because every token string already contains <em>all</em> of its characters (the merge <code>"low"</code> literally stores the three bytes <code>l</code>, <code>o</code>, <code>w</code>), no reverse-merge logic is needed&mdash;appending the strings reassembles the original text byte-for-byte.
+        </p>
 
 <div class="pseudo-code"><span class="tp">std::string</span> <span class="tp">BPETokenizer</span>::<span class="fn">decode</span>(<span class="kw">const</span> <span class="tp">std::vector</span>&lt;<span class="tp">int</span>&gt;&amp; ids) {
     <span class="tp">std::string</span> result;
