@@ -1904,6 +1904,46 @@ function flattenBlogTree(nodes, result) {
   buildLevel(BLOG_TREE, nav, 0);
 })();
 
+/* Blog post: collapsible sidebar toggle */
+(function blogSidebarCollapse() {
+  var layout = document.querySelector('.blog-post-layout');
+  var sidebar = document.querySelector('.blog-sidebar');
+  if (!layout || !sidebar) return;
+
+  var STORAGE_KEY = 'blog-sidebar-collapsed';
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sidebar-toggle';
+  btn.setAttribute('aria-label', 'Toggle explorer');
+  btn.setAttribute('aria-controls', 'blog-sidebar-body');
+  btn.innerHTML = '<span class="st-icon" aria-hidden="true">\u00AB</span><span class="st-label">Collapse</span>';
+
+  var body = document.createElement('div');
+  body.className = 'blog-sidebar-body';
+  body.id = 'blog-sidebar-body';
+  while (sidebar.firstChild) body.appendChild(sidebar.firstChild);
+  sidebar.appendChild(btn);
+  sidebar.appendChild(body);
+
+  function apply(collapsed) {
+    layout.classList.toggle('sidebar-collapsed', collapsed);
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btn.querySelector('.st-icon').textContent = collapsed ? '\u00BB' : '\u00AB';
+    btn.querySelector('.st-label').textContent = collapsed ? '' : 'Collapse';
+    btn.title = collapsed ? 'Expand explorer' : 'Collapse explorer';
+  }
+
+  var initial = false;
+  try { initial = localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) {}
+  apply(initial);
+
+  btn.addEventListener('click', function () {
+    var collapsed = !layout.classList.contains('sidebar-collapsed');
+    apply(collapsed);
+    try { localStorage.setItem(STORAGE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+  });
+})();
+
 /* Blog post: auto-generate TOC from headings */
 (function buildTOC() {
   const sidebar = document.querySelector('.toc-section ul');
