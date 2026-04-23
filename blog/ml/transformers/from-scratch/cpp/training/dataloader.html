@@ -48,7 +48,7 @@
         <h4>Table of Contents</h4>
         <ul>
           <li><a href="#what-it-does">What the DataLoader Does</a></li>
-          <li><a href="#struct">The DataLoader Struct</a></li>
+          <li><a href="#class">The DataLoader Class</a></li>
           <li><a href="#next-batch">next_batch()</a></li>
           <li><a href="#usage">Usage Example</a></li>
         </ul>
@@ -185,71 +185,106 @@
 
 
       <!-- ================================================================ -->
-      <!-- 2. THE STRUCT                                                     -->
+      <!-- 2. THE CLASS                                                      -->
       <!-- ================================================================ -->
-      <h2 id="struct">2 &middot; The DataLoader Struct</h2>
+      <h2 id="class">2 &middot; The DataLoader Class</h2>
 
-      <div class="pseudo-code"><span class="kw">struct</span> <span class="tp">DataLoader</span> {
-    torch::Tensor data;       <span class="cm">// all token IDs as a 1-D long tensor</span>
+      <p>
+        Everything the loader needs is private: the token tensor and the two window sizes.
+        The only public surface is the constructor and <code>next_batch()</code>. No state
+        leaks, no cursor to manage, no copy of the token array floating around.
+      </p>
+
+      <div class="pseudo-code"><span class="kw">class</span> <span class="tp">DataLoader</span> {
+    torch::Tensor data;       <span class="cm">// all token IDs as a 1-D int64 tensor</span>
     <span class="tp">int</span> block_size;           <span class="cm">// sequence length (context window)</span>
-    <span class="tp">int</span> batch_size;
+    <span class="tp">int</span> batch_size;           <span class="cm">// sequences per batch</span>
 
-    <span class="fn">DataLoader</span>(std::vector&lt;<span class="tp">int</span>&gt;&amp; tokens, <span class="tp">int</span> block_size, <span class="tp">int</span> batch_size)
+    <span class="kw">public</span>:
+    <span class="fn">DataLoader</span>(<span class="kw">const</span> std::vector&lt;<span class="tp">int</span>&gt;&amp; tokens, <span class="tp">int</span> block_size, <span class="tp">int</span> batch_size)
         : block_size(block_size), batch_size(batch_size)
     {
+        <span class="cm">// Embedding layers and cross-entropy targets expect int64 indices,</span>
+        <span class="cm">// so we store the token stream as kLong once, up front.</span>
         data = torch::<span class="fn">tensor</span>(tokens, torch::<span class="fn">dtype</span>(torch::kLong));
     }
 
-    std::pair&lt;torch::Tensor, torch::Tensor&gt; <span class="fn">next_batch</span>();
+    std::pair&lt;torch::Tensor, torch::Tensor&gt; <span class="fn">next_batch</span>() {
+        <span class="tp">int</span> n = data.<span class="fn">size</span>(<span class="num">0</span>);
+
+        <span class="cm">// Random starts in [0, n - block_size). Each start s gives</span>
+        <span class="cm">//   x = data[s       : s + block_size    ]   (length block_size)</span>
+        <span class="cm">//   y = data[s + 1   : s + block_size + 1]   (same, shifted by 1)</span>
+        <span class="kw">auto</span> ix = torch::<span class="fn">randint</span>(n - block_size, {batch_size}, torch::<span class="fn">dtype</span>(torch::kLong));
+
+        std::vector&lt;torch::Tensor&gt; xs, ys;
+        xs.<span class="fn">reserve</span>(batch_size);
+        ys.<span class="fn">reserve</span>(batch_size);
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; batch_size; i++) {
+            <span class="tp">int</span> start = ix[i].<span class="fn">item</span>&lt;<span class="tp">int</span>&gt;();
+            xs.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start,     start + block_size));
+            ys.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start + <span class="num">1</span>, start + block_size + <span class="num">1</span>));
+        }
+
+        <span class="cm">// stack along a new leading dim -&gt; (B, T) for both inputs and targets</span>
+        <span class="kw">return</span> { torch::<span class="fn">stack</span>(xs), torch::<span class="fn">stack</span>(ys) };
+    }
 };</div>
 
       <p>
-        The constructor converts the <code>vector&lt;int&gt;</code> of token IDs into a 1-D
-        <code>torch::Tensor</code> of dtype <code>kLong</code> (int64). That&rsquo;s the only
-        storage &mdash; everything else is computed on the fly in <code>next_batch()</code>.
+        A few details worth calling out:
       </p>
+      <ul>
+        <li><strong><code>private</code> by default.</strong> With <code>class</code> the members
+          above the <code>public:</code> label are hidden. Callers can only touch the two-method
+          API, which is exactly what we want.</li>
+        <li><strong><code>const std::vector&lt;int&gt;&amp;</code></strong> in the constructor &mdash;
+          we don&rsquo;t need to modify the caller&rsquo;s vector, and we don&rsquo;t copy it
+          either; <code>torch::tensor(...)</code> reads it once and builds an owned tensor.</li>
+        <li><strong>Dtype <code>kLong</code> (int64).</strong> Token IDs feed
+          <code>nn::Embedding</code> as indices and
+          <code>nn::CrossEntropyLoss</code> as class labels, both of which require int64. Picking
+          the dtype once, here, means no casts later in the training loop.</li>
+        <li><strong>Inline definition.</strong> Keeping <code>next_batch()</code> inside the class
+          body keeps the header self-contained &mdash; no separate <code>.cpp</code>, no forward
+          declarations, easier to drop into a single-file demo.</li>
+      </ul>
 
 
       <!-- ================================================================ -->
       <!-- 3. NEXT BATCH                                                     -->
       <!-- ================================================================ -->
-      <h2 id="next-batch">3 &middot; next_batch()</h2>
+      <h2 id="next-batch">3 &middot; How <code>next_batch()</code> Builds a Batch</h2>
 
       <p>
-        Rather than reading tokens sequentially, we randomly sample starting positions each call.
-        This gives more variety across batches and avoids the need to track a cursor or handle
-        wrap-around logic.
+        Rather than stepping through the corpus with a cursor, we sample <code>batch_size</code>
+        random start positions every call. Each start carves out a contiguous window for the
+        input <em>and</em> a window shifted right by one for the target. Stacking the lists
+        along a new axis gives the <code>(B, T)</code> tensors the model expects.
       </p>
-
-      <div class="pseudo-code">std::pair&lt;torch::Tensor, torch::Tensor&gt; <span class="tp">DataLoader</span>::<span class="fn">next_batch</span>() {
-    <span class="tp">int</span> n = data.<span class="fn">size</span>(<span class="num">0</span>);
-
-    <span class="cm">// random starting indices in [0, n - block_size - 1]</span>
-    <span class="kw">auto</span> ix = torch::<span class="fn">randint</span>(n - block_size, {batch_size}, torch::<span class="fn">dtype</span>(torch::kLong));
-
-    std::vector&lt;torch::Tensor&gt; xs, ys;
-    <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; batch_size; i++) {
-        <span class="tp">int</span> start = ix[i].<span class="fn">item</span>&lt;<span class="tp">int</span>&gt;();
-        xs.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start, start + block_size));
-        ys.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start + <span class="num">1</span>, start + block_size + <span class="num">1</span>));
-    }
-
-    <span class="kw">return</span> { torch::<span class="fn">stack</span>(xs), torch::<span class="fn">stack</span>(ys) };
-}</div>
 
       <table class="dim-table">
         <tr><th>Variable</th><th>Shape</th><th>Description</th></tr>
-        <tr><td>ix</td><td>(B,)</td><td>Random start positions</td></tr>
+        <tr><td>ix</td><td>(B,)</td><td>Random start positions, int64, each in [0, n - block_size)</td></tr>
         <tr><td>xs[i]</td><td>(T,)</td><td>data[start : start + block_size]</td></tr>
-        <tr><td>ys[i]</td><td>(T,)</td><td>data[start+1 : start + block_size+1]</td></tr>
+        <tr><td>ys[i]</td><td>(T,)</td><td>data[start + 1 : start + block_size + 1]</td></tr>
         <tr><td>return.first</td><td>(B, T)</td><td>Stacked input sequences</td></tr>
         <tr><td>return.second</td><td>(B, T)</td><td>Stacked target sequences</td></tr>
       </table>
 
       <div class="callout">
         <strong>Why random sampling?</strong> Sequential reading means the model sees the same
-        windows in the same order every epoch. Random sampling gives a different set of overlapping
-        windows each call, acting as a form of data augmentation.
+        windows in the same order every epoch. Random sampling gives a fresh set of overlapping
+        windows on every call &mdash; it&rsquo;s both free data augmentation and a substitute
+        for explicit shuffling and epoch bookkeeping.
+      </div>
+
+      <div class="callout warn">
+        <strong>Why <code>n - block_size</code> and not <code>n - block_size - 1</code>?</strong>
+        <code>torch::randint(high, ...)</code> draws from [0, <code>high</code>), so the largest
+        start it can return is <code>n - block_size - 1</code>. For that worst case, the target
+        slice ends at index <code>n</code>, which is a valid exclusive upper bound &mdash; no
+        out-of-range access.
       </div>
 
 
