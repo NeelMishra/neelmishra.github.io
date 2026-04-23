@@ -1936,3 +1936,254 @@ function flattenBlogTree(nodes, result) {
 
   headings.forEach(h => obs.observe(h));
 })();
+
+/* ===== Blog index: dynamic grid, filters, search ===== */
+(function buildBlogIndex() {
+  var root = document.getElementById('blog-grid-root');
+  if (!root || typeof BLOG_POSTS === 'undefined') return;
+
+  var CATEGORY_META = {
+    cpp:   { label: 'C++',   accent: '#5ac8a8', blurb: 'STL internals, concurrency, deep language mechanics.' },
+    dsa:   { label: 'DSA',   accent: '#f29e6b', blurb: 'Data structures and algorithms with animated walkthroughs.' },
+    cp:    { label: 'CP',    accent: '#c079d1', blurb: 'Competitive programming math, techniques, and patterns.' },
+    hld:   { label: 'HLD',   accent: '#6aa9e0', blurb: 'High-level system design: scale, storage, distribution.' },
+    lld:   { label: 'LLD',   accent: '#e0b56a', blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
+    ml:    { label: 'ML',    accent: '#d96a8e', blurb: 'Machine learning building blocks, from attention to transformers.' },
+    mlops: { label: 'MLOps', accent: '#7dc4a0', blurb: 'Training infra, deployment, evaluation, observability for ML.' }
+  };
+
+  /* ----- Build normalised post list ----- */
+  var posts = [];
+  Object.keys(BLOG_POSTS).forEach(function(file) {
+    var p = BLOG_POSTS[file];
+    var segs = p.series.split(/\s*&middot;\s*|\s*·\s*/).map(function(s){ return s.trim(); }).filter(Boolean);
+    /* First segment is usually the category label; drop it so the series is the unique inner breadcrumb. */
+    var catLabel = CATEGORY_META[p.category] ? CATEGORY_META[p.category].label : (segs[0] || p.category);
+    var inner = segs.slice();
+    if (inner[0] && inner[0].toLowerCase() === catLabel.toLowerCase()) inner.shift();
+    /* Strip trailing "Part N" so posts in the same series group together. */
+    var part = '';
+    if (inner.length && /^Part\s+\d+/i.test(inner[inner.length - 1])) {
+      part = inner.pop();
+    }
+    var seriesName = inner.join(' · ') || 'Singles';
+    posts.push({
+      file: file,
+      href: 'blog/' + file,
+      category: p.category,
+      categoryLabel: catLabel,
+      seriesFull: p.series,
+      seriesName: seriesName,
+      part: part,
+      title: p.title,
+      description: p.description,
+      meta: p.meta,
+      _search: (p.title + ' ' + p.description + ' ' + p.series + ' ' + p.meta).toLowerCase()
+    });
+  });
+
+  /* ----- Group: category -> series -> posts[] (preserve insertion order for stability) ----- */
+  var byCategory = {};
+  var catOrder = Object.keys(CATEGORY_META); /* stable display order */
+  posts.forEach(function(p) {
+    if (!byCategory[p.category]) byCategory[p.category] = { label: p.categoryLabel, seriesMap: {}, seriesOrder: [] };
+    var cat = byCategory[p.category];
+    if (!cat.seriesMap[p.seriesName]) {
+      cat.seriesMap[p.seriesName] = [];
+      cat.seriesOrder.push(p.seriesName);
+    }
+    cat.seriesMap[p.seriesName].push(p);
+  });
+
+  /* Category chips + counts */
+  var chipsHost = document.getElementById('blog-chips');
+  var statsHost = document.getElementById('blog-hero-stats');
+  var activeCats = new Set();
+
+  var allCount = posts.length;
+  var allChip = makeChip('All', allCount, true);
+  allChip.dataset.cat = '__all__';
+  chipsHost.appendChild(allChip);
+
+  catOrder.forEach(function(code) {
+    if (!byCategory[code]) return;
+    var count = posts.filter(function(p){ return p.category === code; }).length;
+    var chip = makeChip(CATEGORY_META[code].label, count, false);
+    chip.dataset.cat = code;
+    chip.style.setProperty('--chip-accent', CATEGORY_META[code].accent);
+    chipsHost.appendChild(chip);
+  });
+
+  /* Hero stats: total posts + category count */
+  if (statsHost) {
+    var catCount = Object.keys(byCategory).length;
+    var seriesCount = 0;
+    Object.keys(byCategory).forEach(function(c){ seriesCount += byCategory[c].seriesOrder.length; });
+    statsHost.innerHTML =
+      '<span><strong>' + allCount + '</strong> posts</span>' +
+      '<span><strong>' + seriesCount + '</strong> series</span>' +
+      '<span><strong>' + catCount + '</strong> topics</span>';
+  }
+
+  function makeChip(label, count, pressed) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'blog-chip';
+    btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    btn.innerHTML = '<span class="blog-chip-label">' + label + '</span><span class="blog-chip-count">' + count + '</span>';
+    return btn;
+  }
+
+  /* ----- Render all sections once ----- */
+  var frag = document.createDocumentFragment();
+  catOrder.forEach(function(code) {
+    if (!byCategory[code]) return;
+    var cat = byCategory[code];
+    var catSection = document.createElement('section');
+    catSection.className = 'blog-category';
+    catSection.dataset.cat = code;
+    catSection.style.setProperty('--cat-accent', CATEGORY_META[code].accent);
+
+    var catHeader = document.createElement('div');
+    catHeader.className = 'blog-category-header';
+    var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
+    catHeader.innerHTML =
+      '<div class="blog-category-title">' +
+        '<span class="blog-category-dot" aria-hidden="true"></span>' +
+        '<h2>' + CATEGORY_META[code].label + '</h2>' +
+        '<span class="blog-category-count">' + totalInCat + '</span>' +
+      '</div>' +
+      '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
+    catSection.appendChild(catHeader);
+
+    cat.seriesOrder.forEach(function(sName) {
+      var series = cat.seriesMap[sName];
+      var details = document.createElement('details');
+      details.className = 'blog-section';
+      /* Large series start collapsed to reduce overwhelm. */
+      if (series.length <= 15) details.open = true;
+      details.dataset.series = sName;
+
+      var summary = document.createElement('summary');
+      summary.className = 'blog-section-header';
+      summary.innerHTML =
+        '<span class="blog-section-chevron" aria-hidden="true">&#9656;</span>' +
+        '<span class="blog-section-title">' + sName + '</span>' +
+        '<span class="blog-section-count">' + series.length + '</span>';
+      details.appendChild(summary);
+
+      var grid = document.createElement('div');
+      grid.className = 'blog-section-grid';
+      series.forEach(function(p) {
+        var card = document.createElement('a');
+        card.className = 'blog-card';
+        card.href = p.href;
+        card.dataset.cat = p.category;
+        card.dataset.search = p._search;
+
+        var partHtml = p.part ? '<span class="blog-card-part">' + p.part + '</span>' : '';
+        card.innerHTML =
+          '<div class="blog-card-top">' +
+            '<span class="blog-card-series">' + p.seriesFull + '</span>' +
+            partHtml +
+          '</div>' +
+          '<h3>' + p.title + '</h3>' +
+          '<p>' + p.description + '</p>' +
+          '<span class="blog-card-meta">' + p.meta + '</span>';
+        grid.appendChild(card);
+      });
+      details.appendChild(grid);
+      catSection.appendChild(details);
+    });
+
+    frag.appendChild(catSection);
+  });
+  root.appendChild(frag);
+
+  /* ----- Filtering logic ----- */
+  var searchInput = document.getElementById('blog-search');
+  var searchClear = document.getElementById('blog-search-clear');
+  var summary = document.getElementById('blog-results-summary');
+  var emptyState = document.getElementById('blog-empty-state');
+  var currentQuery = '';
+
+  function applyFilters() {
+    var q = currentQuery.trim().toLowerCase();
+    var hasQuery = q.length > 0;
+    var hasCats = activeCats.size > 0;
+    var visiblePosts = 0;
+    var visibleSeries = 0;
+
+    var categorySections = root.querySelectorAll('.blog-category');
+    categorySections.forEach(function(catEl) {
+      var catCode = catEl.dataset.cat;
+      var catVisible = !hasCats || activeCats.has(catCode);
+      var anyCardVisible = false;
+
+      catEl.querySelectorAll('.blog-section').forEach(function(secEl) {
+        var cards = secEl.querySelectorAll('.blog-card');
+        var matches = 0;
+        cards.forEach(function(card) {
+          var ok = catVisible && (!hasQuery || card.dataset.search.indexOf(q) !== -1);
+          card.classList.toggle('hidden', !ok);
+          if (ok) matches++;
+        });
+        if (matches > 0) {
+          secEl.classList.remove('hidden');
+          anyCardVisible = true;
+          visiblePosts += matches;
+          visibleSeries += 1;
+          /* Auto-expand when searching. */
+          if (hasQuery) secEl.open = true;
+        } else {
+          secEl.classList.add('hidden');
+        }
+      });
+      catEl.classList.toggle('hidden', !anyCardVisible);
+    });
+
+    if (hasQuery || hasCats) {
+      summary.textContent = visiblePosts + ' post' + (visiblePosts === 1 ? '' : 's') +
+        ' across ' + visibleSeries + ' series';
+      summary.classList.add('is-active');
+    } else {
+      summary.textContent = '';
+      summary.classList.remove('is-active');
+    }
+    emptyState.hidden = visiblePosts !== 0;
+  }
+
+  searchInput.addEventListener('input', function(e) {
+    currentQuery = e.target.value;
+    searchClear.hidden = !currentQuery;
+    applyFilters();
+  });
+  searchClear.addEventListener('click', function() {
+    searchInput.value = '';
+    currentQuery = '';
+    searchClear.hidden = true;
+    applyFilters();
+    searchInput.focus();
+  });
+
+  chipsHost.addEventListener('click', function(e) {
+    var btn = e.target.closest('.blog-chip');
+    if (!btn) return;
+    var cat = btn.dataset.cat;
+    if (cat === '__all__') {
+      activeCats.clear();
+      chipsHost.querySelectorAll('.blog-chip').forEach(function(c) {
+        c.setAttribute('aria-pressed', c.dataset.cat === '__all__' ? 'true' : 'false');
+      });
+    } else {
+      if (activeCats.has(cat)) activeCats.delete(cat); else activeCats.add(cat);
+      btn.setAttribute('aria-pressed', activeCats.has(cat) ? 'true' : 'false');
+      var allBtn = chipsHost.querySelector('[data-cat="__all__"]');
+      if (allBtn) allBtn.setAttribute('aria-pressed', activeCats.size === 0 ? 'true' : 'false');
+    }
+    applyFilters();
+  });
+
+  /* Initial state: nothing filtered */
+  applyFilters();
+})();
