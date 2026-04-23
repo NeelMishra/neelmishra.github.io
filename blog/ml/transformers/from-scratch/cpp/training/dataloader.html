@@ -299,6 +299,100 @@
         out-of-range access.
       </div>
 
+      <h3>Line-by-line walkthrough</h3>
+      <p>
+        <code>next_batch()</code> is short but every line leans on a LibTorch idiom that
+        isn&rsquo;t always obvious coming from Python PyTorch or plain C++. Here&rsquo;s what
+        each one is actually doing:
+      </p>
+
+      <h4><code>int n = data.size(0);</code></h4>
+      <p>
+        <code>torch::Tensor::size(int dim)</code> returns the length along one axis as an
+        <code>int64_t</code>. That&rsquo;s different from <code>data.sizes()</code> (note the
+        plural, with an <code>s</code>) which returns an <code>IntArrayRef</code> &mdash; the
+        whole shape vector. For a 1-D token buffer we only care about axis 0, the number of
+        tokens. Storing it in a local <code>int</code> avoids re-querying the tensor inside the
+        loop.
+      </p>
+
+      <h4><code>auto ix = torch::randint(n - block_size, {batch_size}, torch::dtype(torch::kLong));</code></h4>
+      <ul>
+        <li><strong>First arg <code>n - block_size</code></strong> is the exclusive upper
+          bound (the function signature is <code>randint(high, size, options)</code>; starts are
+          drawn from [0, <code>high</code>)).</li>
+        <li><strong>Second arg <code>{batch_size}</code></strong> is a brace-enclosed initializer
+          list that implicitly converts to an <code>IntArrayRef</code> &mdash; LibTorch&rsquo;s
+          way of expressing a tensor shape. Here the shape is a single-axis vector of length
+          <code>batch_size</code>, so <code>ix</code> is a 1-D tensor.</li>
+        <li><strong>Third arg</strong> is a <code>TensorOptions</code> builder.
+          <code>torch::dtype(torch::kLong)</code> selects int64 storage &mdash; the dtype indexing
+          operations expect, and what we&rsquo;ll need anyway if we pass <code>ix</code> through
+          to other tensor ops.</li>
+      </ul>
+
+      <h4><code>xs.reserve(batch_size); ys.reserve(batch_size);</code></h4>
+      <p>
+        A small but real win: we know we&rsquo;ll <code>push_back</code> exactly
+        <code>batch_size</code> tensors, so pre-allocating avoids the log(B) reallocations a
+        default-constructed <code>std::vector</code> would otherwise do.
+      </p>
+
+      <h4><code>int start = ix[i].item&lt;int&gt;();</code></h4>
+      <p>
+        This one has two moving parts:
+      </p>
+      <ul>
+        <li><code>ix[i]</code> does <em>not</em> give you an <code>int</code>. It gives you a
+          zero-dimensional <code>torch::Tensor</code> &mdash; a tensor with one element.
+          Everything returned from a LibTorch op is a tensor, even a single scalar.</li>
+        <li><code>.item&lt;int&gt;()</code> then extracts the underlying scalar and casts it to
+          <code>int</code>. The template parameter tells LibTorch which C++ type you want
+          (<code>int</code>, <code>int64_t</code>, <code>float</code>, etc.).</li>
+      </ul>
+      <div class="callout warn">
+        <strong>GPU gotcha.</strong> If <code>data</code> lives on CUDA, every
+        <code>.item&lt;int&gt;()</code> triggers an implicit device &rarr; host synchronization
+        to read the scalar back. Calling it inside a <code>batch_size</code>-long loop forces
+        <em>B</em> round-trips per batch, which can dominate runtime. For a production loader
+        you&rsquo;d keep <code>ix</code> on CPU (as we do here) or call <code>.to(torch::kCPU)</code>
+        once before the loop and index into the resulting CPU tensor.
+      </div>
+
+      <h4><code>xs.push_back(data.slice(0, start, start + block_size));</code></h4>
+      <p>
+        <code>torch::Tensor::slice(dim, start, end)</code> is the LibTorch equivalent of Python&rsquo;s
+        <code>tensor[start:end]</code> along <code>dim</code>. Two things matter:
+      </p>
+      <ul>
+        <li><strong>End is exclusive</strong>, just like Python slicing. That&rsquo;s why we
+          ask for <code>start + block_size</code> and not <code>start + block_size - 1</code>.</li>
+        <li><strong>It returns a view, not a copy.</strong> The new tensor reuses
+          <code>data</code>&rsquo;s underlying storage with an offset and updated shape metadata.
+          So even though we push <code>batch_size &times; 2</code> tensors into
+          <code>xs</code>/<code>ys</code>, no token data is duplicated until the stack at the
+          end.</li>
+      </ul>
+      <p>
+        The target line does the same thing shifted by one: <code>data[start + 1 : start + block_size + 1]</code>.
+        That&rsquo;s the &ldquo;predict the next token&rdquo; alignment the loss function relies on.
+      </p>
+
+      <h4><code>return { torch::stack(xs), torch::stack(ys) };</code></h4>
+      <ul>
+        <li><code>torch::stack</code> takes a list of tensors of equal shape and glues them
+          along a <em>new</em> leading axis. Input: <code>batch_size</code> tensors of shape
+          <code>(T,)</code>. Output: a single tensor of shape <code>(B, T)</code>. This is also
+          the first point where data is actually copied &mdash; the views get materialised into
+          a contiguous 2-D buffer.</li>
+        <li>Don&rsquo;t confuse it with <code>torch::cat</code>, which concatenates along an
+          <em>existing</em> axis and would give you a 1-D tensor of length
+          <code>B &times; T</code>, not the batched shape you want.</li>
+        <li>The braces <code>{ ..., ... }</code> build the <code>std::pair</code> via list
+          initialization &mdash; no explicit <code>std::make_pair</code> needed; the compiler
+          infers it from the declared return type.</li>
+      </ul>
+
 
       <!-- ================================================================ -->
       <!-- 4. USAGE                                                          -->
