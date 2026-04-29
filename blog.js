@@ -1307,7 +1307,7 @@ var BLOG_TREE = [
           { title: 'Adapter Methods: Prefix Tuning, P-Tuning, IA3', file: 'mlops/llm-fundamentals/adapter-methods.html', links: ['mlops/llm-fundamentals/alignment-landscape.html'] },
           { title: 'The Alignment Landscape: RLHF, DPO, KTO, ORPO, and Beyond', file: 'mlops/llm-fundamentals/alignment-landscape.html', links: ['mlops/llm-fundamentals/adapter-methods.html', 'mlops/llm-fundamentals/attention-memory.html'] },
           { title: 'Attention Memory Costs: Why Context Length Matters for Infra', file: 'mlops/llm-fundamentals/attention-memory.html', links: ['mlops/llm-fundamentals/alignment-landscape.html', 'mlops/llm-fundamentals/dpo.html'] },
-          { title: 'DPO: Direct Preference Optimization', file: 'mlops/llm-fundamentals/dpo.html', links: ['mlops/llm-fundamentals/attention-memory.html', 'mlops/llm-fundamentals/fine-tuning-overview.html'] },
+          { title: 'DPO: Direct Preference Optimization', file: 'mlops/llm-fundamentals/dpo.html', links: ['mlops/llm-fundamentals/attention-memory.html', 'mlops/llm-fundamentals/fine-tuning-overview.html', 'mlops/mixture-of-experts/moe-from-scratch.html'] },
           { title: 'Fine-Tuning LLMs: Full, Freeze, and Parameter-Efficient', file: 'mlops/llm-fundamentals/fine-tuning-overview.html', links: ['mlops/llm-fundamentals/dpo.html', 'mlops/llm-fundamentals/instruction-tuning.html'] },
           { title: 'Instruction Tuning: SFT Data, Formatting, and Best Practices', file: 'mlops/llm-fundamentals/instruction-tuning.html', links: ['mlops/llm-fundamentals/fine-tuning-overview.html', 'mlops/llm-fundamentals/lora.html'] },
           { title: 'LoRA and QLoRA: Parameter-Efficient Fine-Tuning', file: 'mlops/llm-fundamentals/lora.html', links: ['mlops/llm-fundamentals/instruction-tuning.html', 'mlops/llm-fundamentals/model-sizes.html'] },
@@ -1316,6 +1316,17 @@ var BLOG_TREE = [
           { title: 'RLHF: Reinforcement Learning from Human Feedback', file: 'mlops/llm-fundamentals/rlhf-overview.html', links: ['mlops/llm-fundamentals/pretraining-overview.html', 'mlops/llm-fundamentals/tokenization.html'] },
           { title: 'Tokenization: BPE, WordPiece, SentencePiece, and Tiktoken', file: 'mlops/llm-fundamentals/tokenization.html', links: ['mlops/llm-fundamentals/rlhf-overview.html', 'mlops/llm-fundamentals/transformer-ops-view.html'] },
           { title: 'Transformer Architecture: An Ops Engineer\'s Perspective', file: 'mlops/llm-fundamentals/transformer-ops-view.html', links: ['mlops/llm-fundamentals/tokenization.html'] }
+        ]
+      },
+      {
+        name: 'mixture-of-experts',
+        label: 'Mixture of Experts',
+        children: [
+          { title: 'Mixture of Experts from Scratch', file: 'mlops/mixture-of-experts/moe-from-scratch.html', links: ['mlops/llm-fundamentals/dpo.html', 'mlops/mixture-of-experts/router-load-balancing.html'] },
+          { title: 'Routers, Top-k Gating, and Load Balancing', file: 'mlops/mixture-of-experts/router-load-balancing.html', links: ['mlops/mixture-of-experts/moe-from-scratch.html', 'mlops/mixture-of-experts/sparse-dispatch.html'] },
+          { title: 'Sparse Dispatch and Combine from Scratch', file: 'mlops/mixture-of-experts/sparse-dispatch.html', links: ['mlops/mixture-of-experts/router-load-balancing.html', 'mlops/mixture-of-experts/training-moe.html'] },
+          { title: 'Training MoE Models from Scratch', file: 'mlops/mixture-of-experts/training-moe.html', links: ['mlops/mixture-of-experts/sparse-dispatch.html', 'mlops/mixture-of-experts/inference-serving.html'] },
+          { title: 'MoE Inference and Serving Systems', file: 'mlops/mixture-of-experts/inference-serving.html', links: ['mlops/mixture-of-experts/training-moe.html', 'mlops/llm-training/expert-parallelism.html'] }
         ]
       },
       {
@@ -1329,7 +1340,7 @@ var BLOG_TREE = [
           { title: 'Data Quality: Toxicity Filtering, PII Removal', file: 'mlops/llm-training/data-quality-llm.html', links: ['mlops/llm-training/data-deduplication.html', 'mlops/llm-training/deepspeed-llm.html'] },
           { title: 'DeepSpeed for LLMs: ZeRO-3, ZeRO-Infinity', file: 'mlops/llm-training/deepspeed-llm.html', links: ['mlops/llm-training/data-quality-llm.html', 'mlops/llm-training/dpo-infra.html'] },
           { title: 'DPO Training Infrastructure', file: 'mlops/llm-training/dpo-infra.html', links: ['mlops/llm-training/deepspeed-llm.html', 'mlops/llm-training/expert-parallelism.html'] },
-          { title: 'Expert Parallelism for MoE', file: 'mlops/llm-training/expert-parallelism.html', links: ['mlops/llm-training/dpo-infra.html', 'mlops/llm-training/flash-attention.html'] },
+          { title: 'Expert Parallelism for MoE', file: 'mlops/llm-training/expert-parallelism.html', links: ['mlops/mixture-of-experts/inference-serving.html', 'mlops/llm-training/flash-attention.html'] },
           { title: 'FlashAttention: Memory-Efficient Attention', file: 'mlops/llm-training/flash-attention.html', links: ['mlops/llm-training/expert-parallelism.html', 'mlops/llm-training/fsdp-llm.html'] },
           { title: 'FSDP for LLM Training', file: 'mlops/llm-training/fsdp-llm.html', links: ['mlops/llm-training/flash-attention.html', 'mlops/llm-training/megatron-lm.html'] },
           { title: 'Megatron-LM: 3D Parallelism', file: 'mlops/llm-training/megatron-lm.html', links: ['mlops/llm-training/fsdp-llm.html', 'mlops/llm-training/multi-node-training.html'] },

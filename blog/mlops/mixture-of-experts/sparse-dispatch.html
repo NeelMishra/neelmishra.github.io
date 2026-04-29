@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Implementation-focused guide to sparse MoE dispatch: token packing, expert buffers, scatter/gather, combine weights, vectorized einsum dispatch, and performance tradeoffs.">
+  <title>Sparse Dispatch and Combine from Scratch | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+.callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+.pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.25rem 1.4rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.8;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+.pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#777;font-style:italic}
+.moe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.1rem 0}
+.moe-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.84)}
+.moe-card h3{margin:0 0 .35rem;font-size:1rem}.moe-card p{margin:0;color:var(--ink-muted);font-size:.92rem;line-height:1.55}
+.formula{text-align:center;font-style:italic;font-size:1.05rem;padding:.85rem 1rem;margin:1rem 0;border:1px dashed var(--line);border-radius:10px;background:rgba(10,143,106,0.04)}
+.moe-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}.moe-table th,.moe-table td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}.moe-table th{background:var(--card);font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#dispatch-problem">The dispatch problem</a></li>
+        <li><a href="#mask-method">Dispatch masks</a></li>
+        <li><a href="#packed-batches">Packed expert batches</a></li>
+        <li><a href="#combine">Combine step</a></li>
+        <li><a href="#vectorized">Vectorized reference</a></li>
+        <li><a href="#performance">Performance notes</a></li>
+      </ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="router-load-balancing.html">&larr; Part 2</a>
+          <span>&middot;</span>
+          <a href="../../../../blog.html">Mixture of Experts Series</a>
+          <span>&middot;</span>
+          <a href="training-moe.html">Part 4 &rarr;</a>
+      </div>
+
+      <div class="blog-post-header">
+        <h1>Sparse Dispatch and Combine from Scratch</h1>
+        <p class="lead">The core MoE systems problem is moving tokens to experts efficiently. Build dispatch masks, grouped expert batches, combine weights, and vectorized alternatives.</p>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">April 2026 &middot; 36 min read</span>
+          <span class="blog-post-category">MLOps &middot; Mixture of Experts &middot; Part 3</span>
+        </div>
+      </div>
+
+
+            <h2 id="dispatch-problem">The dispatch problem</h2>
+            <p>After routing, each token has one or more expert ids. GPUs, however, do not want thousands of tiny calls like “run expert 7 on token 31.” They want contiguous batches. Sparse dispatch converts token-level routing decisions into per-expert mini-batches.</p>
+            <div class="moe-grid">
+              <div class="moe-card"><h3>Route</h3><p>Token 0 chooses experts 2 and 5; token 1 chooses 5 and 1.</p></div>
+              <div class="moe-card"><h3>Dispatch</h3><p>Pack all tokens for expert 5 into one buffer and run expert 5 once.</p></div>
+              <div class="moe-card"><h3>Combine</h3><p>Scatter outputs back to token positions using router weights.</p></div>
+            </div>
+
+            <h2 id="mask-method">Dispatch masks</h2>
+            <p>The clearest representation is a boolean dispatch mask with shape <code>(tokens, experts, capacity)</code>. A true entry means “copy this token into this expert slot.”</p>
+            <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">make_dispatch_and_combine</span>(top_idx, top_weight, num_experts, capacity):
+    tokens, k = top_idx.shape
+    dispatch = torch.zeros(tokens, num_experts, capacity, device=top_idx.device, dtype=torch.bool)
+    combine = torch.zeros(tokens, num_experts, capacity, device=top_weight.device, dtype=top_weight.dtype)
+    counters = torch.zeros(num_experts, device=top_idx.device, dtype=torch.long)
+    dropped = 0
+
+    <span class="kw">for</span> t <span class="kw">in</span> range(tokens):
+        <span class="kw">for</span> j <span class="kw">in</span> range(k):
+            e = int(top_idx[t, j])
+            slot = int(counters[e])
+            <span class="kw">if</span> slot &lt; capacity:
+                dispatch[t, e, slot] = True
+                combine[t, e, slot] = top_weight[t, j]
+                counters[e] += 1
+            <span class="kw">else</span>:
+                dropped += 1
+    <span class="kw">return</span> dispatch, combine, counters, dropped</pre>
+            <p>This representation is easy to reason about but memory-heavy. It is still excellent for tests because it makes correctness obvious.</p>
+
+            <h2 id="packed-batches">Packed expert batches</h2>
+            <p>Given a dispatch mask, one line can build expert inputs:</p>
+            <pre class="pseudo-code"><span class="cm"># tokens: (T, D), dispatch: (T, E, C)</span>
+expert_inputs = torch.einsum("td,tec-&gt;ecd", tokens, dispatch.float())</pre>
+            <p>The resulting tensor has shape <code>(experts, capacity, d_model)</code>. Each expert gets a fixed-capacity batch. Unused slots are zeros and should not contribute to the final output because their combine weights remain zero.</p>
+
+            <h2 id="combine">Combine step</h2>
+            <p>After running experts, combine maps <code>(experts, capacity, d_model)</code> back to <code>(tokens, d_model)</code>:</p>
+            <pre class="pseudo-code"><span class="cm"># expert_outputs: (E, C, D), combine: (T, E, C)</span>
+combined = torch.einsum("ecd,tec-&gt;td", expert_outputs, combine)</pre>
+            <p>For top-2 routing, a token can have two non-zero combine entries. The weighted sum becomes the MoE layer output for that token.</p>
+
+            <h2 id="vectorized">Vectorized reference MoE</h2>
+            <p>This version uses fixed-capacity buffers and <code>einsum</code> for readability. It assumes all experts share the same architecture but not the same weights.</p>
+            <pre class="pseudo-code"><span class="kw">class</span> <span class="fn">MaskedDispatchMoE</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        b, s, d = x.shape
+        tokens = x.reshape(b * s, d)
+        logits = self.router(tokens.float())
+        probs = torch.softmax(logits, dim=-1)
+        weight, idx = torch.topk(probs, self.top_k, dim=-1)
+        weight = weight / weight.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+
+        capacity = math.ceil(self.capacity_factor * tokens.shape[0] * self.top_k / self.num_experts)
+        dispatch, combine, counts, dropped = make_dispatch_and_combine(idx, weight, self.num_experts, capacity)
+        expert_inputs = torch.einsum("td,tec-&gt;ecd", tokens, dispatch.to(tokens.dtype))
+
+        expert_outputs = []
+        <span class="kw">for</span> e, expert <span class="kw">in</span> enumerate(self.experts):
+            expert_outputs.append(expert(expert_inputs[e]))
+        expert_outputs = torch.stack(expert_outputs, dim=0)
+
+        out = torch.einsum("ecd,tec-&gt;td", expert_outputs, combine)
+        <span class="kw">return</span> out.reshape(b, s, d), {"counts": counts, "dropped": dropped}</pre>
+
+            <h2 id="performance">Performance notes</h2>
+            <ul>
+              <li>Dense masks are simple but can be too large for long contexts and many experts.</li>
+              <li>Production kernels pack tokens with prefix sums and sort/group by expert id.</li>
+              <li>Fixed capacity improves static shapes but can waste FLOPs on padding.</li>
+              <li>Dynamic packing reduces padding but complicates compilation, distributed communication, and CUDA graph capture.</li>
+              <li>Always benchmark end-to-end tokens/sec; a beautiful dispatch algorithm can still lose if it creates synchronization points.</li>
+            </ul>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

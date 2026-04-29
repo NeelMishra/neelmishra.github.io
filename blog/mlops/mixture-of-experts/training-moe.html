@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Training-focused MoE guide covering total loss composition, auxiliary routing losses, optimizer parameter groups, precision, gradient clipping, and a practical from-scratch training loop.">
+  <title>Training MoE Models from Scratch | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+.callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+.pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.25rem 1.4rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.8;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+.pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#777;font-style:italic}
+.moe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.1rem 0}
+.moe-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.84)}
+.moe-card h3{margin:0 0 .35rem;font-size:1rem}.moe-card p{margin:0;color:var(--ink-muted);font-size:.92rem;line-height:1.55}
+.formula{text-align:center;font-style:italic;font-size:1.05rem;padding:.85rem 1rem;margin:1rem 0;border:1px dashed var(--line);border-radius:10px;background:rgba(10,143,106,0.04)}
+.moe-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}.moe-table th,.moe-table td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}.moe-table th{background:var(--card);font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#loss">Loss composition</a></li>
+        <li><a href="#optimizer">Optimizer groups</a></li>
+        <li><a href="#loop">Training loop</a></li>
+        <li><a href="#stability">Stability guardrails</a></li>
+        <li><a href="#eval">Evaluation</a></li>
+        <li><a href="#experiments">Experiment plan</a></li>
+      </ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="sparse-dispatch.html">&larr; Part 3</a>
+          <span>&middot;</span>
+          <a href="../../../../blog.html">Mixture of Experts Series</a>
+          <span>&middot;</span>
+          <a href="inference-serving.html">Part 5 &rarr;</a>
+      </div>
+
+      <div class="blog-post-header">
+        <h1>Training MoE Models from Scratch</h1>
+        <p class="lead">Turn an MoE layer into a trainable model: losses, optimizer groups, mixed precision, stability guardrails, and a compact training loop.</p>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">April 2026 &middot; 35 min read</span>
+          <span class="blog-post-category">MLOps &middot; Mixture of Experts &middot; Part 4</span>
+        </div>
+      </div>
+
+
+        <h2 id="loss">Loss composition</h2>
+        <p>An MoE model optimizes the normal task loss plus routing regularizers. The task loss teaches the model what to predict. The auxiliary losses teach the router how to use experts without creating hot spots.</p>
+        <pre class="pseudo-code">total_loss = task_loss
+       + aux_coef * load_balance_loss
+       + z_coef * router_z_loss</pre>
+        <p>Start with small coefficients. A common debugging pattern is to train a tiny dense baseline, replace only one FFN with MoE, then confirm that task loss still decreases while expert counts remain non-zero.</p>
+
+        <h2 id="optimizer">Optimizer groups</h2>
+        <p>Router parameters often benefit from separate treatment. They are small, sensitive, and directly control load balance. You may want lower learning rate, no weight decay, or FP32 precision for the router.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">make_optimizer</span>(model, base_lr=3e-4, router_lr=1e-4):
+router_params, other_params = [], []
+<span class="kw">for</span> name, param <span class="kw">in</span> model.named_parameters():
+    <span class="kw">if</span> <span class="kw">not</span> param.requires_grad:
+        <span class="kw">continue</span>
+    <span class="kw">if</span> "router" <span class="kw">in</span> name:
+        router_params.append(param)
+    <span class="kw">else</span>:
+        other_params.append(param)
+
+<span class="kw">return</span> torch.optim.AdamW([
+    {"params": other_params, "lr": base_lr, "weight_decay": 0.1},
+    {"params": router_params, "lr": router_lr, "weight_decay": 0.0},
+], betas=(0.9, 0.95))</pre>
+
+        <h2 id="loop">Training loop</h2>
+        <p>A clean MoE layer should return both output and routing statistics. The model can aggregate auxiliary losses from every MoE block.</p>
+        <pre class="pseudo-code"><span class="kw">for</span> step, batch <span class="kw">in</span> enumerate(loader):
+optimizer.zero_grad(set_to_none=True)
+
+logits, moe_stats = model(batch["input_ids"])
+task_loss = F.cross_entropy(
+    logits[:, :-1].reshape(-1, logits.size(-1)),
+    batch["input_ids"][:, 1:].reshape(-1),
+)
+
+aux = sum(s["load_balance_loss"] <span class="kw">for</span> s <span class="kw">in</span> moe_stats) / len(moe_stats)
+z = sum(s["router_z_loss"] <span class="kw">for</span> s <span class="kw">in</span> moe_stats) / len(moe_stats)
+loss = task_loss + 0.01 * aux + 0.001 * z
+
+loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()</pre>
+        <div class="callout"><strong>Sanity test:</strong> overfit a tiny dataset before scaling. If a small MoE cannot memorize a few batches, distributed training will only hide the bug behind noise.</div>
+
+        <h2 id="stability">Stability guardrails</h2>
+        <ul>
+          <li><strong>Warm up router noise:</strong> noise helps exploration early but can hurt late convergence.</li>
+          <li><strong>Clip gradients:</strong> sparse expert updates can be spiky.</li>
+          <li><strong>Monitor dropped tokens:</strong> persistent overflow means the capacity factor or load-balance coefficient is wrong.</li>
+          <li><strong>Keep router math stable:</strong> compute softmax logits in FP32 under mixed precision.</li>
+          <li><strong>Avoid instant large expert counts:</strong> scale from 4 to 8 to 16 experts while watching routing metrics.</li>
+        </ul>
+
+        <h2 id="eval">Evaluation</h2>
+        <p>Evaluate both model quality and routing health. Two checkpoints can have similar validation loss but very different serving properties if one uses experts evenly and the other overloads a subset.</p>
+        <table class="moe-table"><thead><tr><th>Metric</th><th>Question answered</th></tr></thead><tbody>
+          <tr><td>Validation loss</td><td>Did language modeling improve?</td></tr>
+          <tr><td>Expert utilization</td><td>Are experts alive?</td></tr>
+          <tr><td>Overflow rate</td><td>Are tokens being dropped?</td></tr>
+          <tr><td>Tokens/sec</td><td>Did sparse compute actually speed up?</td></tr>
+          <tr><td>Per-expert gradient norm</td><td>Are updates balanced?</td></tr>
+        </tbody></table>
+
+        <h2 id="experiments">Experiment plan</h2>
+        <p>For a from-scratch project, run controlled ablations:</p>
+        <ol>
+          <li>Dense baseline with identical attention and embedding stack.</li>
+          <li>MoE with top-1 routing and no auxiliary loss.</li>
+          <li>MoE with top-2 routing and load-balancing loss.</li>
+          <li>Capacity factor sweep: 1.0, 1.25, 1.5, 2.0.</li>
+          <li>Router z-loss on/off under BF16 mixed precision.</li>
+        </ol>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>
