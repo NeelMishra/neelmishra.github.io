@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="A ground-up introduction to Mixture-of-Experts layers: dense FFNs, sparse activation, top-k routing, capacity, combining expert outputs, and a minimal from-scratch PyTorch implementation.">
+  <title>Mixture of Experts from Scratch | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+.callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+.pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.25rem 1.4rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.8;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+.pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#777;font-style:italic}
+.moe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.1rem 0}
+.moe-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.84)}
+.moe-card h3{margin:0 0 .35rem;font-size:1rem}.moe-card p{margin:0;color:var(--ink-muted);font-size:.92rem;line-height:1.55}
+.formula{text-align:center;font-style:italic;font-size:1.05rem;padding:.85rem 1rem;margin:1rem 0;border:1px dashed var(--line);border-radius:10px;background:rgba(10,143,106,0.04)}
+.moe-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}.moe-table th,.moe-table td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}.moe-table th{background:var(--card);font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#why-moe">Why MoE exists</a></li>
+        <li><a href="#dense-to-sparse">From dense FFN to sparse experts</a></li>
+        <li><a href="#math">The MoE equation</a></li>
+        <li><a href="#implementation">Implementation from scratch</a></li>
+        <li><a href="#shape-trace">Shape trace</a></li>
+        <li><a href="#debug-checklist">Debug checklist</a></li>
+      </ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html">Mixture of Experts Series</a>
+          <span>&middot;</span>
+          <a href="router-load-balancing.html">Part 2 &rarr;</a>
+      </div>
+
+      <div class="blog-post-header">
+        <h1>Mixture of Experts from Scratch</h1>
+        <p class="lead">Build the mental model and a minimal PyTorch MoE layer, then understand exactly where sparsity saves compute and where it creates systems complexity.</p>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">April 2026 &middot; 34 min read</span>
+          <span class="blog-post-category">MLOps &middot; Mixture of Experts &middot; Part 1</span>
+        </div>
+      </div>
+
+
+            <h2 id="why-moe">Why Mixture of Experts exists</h2>
+            <p>A dense Transformer spends the same feed-forward compute on every token. That is simple, stable, and GPU-friendly, but it ties <strong>model capacity</strong> to <strong>per-token FLOPs</strong>. If you double the FFN width, every token pays the price. A Mixture-of-Experts (MoE) layer breaks that link: it keeps many FFN blocks available, then activates only a small subset for each token.</p>
+            <div class="moe-grid">
+              <div class="moe-card"><h3>Dense FFN</h3><p>One shared MLP handles all tokens. Every token uses all parameters in the layer.</p></div>
+              <div class="moe-card"><h3>MoE FFN</h3><p>A router picks <em>k</em> experts out of <em>E</em>. Every token uses only the selected experts.</p></div>
+              <div class="moe-card"><h3>Tradeoff</h3><p>More parameters and specialization, but routing, load balance, communication, and serving get harder.</p></div>
+            </div>
+            <p>The practical promise is straightforward: train a model with the <em>knowledge capacity</em> of a very large dense network while keeping the <em>active compute</em> closer to a smaller model. The cost is that the model is no longer a uniform matrix-multiply pipeline; tokens branch to different experts.</p>
+
+            <h2 id="dense-to-sparse">From dense FFN to sparse experts</h2>
+            <p>A standard Transformer block contains attention followed by an FFN. In an MoE Transformer, attention usually remains dense and shared. The FFN is replaced by a bank of experts:</p>
+            <pre class="pseudo-code">Dense block: token -&gt; attention -&gt; one FFN -&gt; residual
+MoE block:   token -&gt; attention -&gt; router -&gt; top-k FFNs -&gt; weighted sum -&gt; residual</pre>
+            <p>Each expert is often architecturally identical to the dense FFN: a projection up, activation, projection down. The router is much smaller: usually a single linear layer mapping the token hidden state to expert logits.</p>
+
+            <h2 id="math">The MoE equation</h2>
+            <p>For token representation <em>x</em>, expert functions <em>E_i</em>, router logits <em>r(x)</em>, and selected experts <em>S(x)</em>, the output is:</p>
+            <div class="formula">MoE(x) = &sum;<sub>i &isin; S(x)</sub> softmax(r(x))<sub>i</sub> &middot; E<sub>i</sub>(x)</div>
+            <p>Top-1 routing chooses one expert and is cheap. Top-2 routing combines two expert outputs and is often more stable because a token can share gradient signal across multiple experts.</p>
+            <div class="callout"><strong>Implementation invariant:</strong> the output shape of an MoE FFN must exactly match the dense FFN shape: <code>(batch, seq, d_model)</code>. All routing complexity is internal to the layer.</div>
+
+            <h2 id="implementation">Implementation from scratch</h2>
+            <p>This minimal PyTorch implementation favors clarity over speed. It shows the full algorithm: flatten tokens, compute router probabilities, select top-k experts, run each expert on the tokens assigned to it, and scatter weighted outputs back to the original order.</p>
+            <pre class="pseudo-code"><span class="kw">import</span> torch
+<span class="kw">import</span> torch.nn <span class="kw">as</span> nn
+<span class="kw">import</span> torch.nn.functional <span class="kw">as</span> F
+
+<span class="kw">class</span> <span class="fn">Expert</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, d_ff):
+        <span class="fn">super</span>().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model),
+        )
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        <span class="kw">return</span> self.net(x)
+
+<span class="kw">class</span> <span class="fn">NaiveMoE</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, d_model, d_ff, num_experts=8, top_k=2):
+        <span class="fn">super</span>().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.router = nn.Linear(d_model, num_experts, bias=False)
+        self.experts = nn.ModuleList([Expert(d_model, d_ff) <span class="kw">for</span> _ <span class="kw">in</span> range(num_experts)])
+
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        batch, seq, d_model = x.shape
+        tokens = x.reshape(batch * seq, d_model)
+
+        logits = self.router(tokens)                  <span class="cm"># (T, E)</span>
+        probs = F.softmax(logits, dim=-1)
+        top_prob, top_idx = torch.topk(probs, self.top_k, dim=-1)
+        top_prob = top_prob / top_prob.sum(dim=-1, keepdim=True)
+
+        out = torch.zeros_like(tokens)
+        <span class="kw">for</span> expert_id, expert <span class="kw">in</span> enumerate(self.experts):
+            token_pos, slot = torch.where(top_idx == expert_id)
+            <span class="kw">if</span> token_pos.numel() == 0:
+                <span class="kw">continue</span>
+            expert_in = tokens[token_pos]
+            expert_out = expert(expert_in)
+            weight = top_prob[token_pos, slot].unsqueeze(-1)
+            out.index_add_(0, token_pos, expert_out * weight)
+
+        <span class="kw">return</span> out.reshape(batch, seq, d_model), logits</pre>
+
+            <h2 id="shape-trace">Shape trace</h2>
+            <table class="moe-table"><thead><tr><th>Tensor</th><th>Shape</th><th>Meaning</th></tr></thead><tbody>
+              <tr><td><code>x</code></td><td><code>(B, S, D)</code></td><td>Input hidden states</td></tr>
+              <tr><td><code>tokens</code></td><td><code>(T, D)</code></td><td>Flattened tokens, where <code>T = B × S</code></td></tr>
+              <tr><td><code>logits</code></td><td><code>(T, E)</code></td><td>Router scores for each expert</td></tr>
+              <tr><td><code>top_idx</code></td><td><code>(T, k)</code></td><td>Selected expert ids per token</td></tr>
+              <tr><td><code>out</code></td><td><code>(T, D)</code></td><td>Weighted sum of selected expert outputs</td></tr>
+            </tbody></table>
+
+            <h2 id="debug-checklist">Debug checklist</h2>
+            <ul>
+              <li>Verify every token receives at least one expert output.</li>
+              <li>Check that top-k probabilities are renormalized after selection.</li>
+              <li>Log expert token counts; uniform routing is not guaranteed without auxiliary losses.</li>
+              <li>Start with small tensors and compare a loop implementation against a vectorized one.</li>
+              <li>Keep router logits in FP32 when training in mixed precision if instability appears.</li>
+            </ul>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

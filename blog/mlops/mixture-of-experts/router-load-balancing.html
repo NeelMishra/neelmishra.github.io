@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into MoE routing: noisy top-k gating, expert capacity, dropped tokens, load-balancing loss, router z-loss, entropy, and production routing metrics.">
+  <title>Routers, Top-k Gating, and Load Balancing | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+.callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+.pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.25rem 1.4rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.8;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+.pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#777;font-style:italic}
+.moe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.1rem 0}
+.moe-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.84)}
+.moe-card h3{margin:0 0 .35rem;font-size:1rem}.moe-card p{margin:0;color:var(--ink-muted);font-size:.92rem;line-height:1.55}
+.formula{text-align:center;font-style:italic;font-size:1.05rem;padding:.85rem 1rem;margin:1rem 0;border:1px dashed var(--line);border-radius:10px;background:rgba(10,143,106,0.04)}
+.moe-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}.moe-table th,.moe-table td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}.moe-table th{background:var(--card);font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#router-job">The router job</a></li>
+        <li><a href="#top-k">Top-k gating</a></li>
+        <li><a href="#capacity">Expert capacity</a></li>
+        <li><a href="#aux-loss">Load-balancing loss</a></li>
+        <li><a href="#z-loss">Router z-loss</a></li>
+        <li><a href="#telemetry">Routing telemetry</a></li>
+      </ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="moe-from-scratch.html">&larr; Part 1</a>
+          <span>&middot;</span>
+          <a href="../../../../blog.html">Mixture of Experts Series</a>
+          <span>&middot;</span>
+          <a href="sparse-dispatch.html">Part 3 &rarr;</a>
+      </div>
+
+      <div class="blog-post-header">
+        <h1>Routers, Top-k Gating, and Load Balancing</h1>
+        <p class="lead">Routers decide which experts learn. This post builds top-k gating, capacity limits, auxiliary losses, z-loss, and practical telemetry for routing health.</p>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">April 2026 &middot; 38 min read</span>
+          <span class="blog-post-category">MLOps &middot; Mixture of Experts &middot; Part 2</span>
+        </div>
+      </div>
+
+
+        <h2 id="router-job">The router job</h2>
+        <p>The router is the small network that controls the large network. Its output determines which experts receive tokens, which experts get gradients, and which experts specialize. A bad router can collapse the entire MoE layer into one busy expert and many idle experts.</p>
+        <div class="callout warn"><strong>Failure mode:</strong> routing collapse is self-reinforcing. If one expert starts winning, it receives more updates, improves faster, and becomes even more attractive to the router.</div>
+        <p>A production MoE implementation therefore treats routing as both an ML problem and a systems scheduling problem. It must select useful experts while keeping GPU work balanced.</p>
+
+        <h2 id="top-k">Top-k gating</h2>
+        <p>Top-k gating computes a categorical distribution over experts, keeps only the largest <em>k</em> entries, and renormalizes the selected probabilities. During training, small router noise can improve exploration.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">top_k_router</span>(hidden, router, k, noise_std=0.0):
+logits = router(hidden.float())
+<span class="kw">if</span> noise_std &gt; 0:
+    logits = logits + torch.randn_like(logits) * noise_std
+
+scores = torch.softmax(logits, dim=-1)
+weights, indices = torch.topk(scores, k, dim=-1)
+weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+<span class="kw">return</span> weights.to(hidden.dtype), indices, logits</pre>
+        <p>Top-1 routing maximizes sparsity. Top-2 routing gives smoother optimization because the second expert still receives gradient signal. Top-k above 2 is usually expensive unless the model is small or the serving latency budget is generous.</p>
+
+        <h2 id="capacity">Expert capacity</h2>
+        <p>Experts run most efficiently when each expert receives a bounded number of tokens. Capacity is the maximum tokens an expert processes in one MoE layer call:</p>
+        <div class="formula">capacity = ceil(capacity_factor × tokens × top_k / num_experts)</div>
+        <p>If more tokens choose an expert than capacity allows, implementations either drop overflow tokens, reroute them to backup experts, or process them with slower dynamic shapes. Dropping is common in early systems because it preserves static buffers.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">build_expert_slots</span>(top_idx, num_experts, capacity):
+<span class="cm"># top_idx: (tokens, k)</span>
+counters = torch.zeros(num_experts, dtype=torch.long, device=top_idx.device)
+slots = torch.full_like(top_idx, -1)
+keep = torch.zeros_like(top_idx, dtype=torch.bool)
+
+<span class="kw">for</span> token <span class="kw">in</span> range(top_idx.shape[0]):
+    <span class="kw">for</span> choice <span class="kw">in</span> range(top_idx.shape[1]):
+        expert = top_idx[token, choice]
+        slot = counters[expert]
+        <span class="kw">if</span> slot &lt; capacity:
+            slots[token, choice] = slot
+            keep[token, choice] = True
+            counters[expert] += 1
+<span class="kw">return</span> slots, keep, counters</pre>
+
+        <h2 id="aux-loss">Load-balancing loss</h2>
+        <p>The standard auxiliary loss compares two distributions: how often experts are selected and how much router probability mass they receive. If either distribution is skewed, the loss increases.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">load_balancing_loss</span>(router_probs, expert_indices, num_experts):
+<span class="cm"># router_probs: (tokens, experts)</span>
+<span class="cm"># expert_indices: (tokens, k)</span>
+tokens = router_probs.shape[0]
+density_proxy = router_probs.mean(dim=0)                 <span class="cm"># probability mass</span>
+
+selected = torch.zeros_like(router_probs)
+selected.scatter_add_(1, expert_indices, torch.ones_like(expert_indices, dtype=router_probs.dtype))
+density = selected.mean(dim=0) / expert_indices.shape[1] <span class="cm"># assignment fraction</span>
+
+<span class="kw">return</span> (density * density_proxy).sum() * num_experts</pre>
+        <p>The coefficient is usually small. If it is too high, routing becomes uniform even when specialization would help. If it is too low, hot experts dominate.</p>
+
+        <h2 id="z-loss">Router z-loss</h2>
+        <p>The router z-loss penalizes large log-sum-exp values. It keeps logits numerically tame, which matters in BF16/FP16 training where softmax saturation can silently destroy gradient quality.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">router_z_loss</span>(logits):
+z = torch.logsumexp(logits.float(), dim=-1)
+<span class="kw">return</span> torch.mean(z ** 2)</pre>
+
+        <h2 id="telemetry">Routing telemetry</h2>
+        <p>Track routing health from the first training step. Useful dashboards include:</p>
+        <ul>
+          <li><strong>Tokens per expert:</strong> catches hot experts and idle experts.</li>
+          <li><strong>Overflow rate:</strong> percentage of selected routes dropped by capacity.</li>
+          <li><strong>Router entropy:</strong> low entropy means confident routing; extremely low early entropy hints at collapse.</li>
+          <li><strong>Expert gradient norms:</strong> detects dead experts that receive no meaningful updates.</li>
+          <li><strong>Auxiliary loss trend:</strong> confirms balancing pressure is active but not dominating task loss.</li>
+        </ul>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>

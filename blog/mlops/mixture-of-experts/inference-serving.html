@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Serving MoE models in production: expert placement, memory footprint, batching, hot experts, all-to-all communication, quantization, caching, and operational checklists.">
+  <title>MoE Inference and Serving Systems | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+.callout.warn{border-left-color:#ff6b35;background:rgba(255,107,53,0.05)}
+.pseudo-code{background:#1a1a2e;color:#e0e0e0;padding:1.25rem 1.4rem;border-radius:10px;font-family:Consolas,monospace;font-size:0.85rem;line-height:1.8;overflow-x:auto;margin:1.2rem 0;white-space:pre}
+.pseudo-code .kw{color:#ff6b35}.pseudo-code .fn{color:#0a8f6a}.pseudo-code .cm{color:#777;font-style:italic}
+.moe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1rem;margin:1.1rem 0}
+.moe-card{border:1px solid var(--line);border-radius:12px;padding:1rem;background:rgba(255,255,255,0.84)}
+.moe-card h3{margin:0 0 .35rem;font-size:1rem}.moe-card p{margin:0;color:var(--ink-muted);font-size:.92rem;line-height:1.55}
+.formula{text-align:center;font-style:italic;font-size:1.05rem;padding:.85rem 1rem;margin:1rem 0;border:1px dashed var(--line);border-radius:10px;background:rgba(10,143,106,0.04)}
+.moe-table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}.moe-table th,.moe-table td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}.moe-table th{background:var(--card);font-weight:700}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul>
+        <li><a href="#serving-paradox">The serving paradox</a></li>
+        <li><a href="#placement">Expert placement</a></li>
+        <li><a href="#batching">Batching and hot experts</a></li>
+        <li><a href="#latency">Latency model</a></li>
+        <li><a href="#quantization">Quantization</a></li>
+        <li><a href="#ops-checklist">Operational checklist</a></li>
+      </ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="training-moe.html">&larr; Part 4</a>
+          <span>&middot;</span>
+          <a href="../../../../blog.html">Mixture of Experts Series</a>
+      </div>
+
+      <div class="blog-post-header">
+        <h1>MoE Inference and Serving Systems</h1>
+        <p class="lead">Sparse activation lowers per-token compute, but serving still has to place experts, route requests, batch tokens, and avoid hot expert bottlenecks.</p>
+        <div class="blog-post-meta">
+          <span class="blog-post-date">April 2026 &middot; 32 min read</span>
+          <span class="blog-post-category">MLOps &middot; Mixture of Experts &middot; Part 5</span>
+        </div>
+      </div>
+
+
+        <h2 id="serving-paradox">The serving paradox</h2>
+        <p>MoE inference activates only a few experts per token, but the serving system must have access to <em>all</em> experts because routing is input-dependent. That creates the MoE serving paradox: FLOPs are sparse, memory is not.</p>
+        <div class="callout"><strong>Rule of thumb:</strong> MoE reduces compute per token more reliably than it reduces deployment memory. Plan capacity for total parameters, not just active parameters.</div>
+
+        <h2 id="placement">Expert placement</h2>
+        <p>There are three common placement strategies:</p>
+        <table class="moe-table"><thead><tr><th>Strategy</th><th>Best for</th><th>Risk</th></tr></thead><tbody>
+          <tr><td>Replicate all experts on every GPU</td><td>Small MoE, low latency</td><td>Wastes memory</td></tr>
+          <tr><td>Shard experts across GPUs</td><td>Large MoE</td><td>Requires token all-to-all</td></tr>
+          <tr><td>Hybrid hot expert replication</td><td>Skewed routing traffic</td><td>Placement policy complexity</td></tr>
+        </tbody></table>
+        <p>When experts are sharded, each GPU owns a subset of experts. Tokens must be exchanged so each expert receives its assigned tokens, then outputs must be sent back to the original sequence owner.</p>
+
+        <h2 id="batching">Batching and hot experts</h2>
+        <p>Continuous batching improves dense LLM serving by merging decode steps across requests. MoE adds a second batching dimension: tokens must also be grouped by expert. If one expert is consistently hot, it becomes the latency bottleneck for the whole batch.</p>
+        <pre class="pseudo-code"><span class="kw">def</span> <span class="fn">route_decode_step</span>(tokens, router):
+weights, experts, logits = top_k_router(tokens, router, k=2)
+groups = defaultdict(list)
+<span class="kw">for</span> token_id, expert_choices <span class="kw">in</span> enumerate(experts.tolist()):
+    <span class="kw">for</span> slot, expert_id <span class="kw">in</span> enumerate(expert_choices):
+        groups[expert_id].append((token_id, slot))
+<span class="kw">return</span> groups, weights</pre>
+        <p>Serving systems often cap per-expert batch sizes, replicate hot experts, or bias routing away from overloaded experts when quality allows.</p>
+
+        <h2 id="latency">Latency model</h2>
+        <p>A useful first-order latency model is:</p>
+        <div class="formula">latency = router + dispatch + max(expert_compute) + combine + communication</div>
+        <p>The <code>max(expert_compute)</code> term matters: a batch completes when the slowest expert group completes. Perfect average utilization is not enough; tail expert load controls latency.</p>
+
+        <h2 id="quantization">Quantization</h2>
+        <p>MoE models are strong candidates for weight-only quantization because inactive expert weights still consume memory. Quantizing experts from BF16 to INT8 or INT4 can reduce residency cost substantially. Keep router precision higher if routing quality regresses.</p>
+        <ul>
+          <li>Quantize expert FFN weights first; they dominate parameter count.</li>
+          <li>Keep shared attention and router in BF16 during early experiments.</li>
+          <li>Measure per-expert activation ranges; experts may have different distributions.</li>
+          <li>Validate routing-sensitive tasks after quantization, not only perplexity.</li>
+        </ul>
+
+        <h2 id="ops-checklist">Operational checklist</h2>
+        <ul>
+          <li>Expose expert utilization, per-expert latency, and token overflow metrics.</li>
+          <li>Plan checkpoint loading for many expert shards; cold start can dominate deploy time.</li>
+          <li>Test adversarial prompts that route disproportionately to one expert.</li>
+          <li>Use canary deployments because router behavior can shift traffic shape.</li>
+          <li>Benchmark prefill and decode separately; MoE bottlenecks differ across phases.</li>
+          <li>Document expert placement so on-call engineers can reason about GPU failures.</li>
+        </ul>
+
+    </article>
+  </div>
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog.js"></script>
+</body>
+</html>
