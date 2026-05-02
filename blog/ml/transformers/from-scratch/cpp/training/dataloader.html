@@ -48,8 +48,10 @@
         <h4>Table of Contents</h4>
         <ul>
           <li><a href="#what-it-does">What the DataLoader Does</a></li>
+          <li><a href="#real-world-scale">Scaling Beyond One Text Stream</a></li>
           <li><a href="#class">The DataLoader Class</a></li>
           <li><a href="#next-batch">next_batch()</a></li>
+          <li><a href="#index-batch">Index-Respecting Variant</a></li>
           <li><a href="#usage">Usage Example</a></li>
         </ul>
       </div>
@@ -193,6 +195,57 @@
         <em>is</em> <code>block_size</code> by construction. The only time they can differ is at
         inference, when you feed a prompt shorter than <code>block_size</code>; then
         <code>T &le; block_size</code>.
+      </div>
+
+      <h3 id="real-world-scale">Scaling Beyond One Text Stream</h3>
+      <p>
+        The implementation below intentionally uses one flat token stream because it makes the
+        mechanics easy to see. Real datasets usually start as millions of rows &mdash; documents,
+        web pages, chat turns, code files, support tickets, or product descriptions &mdash; and the
+        production input pipeline turns those rows into the same kind of token windows.
+      </p>
+
+      <ul>
+        <li><strong>Tokenize offline, not inside the training loop.</strong> Raw rows are cleaned,
+          normalized, filtered, deduplicated, and tokenized in a preprocessing job. The training
+          job usually reads token IDs from binary shards, Arrow/Parquet files, or memory-mapped
+          arrays instead of repeatedly parsing text.</li>
+        <li><strong>Add document boundaries.</strong> When rows are packed into one long stream,
+          insert an <code>&lt;eos&gt;</code> or document-separator token between records. That tells
+          the model where one example ends and prevents accidental blending of unrelated rows
+          unless you explicitly want cross-document packing.</li>
+        <li><strong>Shard the corpus.</strong> A single tensor in RAM works for a toy corpus, but
+          large datasets are split into many token shards. Each worker reads a subset of shards,
+          samples windows from local offsets, and periodically reshuffles shard order.</li>
+        <li><strong>Sample spans, not whole rows.</strong> Long documents are sliced into many
+          <code>block_size</code> spans. Short rows can be packed together with separators so GPU
+          batches stay dense instead of wasting padding.</li>
+        <li><strong>Keep I/O ahead of the GPU.</strong> Production loaders prefetch batches on CPU
+          threads, use pinned host memory for faster host-to-device transfer, and avoid per-token
+          Python/C++ work on the critical path.</li>
+        <li><strong>Partition work for distributed training.</strong> With multiple GPUs or nodes,
+          each rank gets different shards or offset ranges so workers do not all train on the same
+          rows. A global seed plus rank-specific shard assignment keeps sampling reproducible.</li>
+      </ul>
+
+      <div class="pseudo-code"><span class="cm">// Real-world preprocessing shape</span>
+raw rows/files
+  -&gt; clean + filter + deduplicate
+  -&gt; tokenize each row
+  -&gt; append &lt;eos&gt; between rows
+  -&gt; write token shards: shard_000.bin, shard_001.bin, ...
+
+<span class="cm">// Training-time loader shape</span>
+pick shard -&gt; pick random token offset -&gt; read [offset : offset + block_size + 1]
+input  = tokens[0 : block_size]
+target = tokens[1 : block_size + 1]</div>
+
+      <div class="callout">
+        <strong>Why the toy loader is still useful:</strong> after preprocessing, a massive
+        row-based dataset and a tiny demo string both reduce to the same abstraction: sample
+        contiguous token windows and train the model to predict the next token. The difference is
+        engineering scale &mdash; sharding, streaming, prefetching, distributed partitioning, and
+        careful handling of document boundaries.
       </div>
 
 
@@ -356,9 +409,123 @@
 
 
       <!-- ================================================================ -->
-      <!-- 4. USAGE                                                          -->
+      <!-- 4. INDEX-RESPECTING VARIANT                                       -->
       <!-- ================================================================ -->
-      <h2 id="usage">4 &middot; Usage Example</h2>
+      <h2 id="index-batch">4 &middot; Index-Respecting Variant</h2>
+
+      <p>
+        A fair objection to the loader above: <em>it does not respect index order</em>.
+        <code>torch::randint</code> draws <code>batch_size</code> independent starts every call,
+        so a window can be picked twice while another is never picked at all. There is no
+        notion of an epoch &mdash; the model just keeps drawing from a uniform distribution
+        over <code>[0, n - block_size)</code> forever.
+      </p>
+
+      <p>
+        For pretraining on billions of tokens that&rsquo;s usually fine: the law of large
+        numbers takes over, the variance disappears, and skipping the bookkeeping buys real
+        throughput. But on smaller corpora &mdash; fine-tuning, evaluation, ablations &mdash;
+        you typically <em>do</em> want every window seen exactly once before any repeats.
+        That is the standard PyTorch <code>DataLoader</code> contract: shuffle indices once
+        per epoch, then iterate.
+      </p>
+
+      <p>
+        The variant below keeps the same <code>std::pair&lt;Tensor, Tensor&gt; next_batch()</code>
+        signature so it is a drop-in replacement, but it now owns a permutation of valid start
+        offsets and a cursor.
+      </p>
+
+      <div class="pseudo-code"><span class="kw">class</span> <span class="tp">EpochDataLoader</span> {
+    torch::Tensor data;
+    torch::Tensor perm;       <span class="cm">// shuffled valid starts, shape (n - block_size,), int64</span>
+    <span class="tp">int64_t</span> cursor = <span class="num">0</span>;     <span class="cm">// next index into perm</span>
+    <span class="tp">int64_t</span> epoch  = <span class="num">0</span>;     <span class="cm">// completed epoch counter (handy for logging)</span>
+    <span class="tp">int</span> block_size;
+    <span class="tp">int</span> batch_size;
+
+    <span class="kw">void</span> <span class="fn">reshuffle</span>() {
+        <span class="kw">auto</span> n = data.<span class="fn">size</span>(<span class="num">0</span>);
+        perm   = torch::<span class="fn">randperm</span>(n - block_size, torch::<span class="fn">dtype</span>(torch::kLong));
+        cursor = <span class="num">0</span>;
+    }
+
+    <span class="kw">public</span>:
+    <span class="fn">EpochDataLoader</span>(<span class="kw">const</span> std::vector&lt;<span class="tp">int</span>&gt;&amp; tokens, <span class="tp">int</span> block_size, <span class="tp">int</span> batch_size)
+        : block_size(block_size), batch_size(batch_size)
+    {
+        data = torch::<span class="fn">tensor</span>(tokens, torch::<span class="fn">dtype</span>(torch::kLong));
+        <span class="fn">reshuffle</span>();
+    }
+
+    std::pair&lt;torch::Tensor, torch::Tensor&gt; <span class="fn">next_batch</span>() {
+        <span class="cm">// Drop-last: if we cannot fill a full batch from the remaining permutation,</span>
+        <span class="cm">// finish the epoch and start a freshly shuffled one. This keeps the (B, T)</span>
+        <span class="cm">// shape constant for the model and matches PyTorch's drop_last=True default.</span>
+        <span class="kw">if</span> (cursor + batch_size &gt; perm.<span class="fn">size</span>(<span class="num">0</span>)) {
+            ++epoch;
+            <span class="fn">reshuffle</span>();
+        }
+
+        <span class="kw">auto</span> ix = perm.<span class="fn">slice</span>(<span class="num">0</span>, cursor, cursor + batch_size);
+        cursor += batch_size;
+
+        std::vector&lt;torch::Tensor&gt; xs, ys;
+        xs.<span class="fn">reserve</span>(batch_size);
+        ys.<span class="fn">reserve</span>(batch_size);
+        <span class="kw">for</span> (<span class="tp">int</span> i = <span class="num">0</span>; i &lt; batch_size; i++) {
+            <span class="tp">int64_t</span> start = ix[i].<span class="fn">item</span>&lt;<span class="tp">int64_t</span>&gt;();
+            xs.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start,     start + block_size));
+            ys.<span class="fn">push_back</span>(data.<span class="fn">slice</span>(<span class="num">0</span>, start + <span class="num">1</span>, start + block_size + <span class="num">1</span>));
+        }
+        <span class="kw">return</span> { torch::<span class="fn">stack</span>(xs), torch::<span class="fn">stack</span>(ys) };
+    }
+
+    <span class="tp">int64_t</span> <span class="fn">current_epoch</span>() <span class="kw">const</span> { <span class="kw">return</span> epoch; }
+};</div>
+
+      <p>
+        The interesting line is <code>torch::randperm(n - block_size, kLong)</code>. It returns
+        a 1-D tensor containing every integer in <code>[0, n - block_size)</code> exactly once,
+        in random order &mdash; the same primitive PyTorch&rsquo;s <code>RandomSampler</code>
+        builds on. Slicing <code>batch_size</code> entries off the front and advancing the
+        cursor is what makes "every window once per epoch" hold by construction.
+      </p>
+
+      <h3>Trade-offs at a glance</h3>
+
+      <table class="dim-table">
+        <tr><th>Aspect</th><th>Random sampling (section&nbsp;3)</th><th>Index-respecting (this section)</th></tr>
+        <tr><td>State per loader</td><td>O(1)</td><td>O(n - block_size) for the permutation</td></tr>
+        <tr><td>Coverage per epoch</td><td>Probabilistic; some windows missed, others repeated</td><td>Every valid start visited exactly once</td></tr>
+        <tr><td>Epoch signal</td><td>None &mdash; you train by step count</td><td>Cursor wrap = epoch boundary, easy to log</td></tr>
+        <tr><td>Reproducibility</td><td>Seed <code>torch::Generator</code> globally</td><td>Same, plus the permutation is materialized so you can checkpoint <code>perm</code> + <code>cursor</code></td></tr>
+        <tr><td>Implicit augmentation</td><td>Yes &mdash; new overlapping windows every call</td><td>Only between epochs (after reshuffle)</td></tr>
+        <tr><td>Tail handling</td><td>N/A</td><td>Drop-last by default; alternatives: pad to fill, or wrap into next epoch</td></tr>
+      </table>
+
+      <div class="callout">
+        <strong>Rule of thumb.</strong> Use random sampling when the corpus is so large that
+        a full pass is impractical and per-step variance is dominated by data scale &mdash; the
+        canonical LM pretraining setting. Reach for the index-respecting variant when you
+        actually care about epoch semantics: small or curated datasets, fine-tuning,
+        evaluation, ablations, and any time you want a deterministic "did the model see
+        every example?" answer.
+      </div>
+
+      <div class="callout warn">
+        <strong>Tail policy matters.</strong> Drop-last (shown above) is the safest default
+        because it keeps <code>(B, T)</code> static, which avoids recompiling kernels and
+        keeps tensor shapes friendly to <code>torch.compile</code>-style graph capture. If you
+        need every token, prefer wrapping the leftover starts into the start of the next
+        epoch&rsquo;s permutation rather than emitting a runt batch.
+      </div>
+
+
+      <!-- ================================================================ -->
+      <!-- 5. USAGE                                                          -->
+      <!-- ================================================================ -->
+      <h2 id="usage">5 &middot; Usage Example</h2>
 
       <div class="pseudo-code"><span class="tp">int</span> <span class="fn">main</span>() {
     <span class="cm">// token IDs from your BPE tokenizer</span>
