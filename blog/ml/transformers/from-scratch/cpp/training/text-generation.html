@@ -49,6 +49,7 @@
         <ul>
           <li><a href="#autoregressive-loop">The Autoregressive Loop</a></li>
           <li><a href="#greedy-decoding">Greedy Decoding</a></li>
+          <li><a href="#slice-index-explainer">&nbsp;&nbsp;&middot; Reading the crop: Slice &amp; index()</a></li>
           <li><a href="#temperature">Temperature Scaling</a></li>
           <li><a href="#top-k">Top-k Sampling</a></li>
           <li><a href="#complete-generate">The Complete Generate Function</a></li>
@@ -171,6 +172,96 @@
     }
     <span class="kw">return</span> context;
 }</div>
+
+      <h3 id="slice-index-explainer">Reading the crop: <code>Slice</code>, <code>index()</code>, and why</h3>
+
+      <p>
+        The first three lines inside the loop are the part most readers stumble on, so they
+        deserve their own walkthrough.
+      </p>
+
+      <div class="pseudo-code"><span class="kw">auto</span> ctx = context.<span class="fn">size</span>(<span class="num">1</span>) &gt; block_size
+    ? context.<span class="fn">index</span>({Slice(), Slice(-block_size, None)})
+    : context;</div>
+
+      <p>
+        <code>context</code> is a 2-D tensor of token IDs with shape
+        <strong>(B, T)</strong>:
+      </p>
+      <ul>
+        <li><strong>B</strong> &mdash; batch size (number of sequences generated in
+            parallel; usually 1 at inference).</li>
+        <li><strong>T</strong> &mdash; current sequence length. It grows by one at the end
+            of every loop iteration, because we just appended the predicted token.</li>
+      </ul>
+
+      <p>
+        So <code>context.size(1)</code> is just the current <em>T</em>, which we compare
+        against <code>block_size</code> &mdash; the fixed context window the model was
+        <em>trained</em> with.
+      </p>
+
+      <h4>Why crop at all?</h4>
+      <p>
+        The transformer&rsquo;s positional embedding table is a learned
+        <code>(block_size, n_embd)</code> matrix. Internally the forward pass computes
+        <code>x = tok_emb(idx) + pos_emb(arange(T))</code>. If we pass in a sequence longer
+        than <code>block_size</code>, <code>arange(T)</code> tries to index positions the
+        model never learned &mdash; runtime error or garbage output. So before each forward
+        pass we keep only the most recent <code>block_size</code> tokens. Older tokens fall
+        out of the window. This is exactly the receptive field the model was trained on.
+      </p>
+
+      <h4>What <code>Slice</code> is</h4>
+      <p>
+        In Python you would write <code>context[:, -block_size:]</code>. C++ has no
+        <code>[:]</code> syntax, so LibTorch exposes the same machinery through two pieces:
+      </p>
+      <ul>
+        <li><code>torch::indexing::Slice(start, stop, step)</code> &mdash; a value object
+            that represents a Python slice. <code>Slice()</code> with no arguments is
+            equivalent to Python <code>:</code> (&ldquo;everything along this axis&rdquo;).
+            <code>Slice(-block_size, None)</code> is equivalent to
+            <code>-block_size:</code> (&ldquo;from the <em>block_size</em>-th-to-last
+            element through the end&rdquo;). <code>None</code> here is
+            <code>torch::indexing::None</code>, the C++ stand-in for Python
+            <code>None</code> meaning &ldquo;no bound&rdquo;.</li>
+        <li><code>tensor.<span class="fn">index</span>({...})</code> &mdash; multi-dim
+            advanced indexing. The braced list is one
+            <code>torch::indexing::TensorIndex</code> per dimension; each entry can be a
+            <code>Slice</code>, an integer, an ellipsis, a boolean mask, or another tensor.</li>
+      </ul>
+
+      <p>So the call</p>
+      <div class="pseudo-code">context.<span class="fn">index</span>({Slice(), Slice(-block_size, None)})</div>
+      <p>reads dimension by dimension as:</p>
+      <ul>
+        <li>dim 0 (batch): <code>Slice()</code> &rarr; keep all <em>B</em> rows.</li>
+        <li>dim 1 (time):  <code>Slice(-block_size, None)</code> &rarr; keep only the last
+            <em>block_size</em> columns.</li>
+      </ul>
+      <p>
+        which is exactly Python&rsquo;s <code>context[:, -block_size:]</code>.
+      </p>
+
+      <h4>Why the ternary</h4>
+      <p>
+        Early in generation <em>T</em> is small, so cropping is a no-op &mdash; we just
+        hand <code>context</code> through unchanged. Once <em>T</em> exceeds the window we
+        switch to the sliced view. Note that <code>index()</code> returns a <strong>view
+        into the same storage</strong>, not a copy: it&rsquo;s O(1) metadata (a stride and
+        an offset). The forward pass then reads through that view without allocating new
+        memory.
+      </p>
+
+      <div class="callout">
+        <strong>Mental model.</strong> The crop turns the autoregressive loop into a
+        sliding window of width <code>block_size</code>. The model always sees the most
+        recent <code>block_size</code> tokens and silently forgets older ones &mdash; a
+        cheap form of &ldquo;context truncation&rdquo; with no copy, just a fresh view on
+        the same buffer.
+      </div>
+
 
       <div class="callout warn">
         <strong>Greedy is deterministic.</strong> Given the same prompt, you always get the
