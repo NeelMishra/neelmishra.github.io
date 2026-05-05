@@ -561,8 +561,9 @@ var BLOG_TREE = [
         name: 'bit-manipulation',
         label: 'Bit Manipulation',
         children: [
-          { title: 'Overview', file: 'dsa/bit-manipulation/index.html', links: ['dsa/complexity/patterns.html', 'dsa/bit-manipulation/binary-representation.html'] },
-          { title: 'Binary Representation', file: 'dsa/bit-manipulation/binary-representation.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/basic-operations.html'] },
+          { title: 'Overview', file: 'dsa/bit-manipulation/index.html', links: ['dsa/complexity/patterns.html', 'dsa/bit-manipulation/number-system.html'] },
+          { title: 'Number System', file: 'dsa/bit-manipulation/number-system.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/binary-representation.html'] },
+          { title: 'Binary Representation', file: 'dsa/bit-manipulation/binary-representation.html', links: ['dsa/bit-manipulation/number-system.html', 'dsa/bit-manipulation/basic-operations.html'] },
           { title: 'Bitwise Operators', file: 'dsa/bit-manipulation/basic-operations.html', links: ['dsa/bit-manipulation/binary-representation.html', 'dsa/bit-manipulation/common-tricks.html'] },
           { title: 'Essential Tricks', file: 'dsa/bit-manipulation/common-tricks.html', links: ['dsa/bit-manipulation/basic-operations.html', 'dsa/bit-manipulation/bit-masks.html'] },
           { title: 'Bit Masks', file: 'dsa/bit-manipulation/bit-masks.html', links: ['dsa/bit-manipulation/common-tricks.html', 'dsa/bit-manipulation/counting-bits.html'] },
