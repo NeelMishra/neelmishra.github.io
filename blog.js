@@ -8464,6 +8464,31 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'math',
+    label: 'Math',
+    children: [
+      {
+        name: 'probability-statistics',
+        label: 'Probability & Statistics',
+        children: [
+          {
+            name: 'combinatorial-analysis',
+            label: 'Combinatorial Analysis',
+            children: [
+              { title: 'Combinatorial Analysis — Series Overview', file: 'math/probability-statistics/combinatorial-analysis/index.html', links: ['math/probability-statistics/combinatorial-analysis/basic-principle-of-counting.html'] },
+              { title: 'The Basic Principle of Counting', file: 'math/probability-statistics/combinatorial-analysis/basic-principle-of-counting.html', links: ['math/probability-statistics/combinatorial-analysis/index.html', 'math/probability-statistics/combinatorial-analysis/permutations.html'] },
+              { title: 'Permutations', file: 'math/probability-statistics/combinatorial-analysis/permutations.html', links: ['math/probability-statistics/combinatorial-analysis/basic-principle-of-counting.html', 'math/probability-statistics/combinatorial-analysis/combinations.html'] },
+              { title: 'Combinations &amp; Pascal\'s Triangle', file: 'math/probability-statistics/combinatorial-analysis/combinations.html', links: ['math/probability-statistics/combinatorial-analysis/permutations.html', 'math/probability-statistics/combinatorial-analysis/binomial-theorem.html'] },
+              { title: 'The Binomial Theorem', file: 'math/probability-statistics/combinatorial-analysis/binomial-theorem.html', links: ['math/probability-statistics/combinatorial-analysis/combinations.html', 'math/probability-statistics/combinatorial-analysis/multinomial-coefficients.html'] },
+              { title: 'Multinomial Coefficients', file: 'math/probability-statistics/combinatorial-analysis/multinomial-coefficients.html', links: ['math/probability-statistics/combinatorial-analysis/binomial-theorem.html', 'math/probability-statistics/combinatorial-analysis/stars-and-bars.html'] },
+              { title: 'Integer Solutions &amp; Stars and Bars', file: 'math/probability-statistics/combinatorial-analysis/stars-and-bars.html', links: ['math/probability-statistics/combinatorial-analysis/multinomial-coefficients.html'] }
+            ]
+          }
+        ]
+      }
+    ]
   }
 
 ];
@@ -8662,6 +8687,7 @@ function flattenBlogTree(nodes, result) {
     cpp:   { label: 'C++',   blurb: 'STL internals, concurrency, deep language mechanics.' },
     dsa:   { label: 'DSA',   blurb: 'Data structures and algorithms with animated walkthroughs.' },
     cp:    { label: 'CP',    blurb: 'Competitive programming math, techniques, and patterns.' },
+    math:  { label: 'Math',  blurb: 'Probability, statistics, and pure-math foundations with worked-out proofs.' },
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Machine learning building blocks, from attention to transformers.' },
