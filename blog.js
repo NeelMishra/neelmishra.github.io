@@ -8485,6 +8485,19 @@ var BLOG_TREE = [
               { title: 'Multinomial Coefficients', file: 'math/probability-statistics/combinatorial-analysis/multinomial-coefficients.html', links: ['math/probability-statistics/combinatorial-analysis/binomial-theorem.html', 'math/probability-statistics/combinatorial-analysis/stars-and-bars.html'] },
               { title: 'Integer Solutions &amp; Stars and Bars', file: 'math/probability-statistics/combinatorial-analysis/stars-and-bars.html', links: ['math/probability-statistics/combinatorial-analysis/multinomial-coefficients.html'] }
             ]
+          },
+          {
+            name: 'axioms-of-probability',
+            label: 'Axioms of Probability',
+            children: [
+              { title: 'Axioms of Probability — Series Overview', file: 'math/probability-statistics/axioms-of-probability/index.html', links: ['math/probability-statistics/axioms-of-probability/sample-spaces-and-events.html'] },
+              { title: 'Sample Spaces and Events', file: 'math/probability-statistics/axioms-of-probability/sample-spaces-and-events.html', links: ['math/probability-statistics/axioms-of-probability/index.html', 'math/probability-statistics/axioms-of-probability/axioms-of-probability.html'] },
+              { title: 'The Three Axioms of Probability', file: 'math/probability-statistics/axioms-of-probability/axioms-of-probability.html', links: ['math/probability-statistics/axioms-of-probability/sample-spaces-and-events.html', 'math/probability-statistics/axioms-of-probability/simple-propositions.html'] },
+              { title: 'Simple Propositions &amp; Inclusion–Exclusion', file: 'math/probability-statistics/axioms-of-probability/simple-propositions.html', links: ['math/probability-statistics/axioms-of-probability/axioms-of-probability.html', 'math/probability-statistics/axioms-of-probability/equally-likely-outcomes.html'] },
+              { title: 'Equally Likely Outcomes', file: 'math/probability-statistics/axioms-of-probability/equally-likely-outcomes.html', links: ['math/probability-statistics/axioms-of-probability/simple-propositions.html', 'math/probability-statistics/axioms-of-probability/continuity-of-probability.html'] },
+              { title: 'Probability as a Continuous Set Function', file: 'math/probability-statistics/axioms-of-probability/continuity-of-probability.html', links: ['math/probability-statistics/axioms-of-probability/equally-likely-outcomes.html', 'math/probability-statistics/axioms-of-probability/probability-as-belief.html'] },
+              { title: 'Probability as a Measure of Belief', file: 'math/probability-statistics/axioms-of-probability/probability-as-belief.html', links: ['math/probability-statistics/axioms-of-probability/continuity-of-probability.html'] }
+            ]
           }
         ]
       }
