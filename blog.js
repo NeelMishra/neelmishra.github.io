@@ -7391,7 +7391,8 @@ var BLOG_TREE = [
                     label: 'Biweekly 182',
                     children: [
                       { title: 'Biweekly 182 · Overview', file: 'dsa/leetcode-contests/biweekly/182/index.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html'] },
-                      { title: 'Q1. Score Validator', file: 'dsa/leetcode-contests/biweekly/182/q1-score-validator.html', links: ['dsa/leetcode-contests/biweekly/182/index.html', 'dsa/leetcode-contests/biweekly/181/q1-valid-digit-number.html'] }
+                      { title: 'Q1. Score Validator', file: 'dsa/leetcode-contests/biweekly/182/q1-score-validator.html', links: ['dsa/leetcode-contests/biweekly/182/index.html', 'dsa/leetcode-contests/biweekly/182/q2-coherent-binary-string.html'] },
+                      { title: 'Q2. Coherent Binary String', file: 'dsa/leetcode-contests/biweekly/182/q2-coherent-binary-string.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html', 'dsa/leetcode-contests/biweekly/182/index.html'] }
                     ]
                   }
                 ]
