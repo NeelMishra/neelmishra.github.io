@@ -7385,6 +7385,14 @@ var BLOG_TREE = [
                       { title: 'Q3. Count Connected Subgraphs with Even Node Sum', file: 'dsa/leetcode-contests/biweekly/181/q3-count-connected-subgraphs-with-even-node-sum.html', links: ['dsa/leetcode-contests/biweekly/181/q2-compare-sums-of-bitonic-parts.html', 'dsa/leetcode-contests/biweekly/181/q4-k-th-smallest-remaining-even-integer-in-subarray-queries.html'] },
                       { title: 'Q4. K-th Smallest Remaining Even Integer in Subarray Queries', file: 'dsa/leetcode-contests/biweekly/181/q4-k-th-smallest-remaining-even-integer-in-subarray-queries.html', links: ['dsa/leetcode-contests/biweekly/181/q3-count-connected-subgraphs-with-even-node-sum.html'] }
                     ]
+                  },
+                  {
+                    name: '182',
+                    label: 'Biweekly 182',
+                    children: [
+                      { title: 'Biweekly 182 · Overview', file: 'dsa/leetcode-contests/biweekly/182/index.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html'] },
+                      { title: 'Q1. Score Validator', file: 'dsa/leetcode-contests/biweekly/182/q1-score-validator.html', links: ['dsa/leetcode-contests/biweekly/182/index.html', 'dsa/leetcode-contests/biweekly/181/q1-valid-digit-number.html'] }
+                    ]
                   }
                 ]
               }
