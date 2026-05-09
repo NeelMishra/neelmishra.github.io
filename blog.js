@@ -13,8 +13,7 @@ var BLOG_TREE = [
           { title: 'Maps & Sets', file: 'cpp/stl/maps-sets.html', links: ['cpp/stl/vectors.html', 'cpp/stl/iterators.html'] },
           { title: 'Iterators', file: 'cpp/stl/iterators.html', links: ['cpp/stl/maps-sets.html', 'cpp/stl/algorithms.html'] },
           { title: 'Algorithms', file: 'cpp/stl/algorithms.html', links: ['cpp/stl/iterators.html', 'cpp/stl/smart-pointers.html'] },
-          { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/deep-dives/raii.html'] },
-          { title: 'Reversing std::bitset', file: 'cpp/stl/bitset-reverse.html', links: ['cpp/stl/smart-pointers.html', 'dsa/bit-manipulation/bit-reversal-rotation.html'] }
+          { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/deep-dives/raii.html'] }
         ]
       },
       {
@@ -574,6 +573,7 @@ var BLOG_TREE = [
           { title: 'Counting Bits', file: 'dsa/bit-manipulation/counting-bits.html', links: ['dsa/bit-manipulation/bit-shifting.html', 'dsa/bit-manipulation/power-of-two.html'] },
           { title: 'Powers of Two', file: 'dsa/bit-manipulation/power-of-two.html', links: ['dsa/bit-manipulation/counting-bits.html', 'dsa/bit-manipulation/bit-reversal-rotation.html'] },
           { title: 'Bit Reversal & Rotation', file: 'dsa/bit-manipulation/bit-reversal-rotation.html', links: ['dsa/bit-manipulation/power-of-two.html', 'dsa/bit-manipulation/bitwise-arithmetic.html'] },
+          { title: 'Reversing std::bitset', file: 'dsa/bit-manipulation/bitset-reverse.html', links: ['dsa/bit-manipulation/bit-reversal-rotation.html', 'dsa/bit-manipulation/bitset-optimization.html'] },
           { title: 'Bitwise Arithmetic', file: 'dsa/bit-manipulation/bitwise-arithmetic.html', links: ['dsa/bit-manipulation/bit-reversal-rotation.html', 'dsa/bit-manipulation/xor-patterns.html'] },
           { title: 'XOR Patterns', file: 'dsa/bit-manipulation/xor-patterns.html', links: ['dsa/bit-manipulation/bitwise-arithmetic.html', 'dsa/bit-manipulation/gray-code.html'] },
           { title: 'Gray Code', file: 'dsa/bit-manipulation/gray-code.html', links: ['dsa/bit-manipulation/xor-patterns.html', 'dsa/bit-manipulation/binary-trie-xor.html'] },
