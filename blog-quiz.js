@@ -8,14 +8,22 @@
  *       bank: [
  *         { meaning: 'prompt shown to user',
  *           answer: 'correct expression',
- *           distractors: ['wrong1', 'wrong2', 'wrong3'],
- *           explain: 'one-line explanation shown after answering' },
- *         ...
+ *           explain: 'shown after correct or below correct answer when wrong',
+ *           distractors: [
+ *             { text: 'wrong option', why: 'why THIS option is wrong' },
+ *             'wrong option as plain string (no per-option why)',
+ *             ...
+ *           ]
+ *         }, ...
  *       ]
  *     });
- *   </script>
+ *   </scr' + 'ipt>
  *
- * The container element receives the .anim-container styling automatically.
+ * Each distractor may be a plain string (no specific why-wrong note) or
+ * an object { text, why }. On a wrong pick the widget shows that
+ * distractor's `why` (if present) followed by the correct answer and
+ * the general `explain`. On a correct pick it shows only `explain`.
+ *
  * Pure vanilla ES5-style JS, no dependencies.
  */
 (function() {
@@ -37,6 +45,11 @@
     });
   }
 
+  function normalizeDistractor(d) {
+    if (typeof d === 'string') return { text: d, why: null };
+    return { text: String(d.text), why: d.why || null };
+  }
+
   function create(containerId, config) {
     var root = document.getElementById(containerId);
     if (!root) return;
@@ -44,7 +57,9 @@
     var title = config.title || 'Quiz';
     var intro = config.intro || 'Click <strong>Start</strong> to begin.';
     var bank  = (config.bank || []).slice();
-    var promptLabel = config.promptLabel || 'What is the identity for:';
+    var promptLabel = typeof config.promptLabel === 'string'
+      ? config.promptLabel
+      : 'What is the identity for:';
 
     if (!bank.length) {
       root.innerHTML = '<em>(empty question bank)</em>';
@@ -74,6 +89,7 @@
     var resetBtn   = root.querySelector('.bq-reset');
 
     var order = [], idx = 0, correct = 0, total = 0, locked = false;
+    var whyByText = {};
 
     function updateScore() {
       scoreEl.textContent = total === 0 ? '' : 'Score: ' + correct + ' / ' + total;
@@ -82,12 +98,17 @@
     function renderQuestion() {
       locked = false;
       var q = bank[order[idx]];
+      var distractors = (q.distractors || []).map(normalizeDistractor);
+      whyByText = {};
+      distractors.forEach(function(d){ whyByText[d.text] = d.why; });
+
       promptEl.innerHTML =
         '<span class="bq-qnum">Q' + (idx + 1) + ' of ' + order.length + '.</span> ' +
         promptLabel + ' <span class="bq-qmeaning">' + escapeHtml(q.meaning) + '</span>';
       feedbackEl.innerHTML = '';
       nextBtn.style.display = 'none';
-      var opts = [q.answer].concat(q.distractors);
+
+      var opts = [q.answer].concat(distractors.map(function(d){ return d.text; }));
       shuffle(opts);
       choicesEl.innerHTML = '';
       opts.forEach(function(opt){
@@ -113,16 +134,28 @@
         if (c.textContent === q.answer) c.classList.add('correct');
         else if (c === btn) c.classList.add('wrong');
       }
-      var head = isCorrect
-        ? '<strong class="bq-ok">&check; Correct.</strong> '
-        : '<strong class="bq-no">&times; Not quite.</strong> The answer is <code>' + escapeHtml(q.answer) + '</code>. ';
-      feedbackEl.innerHTML = head + escapeHtml(q.explain);
+
+      var html;
+      if (isCorrect) {
+        html = '<strong class="bq-ok">&check; Correct.</strong> ' + escapeHtml(q.explain || '');
+      } else {
+        var pickedWhy = whyByText[picked];
+        html  = '<strong class="bq-no">&times; Not quite.</strong> ';
+        html += '<code>' + escapeHtml(picked) + '</code>';
+        html += pickedWhy
+          ? ' &mdash; ' + escapeHtml(pickedWhy)
+          : ' is not the right form here.';
+        html += '<br><strong class="bq-answer">Answer:</strong> <code>' + escapeHtml(q.answer) + '</code>';
+        if (q.explain) html += ' &mdash; ' + escapeHtml(q.explain);
+      }
+      feedbackEl.innerHTML = html;
       updateScore();
+
       if (idx + 1 < order.length) {
         nextBtn.style.display = '';
       } else {
         nextBtn.style.display = 'none';
-        feedbackEl.innerHTML += ' <strong>Bank complete &mdash; final score ' + correct + ' / ' + total + '. Hit Reset to reshuffle.</strong>';
+        feedbackEl.innerHTML += '<br><strong>Bank complete &mdash; final score ' + correct + ' / ' + total + '. Hit Reset to reshuffle.</strong>';
       }
     }
 
@@ -157,3 +190,4 @@
 
   window.BlogQuiz = { create: create };
 })();
+
