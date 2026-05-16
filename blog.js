@@ -7682,6 +7682,32 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        name: 'recommended-papers',
+        label: 'Recommended Papers',
+        children: [
+          { title: 'Overview', file: 'ml/recommended-papers/index.html' },
+          {
+            name: 'nlp',
+            label: 'NLP',
+            children: [
+              { title: 'Overview', file: 'ml/recommended-papers/nlp/index.html' },
+              { title: 'Entropy of English', file: 'ml/recommended-papers/nlp/shannon-1950-entropy.html' },
+              { title: 'First Neural Language Model', file: 'ml/recommended-papers/nlp/bengio-2003-neural-lm.html' },
+              { title: 'Seq2Seq', file: 'ml/recommended-papers/nlp/sutskever-2014-seq2seq.html' },
+              { title: 'Attention Mechanism', file: 'ml/recommended-papers/nlp/bahdanau-2015-attention.html' },
+              { title: 'BPE for NMT', file: 'ml/recommended-papers/nlp/sennrich-2016-bpe.html' },
+              { title: 'The Transformer', file: 'ml/recommended-papers/nlp/vaswani-2017-transformer.html' },
+              { title: 'ELMo', file: 'ml/recommended-papers/nlp/peters-2018-elmo.html' },
+              { title: 'BERT', file: 'ml/recommended-papers/nlp/devlin-2019-bert.html' },
+              { title: 'GPT-2', file: 'ml/recommended-papers/nlp/radford-2019-gpt2.html' },
+              { title: 'GPT-3', file: 'ml/recommended-papers/nlp/brown-2020-gpt3.html' },
+              { title: 'Scaling Laws', file: 'ml/recommended-papers/nlp/kaplan-2020-scaling-laws.html' },
+              { title: 'Chinchilla', file: 'ml/recommended-papers/nlp/hoffmann-2022-chinchilla.html' }
+            ]
+          }
+        ]
       }
     ]
   },
