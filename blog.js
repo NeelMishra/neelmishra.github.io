@@ -7669,6 +7669,19 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        name: 'popular-courses',
+        label: 'Popular Courses',
+        children: [
+          {
+            name: 'cs336-lm-from-scratch',
+            label: 'CS336 · LM from Scratch',
+            children: [
+              { title: 'Lecture 1 · Overview & Tokenization', file: 'ml/popular-courses/cs336-lm-from-scratch/lecture-01.html', links: [] }
+            ]
+          }
+        ]
       }
     ]
   },
