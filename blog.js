@@ -5378,6 +5378,34 @@ var BLOG_TREE = [
                     ]
                   }
                 ]
+              },
+              {
+                name: 'r05',
+                label: 'Weekly 501–600',
+                children: [
+                  {
+                    name: '501',
+                    label: 'Weekly 501',
+                    children: [
+                      { title: 'Weekly 501 · Overview', file: 'dsa/leetcode-contests/weekly/501/index.html', links: ['dsa/leetcode-contests/weekly/501/q1-concatenate-array-with-reverse.html'] },
+                      { title: 'Q1. Concatenate Array With Reverse', file: 'dsa/leetcode-contests/weekly/501/q1-concatenate-array-with-reverse.html', links: ['dsa/leetcode-contests/weekly/501/index.html', 'dsa/leetcode-contests/weekly/501/q2-count-valid-word-occurrences.html'] },
+                      { title: 'Q2. Count Valid Word Occurrences', file: 'dsa/leetcode-contests/weekly/501/q2-count-valid-word-occurrences.html', links: ['dsa/leetcode-contests/weekly/501/q1-concatenate-array-with-reverse.html', 'dsa/leetcode-contests/weekly/501/q3-minimize-array-sum-using-divisible-replacements.html'] },
+                      { title: 'Q3. Minimize Array Sum Using Divisible Replacements', file: 'dsa/leetcode-contests/weekly/501/q3-minimize-array-sum-using-divisible-replacements.html', links: ['dsa/leetcode-contests/weekly/501/q2-count-valid-word-occurrences.html', 'dsa/leetcode-contests/weekly/501/q4-minimum-cost-to-buy-apples-ii.html'] },
+                      { title: 'Q4. Minimum Cost to Buy Apples II', file: 'dsa/leetcode-contests/weekly/501/q4-minimum-cost-to-buy-apples-ii.html', links: ['dsa/leetcode-contests/weekly/501/q3-minimize-array-sum-using-divisible-replacements.html'] }
+                    ]
+                  },
+                  {
+                    name: '502',
+                    label: 'Weekly 502',
+                    children: [
+                      { title: 'Weekly 502 · Overview', file: 'dsa/leetcode-contests/weekly/502/index.html', links: ['dsa/leetcode-contests/weekly/502/q1-check-adjacent-digit-differences.html'] },
+                      { title: 'Q1. Check Adjacent Digit Differences', file: 'dsa/leetcode-contests/weekly/502/q1-check-adjacent-digit-differences.html', links: ['dsa/leetcode-contests/weekly/502/index.html', 'dsa/leetcode-contests/weekly/502/q2-count-local-maximums.html'] },
+                      { title: 'Q2. Count Local Maximums', file: 'dsa/leetcode-contests/weekly/502/q2-count-local-maximums.html', links: ['dsa/leetcode-contests/weekly/502/q1-check-adjacent-digit-differences.html', 'dsa/leetcode-contests/weekly/502/q3-count-perfect-kth-powers-in-range.html'] },
+                      { title: 'Q3. Count Perfect Kth Powers in Range', file: 'dsa/leetcode-contests/weekly/502/q3-count-perfect-kth-powers-in-range.html', links: ['dsa/leetcode-contests/weekly/502/q2-count-local-maximums.html', 'dsa/leetcode-contests/weekly/502/q4-smallest-unique-subarray.html'] },
+                      { title: 'Q4. Smallest Unique Subarray', file: 'dsa/leetcode-contests/weekly/502/q4-smallest-unique-subarray.html', links: ['dsa/leetcode-contests/weekly/502/q3-count-perfect-kth-powers-in-range.html'] }
+                    ]
+                  }
+                ]
               }
             ]
           },
@@ -7391,8 +7419,10 @@ var BLOG_TREE = [
                     label: 'Biweekly 182',
                     children: [
                       { title: 'Biweekly 182 · Overview', file: 'dsa/leetcode-contests/biweekly/182/index.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html'] },
-                      { title: 'Q1. Score Validator', file: 'dsa/leetcode-contests/biweekly/182/q1-score-validator.html', links: ['dsa/leetcode-contests/biweekly/182/index.html', 'dsa/leetcode-contests/biweekly/182/q2-coherent-binary-string.html'] },
-                      { title: 'Q2. Coherent Binary String', file: 'dsa/leetcode-contests/biweekly/182/q2-coherent-binary-string.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html', 'dsa/leetcode-contests/biweekly/182/index.html'] }
+                      { title: 'Q1. Score Validator', file: 'dsa/leetcode-contests/biweekly/182/q1-score-validator.html', links: ['dsa/leetcode-contests/biweekly/182/index.html', 'dsa/leetcode-contests/biweekly/182/q2-minimum-flips-to-make-binary-string-coherent.html'] },
+                      { title: 'Q2. Minimum Flips to Make Binary String Coherent', file: 'dsa/leetcode-contests/biweekly/182/q2-minimum-flips-to-make-binary-string-coherent.html', links: ['dsa/leetcode-contests/biweekly/182/q1-score-validator.html', 'dsa/leetcode-contests/biweekly/182/q3-minimum-generations-to-target-point.html'] },
+                      { title: 'Q3. Minimum Generations to Target Point', file: 'dsa/leetcode-contests/biweekly/182/q3-minimum-generations-to-target-point.html', links: ['dsa/leetcode-contests/biweekly/182/q2-minimum-flips-to-make-binary-string-coherent.html', 'dsa/leetcode-contests/biweekly/182/q4-minimum-threshold-path-with-limited-heavy-edges.html'] },
+                      { title: 'Q4. Minimum Threshold Path With Limited Heavy Edges', file: 'dsa/leetcode-contests/biweekly/182/q4-minimum-threshold-path-with-limited-heavy-edges.html', links: ['dsa/leetcode-contests/biweekly/182/q3-minimum-generations-to-target-point.html'] }
                     ]
                   }
                 ]
