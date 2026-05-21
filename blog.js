@@ -7584,6 +7584,7 @@ var BLOG_TREE = [
               { title: 'Transformer Block', file: 'ml/transformers/building-blocks/transformer-block.html' },
               { title: 'Positional Encoding', file: 'ml/transformers/building-blocks/positional-encoding.html' },
               { title: 'Layer Normalization', file: 'ml/transformers/building-blocks/layer-norm.html' },
+              { title: 'Dropout Layer', file: 'ml/transformers/building-blocks/dropout.html', links: ['ml/transformers/building-blocks/layer-norm.html', 'ml/transformers/building-blocks/embedding-layer.html'] },
               { title: 'Embedding Layer', file: 'ml/transformers/building-blocks/embedding-layer.html' }
             ]
           },
