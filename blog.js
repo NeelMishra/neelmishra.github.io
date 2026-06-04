@@ -7655,7 +7655,9 @@ var BLOG_TREE = [
                       { title: 'LayerNorm', file: 'ml/transformers/from-scratch/cpp/building-blocks/layer-norm.html' },
                       { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
                       { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
-                      { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' }
+                      { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' },
+                      { title: 'Encoder-Only Transformer', file: 'ml/transformers/from-scratch/cpp/building-blocks/encoder-only-transformer.html' },
+                      { title: 'Encoder-Decoder Transformer', file: 'ml/transformers/from-scratch/cpp/building-blocks/encoder-decoder-transformer.html' }
                     ]
                   },
                   {
@@ -8582,6 +8584,26 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+
+  {
+    name: 'rl',
+    label: 'Reinforcement Learning',
+    children: [
+      {
+        name: 'popular-courses',
+        label: 'Popular Courses',
+        children: [
+          {
+            name: 'fundamentals-of-rl',
+            label: 'Coursera: Fundamentals of RL',
+            children: [
+              { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html', links: ['mlops/llm-fundamentals/rlhf-overview.html'] }
+            ]
+          }
+        ]
+      }
+    ]
   }
 
 ];
@@ -8784,7 +8806,8 @@ function flattenBlogTree(nodes, result) {
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Machine learning building blocks, from attention to transformers.' },
-    mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' }
+    mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
+    rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' }
   };
 
   /* Build normalised post list: parse series breadcrumb into inner series name + Part tag. */
