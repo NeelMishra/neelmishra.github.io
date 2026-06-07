@@ -608,6 +608,30 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'partition-dp',
+        label: 'Partition DP',
+        children: [
+          { title: 'Overview', file: 'dsa/partition-dp/index.html', links: ['dsa/partition-dp/front/foundations.html', 'dsa/partition-dp/interval/matrix-chain.html'] },
+          {
+            name: 'front',
+            label: 'Front Partition',
+            children: [
+              { title: 'Front Partition: The Linear Template', file: 'dsa/partition-dp/front/foundations.html', links: ['dsa/partition-dp/index.html', 'dsa/partition-dp/front/palindrome-partitioning.html'] },
+              { title: 'Palindrome Partitioning II', file: 'dsa/partition-dp/front/palindrome-partitioning.html', links: ['dsa/partition-dp/front/foundations.html', 'dsa/partition-dp/interval/matrix-chain.html'] }
+            ]
+          },
+          {
+            name: 'interval',
+            label: 'Interval Partition',
+            children: [
+              { title: 'Matrix Chain Multiplication', file: 'dsa/partition-dp/interval/matrix-chain.html', links: ['dsa/partition-dp/front/palindrome-partitioning.html', 'dsa/partition-dp/interval/burst-balloons.html'] },
+              { title: 'Burst Balloons', file: 'dsa/partition-dp/interval/burst-balloons.html', links: ['dsa/partition-dp/interval/matrix-chain.html', 'dsa/partition-dp/interval/min-cost-cut-stick.html'] },
+              { title: 'Minimum Cost to Cut a Stick', file: 'dsa/partition-dp/interval/min-cost-cut-stick.html', links: ['dsa/partition-dp/interval/burst-balloons.html', 'dsa/partition-dp/index.html'] }
+            ]
+          }
+        ]
+      },
+      {
         name: 'graphs',
         label: 'Graphs',
         children: [
