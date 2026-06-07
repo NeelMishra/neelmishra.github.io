@@ -8622,7 +8622,8 @@ var BLOG_TREE = [
             name: 'fundamentals-of-rl',
             label: 'Coursera: Fundamentals of RL',
             children: [
-              { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html', links: ['mlops/llm-fundamentals/rlhf-overview.html'] }
+              { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html', links: ['rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', 'mlops/llm-fundamentals/rlhf-overview.html'] },
+              { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', links: ['rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html'] }
             ]
           }
         ]
