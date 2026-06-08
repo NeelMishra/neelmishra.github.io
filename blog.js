@@ -8623,7 +8623,9 @@ var BLOG_TREE = [
             label: 'Coursera: Fundamentals of RL',
             children: [
               { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html', links: ['rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', 'mlops/llm-fundamentals/rlhf-overview.html'] },
-              { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', links: ['rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html'] }
+              { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', links: ['rl/popular-courses/fundamentals-of-rl/k-armed-bandits.html', 'rl/popular-courses/fundamentals-of-rl/policies-and-value-functions.html'] },
+              { title: 'Policies &amp; Value Functions', file: 'rl/popular-courses/fundamentals-of-rl/policies-and-value-functions.html', links: ['rl/popular-courses/fundamentals-of-rl/markov-decision-processes.html', 'rl/popular-courses/fundamentals-of-rl/bellman-equations-and-optimality.html'] },
+              { title: 'Bellman Equations &amp; Optimality', file: 'rl/popular-courses/fundamentals-of-rl/bellman-equations-and-optimality.html', links: ['rl/popular-courses/fundamentals-of-rl/policies-and-value-functions.html'] }
             ]
           }
         ]
