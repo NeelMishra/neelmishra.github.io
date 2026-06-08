@@ -628,6 +628,15 @@ var BLOG_TREE = [
               { title: 'Burst Balloons', file: 'dsa/partition-dp/interval/burst-balloons.html', links: ['dsa/partition-dp/interval/matrix-chain.html', 'dsa/partition-dp/interval/min-cost-cut-stick.html'] },
               { title: 'Minimum Cost to Cut a Stick', file: 'dsa/partition-dp/interval/min-cost-cut-stick.html', links: ['dsa/partition-dp/interval/burst-balloons.html', 'dsa/partition-dp/index.html'] }
             ]
+          },
+          {
+            name: 'subarrays',
+            label: 'Subarray Partition',
+            children: [
+              { title: 'Partitioning Into K Subarrays', file: 'dsa/partition-dp/subarrays/foundations.html', links: ['dsa/partition-dp/index.html', 'dsa/partition-dp/subarrays/split-array-largest-sum.html'] },
+              { title: 'Split Array Largest Sum', file: 'dsa/partition-dp/subarrays/split-array-largest-sum.html', links: ['dsa/partition-dp/subarrays/foundations.html', 'dsa/partition-dp/subarrays/largest-sum-of-averages.html'] },
+              { title: 'Largest Sum of Averages', file: 'dsa/partition-dp/subarrays/largest-sum-of-averages.html', links: ['dsa/partition-dp/subarrays/split-array-largest-sum.html', 'dsa/partition-dp/index.html'] }
+            ]
           }
         ]
       },
