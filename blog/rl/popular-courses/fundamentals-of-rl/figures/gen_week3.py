@@ -144,9 +144,57 @@ def fig_gamma_crossover():
     plt.close(fig)
 
 
+def fig_policy_comparison():
+    """Two panels illustrating the partial order over policies.
+
+    Left:  value curves of two policies cross, so neither dominates -> the
+           comparison is inconclusive (the policies are incomparable).
+    Right: one policy's value is >= the other's in every state (pi_1 >= pi_2),
+           and an optimal policy pi_* dominates everything everywhere.
+    """
+    s = np.linspace(0, 1, 200)
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(9.6, 4.0))
+
+    # Left: crossing curves -> incomparable
+    a1 = 0.62 + 0.34 * np.cos(2.4 * np.pi * s + 0.5)
+    a2 = 0.58 + 0.14 * np.cos(2.4 * np.pi * s + 0.5 + np.pi)
+    axL.plot(s, a1, color="#3a7bd5", lw=2.4)
+    axL.plot(s, a2, color=BRAND2, lw=2.4)
+    axL.text(1.005, a1[-1], r"$\pi_1$", color="#3a7bd5", fontsize=12, va="center")
+    axL.text(1.005, a2[-1], r"$\pi_2$", color=BRAND2, fontsize=12, va="center")
+    axL.set_title("Curves cross: comparison inconclusive", fontsize=10.5, color=INK)
+
+    # Right: dominance + optimal policy on top
+    b2 = 0.28 + 0.26 * np.exp(-((s - 0.0) ** 2) / 0.12)
+    b1 = b2 + 0.08 + 0.24 * np.exp(-((s - 0.0) ** 2) / 0.10)
+    star = np.full_like(s, 0.96) + 0.008 * np.sin(9 * s)
+    axR.plot(s, star, color="#c0392b", lw=2.2)
+    axR.plot(s, b1, color="#3a7bd5", lw=2.4)
+    axR.plot(s, b2, color=BRAND2, lw=2.4)
+    axR.text(1.005, star[-1], r"$\pi_*$", color="#c0392b", fontsize=12, va="center")
+    axR.text(1.005, b1[-1], r"$\pi_1$", color="#3a7bd5", fontsize=12, va="center")
+    axR.text(1.005, b2[-1] - 0.02, r"$\pi_2$", color=BRAND2, fontsize=12, va="center")
+    axR.text(0.5, 0.18, r"$\pi_1 \geq \pi_2$", color=INK, fontsize=13, ha="center")
+    axR.set_title(r"$\pi_1$ dominates $\pi_2$; $\pi_*$ dominates all",
+                  fontsize=10.5, color=INK)
+
+    for ax in (axL, axR):
+        ax.set_xlim(0, 1.12)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlabel("state $s$")
+        ax.set_ylabel("value $v_\\pi(s)$")
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(HERE, "policy-comparison.png"))
+    plt.close(fig)
+
+
 if __name__ == "__main__":
-    fig_gridworld_policy(); print("[1/4] gridworld-policy.png")
-    fig_stochastic_policy(); print("[2/4] stochastic-policy.png")
-    fig_gridworld_values(); print("[3/4] gridworld-values.png")
-    fig_gamma_crossover(); print("[4/4] gamma-crossover.png")
+    fig_gridworld_policy(); print("[1/5] gridworld-policy.png")
+    fig_stochastic_policy(); print("[2/5] stochastic-policy.png")
+    fig_gridworld_values(); print("[3/5] gridworld-values.png")
+    fig_gamma_crossover(); print("[4/5] gamma-crossover.png")
+    fig_policy_comparison(); print("[5/5] policy-comparison.png")
     print("done")
