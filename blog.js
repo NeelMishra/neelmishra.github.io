@@ -139,6 +139,93 @@ var BLOG_TREE = [
     ]
   },
   {
+    name: 'from-scratch',
+    label: 'From Scratch',
+    children: [
+      { title: 'Overview', file: 'from-scratch/index.html', links: ['from-scratch/cpp/index.html'] },
+      {
+        name: 'cpp',
+        label: 'C++',
+        children: [
+          { title: 'Overview', file: 'from-scratch/cpp/index.html', links: ['from-scratch/cpp/transformers/index.html'] },
+          {
+            name: 'build-tools',
+            label: 'Build Tools',
+            children: [
+              { title: 'CMake', file: 'from-scratch/cpp/build-tools/cmake.html', links: ['cpp/deep-dives/compile-link/build-systems.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] }
+            ]
+          },
+          {
+            name: 'transformers',
+            label: 'Transformers',
+            children: [
+              { title: 'Overview', file: 'from-scratch/cpp/transformers/index.html', links: ['ml/transformers/index.html', 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] },
+              {
+                name: 'building-blocks',
+                label: 'Building Blocks',
+                children: [
+                  { title: 'SingleHeadAttention', file: 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html', links: ['ml/transformers/building-blocks/single-head-attention.html', 'from-scratch/cpp/transformers/building-blocks/multi-head-attention.html'] },
+                  { title: 'MultiHeadAttention', file: 'from-scratch/cpp/transformers/building-blocks/multi-head-attention.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html', 'from-scratch/cpp/transformers/building-blocks/feed-forward.html'] },
+                  { title: 'FeedForward', file: 'from-scratch/cpp/transformers/building-blocks/feed-forward.html', links: ['ml/transformers/building-blocks/feed-forward.html', 'from-scratch/cpp/transformers/building-blocks/dropout.html'] },
+                  { title: 'Dropout', file: 'from-scratch/cpp/transformers/building-blocks/dropout.html', links: ['ml/transformers/building-blocks/dropout.html', 'from-scratch/cpp/transformers/building-blocks/layer-norm.html'] },
+                  { title: 'LayerNorm', file: 'from-scratch/cpp/transformers/building-blocks/layer-norm.html', links: ['ml/transformers/building-blocks/layer-norm.html', 'from-scratch/cpp/transformers/building-blocks/transformer-block.html'] },
+                  { title: 'TransformerBlock', file: 'from-scratch/cpp/transformers/building-blocks/transformer-block.html', links: ['ml/transformers/building-blocks/transformer-block.html', 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html'] },
+                  { title: 'PositionalEncoding', file: 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html', links: ['ml/transformers/building-blocks/positional-encoding.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
+                ]
+              },
+              {
+                name: 'attention-variants',
+                label: 'Attention Variants',
+                children: [
+                  { title: 'SelfAttention', file: 'from-scratch/cpp/transformers/attention-variants/self-attention.html', links: ['ml/transformers/building-blocks/self-attention.html', 'from-scratch/cpp/transformers/attention-variants/softmax-attention.html'] },
+                  { title: 'SoftmaxAttention', file: 'from-scratch/cpp/transformers/attention-variants/softmax-attention.html', links: ['from-scratch/cpp/transformers/attention-variants/self-attention.html', 'from-scratch/cpp/transformers/attention-variants/causal-attention.html'] },
+                  { title: 'CausalAttention', file: 'from-scratch/cpp/transformers/attention-variants/causal-attention.html', links: ['ml/transformers/building-blocks/causal-attention.html', 'from-scratch/cpp/transformers/attention-variants/cross-attention.html'] },
+                  { title: 'CrossAttention', file: 'from-scratch/cpp/transformers/attention-variants/cross-attention.html', links: ['ml/transformers/building-blocks/cross-attention.html', 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html'] },
+                  { title: 'SlidingWindowAttention', file: 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html', links: ['ml/transformers/building-blocks/sliding-window-attention.html', 'from-scratch/cpp/transformers/attention-variants/global-attention.html'] },
+                  { title: 'GlobalAttention', file: 'from-scratch/cpp/transformers/attention-variants/global-attention.html', links: ['from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html', 'from-scratch/cpp/transformers/attention-variants/linear-attention.html'] },
+                  { title: 'LinearAttention', file: 'from-scratch/cpp/transformers/attention-variants/linear-attention.html', links: ['ml/transformers/building-blocks/linear-attention.html', 'from-scratch/cpp/transformers/attention-variants/flash-attention.html'] },
+                  { title: 'FlashAttention', file: 'from-scratch/cpp/transformers/attention-variants/flash-attention.html', links: ['ml/transformers/building-blocks/flash-attention.html', 'from-scratch/cpp/transformers/attention-variants/mha.html'] },
+                  { title: 'MHA', file: 'from-scratch/cpp/transformers/attention-variants/mha.html', links: ['from-scratch/cpp/transformers/attention-variants/flash-attention.html', 'from-scratch/cpp/transformers/attention-variants/mqa.html'] },
+                  { title: 'MQA', file: 'from-scratch/cpp/transformers/attention-variants/mqa.html', links: ['ml/transformers/building-blocks/mqa.html', 'from-scratch/cpp/transformers/attention-variants/gqa.html'] },
+                  { title: 'GQA', file: 'from-scratch/cpp/transformers/attention-variants/gqa.html', links: ['ml/transformers/building-blocks/gqa.html', 'from-scratch/cpp/transformers/attention-variants/mla.html'] },
+                  { title: 'MLA', file: 'from-scratch/cpp/transformers/attention-variants/mla.html', links: ['ml/transformers/building-blocks/mla.html', 'from-scratch/cpp/transformers/attention-variants/iha.html'] },
+                  { title: 'IHA', file: 'from-scratch/cpp/transformers/attention-variants/iha.html', links: ['ml/transformers/building-blocks/iha.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
+                ]
+              },
+              {
+                name: 'full-models',
+                label: 'Full Models',
+                children: [
+                  { title: 'GPT', file: 'from-scratch/cpp/transformers/full-models/gpt.html', links: ['from-scratch/cpp/transformers/building-blocks/positional-encoding.html', 'from-scratch/cpp/transformers/full-models/encoder-only-transformer.html'] },
+                  { title: 'Encoder-Only Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-only-transformer.html', links: ['ml/transformers/variants/bert.html', 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html'] },
+                  { title: 'Encoder-Decoder Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html', links: ['ml/transformers/architecture/index.html', 'from-scratch/cpp/transformers/training/bpe-tokenizer.html'] }
+                ]
+              },
+              {
+                name: 'training',
+                label: 'Training Pipeline',
+                children: [
+                  { title: 'BPE Tokenizer', file: 'from-scratch/cpp/transformers/training/bpe-tokenizer.html', links: ['ml/transformers/training/tokenization.html', 'from-scratch/cpp/transformers/training/dataloader.html'] },
+                  { title: 'DataLoader', file: 'from-scratch/cpp/transformers/training/dataloader.html', links: ['from-scratch/cpp/transformers/training/bpe-tokenizer.html', 'from-scratch/cpp/transformers/training/loss-function.html'] },
+                  { title: 'Cross-Entropy Loss', file: 'from-scratch/cpp/transformers/training/loss-function.html', links: ['from-scratch/cpp/transformers/full-models/gpt.html', 'from-scratch/cpp/transformers/training/training-loop.html'] },
+                  { title: 'Training Loop', file: 'from-scratch/cpp/transformers/training/training-loop.html', links: ['from-scratch/cpp/transformers/training/loss-function.html', 'from-scratch/cpp/transformers/training/text-generation.html'] },
+                  { title: 'Text Generation', file: 'from-scratch/cpp/transformers/training/text-generation.html', links: ['from-scratch/cpp/transformers/training/training-loop.html'] }
+                ]
+              },
+              {
+                name: 'libtorch',
+                label: 'LibTorch Deep Dives',
+                children: [
+                  { title: 'register_module', file: 'from-scratch/cpp/transformers/libtorch/register-module.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
     name: 'dsa',
     label: 'DSA Series',
     children: [
@@ -7666,73 +7753,6 @@ var BLOG_TREE = [
               { title: 'GPT', file: 'ml/transformers/variants/gpt.html' },
               { title: 'Vision Transformer', file: 'ml/transformers/variants/vision.html' }
             ]
-          },
-          {
-            name: 'from-scratch',
-            label: 'From Scratch',
-            children: [
-              { title: 'Overview', file: 'ml/transformers/from-scratch/index.html' },
-              {
-                name: 'cpp',
-                label: 'C++ Implementation',
-                children: [
-                  { title: 'Overview', file: 'ml/transformers/from-scratch/cpp/index.html' },
-                  {
-                    name: 'building-blocks',
-                    label: 'Building Blocks',
-                    children: [
-                      { title: 'SingleHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/single-head-attention.html' },
-                      { title: 'MultiHeadAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/multi-head-attention.html' },
-                      { title: 'FeedForward', file: 'ml/transformers/from-scratch/cpp/building-blocks/feed-forward.html' },
-                      { title: 'Dropout', file: 'ml/transformers/from-scratch/cpp/building-blocks/dropout.html' },
-                      { title: 'LayerNorm', file: 'ml/transformers/from-scratch/cpp/building-blocks/layer-norm.html' },
-                      { title: 'TransformerBlock', file: 'ml/transformers/from-scratch/cpp/building-blocks/transformer-block.html' },
-                      { title: 'PositionalEncoding', file: 'ml/transformers/from-scratch/cpp/building-blocks/positional-encoding.html' },
-                      { title: 'GPT (Full Model)', file: 'ml/transformers/from-scratch/cpp/building-blocks/gpt.html' },
-                      { title: 'Encoder-Only Transformer', file: 'ml/transformers/from-scratch/cpp/building-blocks/encoder-only-transformer.html' },
-                      { title: 'Encoder-Decoder Transformer', file: 'ml/transformers/from-scratch/cpp/building-blocks/encoder-decoder-transformer.html' }
-                    ]
-                  },
-                  {
-                    name: 'attention-variants',
-                    label: 'Attention Variants (C++)',
-                    children: [
-                      { title: 'SelfAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/self-attention.html' },
-                      { title: 'SoftmaxAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/softmax-attention.html' },
-                      { title: 'CausalAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/causal-attention.html' },
-                      { title: 'CrossAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/cross-attention.html' },
-                      { title: 'SlidingWindowAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/sliding-window-attention.html' },
-                      { title: 'GlobalAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/global-attention.html' },
-                      { title: 'LinearAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/linear-attention.html' },
-                      { title: 'FlashAttention', file: 'ml/transformers/from-scratch/cpp/building-blocks/flash-attention.html' },
-                      { title: 'MHA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mha.html' },
-                      { title: 'MQA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mqa.html' },
-                      { title: 'GQA', file: 'ml/transformers/from-scratch/cpp/building-blocks/gqa.html' },
-                      { title: 'MLA', file: 'ml/transformers/from-scratch/cpp/building-blocks/mla.html' },
-                      { title: 'IHA', file: 'ml/transformers/from-scratch/cpp/building-blocks/iha.html' }
-                    ]
-                  },
-                  {
-                    name: 'training',
-                    label: 'Training Pipeline',
-                    children: [
-                      { title: 'BPE Tokenizer', file: 'ml/transformers/from-scratch/cpp/training/bpe-tokenizer.html' },
-                      { title: 'DataLoader', file: 'ml/transformers/from-scratch/cpp/training/dataloader.html' },
-                      { title: 'Cross-Entropy Loss', file: 'ml/transformers/from-scratch/cpp/training/loss-function.html' },
-                      { title: 'Training Loop', file: 'ml/transformers/from-scratch/cpp/training/training-loop.html' },
-                      { title: 'Text Generation', file: 'ml/transformers/from-scratch/cpp/training/text-generation.html' }
-                    ]
-                  }
-                ]
-              },
-              {
-                name: 'libtorch',
-                label: 'LibTorch Deep Dives',
-                children: [
-                  { title: 'register_module', file: 'ml/transformers/from-scratch/libtorch/register-module.html' }
-                ]
-              }
-            ]
           }
         ]
       },
@@ -8842,6 +8862,7 @@ function flattenBlogTree(nodes, result) {
 
   var CATEGORY_META = {
     cpp:   { label: 'C++',   blurb: 'STL internals, concurrency, deep language mechanics.' },
+    scratch: { label: 'From Scratch', blurb: 'Implementation-first builds in C++ with theory linked to canonical posts.' },
     dsa:   { label: 'DSA',   blurb: 'Data structures and algorithms with animated walkthroughs.' },
     cp:    { label: 'CP',    blurb: 'Competitive programming math, techniques, and patterns.' },
     math:  { label: 'Math',  blurb: 'Probability, statistics, and pure-math foundations with worked-out proofs.' },
