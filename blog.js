@@ -21,17 +21,7 @@ var BLOG_TREE = [
         label: 'Deep Dives',
         children: [
           { title: 'RAII', file: 'cpp/deep-dives/raii.html', links: ['cpp/stl/smart-pointers.html', 'cpp/deep-dives/operator-overloading.html'] },
-          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html', 'cpp/deep-dives/compile-link/translation-units.html'] },
-          {
-            name: 'compile-link',
-            label: 'Compilation & Linking',
-            children: [
-              { title: 'Translation Units', file: 'cpp/deep-dives/compile-link/translation-units.html', links: ['cpp/deep-dives/operator-overloading.html', 'cpp/deep-dives/compile-link/linking.html'] },
-              { title: 'Linking Deep Dive', file: 'cpp/deep-dives/compile-link/linking.html', links: ['cpp/deep-dives/compile-link/translation-units.html', 'cpp/deep-dives/compile-link/odr.html'] },
-              { title: 'One Definition Rule', file: 'cpp/deep-dives/compile-link/odr.html', links: ['cpp/deep-dives/compile-link/linking.html', 'cpp/deep-dives/compile-link/build-systems.html'] },
-              { title: 'Build Systems & CMake', file: 'cpp/deep-dives/compile-link/build-systems.html', links: ['cpp/deep-dives/compile-link/odr.html', 'cpp/concurrency/index.html'] }
-            ]
-          }
+          { title: 'Operator Overloading', file: 'cpp/deep-dives/operator-overloading.html', links: ['cpp/deep-dives/raii.html', 'from-scratch/cpp/project-structure/compiler.html'] }
         ]
       },
       {
@@ -147,12 +137,26 @@ var BLOG_TREE = [
         name: 'cpp',
         label: 'C++',
         children: [
-          { title: 'Overview', file: 'from-scratch/cpp/index.html', links: ['from-scratch/cpp/transformers/index.html'] },
+          { title: 'Overview', file: 'from-scratch/cpp/index.html', links: ['from-scratch/cpp/project-structure/index.html', 'from-scratch/cpp/transformers/index.html'] },
+          {
+            name: 'project-structure',
+            label: 'Project Structure',
+            children: [
+              { title: 'Overview', file: 'from-scratch/cpp/project-structure/index.html', links: ['from-scratch/cpp/project-structure/project-layout.html'] },
+              { title: 'Project Layout', file: 'from-scratch/cpp/project-structure/project-layout.html', links: ['from-scratch/cpp/project-structure/header-files.html'] },
+              { title: 'Header Files', file: 'from-scratch/cpp/project-structure/header-files.html', links: ['from-scratch/cpp/project-structure/project-layout.html', 'from-scratch/cpp/project-structure/source-files.html'] },
+              { title: 'Source Files', file: 'from-scratch/cpp/project-structure/source-files.html', links: ['from-scratch/cpp/project-structure/header-files.html', 'from-scratch/cpp/project-structure/compiler.html'] },
+              { title: 'Compiler and Translation Units', file: 'from-scratch/cpp/project-structure/compiler.html', links: ['from-scratch/cpp/project-structure/source-files.html', 'from-scratch/cpp/project-structure/linker.html'] },
+              { title: 'The Linker', file: 'from-scratch/cpp/project-structure/linker.html', links: ['from-scratch/cpp/project-structure/compiler.html', 'from-scratch/cpp/project-structure/one-definition-rule.html'] },
+              { title: 'One Definition Rule', file: 'from-scratch/cpp/project-structure/one-definition-rule.html', links: ['from-scratch/cpp/project-structure/linker.html', 'from-scratch/cpp/project-structure/build-systems.html'] },
+              { title: 'Build Systems', file: 'from-scratch/cpp/project-structure/build-systems.html', links: ['from-scratch/cpp/project-structure/one-definition-rule.html', 'from-scratch/cpp/build-tools/cmake.html'] }
+            ]
+          },
           {
             name: 'build-tools',
             label: 'Build Tools',
             children: [
-              { title: 'CMake', file: 'from-scratch/cpp/build-tools/cmake.html', links: ['cpp/deep-dives/compile-link/build-systems.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] }
+              { title: 'CMake', file: 'from-scratch/cpp/build-tools/cmake.html', links: ['from-scratch/cpp/project-structure/build-systems.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] }
             ]
           },
           {
