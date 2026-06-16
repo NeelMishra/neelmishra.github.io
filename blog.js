@@ -653,6 +653,7 @@ var BLOG_TREE = [
         label: 'Bit Manipulation',
         children: [
           { title: 'Overview', file: 'dsa/bit-manipulation/index.html', links: ['dsa/complexity/patterns.html', 'dsa/bit-manipulation/number-system.html'] },
+          { title: 'Flashcards', file: 'dsa/bit-manipulation/flashcards.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/bit-manipulation-capstone.html'] },
           { title: 'Number System', file: 'dsa/bit-manipulation/number-system.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/binary-representation.html'] },
           { title: 'Binary Representation', file: 'dsa/bit-manipulation/binary-representation.html', links: ['dsa/bit-manipulation/number-system.html', 'dsa/bit-manipulation/bit-width-cpp-safety.html'] },
           { title: 'C++ Bit Safety', file: 'dsa/bit-manipulation/bit-width-cpp-safety.html', links: ['dsa/bit-manipulation/binary-representation.html', 'dsa/bit-manipulation/basic-operations.html'] },
