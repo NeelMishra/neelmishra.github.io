@@ -686,7 +686,16 @@ var BLOG_TREE = [
           { title: 'Bitwise Hashing', file: 'dsa/bit-manipulation/bitwise-hashing.html', links: ['dsa/bit-manipulation/nim-grundy-xor.html', 'dsa/bit-manipulation/interview-patterns.html'] },
           { title: 'Interview Patterns', file: 'dsa/bit-manipulation/interview-patterns.html', links: ['dsa/bit-manipulation/bitwise-hashing.html', 'dsa/bit-manipulation/cp-pattern-catalog.html'] },
           { title: 'CP Pattern Catalog', file: 'dsa/bit-manipulation/cp-pattern-catalog.html', links: ['dsa/bit-manipulation/interview-patterns.html', 'dsa/bit-manipulation/bit-manipulation-capstone.html'] },
-          { title: 'Capstone Practice', file: 'dsa/bit-manipulation/bit-manipulation-capstone.html', links: ['dsa/bit-manipulation/cp-pattern-catalog.html'] }
+          { title: 'Capstone Practice', file: 'dsa/bit-manipulation/bit-manipulation-capstone.html', links: ['dsa/bit-manipulation/cp-pattern-catalog.html'] },
+          {
+            name: 'cpp-bitset',
+            label: 'C++ bitset',
+            children: [
+              { title: 'std::bitset Essentials', file: 'dsa/bit-manipulation/cpp-bitset/index.html', links: ['dsa/bit-manipulation/index.html', 'dsa/bit-manipulation/cpp-bitset/operations.html'] },
+              { title: 'bitset Operators & Idioms', file: 'dsa/bit-manipulation/cpp-bitset/operations.html', links: ['dsa/bit-manipulation/cpp-bitset/index.html', 'dsa/bit-manipulation/cpp-bitset/performance.html'] },
+              { title: 'bitset Performance & Use', file: 'dsa/bit-manipulation/cpp-bitset/performance.html', links: ['dsa/bit-manipulation/cpp-bitset/operations.html', 'dsa/bit-manipulation/bitset-optimization.html'] }
+            ]
+          }
         ]
       },
       {
