@@ -215,15 +215,15 @@ var BLOG_TREE = [
                   { title: 'Training Loop', file: 'from-scratch/cpp/transformers/training/training-loop.html', links: ['from-scratch/cpp/transformers/training/loss-function.html', 'from-scratch/cpp/transformers/training/text-generation.html'] },
                   { title: 'Text Generation', file: 'from-scratch/cpp/transformers/training/text-generation.html', links: ['from-scratch/cpp/transformers/training/training-loop.html'] }
                 ]
-              },
-              {
-                name: 'libtorch',
-                label: 'LibTorch Deep Dives',
-                children: [
-                  { title: 'Installing LibTorch', file: 'from-scratch/cpp/transformers/libtorch/getting-started.html', links: ['from-scratch/cpp/build-tools/cmake.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] },
-                  { title: 'register_module', file: 'from-scratch/cpp/transformers/libtorch/register-module.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] }
-                ]
               }
+            ]
+          },
+          {
+            name: 'libtorch',
+            label: 'LibTorch Deep Dives',
+            children: [
+              { title: 'Installing LibTorch', file: 'from-scratch/cpp/transformers/libtorch/getting-started.html', links: ['from-scratch/cpp/build-tools/cmake.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] },
+              { title: 'register_module', file: 'from-scratch/cpp/transformers/libtorch/register-module.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] }
             ]
           }
         ]
