@@ -746,7 +746,8 @@ var BLOG_TREE = [
         name: 'matrix-exponentiation',
         label: 'Matrix Exponentiation',
         children: [
-          { title: 'Linear Recurrences in O(log n)', file: 'dsa/matrix-exponentiation/index.html', links: ['dsa/digit-dp/index.html', 'cp/linear-algebra/matrix-exponentiation-la.html'] }
+          { title: 'Linear Recurrences in O(log n)', file: 'dsa/matrix-exponentiation/index.html', links: ['dsa/matrix-exponentiation/zigzag-arrays.html', 'dsa/digit-dp/index.html'] },
+          { title: 'ZigZag Arrays II (LeetCode 3700)', file: 'dsa/matrix-exponentiation/zigzag-arrays.html', links: ['dsa/matrix-exponentiation/index.html', 'cp/linear-algebra/matrix-exponentiation-la.html'] }
         ]
       },
       {
