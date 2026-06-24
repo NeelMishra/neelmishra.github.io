@@ -743,6 +743,13 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'matrix-exponentiation',
+        label: 'Matrix Exponentiation',
+        children: [
+          { title: 'Linear Recurrences in O(log n)', file: 'dsa/matrix-exponentiation/index.html', links: ['dsa/digit-dp/index.html', 'cp/linear-algebra/matrix-exponentiation-la.html'] }
+        ]
+      },
+      {
         name: 'graphs',
         label: 'Graphs',
         children: [
