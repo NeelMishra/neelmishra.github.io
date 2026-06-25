@@ -7758,6 +7758,7 @@ var BLOG_TREE = [
     name: 'hld',
     label: 'High Level Design',
     children: [
+      { title: 'Resources: Getting Good at System Design', file: 'hld/resources/index.html', links: ['hld/foundations/intro.html', 'hld/case-studies/interview-framework.html'] },
       {
         name: 'foundations',
         label: 'Foundations',
