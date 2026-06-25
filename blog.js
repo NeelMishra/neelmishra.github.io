@@ -230,10 +230,41 @@ var BLOG_TREE = [
             name: 'machine-learning',
             label: 'Machine Learning',
             children: [
-              { title: 'Decision Tree Classifier', file: 'from-scratch/cpp/machine-learning/index.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'from-scratch/cpp/machine-learning/regression-tree.html'] },
-              { title: 'Regression Tree (CART)', file: 'from-scratch/cpp/machine-learning/regression-tree.html', links: ['from-scratch/cpp/machine-learning/index.html', 'from-scratch/cpp/machine-learning/random-forest.html'] },
-              { title: 'Random Forest', file: 'from-scratch/cpp/machine-learning/random-forest.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/gradient-boosting.html'] },
-              { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/gradient-boosting.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/random-forest.html'] }
+              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/index.html'] },
+              {
+                name: 'decision-trees',
+                label: 'Decision Trees',
+                children: [
+                  { title: 'Decision Tree Classifier', file: 'from-scratch/cpp/machine-learning/decision-trees/index.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'from-scratch/cpp/machine-learning/decision-trees/regression-tree.html'] },
+                  { title: 'Regression Tree (CART)', file: 'from-scratch/cpp/machine-learning/decision-trees/regression-tree.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/random-forest/index.html'] }
+                ]
+              },
+              {
+                name: 'random-forest',
+                label: 'Random Forest',
+                children: [
+                  { title: 'Random Forest', file: 'from-scratch/cpp/machine-learning/random-forest/index.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/boosting/index.html'] }
+                ]
+              },
+              {
+                name: 'boosting',
+                label: 'Boosting',
+                children: [
+                  { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/boosting/index.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/data-preprocessing/index.html'] }
+                ]
+              },
+              {
+                name: 'data-preprocessing',
+                label: 'Data Preprocessing',
+                children: [
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/data-preprocessing/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'from-scratch/cpp/machine-learning/index.html'] },
+                  { title: 'Train/Test Split & Shuffling', file: 'from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html'] },
+                  { title: 'Feature Scaling', file: 'from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', links: ['from-scratch/cpp/machine-learning/boosting/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html'] },
+                  { title: 'Encoding Categorical Features', file: 'from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html'] },
+                  { title: 'Handling Missing Values', file: 'from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', 'from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html'] },
+                  { title: 'K-Fold Cross-Validation', file: 'from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/random-forest/index.html'] }
+                ]
+              }
             ]
           }
         ]
