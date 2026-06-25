@@ -7587,7 +7587,8 @@ var BLOG_TREE = [
       { title: 'Design: Parking Lot', file: 'lld/parking-lot.html', links: ['lld/design-patterns.html', 'lld/elevator.html'] },
       { title: 'Design: Elevator System', file: 'lld/elevator.html', links: ['lld/parking-lot.html', 'lld/splitwise.html'] },
       { title: 'Design: Splitwise', file: 'lld/splitwise.html', links: ['lld/elevator.html', 'lld/patterns.html'] },
-      { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html'] },
+      { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html', 'lld/resources.html'] },
+      { title: 'Resources & How to Get Good', file: 'lld/resources.html', links: ['lld/patterns.html', 'lld/intro.html'] },
       {
         name: 'examples',
         label: 'Worked Examples (WIP)',
