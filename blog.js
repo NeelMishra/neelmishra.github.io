@@ -7587,7 +7587,170 @@ var BLOG_TREE = [
       { title: 'Design: Parking Lot', file: 'lld/parking-lot.html', links: ['lld/design-patterns.html', 'lld/elevator.html'] },
       { title: 'Design: Elevator System', file: 'lld/elevator.html', links: ['lld/parking-lot.html', 'lld/splitwise.html'] },
       { title: 'Design: Splitwise', file: 'lld/splitwise.html', links: ['lld/elevator.html', 'lld/patterns.html'] },
-      { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html'] }
+      { title: 'Interview Patterns', file: 'lld/patterns.html', links: ['lld/splitwise.html'] },
+      {
+        name: 'examples',
+        label: 'Worked Examples (WIP)',
+        children: [
+          {
+            name: 'games',
+            label: 'Games &amp; Puzzles',
+            children: [
+              { title: 'Design Tic-Tac-Toe', file: 'lld/examples/tic-tac-toe.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Chess', file: 'lld/examples/chess.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Checkers (Draughts)', file: 'lld/examples/checkers.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Snakes and Ladders', file: 'lld/examples/snakes-and-ladders.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Ludo', file: 'lld/examples/ludo.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Connect Four', file: 'lld/examples/connect-four.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Battleship', file: 'lld/examples/battleship.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Minesweeper', file: 'lld/examples/minesweeper.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Sudoku Validator and Solver', file: 'lld/examples/sudoku.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Blackjack', file: 'lld/examples/blackjack.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Poker', file: 'lld/examples/poker.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design UNO', file: 'lld/examples/uno.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Scrabble', file: 'lld/examples/scrabble.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Bowling Alley Scoring', file: 'lld/examples/bowling-alley.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Carrom', file: 'lld/examples/carrom.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Memory Card Game', file: 'lld/examples/memory-card-game.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design the 2048 Game', file: 'lld/examples/game-2048.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Hangman', file: 'lld/examples/hangman.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'machines',
+            label: 'Machines &amp; Devices',
+            children: [
+              { title: 'Design a Vending Machine', file: 'lld/examples/vending-machine.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an ATM', file: 'lld/examples/atm.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Coffee Vending Machine', file: 'lld/examples/coffee-machine.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Traffic Signal Control System', file: 'lld/examples/traffic-signal.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Elevator System', file: 'lld/examples/elevator-system.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Multi-Elevator Bank', file: 'lld/examples/elevator-bank.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Parking Lot', file: 'lld/examples/parking-lot.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Smart Thermostat', file: 'lld/examples/thermostat.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Alarm Clock', file: 'lld/examples/alarm-clock.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Washing Machine Controller', file: 'lld/examples/washing-machine.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Printer Spooler', file: 'lld/examples/printer-spooler.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Console Snake Game', file: 'lld/examples/snake-game.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'booking',
+            label: 'Booking &amp; Reservation',
+            children: [
+              { title: 'Design a Movie Ticket Booking System', file: 'lld/examples/movie-booking.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Hotel Reservation System', file: 'lld/examples/hotel-booking.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Flight Booking System', file: 'lld/examples/flight-booking.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Restaurant Reservation System', file: 'lld/examples/restaurant-reservation.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Ride-Hailing Service', file: 'lld/examples/ride-hailing.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Bike/Scooter Rental System', file: 'lld/examples/bike-rental.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Car Rental System', file: 'lld/examples/car-rental.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Library Management System', file: 'lld/examples/library-management.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Doctor Appointment Booking System', file: 'lld/examples/doctor-appointment.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Turf/Court Booking System', file: 'lld/examples/turf-booking.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Event Ticketing System', file: 'lld/examples/event-ticketing.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Meeting Room Booking System', file: 'lld/examples/meeting-room-booking.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'ecommerce',
+            label: 'E-commerce &amp; Payments',
+            children: [
+              { title: 'Design an Online Shopping System', file: 'lld/examples/online-shopping.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Shopping Cart', file: 'lld/examples/shopping-cart.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Payment Gateway', file: 'lld/examples/payment-gateway.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Digital Wallet', file: 'lld/examples/digital-wallet.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Splitwise', file: 'lld/examples/splitwise.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Online Auction System', file: 'lld/examples/online-auction.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Food Delivery System', file: 'lld/examples/food-delivery.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Inventory Management System', file: 'lld/examples/inventory-management.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Order Management System', file: 'lld/examples/order-management.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Discount/Coupon Engine', file: 'lld/examples/discount-engine.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Subscription and Billing System', file: 'lld/examples/subscription-billing.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Gift Card System', file: 'lld/examples/gift-card.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'social',
+            label: 'Social &amp; Communication',
+            children: [
+              { title: 'Design a Chat Application', file: 'lld/examples/chat-app.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Notification Service', file: 'lld/examples/notification-service.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a News Feed', file: 'lld/examples/news-feed.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Microblogging Service (Twitter)', file: 'lld/examples/twitter.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Comment System', file: 'lld/examples/comment-system.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Email Service', file: 'lld/examples/email-service.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Online Forum (Reddit)', file: 'lld/examples/online-forum.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Q&amp;A Platform (Stack Overflow)', file: 'lld/examples/qa-platform.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Group Chat (Slack)', file: 'lld/examples/group-chat.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Polling/Voting System', file: 'lld/examples/polling-system.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'productivity',
+            label: 'Productivity &amp; Tools',
+            children: [
+              { title: 'Design a URL Shortener', file: 'lld/examples/url-shortener.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Rate Limiter', file: 'lld/examples/rate-limiter.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Logging Framework', file: 'lld/examples/logging-framework.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an LRU Cache', file: 'lld/examples/lru-cache.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an LFU Cache', file: 'lld/examples/lfu-cache.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Calendar/Scheduling System', file: 'lld/examples/calendar.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Task Management System (Trello/Jira)', file: 'lld/examples/task-management.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Text Editor', file: 'lld/examples/text-editor.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Spreadsheet', file: 'lld/examples/spreadsheet.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an In-Memory File System', file: 'lld/examples/file-system.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Version Control System (Git)', file: 'lld/examples/version-control.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design Autocomplete/Typeahead', file: 'lld/examples/autocomplete.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Spell Checker', file: 'lld/examples/spell-checker.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Expression Evaluator', file: 'lld/examples/expression-evaluator.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a To-Do List', file: 'lld/examples/todo-list.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Key-Value Store', file: 'lld/examples/key-value-store.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Job Scheduler', file: 'lld/examples/job-scheduler.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Distributed ID Generator', file: 'lld/examples/id-generator.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'media',
+            label: 'Media &amp; Content',
+            children: [
+              { title: 'Design a Music Streaming Service (Spotify)', file: 'lld/examples/music-streaming.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Video Streaming Service (Netflix)', file: 'lld/examples/video-streaming.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Photo Sharing Service (Instagram)', file: 'lld/examples/photo-sharing.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Online Whiteboard', file: 'lld/examples/whiteboard.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Content Management System', file: 'lld/examples/cms.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Podcast Platform', file: 'lld/examples/podcast-platform.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'finance',
+            label: 'Finance &amp; Banking',
+            children: [
+              { title: 'Design a Banking System', file: 'lld/examples/banking-system.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Stock Exchange Matching Engine', file: 'lld/examples/stock-exchange.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Expense Tracker', file: 'lld/examples/expense-tracker.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Loan Management System', file: 'lld/examples/loan-management.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Cryptocurrency Wallet', file: 'lld/examples/crypto-wallet.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          },
+          {
+            name: 'infra',
+            label: 'Infrastructure &amp; Concurrency',
+            children: [
+              { title: 'Design a Pub/Sub System', file: 'lld/examples/pub-sub.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Message Queue', file: 'lld/examples/message-queue.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Connection Pool', file: 'lld/examples/connection-pool.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Thread Pool', file: 'lld/examples/thread-pool.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design an Object Pool', file: 'lld/examples/object-pool.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Dependency Injection Container', file: 'lld/examples/di-container.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Circuit Breaker', file: 'lld/examples/circuit-breaker.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Leaderboard/Ranking System', file: 'lld/examples/leaderboard.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Distributed Lock', file: 'lld/examples/distributed-lock.html', links: ['lld/intro.html', 'lld/patterns.html'] },
+              { title: 'Design a Service Registry', file: 'lld/examples/service-registry.html', links: ['lld/intro.html', 'lld/patterns.html'] }
+            ]
+          }
+        ]
+      }
     ]
   },
   {
