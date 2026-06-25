@@ -9023,6 +9023,22 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'gpu',
+    label: 'GPU Programming',
+    children: [
+      {
+        name: 'cuda',
+        label: 'CUDA',
+        children: []
+      },
+      {
+        name: 'hip',
+        label: 'HIP',
+        children: []
+      }
+    ]
   }
 
 ];
@@ -9227,7 +9243,8 @@ function flattenBlogTree(nodes, result) {
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Machine learning building blocks, from attention to transformers.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
-    rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' }
+    rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' },
+    gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
   };
 
   /* Build normalised post list: parse series breadcrumb into inner series name + Part tag. */
