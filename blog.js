@@ -7868,6 +7868,174 @@ var BLOG_TREE = [
           { title: 'Slack Architecture', file: 'hld/case-studies/slack-architecture.html', links: ['hld/case-studies/discord-infrastructure.html', 'hld/case-studies/interview-framework.html'] },
           { title: 'Interview Framework', file: 'hld/case-studies/interview-framework.html', links: ['hld/case-studies/slack-architecture.html'] }
         ]
+      },
+      {
+        name: 'examples',
+        label: 'Worked Examples (WIP)',
+        children: [
+          {
+            name: 'social',
+            label: 'Social &amp; Messaging',
+            children: [
+              { title: 'Design Instagram', file: 'hld/examples/instagram.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Facebook', file: 'hld/examples/facebook.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design WhatsApp', file: 'hld/examples/whatsapp.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Snapchat', file: 'hld/examples/snapchat.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design TikTok', file: 'hld/examples/tiktok.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design LinkedIn', file: 'hld/examples/linkedin.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Reddit', file: 'hld/examples/reddit.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Quora', file: 'hld/examples/quora.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Tinder', file: 'hld/examples/tinder.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Telegram', file: 'hld/examples/telegram.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Pinterest', file: 'hld/examples/pinterest.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Live Comments System', file: 'hld/examples/live-comments.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Friend Recommendation System', file: 'hld/examples/friend-recommendation.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Social Graph Service', file: 'hld/examples/social-graph.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'media',
+            label: 'Media &amp; Streaming',
+            children: [
+              { title: 'Design Spotify', file: 'hld/examples/spotify.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Twitch (Live Streaming)', file: 'hld/examples/twitch.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Zoom (Video Conferencing)', file: 'hld/examples/zoom.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Google Photos', file: 'hld/examples/google-photos.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Podcast Platform', file: 'hld/examples/podcast-platform.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Image Hosting Service (Imgur)', file: 'hld/examples/image-hosting.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Clubhouse (Audio Rooms)', file: 'hld/examples/audio-rooms.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Video-on-Demand Service', file: 'hld/examples/video-on-demand.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Live Streaming Platform', file: 'hld/examples/live-streaming.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'storage',
+            label: 'Storage &amp; Files',
+            children: [
+              { title: 'Design Dropbox', file: 'hld/examples/dropbox.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed File System (GFS/HDFS)', file: 'hld/examples/distributed-file-system.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design Amazon S3 (Object Storage)', file: 'hld/examples/s3-object-storage.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Content Delivery Network (CDN)', file: 'hld/examples/cdn.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed Cache', file: 'hld/examples/distributed-cache.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Backup and Restore System', file: 'hld/examples/backup-restore.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Block Storage Service', file: 'hld/examples/block-storage.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Photo Storage Service at Scale', file: 'hld/examples/photo-storage.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'ecommerce',
+            label: 'E-commerce &amp; Marketplace',
+            children: [
+              { title: 'Design Amazon (E-commerce)', file: 'hld/examples/amazon-ecommerce.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Online Marketplace (eBay)', file: 'hld/examples/online-marketplace.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Flash Sale System', file: 'hld/examples/flash-sale.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Recommendation System', file: 'hld/examples/recommendation-system.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Ad Serving Platform', file: 'hld/examples/ad-serving.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Shopping Cart at Scale', file: 'hld/examples/shopping-cart-scale.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Inventory System at Scale', file: 'hld/examples/inventory-scale.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Review and Rating System', file: 'hld/examples/review-rating.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Order Fulfillment System', file: 'hld/examples/order-fulfillment.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Loyalty/Rewards Platform', file: 'hld/examples/loyalty-rewards.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'ride',
+            label: 'Ride, Delivery &amp; Maps',
+            children: [
+              { title: 'Design a Food Delivery System (DoorDash)', file: 'hld/examples/food-delivery.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Grocery Delivery System', file: 'hld/examples/grocery-delivery.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Delivery Tracking System', file: 'hld/examples/delivery-tracking.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Fleet Management System', file: 'hld/examples/fleet-management.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Ride Dispatch/Matching System', file: 'hld/examples/ride-dispatch.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Map Tile Service', file: 'hld/examples/map-tiles.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Route/Navigation Engine', file: 'hld/examples/navigation-engine.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an ETA Prediction Service', file: 'hld/examples/eta-prediction.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Geo-fencing Service', file: 'hld/examples/geofencing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'search',
+            label: 'Search, Analytics &amp; ML',
+            children: [
+              { title: 'Design Google Search', file: 'hld/examples/google-search.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Search Indexing System', file: 'hld/examples/search-indexing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Recommendation Engine', file: 'hld/examples/recommendation-engine.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Trending/Top-K System', file: 'hld/examples/trending-topk.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Real-time Analytics System', file: 'hld/examples/realtime-analytics.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Clickstream Analytics Pipeline', file: 'hld/examples/clickstream-analytics.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Data Warehouse (OLAP)', file: 'hld/examples/data-warehouse.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an ETL Pipeline', file: 'hld/examples/etl-pipeline.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an A/B Testing Platform', file: 'hld/examples/ab-testing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Feature Store', file: 'hld/examples/feature-store.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Fraud Detection System', file: 'hld/examples/fraud-detection.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Spam Detection System', file: 'hld/examples/spam-detection.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'messaging',
+            label: 'Messaging &amp; Streaming Infra',
+            children: [
+              { title: 'Design a Message Queue (Kafka)', file: 'hld/examples/message-queue-kafka.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Pub/Sub System', file: 'hld/examples/pub-sub.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed Job Scheduler', file: 'hld/examples/job-scheduler.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed Cron', file: 'hld/examples/distributed-cron.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Workflow Orchestrator (Airflow)', file: 'hld/examples/workflow-orchestrator.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Webhook Delivery System', file: 'hld/examples/webhook-delivery.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Stream Processing System (Flink)', file: 'hld/examples/stream-processing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Change Data Capture Pipeline', file: 'hld/examples/change-data-capture.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'collab',
+            label: 'Collaboration &amp; Productivity',
+            children: [
+              { title: 'Design Google Docs (Collaborative Editor)', file: 'hld/examples/google-docs.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Online Whiteboard (Miro)', file: 'hld/examples/online-whiteboard.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Calendar System', file: 'hld/examples/calendar-system.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Task Board (Trello)', file: 'hld/examples/task-board.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Issue Tracker (Jira)', file: 'hld/examples/issue-tracker.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Wiki (Confluence)', file: 'hld/examples/wiki.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design GitHub (Code Hosting)', file: 'hld/examples/code-hosting.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a CI/CD Pipeline', file: 'hld/examples/cicd-pipeline.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Code Deployment System', file: 'hld/examples/code-deployment.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'finance',
+            label: 'Finance &amp; Payments',
+            children: [
+              { title: 'Design a Digital Wallet (PayPal)', file: 'hld/examples/digital-wallet.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Crypto Exchange', file: 'hld/examples/crypto-exchange.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Billing and Invoicing System', file: 'hld/examples/billing-invoicing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Subscription Billing System', file: 'hld/examples/subscription-billing.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Ledger System', file: 'hld/examples/ledger-system.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Payment Reconciliation System', file: 'hld/examples/payment-reconciliation.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          },
+          {
+            name: 'infra',
+            label: 'Platform &amp; Infrastructure',
+            children: [
+              { title: 'Design an API Gateway', file: 'hld/examples/api-gateway.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Load Balancer', file: 'hld/examples/load-balancer.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a DNS System', file: 'hld/examples/dns-system.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Service Mesh', file: 'hld/examples/service-mesh.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Configuration Service', file: 'hld/examples/config-service.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Secret Management System (Vault)', file: 'hld/examples/secret-management.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Container Orchestrator (Kubernetes)', file: 'hld/examples/container-orchestrator.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Serverless/FaaS Platform', file: 'hld/examples/serverless-platform.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed SQL Database (Spanner)', file: 'hld/examples/distributed-sql-db.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Time-Series Database', file: 'hld/examples/timeseries-db.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Graph Database', file: 'hld/examples/graph-db.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Vector/Similarity Search Database', file: 'hld/examples/vector-db.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed Transaction Coordinator', file: 'hld/examples/distributed-transactions.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Monitoring and Alerting Platform', file: 'hld/examples/monitoring-alerting.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Distributed Counter', file: 'hld/examples/distributed-counter.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design a Feature Flag System', file: 'hld/examples/feature-flags.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] },
+              { title: 'Design an Online Judge (LeetCode)', file: 'hld/examples/online-judge.html', links: ['hld/case-studies/interview-framework.html', 'hld/real-world/url-shortener.html'] }
+            ]
+          }
+        ]
       }
     ]
   },
