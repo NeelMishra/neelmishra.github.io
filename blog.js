@@ -225,6 +225,16 @@ var BLOG_TREE = [
               { title: 'Installing LibTorch', file: 'from-scratch/cpp/transformers/libtorch/getting-started.html', links: ['from-scratch/cpp/build-tools/cmake.html', 'from-scratch/cpp/transformers/libtorch/register-module.html'] },
               { title: 'register_module', file: 'from-scratch/cpp/transformers/libtorch/register-module.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] }
             ]
+          },
+          {
+            name: 'machine-learning',
+            label: 'Machine Learning',
+            children: [
+              { title: 'Decision Tree Classifier', file: 'from-scratch/cpp/machine-learning/index.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'from-scratch/cpp/machine-learning/regression-tree.html'] },
+              { title: 'Regression Tree (CART)', file: 'from-scratch/cpp/machine-learning/regression-tree.html', links: ['from-scratch/cpp/machine-learning/index.html', 'from-scratch/cpp/machine-learning/random-forest.html'] },
+              { title: 'Random Forest', file: 'from-scratch/cpp/machine-learning/random-forest.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/gradient-boosting.html'] },
+              { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/gradient-boosting.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/random-forest.html'] }
+            ]
           }
         ]
       }
