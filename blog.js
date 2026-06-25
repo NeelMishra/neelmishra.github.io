@@ -8053,6 +8053,24 @@ var BLOG_TREE = [
     label: 'Machine Learning',
     children: [
       {
+        name: 'decision-trees',
+        label: 'Decision Trees',
+        children: [
+          {
+            name: 'handwritten-notes',
+            label: 'Handwritten Notes',
+            children: [
+              { title: 'Foundations', file: 'ml/decision-trees/handwritten-notes/index.html', links: ['ml/decision-trees/handwritten-notes/entropy-information-gain.html'] },
+              { title: 'Entropy, Gini & Information Gain', file: 'ml/decision-trees/handwritten-notes/entropy-information-gain.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'ml/decision-trees/handwritten-notes/entropy-from-kl.html'] },
+              { title: 'Entropy from KL Divergence', file: 'ml/decision-trees/handwritten-notes/entropy-from-kl.html', links: ['ml/decision-trees/handwritten-notes/entropy-information-gain.html', 'ml/decision-trees/handwritten-notes/cart-and-complexity.html'] },
+              { title: 'CART, Complexity & Pruning', file: 'ml/decision-trees/handwritten-notes/cart-and-complexity.html', links: ['ml/decision-trees/handwritten-notes/entropy-from-kl.html', 'ml/decision-trees/handwritten-notes/bagging-random-forests.html'] },
+              { title: 'Bagging & Random Forests', file: 'ml/decision-trees/handwritten-notes/bagging-random-forests.html', links: ['ml/decision-trees/handwritten-notes/cart-and-complexity.html', 'ml/decision-trees/handwritten-notes/boosting-adaboost.html'] },
+              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/handwritten-notes/boosting-adaboost.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html'] }
+            ]
+          }
+        ]
+      },
+      {
         name: 'transformers',
         label: 'Transformers',
         children: [
