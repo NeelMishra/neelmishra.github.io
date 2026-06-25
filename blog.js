@@ -504,7 +504,14 @@ var BLOG_TREE = [
             children: [
               { title: 'Fundamentals', file: 'dsa/arrays/prefix-sum/index.html', links: ['dsa/arrays/prefix-sum/patterns.html'] },
               { title: 'Patterns', file: 'dsa/arrays/prefix-sum/patterns.html', links: ['dsa/arrays/prefix-sum/index.html', 'dsa/arrays/prefix-sum/advanced.html'] },
-              { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/intro.html'] }
+              { title: '2D & Advanced', file: 'dsa/arrays/prefix-sum/advanced.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/segment-tree/intro.html'] },
+              {
+                name: 'worked-examples',
+                label: 'Worked Examples',
+                children: [
+                  { title: 'Counting Majority-Element Subarrays', file: 'dsa/arrays/prefix-sum/worked-examples/majority-subarrays.html', links: ['dsa/arrays/prefix-sum/patterns.html', 'dsa/trees/fenwick-tree/prefix-sum-counting.html'] }
+                ]
+              }
             ]
           },
           {
