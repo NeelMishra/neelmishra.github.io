@@ -8186,6 +8186,8 @@ var BLOG_TREE = [
               { title: 'Iterative (Model-Based) Imputation', file: 'ml/data-preparation/missing-values/iterative-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'Missingness Indicators', file: 'ml/data-preparation/missing-values/missingness-indicators.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'Forward and Backward Fill', file: 'ml/data-preparation/missing-values/forward-backward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Forward Fill', file: 'ml/data-preparation/missing-values/forward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Backward Fill', file: 'ml/data-preparation/missing-values/backward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'Constant and Sentinel Imputation', file: 'ml/data-preparation/missing-values/constant-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'Multiple Imputation', file: 'ml/data-preparation/missing-values/multiple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] }
             ]
