@@ -8137,7 +8137,10 @@ var BLOG_TREE = [
               { title: 'Train, Validation, and Test', file: 'ml/data-preparation/train-test-split/train-validation-test.html', links: ['ml/data-preparation/train-test-split/index.html'] },
               { title: 'Stratified Splitting', file: 'ml/data-preparation/train-test-split/stratified-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
               { title: 'Group Splitting', file: 'ml/data-preparation/train-test-split/group-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Time-Series Splitting', file: 'ml/data-preparation/train-test-split/time-series-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] }
+              { title: 'Time-Series Splitting', file: 'ml/data-preparation/train-test-split/time-series-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Data Leakage in Splitting', file: 'ml/data-preparation/train-test-split/data-leakage-in-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Reproducibility and Random Seeds', file: 'ml/data-preparation/train-test-split/reproducibility-and-seeds.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Hold-Out vs Cross-Validation', file: 'ml/data-preparation/train-test-split/holdout-vs-cross-validation.html', links: ['ml/data-preparation/train-test-split/index.html'] }
             ]
           },
           {
@@ -8149,7 +8152,9 @@ var BLOG_TREE = [
               { title: 'Min-Max Normalization', file: 'ml/data-preparation/feature-scaling/min-max-normalization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
               { title: 'Robust Scaling', file: 'ml/data-preparation/feature-scaling/robust-scaling.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
               { title: 'Max-Abs and Unit-Norm Scaling', file: 'ml/data-preparation/feature-scaling/max-abs-and-unit-norm.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'When Scaling Matters', file: 'ml/data-preparation/feature-scaling/when-to-scale.html', links: ['ml/data-preparation/feature-scaling/index.html'] }
+              { title: 'When Scaling Matters', file: 'ml/data-preparation/feature-scaling/when-to-scale.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'Normalization vs Standardization', file: 'ml/data-preparation/feature-scaling/normalization-vs-standardization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'Scaling Sparse Data', file: 'ml/data-preparation/feature-scaling/scaling-sparse-data.html', links: ['ml/data-preparation/feature-scaling/index.html'] }
             ]
           },
           {
@@ -8162,7 +8167,11 @@ var BLOG_TREE = [
               { title: 'One-Hot Encoding', file: 'ml/data-preparation/encoding-categoricals/one-hot-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
               { title: 'Target (Mean) Encoding', file: 'ml/data-preparation/encoding-categoricals/target-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
               { title: 'Frequency and Count Encoding', file: 'ml/data-preparation/encoding-categoricals/frequency-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Hashing and High Cardinality', file: 'ml/data-preparation/encoding-categoricals/hashing-high-cardinality.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] }
+              { title: 'Hashing and High Cardinality', file: 'ml/data-preparation/encoding-categoricals/hashing-high-cardinality.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Binary Encoding', file: 'ml/data-preparation/encoding-categoricals/binary-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Cyclical Encoding (sin/cos)', file: 'ml/data-preparation/encoding-categoricals/cyclical-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Weight of Evidence', file: 'ml/data-preparation/encoding-categoricals/weight-of-evidence.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Rare-Category Grouping', file: 'ml/data-preparation/encoding-categoricals/rare-category-grouping.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] }
             ]
           },
           {
@@ -8175,7 +8184,10 @@ var BLOG_TREE = [
               { title: 'Mean, Median, and Mode Imputation', file: 'ml/data-preparation/missing-values/simple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'KNN Imputation', file: 'ml/data-preparation/missing-values/knn-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
               { title: 'Iterative (Model-Based) Imputation', file: 'ml/data-preparation/missing-values/iterative-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Missingness Indicators', file: 'ml/data-preparation/missing-values/missingness-indicators.html', links: ['ml/data-preparation/missing-values/index.html'] }
+              { title: 'Missingness Indicators', file: 'ml/data-preparation/missing-values/missingness-indicators.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Forward and Backward Fill', file: 'ml/data-preparation/missing-values/forward-backward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Constant and Sentinel Imputation', file: 'ml/data-preparation/missing-values/constant-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Multiple Imputation', file: 'ml/data-preparation/missing-values/multiple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] }
             ]
           },
           {
@@ -8188,7 +8200,119 @@ var BLOG_TREE = [
               { title: 'Leave-One-Out (LOOCV)', file: 'ml/data-preparation/cross-validation/leave-one-out.html', links: ['ml/data-preparation/cross-validation/index.html'] },
               { title: 'Group K-Fold', file: 'ml/data-preparation/cross-validation/group-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
               { title: 'Time-Series Cross-Validation', file: 'ml/data-preparation/cross-validation/time-series-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Nested Cross-Validation', file: 'ml/data-preparation/cross-validation/nested-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] }
+              { title: 'Nested Cross-Validation', file: 'ml/data-preparation/cross-validation/nested-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Repeated K-Fold', file: 'ml/data-preparation/cross-validation/repeated-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Shuffle-Split (Monte Carlo CV)', file: 'ml/data-preparation/cross-validation/shuffle-split.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Choosing k: Bias and Variance', file: 'ml/data-preparation/cross-validation/choosing-k.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Cross-Validation for Hyperparameter Tuning', file: 'ml/data-preparation/cross-validation/cv-for-tuning.html', links: ['ml/data-preparation/cross-validation/index.html'] }
+            ]
+          },
+          {
+            name: 'data-cleaning',
+            label: 'Data Cleaning',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/data-cleaning/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'Duplicate Records', file: 'ml/data-preparation/data-cleaning/duplicate-records.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
+              { title: 'Data Types and Parsing', file: 'ml/data-preparation/data-cleaning/data-types-and-parsing.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
+              { title: 'Text Normalization', file: 'ml/data-preparation/data-cleaning/text-normalization.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
+              { title: 'Units and Consistency', file: 'ml/data-preparation/data-cleaning/units-and-consistency.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
+              { title: 'Errors vs Outliers', file: 'ml/data-preparation/data-cleaning/errors-vs-outliers.html', links: ['ml/data-preparation/data-cleaning/index.html'] }
+            ]
+          },
+          {
+            name: 'outliers',
+            label: 'Outlier Detection and Treatment',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/outliers/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'What Is an Outlier', file: 'ml/data-preparation/outliers/what-is-an-outlier.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'Z-Score Method', file: 'ml/data-preparation/outliers/z-score-method.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'IQR Method', file: 'ml/data-preparation/outliers/iqr-method.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'Isolation Forest', file: 'ml/data-preparation/outliers/isolation-forest.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'Local Outlier Factor', file: 'ml/data-preparation/outliers/local-outlier-factor.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'Winsorizing and Capping', file: 'ml/data-preparation/outliers/winsorizing-and-capping.html', links: ['ml/data-preparation/outliers/index.html'] },
+              { title: 'Remove, Cap, or Keep', file: 'ml/data-preparation/outliers/remove-vs-keep.html', links: ['ml/data-preparation/outliers/index.html'] }
+            ]
+          },
+          {
+            name: 'feature-transformation',
+            label: 'Feature Transformation',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/feature-transformation/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'Skewness and Why It Hurts', file: 'ml/data-preparation/feature-transformation/skewness.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Log Transform', file: 'ml/data-preparation/feature-transformation/log-transform.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Box-Cox Transform', file: 'ml/data-preparation/feature-transformation/box-cox.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Yeo-Johnson Transform', file: 'ml/data-preparation/feature-transformation/yeo-johnson.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Quantile and Rank Transform', file: 'ml/data-preparation/feature-transformation/quantile-transform.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Power Transforms', file: 'ml/data-preparation/feature-transformation/power-transforms.html', links: ['ml/data-preparation/feature-transformation/index.html'] }
+            ]
+          },
+          {
+            name: 'feature-engineering',
+            label: 'Feature Engineering',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/feature-engineering/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'Interaction Features', file: 'ml/data-preparation/feature-engineering/interaction-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
+              { title: 'Polynomial Features', file: 'ml/data-preparation/feature-engineering/polynomial-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
+              { title: 'Binning and Discretization', file: 'ml/data-preparation/feature-engineering/binning-discretization.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
+              { title: 'Datetime Features', file: 'ml/data-preparation/feature-engineering/datetime-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
+              { title: 'Aggregation and Group Features', file: 'ml/data-preparation/feature-engineering/aggregation-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
+              { title: 'Text Features (Bag of Words, TF-IDF)', file: 'ml/data-preparation/feature-engineering/text-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] }
+            ]
+          },
+          {
+            name: 'feature-selection',
+            label: 'Feature Selection',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/feature-selection/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'Why Select Features', file: 'ml/data-preparation/feature-selection/why-feature-selection.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Variance Threshold', file: 'ml/data-preparation/feature-selection/variance-threshold.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Correlation Filter', file: 'ml/data-preparation/feature-selection/correlation-filter.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Mutual Information', file: 'ml/data-preparation/feature-selection/mutual-information.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Chi-Square Test', file: 'ml/data-preparation/feature-selection/chi-square.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Recursive Feature Elimination', file: 'ml/data-preparation/feature-selection/recursive-feature-elimination.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'L1 (Lasso) Selection', file: 'ml/data-preparation/feature-selection/l1-regularization.html', links: ['ml/data-preparation/feature-selection/index.html'] },
+              { title: 'Tree Feature Importance', file: 'ml/data-preparation/feature-selection/feature-importance.html', links: ['ml/data-preparation/feature-selection/index.html'] }
+            ]
+          },
+          {
+            name: 'imbalance',
+            label: 'Class Imbalance and Resampling',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/imbalance/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'The Imbalance Problem', file: 'ml/data-preparation/imbalance/the-imbalance-problem.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'Random Oversampling', file: 'ml/data-preparation/imbalance/random-oversampling.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'Random Undersampling', file: 'ml/data-preparation/imbalance/random-undersampling.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'SMOTE', file: 'ml/data-preparation/imbalance/smote.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'ADASYN', file: 'ml/data-preparation/imbalance/adasyn.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'Class Weights', file: 'ml/data-preparation/imbalance/class-weights.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'Threshold Moving', file: 'ml/data-preparation/imbalance/threshold-moving.html', links: ['ml/data-preparation/imbalance/index.html'] },
+              { title: 'Evaluating Under Imbalance', file: 'ml/data-preparation/imbalance/evaluating-imbalance.html', links: ['ml/data-preparation/imbalance/index.html'] }
+            ]
+          },
+          {
+            name: 'dimensionality-reduction',
+            label: 'Dimensionality Reduction',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/dimensionality-reduction/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'The Curse of Dimensionality', file: 'ml/data-preparation/dimensionality-reduction/curse-of-dimensionality.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 'Principal Component Analysis (PCA)', file: 'ml/data-preparation/dimensionality-reduction/pca.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 'Kernel PCA', file: 'ml/data-preparation/dimensionality-reduction/kernel-pca.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 'Linear Discriminant Analysis (LDA)', file: 'ml/data-preparation/dimensionality-reduction/lda.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 't-SNE', file: 'ml/data-preparation/dimensionality-reduction/t-sne.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 'UMAP', file: 'ml/data-preparation/dimensionality-reduction/umap.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
+              { title: 'Autoencoders', file: 'ml/data-preparation/dimensionality-reduction/autoencoders.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] }
+            ]
+          },
+          {
+            name: 'pipelines',
+            label: 'Pipelines and Reproducibility',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/pipelines/index.html', links: ['ml/data-preparation/index.html'] },
+              { title: 'Preprocessing Pipelines', file: 'ml/data-preparation/pipelines/preprocessing-pipelines.html', links: ['ml/data-preparation/pipelines/index.html'] },
+              { title: 'Column Transformer', file: 'ml/data-preparation/pipelines/column-transformer.html', links: ['ml/data-preparation/pipelines/index.html'] },
+              { title: 'Avoiding Leakage with Pipelines', file: 'ml/data-preparation/pipelines/avoiding-leakage.html', links: ['ml/data-preparation/pipelines/index.html'] },
+              { title: 'Saving and Serializing Transformers', file: 'ml/data-preparation/pipelines/saving-transformers.html', links: ['ml/data-preparation/pipelines/index.html'] },
+              { title: 'Reproducibility', file: 'ml/data-preparation/pipelines/reproducibility.html', links: ['ml/data-preparation/pipelines/index.html'] }
             ]
           }
         ]
@@ -9561,3 +9685,4 @@ function flattenBlogTree(nodes, result) {
 
   applyFilters();
 })();
+
