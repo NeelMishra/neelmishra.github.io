@@ -255,7 +255,7 @@ var BLOG_TREE = [
               },
               {
                 name: 'data-preprocessing',
-                label: 'Data Preprocessing',
+                label: 'Data Preparation and Preprocessing',
                 children: [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/data-preprocessing/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'from-scratch/cpp/machine-learning/index.html'] },
                   { title: 'Train/Test Split & Shuffling', file: 'from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html'] },
@@ -8121,6 +8121,18 @@ var BLOG_TREE = [
               { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/deep-dive/boosting-adaboost.html', links: ['ml/decision-trees/deep-dive/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/boosting/index.html'] }
             ]
           }
+        ]
+      },
+      {
+        name: 'data-preparation',
+        label: 'Data Preparation and Preprocessing',
+        children: [
+          { title: 'Foundations', file: 'ml/data-preparation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/index.html', 'ml/data-preparation/train-test-split.html'] },
+          { title: 'Splitting & Stratification', file: 'ml/data-preparation/train-test-split.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'ml/data-preparation/feature-scaling.html'] },
+          { title: 'Feature Scaling', file: 'ml/data-preparation/feature-scaling.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', 'ml/data-preparation/encoding-categoricals.html'] },
+          { title: 'Encoding Categorical Features', file: 'ml/data-preparation/encoding-categoricals.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html', 'ml/data-preparation/missing-values.html'] },
+          { title: 'Handling Missing Data', file: 'ml/data-preparation/missing-values.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html', 'ml/data-preparation/cross-validation.html'] },
+          { title: 'Cross-Validation', file: 'ml/data-preparation/cross-validation.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html', 'ml/data-preparation/index.html'] }
         ]
       },
       {
