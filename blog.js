@@ -9688,3 +9688,21 @@ function flattenBlogTree(nodes, result) {
   applyFilters();
 })();
 
+
+/* Load the shared code syntax-highlighter (code-highlight.js) relative to this
+   script, so it works at any post depth without per-page includes. */
+(function () {
+  if (window.__codeHLLoad) return;
+  window.__codeHLLoad = true;
+  var me = document.currentScript;
+  if (!me) {
+    var ss = document.getElementsByTagName('script');
+    for (var i = 0; i < ss.length; i++) {
+      if (ss[i].src && /\/blog\.js(\?|$)/.test(ss[i].src)) { me = ss[i]; break; }
+    }
+  }
+  if (!me || !me.src) return;
+  var s = document.createElement('script');
+  s.src = me.src.replace(/blog\.js(\?.*)?$/, 'code-highlight.js');
+  document.head.appendChild(s);
+})();
