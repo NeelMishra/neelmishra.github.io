@@ -8127,12 +8127,70 @@ var BLOG_TREE = [
         name: 'data-preparation',
         label: 'Data Preparation and Preprocessing',
         children: [
-          { title: 'Foundations', file: 'ml/data-preparation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/index.html', 'ml/data-preparation/train-test-split.html'] },
-          { title: 'Splitting & Stratification', file: 'ml/data-preparation/train-test-split.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'ml/data-preparation/feature-scaling.html'] },
-          { title: 'Feature Scaling', file: 'ml/data-preparation/feature-scaling.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', 'ml/data-preparation/encoding-categoricals.html'] },
-          { title: 'Encoding Categorical Features', file: 'ml/data-preparation/encoding-categoricals.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html', 'ml/data-preparation/missing-values.html'] },
-          { title: 'Handling Missing Data', file: 'ml/data-preparation/missing-values.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html', 'ml/data-preparation/cross-validation.html'] },
-          { title: 'Cross-Validation', file: 'ml/data-preparation/cross-validation.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html', 'ml/data-preparation/index.html'] }
+          { title: 'Foundations', file: 'ml/data-preparation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/index.html', 'ml/data-preparation/train-test-split/index.html'] },
+          {
+            name: 'train-test-split',
+            label: 'Splitting & Stratification',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/train-test-split/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'The Hold-Out Split', file: 'ml/data-preparation/train-test-split/hold-out-split.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Train, Validation, and Test', file: 'ml/data-preparation/train-test-split/train-validation-test.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Stratified Splitting', file: 'ml/data-preparation/train-test-split/stratified-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Group Splitting', file: 'ml/data-preparation/train-test-split/group-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
+              { title: 'Time-Series Splitting', file: 'ml/data-preparation/train-test-split/time-series-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] }
+            ]
+          },
+          {
+            name: 'feature-scaling',
+            label: 'Feature Scaling',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/feature-scaling/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', 'ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Standardization (Z-Score)', file: 'ml/data-preparation/feature-scaling/standardization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'Min-Max Normalization', file: 'ml/data-preparation/feature-scaling/min-max-normalization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'Robust Scaling', file: 'ml/data-preparation/feature-scaling/robust-scaling.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'Max-Abs and Unit-Norm Scaling', file: 'ml/data-preparation/feature-scaling/max-abs-and-unit-norm.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
+              { title: 'When Scaling Matters', file: 'ml/data-preparation/feature-scaling/when-to-scale.html', links: ['ml/data-preparation/feature-scaling/index.html'] }
+            ]
+          },
+          {
+            name: 'encoding-categoricals',
+            label: 'Encoding Categorical Features',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/encoding-categoricals/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html', 'ml/data-preparation/missing-values/index.html'] },
+              { title: 'Label Encoding', file: 'ml/data-preparation/encoding-categoricals/label-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Ordinal Encoding', file: 'ml/data-preparation/encoding-categoricals/ordinal-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'One-Hot Encoding', file: 'ml/data-preparation/encoding-categoricals/one-hot-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Target (Mean) Encoding', file: 'ml/data-preparation/encoding-categoricals/target-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Frequency and Count Encoding', file: 'ml/data-preparation/encoding-categoricals/frequency-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
+              { title: 'Hashing and High Cardinality', file: 'ml/data-preparation/encoding-categoricals/hashing-high-cardinality.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] }
+            ]
+          },
+          {
+            name: 'missing-values',
+            label: 'Handling Missing Data',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/missing-values/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html', 'ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Missingness Mechanisms: MCAR, MAR, MNAR', file: 'ml/data-preparation/missing-values/missingness-mechanisms.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Deletion: Listwise and Pairwise', file: 'ml/data-preparation/missing-values/deletion.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Mean, Median, and Mode Imputation', file: 'ml/data-preparation/missing-values/simple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'KNN Imputation', file: 'ml/data-preparation/missing-values/knn-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Iterative (Model-Based) Imputation', file: 'ml/data-preparation/missing-values/iterative-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
+              { title: 'Missingness Indicators', file: 'ml/data-preparation/missing-values/missingness-indicators.html', links: ['ml/data-preparation/missing-values/index.html'] }
+            ]
+          },
+          {
+            name: 'cross-validation',
+            label: 'Cross-Validation',
+            children: [
+              { title: 'Overview', file: 'ml/data-preparation/cross-validation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html', 'ml/data-preparation/index.html'] },
+              { title: 'K-Fold Cross-Validation', file: 'ml/data-preparation/cross-validation/k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Stratified K-Fold', file: 'ml/data-preparation/cross-validation/stratified-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Leave-One-Out (LOOCV)', file: 'ml/data-preparation/cross-validation/leave-one-out.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Group K-Fold', file: 'ml/data-preparation/cross-validation/group-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Time-Series Cross-Validation', file: 'ml/data-preparation/cross-validation/time-series-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] },
+              { title: 'Nested Cross-Validation', file: 'ml/data-preparation/cross-validation/nested-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] }
+            ]
+          }
         ]
       },
       {
