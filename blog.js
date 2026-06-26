@@ -163,37 +163,37 @@ var BLOG_TREE = [
             name: 'transformers',
             label: 'Transformers',
             children: [
-              { title: 'Overview', file: 'from-scratch/cpp/transformers/index.html', links: ['ml/transformers/index.html', 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] },
+              { title: 'Overview', file: 'from-scratch/cpp/transformers/index.html', links: ['dl/transformers/index.html', 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html'] },
               {
                 name: 'building-blocks',
                 label: 'Building Blocks',
                 children: [
-                  { title: 'SingleHeadAttention', file: 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html', links: ['ml/transformers/building-blocks/single-head-attention.html', 'from-scratch/cpp/transformers/building-blocks/multi-head-attention.html'] },
+                  { title: 'SingleHeadAttention', file: 'from-scratch/cpp/transformers/building-blocks/single-head-attention.html', links: ['dl/transformers/building-blocks/single-head-attention.html', 'from-scratch/cpp/transformers/building-blocks/multi-head-attention.html'] },
                   { title: 'MultiHeadAttention', file: 'from-scratch/cpp/transformers/building-blocks/multi-head-attention.html', links: ['from-scratch/cpp/transformers/building-blocks/single-head-attention.html', 'from-scratch/cpp/transformers/building-blocks/feed-forward.html'] },
-                  { title: 'FeedForward', file: 'from-scratch/cpp/transformers/building-blocks/feed-forward.html', links: ['ml/transformers/building-blocks/feed-forward.html', 'from-scratch/cpp/transformers/building-blocks/dropout.html'] },
-                  { title: 'Dropout', file: 'from-scratch/cpp/transformers/building-blocks/dropout.html', links: ['ml/transformers/building-blocks/dropout.html', 'from-scratch/cpp/transformers/building-blocks/layer-norm.html'] },
-                  { title: 'LayerNorm', file: 'from-scratch/cpp/transformers/building-blocks/layer-norm.html', links: ['ml/transformers/building-blocks/layer-norm.html', 'from-scratch/cpp/transformers/building-blocks/transformer-block.html'] },
-                  { title: 'TransformerBlock', file: 'from-scratch/cpp/transformers/building-blocks/transformer-block.html', links: ['ml/transformers/building-blocks/transformer-block.html', 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html'] },
-                  { title: 'PositionalEncoding', file: 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html', links: ['ml/transformers/building-blocks/positional-encoding.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
+                  { title: 'FeedForward', file: 'from-scratch/cpp/transformers/building-blocks/feed-forward.html', links: ['dl/transformers/building-blocks/feed-forward.html', 'from-scratch/cpp/transformers/building-blocks/dropout.html'] },
+                  { title: 'Dropout', file: 'from-scratch/cpp/transformers/building-blocks/dropout.html', links: ['dl/transformers/building-blocks/dropout.html', 'from-scratch/cpp/transformers/building-blocks/layer-norm.html'] },
+                  { title: 'LayerNorm', file: 'from-scratch/cpp/transformers/building-blocks/layer-norm.html', links: ['dl/transformers/building-blocks/layer-norm.html', 'from-scratch/cpp/transformers/building-blocks/transformer-block.html'] },
+                  { title: 'TransformerBlock', file: 'from-scratch/cpp/transformers/building-blocks/transformer-block.html', links: ['dl/transformers/building-blocks/transformer-block.html', 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html'] },
+                  { title: 'PositionalEncoding', file: 'from-scratch/cpp/transformers/building-blocks/positional-encoding.html', links: ['dl/transformers/building-blocks/positional-encoding.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
                 ]
               },
               {
                 name: 'attention-variants',
                 label: 'Attention Variants',
                 children: [
-                  { title: 'SelfAttention', file: 'from-scratch/cpp/transformers/attention-variants/self-attention.html', links: ['ml/transformers/building-blocks/self-attention.html', 'from-scratch/cpp/transformers/attention-variants/softmax-attention.html'] },
+                  { title: 'SelfAttention', file: 'from-scratch/cpp/transformers/attention-variants/self-attention.html', links: ['dl/transformers/building-blocks/self-attention.html', 'from-scratch/cpp/transformers/attention-variants/softmax-attention.html'] },
                   { title: 'SoftmaxAttention', file: 'from-scratch/cpp/transformers/attention-variants/softmax-attention.html', links: ['from-scratch/cpp/transformers/attention-variants/self-attention.html', 'from-scratch/cpp/transformers/attention-variants/causal-attention.html'] },
-                  { title: 'CausalAttention', file: 'from-scratch/cpp/transformers/attention-variants/causal-attention.html', links: ['ml/transformers/building-blocks/causal-attention.html', 'from-scratch/cpp/transformers/attention-variants/cross-attention.html'] },
-                  { title: 'CrossAttention', file: 'from-scratch/cpp/transformers/attention-variants/cross-attention.html', links: ['ml/transformers/building-blocks/cross-attention.html', 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html'] },
-                  { title: 'SlidingWindowAttention', file: 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html', links: ['ml/transformers/building-blocks/sliding-window-attention.html', 'from-scratch/cpp/transformers/attention-variants/global-attention.html'] },
+                  { title: 'CausalAttention', file: 'from-scratch/cpp/transformers/attention-variants/causal-attention.html', links: ['dl/transformers/building-blocks/causal-attention.html', 'from-scratch/cpp/transformers/attention-variants/cross-attention.html'] },
+                  { title: 'CrossAttention', file: 'from-scratch/cpp/transformers/attention-variants/cross-attention.html', links: ['dl/transformers/building-blocks/cross-attention.html', 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html'] },
+                  { title: 'SlidingWindowAttention', file: 'from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html', links: ['dl/transformers/building-blocks/sliding-window-attention.html', 'from-scratch/cpp/transformers/attention-variants/global-attention.html'] },
                   { title: 'GlobalAttention', file: 'from-scratch/cpp/transformers/attention-variants/global-attention.html', links: ['from-scratch/cpp/transformers/attention-variants/sliding-window-attention.html', 'from-scratch/cpp/transformers/attention-variants/linear-attention.html'] },
-                  { title: 'LinearAttention', file: 'from-scratch/cpp/transformers/attention-variants/linear-attention.html', links: ['ml/transformers/building-blocks/linear-attention.html', 'from-scratch/cpp/transformers/attention-variants/flash-attention.html'] },
-                  { title: 'FlashAttention', file: 'from-scratch/cpp/transformers/attention-variants/flash-attention.html', links: ['ml/transformers/building-blocks/flash-attention.html', 'from-scratch/cpp/transformers/attention-variants/mha.html'] },
+                  { title: 'LinearAttention', file: 'from-scratch/cpp/transformers/attention-variants/linear-attention.html', links: ['dl/transformers/building-blocks/linear-attention.html', 'from-scratch/cpp/transformers/attention-variants/flash-attention.html'] },
+                  { title: 'FlashAttention', file: 'from-scratch/cpp/transformers/attention-variants/flash-attention.html', links: ['dl/transformers/building-blocks/flash-attention.html', 'from-scratch/cpp/transformers/attention-variants/mha.html'] },
                   { title: 'MHA', file: 'from-scratch/cpp/transformers/attention-variants/mha.html', links: ['from-scratch/cpp/transformers/attention-variants/flash-attention.html', 'from-scratch/cpp/transformers/attention-variants/mqa.html'] },
-                  { title: 'MQA', file: 'from-scratch/cpp/transformers/attention-variants/mqa.html', links: ['ml/transformers/building-blocks/mqa.html', 'from-scratch/cpp/transformers/attention-variants/gqa.html'] },
-                  { title: 'GQA', file: 'from-scratch/cpp/transformers/attention-variants/gqa.html', links: ['ml/transformers/building-blocks/gqa.html', 'from-scratch/cpp/transformers/attention-variants/mla.html'] },
-                  { title: 'MLA', file: 'from-scratch/cpp/transformers/attention-variants/mla.html', links: ['ml/transformers/building-blocks/mla.html', 'from-scratch/cpp/transformers/attention-variants/iha.html'] },
-                  { title: 'IHA', file: 'from-scratch/cpp/transformers/attention-variants/iha.html', links: ['ml/transformers/building-blocks/iha.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
+                  { title: 'MQA', file: 'from-scratch/cpp/transformers/attention-variants/mqa.html', links: ['dl/transformers/building-blocks/mqa.html', 'from-scratch/cpp/transformers/attention-variants/gqa.html'] },
+                  { title: 'GQA', file: 'from-scratch/cpp/transformers/attention-variants/gqa.html', links: ['dl/transformers/building-blocks/gqa.html', 'from-scratch/cpp/transformers/attention-variants/mla.html'] },
+                  { title: 'MLA', file: 'from-scratch/cpp/transformers/attention-variants/mla.html', links: ['dl/transformers/building-blocks/mla.html', 'from-scratch/cpp/transformers/attention-variants/iha.html'] },
+                  { title: 'IHA', file: 'from-scratch/cpp/transformers/attention-variants/iha.html', links: ['dl/transformers/building-blocks/iha.html', 'from-scratch/cpp/transformers/full-models/gpt.html'] }
                 ]
               },
               {
@@ -201,15 +201,15 @@ var BLOG_TREE = [
                 label: 'Full Models',
                 children: [
                   { title: 'GPT', file: 'from-scratch/cpp/transformers/full-models/gpt.html', links: ['from-scratch/cpp/transformers/building-blocks/positional-encoding.html', 'from-scratch/cpp/transformers/full-models/encoder-only-transformer.html'] },
-                  { title: 'Encoder-Only Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-only-transformer.html', links: ['ml/transformers/variants/bert.html', 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html'] },
-                  { title: 'Encoder-Decoder Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html', links: ['ml/transformers/architecture/index.html', 'from-scratch/cpp/transformers/training/bpe-tokenizer.html'] }
+                  { title: 'Encoder-Only Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-only-transformer.html', links: ['dl/transformers/variants/bert.html', 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html'] },
+                  { title: 'Encoder-Decoder Transformer', file: 'from-scratch/cpp/transformers/full-models/encoder-decoder-transformer.html', links: ['dl/transformers/architecture/index.html', 'from-scratch/cpp/transformers/training/bpe-tokenizer.html'] }
                 ]
               },
               {
                 name: 'training',
                 label: 'Training Pipeline',
                 children: [
-                  { title: 'BPE Tokenizer', file: 'from-scratch/cpp/transformers/training/bpe-tokenizer.html', links: ['ml/transformers/training/tokenization.html', 'from-scratch/cpp/transformers/training/dataloader.html'] },
+                  { title: 'BPE Tokenizer', file: 'from-scratch/cpp/transformers/training/bpe-tokenizer.html', links: ['dl/transformers/training/tokenization.html', 'from-scratch/cpp/transformers/training/dataloader.html'] },
                   { title: 'DataLoader', file: 'from-scratch/cpp/transformers/training/dataloader.html', links: ['from-scratch/cpp/transformers/training/bpe-tokenizer.html', 'from-scratch/cpp/transformers/training/loss-function.html'] },
                   { title: 'Cross-Entropy Loss', file: 'from-scratch/cpp/transformers/training/loss-function.html', links: ['from-scratch/cpp/transformers/full-models/gpt.html', 'from-scratch/cpp/transformers/training/training-loop.html'] },
                   { title: 'Training Loop', file: 'from-scratch/cpp/transformers/training/training-loop.html', links: ['from-scratch/cpp/transformers/training/loss-function.html', 'from-scratch/cpp/transformers/training/text-generation.html'] },
@@ -8124,74 +8124,6 @@ var BLOG_TREE = [
         ]
       },
       {
-        name: 'transformers',
-        label: 'Transformers',
-        children: [
-          { title: 'Overview', file: 'ml/transformers/index.html' },
-          {
-            name: 'building-blocks',
-            label: 'Building Blocks',
-            children: [
-              { title: 'Overview', file: 'ml/transformers/building-blocks/index.html' },
-              { title: 'Single-Head Attention', file: 'ml/transformers/building-blocks/single-head-attention.html' },
-              { title: 'Multi-Head Attention', file: 'ml/transformers/building-blocks/multi-head-attention.html' },
-              { title: 'Feed-Forward Network', file: 'ml/transformers/building-blocks/feed-forward.html' },
-              { title: 'Transformer Block', file: 'ml/transformers/building-blocks/transformer-block.html' },
-              { title: 'Positional Encoding', file: 'ml/transformers/building-blocks/positional-encoding.html' },
-              { title: 'Layer Normalization', file: 'ml/transformers/building-blocks/layer-norm.html' },
-              { title: 'Dropout Layer', file: 'ml/transformers/building-blocks/dropout.html', links: ['ml/transformers/building-blocks/layer-norm.html', 'ml/transformers/building-blocks/embedding-layer.html'] },
-              { title: 'Embedding Layer', file: 'ml/transformers/building-blocks/embedding-layer.html' }
-            ]
-          },
-          {
-            name: 'attention-variants',
-            label: 'Attention Variants',
-            children: [
-              { title: 'Self-Attention', file: 'ml/transformers/building-blocks/self-attention.html' },
-              { title: 'Softmax Attention', file: 'ml/transformers/building-blocks/softmax-attention.html' },
-              { title: 'Causal Attention', file: 'ml/transformers/building-blocks/causal-attention.html' },
-              { title: 'Cross-Attention', file: 'ml/transformers/building-blocks/cross-attention.html' },
-              { title: 'Sliding Window Attention', file: 'ml/transformers/building-blocks/sliding-window-attention.html' },
-              { title: 'Global Attention', file: 'ml/transformers/building-blocks/global-attention.html' },
-              { title: 'Linear Attention', file: 'ml/transformers/building-blocks/linear-attention.html' },
-              { title: 'Flash Attention', file: 'ml/transformers/building-blocks/flash-attention.html' },
-              { title: 'Multi-Head Attention (MHA)', file: 'ml/transformers/building-blocks/mha.html' },
-              { title: 'Multi-Query Attention (MQA)', file: 'ml/transformers/building-blocks/mqa.html' },
-              { title: 'Grouped-Query Attention (GQA)', file: 'ml/transformers/building-blocks/gqa.html' },
-              { title: 'Multi-Head Latent Attention (MLA)', file: 'ml/transformers/building-blocks/mla.html' },
-              { title: 'Interleaved Head Attention (IHA)', file: 'ml/transformers/building-blocks/iha.html' }
-            ]
-          },
-          {
-            name: 'architecture',
-            label: 'Architecture',
-            children: [
-              { title: 'Encoder-Decoder Overview', file: 'ml/transformers/architecture/index.html' },
-              { title: 'Encoder Block', file: 'ml/transformers/architecture/encoder.html' },
-              { title: 'Decoder Block', file: 'ml/transformers/architecture/decoder.html' }
-            ]
-          },
-          {
-            name: 'training',
-            label: 'Training',
-            children: [
-              { title: 'Training Overview', file: 'ml/transformers/training/index.html' },
-              { title: 'Tokenization', file: 'ml/transformers/training/tokenization.html' }
-            ]
-          },
-          {
-            name: 'variants',
-            label: 'Variants',
-            children: [
-              { title: 'Landscape', file: 'ml/transformers/variants/index.html' },
-              { title: 'BERT', file: 'ml/transformers/variants/bert.html' },
-              { title: 'GPT', file: 'ml/transformers/variants/gpt.html' },
-              { title: 'Vision Transformer', file: 'ml/transformers/variants/vision.html' }
-            ]
-          }
-        ]
-      },
-      {
         name: 'popular-courses',
         label: 'Popular Courses',
         children: [
@@ -8230,6 +8162,80 @@ var BLOG_TREE = [
           }
         ]
       }
+    ]
+  },
+  {
+    name: 'dl',
+    label: 'Deep Learning',
+    children: [
+      {
+        name: 'transformers',
+        label: 'Transformers',
+        children: [
+          { title: 'Overview', file: 'dl/transformers/index.html' },
+          {
+            name: 'building-blocks',
+            label: 'Building Blocks',
+            children: [
+              { title: 'Overview', file: 'dl/transformers/building-blocks/index.html' },
+              { title: 'Single-Head Attention', file: 'dl/transformers/building-blocks/single-head-attention.html' },
+              { title: 'Multi-Head Attention', file: 'dl/transformers/building-blocks/multi-head-attention.html' },
+              { title: 'Feed-Forward Network', file: 'dl/transformers/building-blocks/feed-forward.html' },
+              { title: 'Transformer Block', file: 'dl/transformers/building-blocks/transformer-block.html' },
+              { title: 'Positional Encoding', file: 'dl/transformers/building-blocks/positional-encoding.html' },
+              { title: 'Layer Normalization', file: 'dl/transformers/building-blocks/layer-norm.html' },
+              { title: 'Dropout Layer', file: 'dl/transformers/building-blocks/dropout.html', links: ['dl/transformers/building-blocks/layer-norm.html', 'dl/transformers/building-blocks/embedding-layer.html'] },
+              { title: 'Embedding Layer', file: 'dl/transformers/building-blocks/embedding-layer.html' }
+            ]
+          },
+          {
+            name: 'attention-variants',
+            label: 'Attention Variants',
+            children: [
+              { title: 'Self-Attention', file: 'dl/transformers/building-blocks/self-attention.html' },
+              { title: 'Softmax Attention', file: 'dl/transformers/building-blocks/softmax-attention.html' },
+              { title: 'Causal Attention', file: 'dl/transformers/building-blocks/causal-attention.html' },
+              { title: 'Cross-Attention', file: 'dl/transformers/building-blocks/cross-attention.html' },
+              { title: 'Sliding Window Attention', file: 'dl/transformers/building-blocks/sliding-window-attention.html' },
+              { title: 'Global Attention', file: 'dl/transformers/building-blocks/global-attention.html' },
+              { title: 'Linear Attention', file: 'dl/transformers/building-blocks/linear-attention.html' },
+              { title: 'Flash Attention', file: 'dl/transformers/building-blocks/flash-attention.html' },
+              { title: 'Multi-Head Attention (MHA)', file: 'dl/transformers/building-blocks/mha.html' },
+              { title: 'Multi-Query Attention (MQA)', file: 'dl/transformers/building-blocks/mqa.html' },
+              { title: 'Grouped-Query Attention (GQA)', file: 'dl/transformers/building-blocks/gqa.html' },
+              { title: 'Multi-Head Latent Attention (MLA)', file: 'dl/transformers/building-blocks/mla.html' },
+              { title: 'Interleaved Head Attention (IHA)', file: 'dl/transformers/building-blocks/iha.html' }
+            ]
+          },
+          {
+            name: 'architecture',
+            label: 'Architecture',
+            children: [
+              { title: 'Encoder-Decoder Overview', file: 'dl/transformers/architecture/index.html' },
+              { title: 'Encoder Block', file: 'dl/transformers/architecture/encoder.html' },
+              { title: 'Decoder Block', file: 'dl/transformers/architecture/decoder.html' }
+            ]
+          },
+          {
+            name: 'training',
+            label: 'Training',
+            children: [
+              { title: 'Training Overview', file: 'dl/transformers/training/index.html' },
+              { title: 'Tokenization', file: 'dl/transformers/training/tokenization.html' }
+            ]
+          },
+          {
+            name: 'variants',
+            label: 'Variants',
+            children: [
+              { title: 'Landscape', file: 'dl/transformers/variants/index.html' },
+              { title: 'BERT', file: 'dl/transformers/variants/bert.html' },
+              { title: 'GPT', file: 'dl/transformers/variants/gpt.html' },
+              { title: 'Vision Transformer', file: 'dl/transformers/variants/vision.html' }
+            ]
+          }
+        ]
+      },
     ]
   },
   {
@@ -9319,7 +9325,8 @@ function flattenBlogTree(nodes, result) {
     math:  { label: 'Math',  blurb: 'Probability, statistics, and pure-math foundations with worked-out proofs.' },
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
-    ml:    { label: 'ML',    blurb: 'Machine learning building blocks, from attention to transformers.' },
+    ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
+    dl:    { label: 'Deep Learning', blurb: 'Neural architectures in depth, starting with the transformer.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
