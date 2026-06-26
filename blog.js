@@ -8108,6 +8108,18 @@ var BLOG_TREE = [
               { title: 'Bagging & Random Forests', file: 'ml/decision-trees/handwritten-notes/bagging-random-forests.html', links: ['ml/decision-trees/handwritten-notes/cart-and-complexity.html', 'ml/decision-trees/handwritten-notes/boosting-adaboost.html'] },
               { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/handwritten-notes/boosting-adaboost.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html'] }
             ]
+          },
+          {
+            name: 'deep-dive',
+            label: 'Deep Dive',
+            children: [
+              { title: 'Foundations', file: 'ml/decision-trees/deep-dive/index.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'ml/decision-trees/deep-dive/impurity-and-information-gain.html'] },
+              { title: 'Impurity & Information Gain', file: 'ml/decision-trees/deep-dive/impurity-and-information-gain.html', links: ['ml/decision-trees/deep-dive/index.html', 'ml/decision-trees/deep-dive/entropy-from-kl.html'] },
+              { title: 'Entropy from KL Divergence', file: 'ml/decision-trees/deep-dive/entropy-from-kl.html', links: ['ml/decision-trees/deep-dive/impurity-and-information-gain.html', 'ml/decision-trees/deep-dive/cart-complexity-pruning.html'] },
+              { title: 'CART, Complexity & Pruning', file: 'ml/decision-trees/deep-dive/cart-complexity-pruning.html', links: ['ml/decision-trees/deep-dive/entropy-from-kl.html', 'ml/decision-trees/deep-dive/bagging-random-forests.html'] },
+              { title: 'Bagging & Random Forests', file: 'ml/decision-trees/deep-dive/bagging-random-forests.html', links: ['ml/decision-trees/deep-dive/cart-complexity-pruning.html', 'ml/decision-trees/deep-dive/boosting-adaboost.html'] },
+              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/deep-dive/boosting-adaboost.html', links: ['ml/decision-trees/deep-dive/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/boosting/index.html'] }
+            ]
           }
         ]
       },
