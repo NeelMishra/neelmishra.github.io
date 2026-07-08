@@ -8158,6 +8158,24 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'loss-functions',
+        label: 'Loss Functions',
+        children: [
+          { title: 'Overview', file: 'ml/loss-functions/index.html', links: ['ml/loss-functions/entropy/index.html', 'ml/gradient-boosted-machines/loss-functions.html'] },
+          {
+            name: 'entropy',
+            label: 'Entropy',
+            children: [
+              { title: 'Entropy Foundations', file: 'ml/loss-functions/entropy/index.html', links: ['ml/loss-functions/index.html', 'ml/loss-functions/entropy/binary-entropy.html'] },
+              { title: 'Binary Entropy', file: 'ml/loss-functions/entropy/binary-entropy.html', links: ['ml/loss-functions/entropy/index.html', 'ml/loss-functions/entropy/cross-entropy-kl.html'] },
+              { title: 'Cross-Entropy & KL Divergence', file: 'ml/loss-functions/entropy/cross-entropy-kl.html', links: ['ml/loss-functions/entropy/binary-entropy.html', 'ml/loss-functions/entropy/information-gain.html'] },
+              { title: 'Entropy & Information Gain', file: 'ml/loss-functions/entropy/information-gain.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/entropy/maximum-entropy.html'] },
+              { title: 'Maximum Entropy & Calibration', file: 'ml/loss-functions/entropy/maximum-entropy.html', links: ['ml/loss-functions/entropy/information-gain.html', 'ml/loss-functions/index.html'] }
+            ]
+          }
+        ]
+      },
+      {
         name: 'data-preparation',
         label: 'Data Preparation and Preprocessing',
         children: [
