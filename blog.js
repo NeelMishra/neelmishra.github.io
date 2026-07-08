@@ -230,7 +230,7 @@ var BLOG_TREE = [
             name: 'machine-learning',
             label: 'Machine Learning',
             children: [
-              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/data-preprocessing/index.html'] },
+              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] },
               {
                 name: 'decision-trees',
                 label: 'Decision Trees',
@@ -243,14 +243,24 @@ var BLOG_TREE = [
                 name: 'random-forest',
                 label: 'Random Forest',
                 children: [
-                  { title: 'Random Forest', file: 'from-scratch/cpp/machine-learning/random-forest/index.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/boosting/index.html'] }
+                  { title: 'Random Forest', file: 'from-scratch/cpp/machine-learning/random-forest/index.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] }
+                ]
+              },
+              {
+                name: 'gradient-boosted-machines',
+                label: 'Gradient Boosted Machines',
+                children: [
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', links: ['ml/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html'] },
+                  { title: 'Regression GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html'] },
+                  { title: 'Binary Classification GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html'] },
+                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/gradient-boosted-machines/modern-gbm.html'] }
                 ]
               },
               {
                 name: 'boosting',
                 label: 'Boosting',
                 children: [
-                  { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/boosting/index.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/data-preprocessing/index.html'] }
+                  { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/boosting/index.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] }
                 ]
               },
               {
@@ -8131,9 +8141,20 @@ var BLOG_TREE = [
               { title: 'Entropy from KL Divergence', file: 'ml/decision-trees/deep-dive/entropy-from-kl.html', links: ['ml/decision-trees/deep-dive/impurity-and-information-gain.html', 'ml/decision-trees/deep-dive/cart-complexity-pruning.html'] },
               { title: 'CART, Complexity & Pruning', file: 'ml/decision-trees/deep-dive/cart-complexity-pruning.html', links: ['ml/decision-trees/deep-dive/entropy-from-kl.html', 'ml/decision-trees/deep-dive/bagging-random-forests.html'] },
               { title: 'Bagging & Random Forests', file: 'ml/decision-trees/deep-dive/bagging-random-forests.html', links: ['ml/decision-trees/deep-dive/cart-complexity-pruning.html', 'ml/decision-trees/deep-dive/boosting-adaboost.html'] },
-              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/deep-dive/boosting-adaboost.html', links: ['ml/decision-trees/deep-dive/bagging-random-forests.html', 'from-scratch/cpp/machine-learning/boosting/index.html'] }
+              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/deep-dive/boosting-adaboost.html', links: ['ml/decision-trees/deep-dive/bagging-random-forests.html', 'ml/gradient-boosted-machines/index.html'] }
             ]
           }
+        ]
+      },
+      {
+        name: 'gradient-boosted-machines',
+        label: 'Gradient Boosted Machines',
+        children: [
+          { title: 'Foundations', file: 'ml/gradient-boosted-machines/index.html', links: ['ml/decision-trees/deep-dive/boosting-adaboost.html', 'ml/gradient-boosted-machines/loss-functions.html'] },
+          { title: 'Loss Functions & Pseudo-Residuals', file: 'ml/gradient-boosted-machines/loss-functions.html', links: ['ml/gradient-boosted-machines/index.html', 'ml/gradient-boosted-machines/tree-base-learners.html'] },
+          { title: 'Trees as Base Learners', file: 'ml/gradient-boosted-machines/tree-base-learners.html', links: ['ml/gradient-boosted-machines/loss-functions.html', 'ml/gradient-boosted-machines/regularization.html'] },
+          { title: 'Regularization & Early Stopping', file: 'ml/gradient-boosted-machines/regularization.html', links: ['ml/gradient-boosted-machines/tree-base-learners.html', 'ml/gradient-boosted-machines/modern-gbm.html'] },
+          { title: 'Modern GBM Systems', file: 'ml/gradient-boosted-machines/modern-gbm.html', links: ['ml/gradient-boosted-machines/regularization.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] }
         ]
       },
       {

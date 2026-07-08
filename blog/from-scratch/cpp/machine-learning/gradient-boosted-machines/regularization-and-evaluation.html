@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Regularizing and evaluating a Gradient Boosted Machine from scratch in C++: options structs, learning rate, tree depth, row subsampling, validation curves, early stopping, and permutation importance.">
+  <title>GBM Regularization and Evaluation in C++ | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css">
+  <link rel="stylesheet" href="../../../../../blog.css">
+  <style>
+    .callout{border-left:4px solid var(--brand);padding:0.8rem 1rem;margin:1rem 0;background:rgba(10,143,106,0.05);border-radius:0 8px 8px 0}
+    .callout strong{color:var(--brand)}
+    .result{background:#1a2b22;color:#d4e8dc;border-radius:10px;padding:0.9rem 1.1rem;margin:1rem 0;font-family:Consolas,monospace;font-size:0.9rem;white-space:pre-wrap}
+    figure.chart{margin:1.4rem 0;text-align:center}
+    figure.chart figcaption{color:var(--ink-muted);font-size:0.85rem;margin-top:0.5rem}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../../index.html">Home</a>
+      <a href="../../../../../experience.html">Experience</a>
+      <a href="../../../../../projects.html">Projects</a>
+      <a href="../../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="index.html">From Scratch &middot; C++ &middot; ML &middot; Gradient Boosted Machines</a>
+        <span>&middot; Part 3</span>
+      </div>
+
+      <h1>GBM Regularization and Evaluation in C++</h1>
+      <p class="post-meta">July 2026 &middot; 16 min read</p>
+
+      <p>The first two implementation posts built working GBM models. This final post adds the controls that make them usable: options, row subsampling, validation curves, early stopping, and permutation importance. The goal is not a full XGBoost clone; it is the practical scaffolding that turns the core loop into a model that can be tuned and inspected.</p>
+
+      <h2 id="options">Options Struct</h2>
+      <p>Collecting hyperparameters in one struct makes experiments reproducible:</p>
+      <pre><code>struct GBMOptions {
+    int rounds = 300;
+    int treeDepth = 3;
+    int minSamples = 8;
+    double learningRate = 0.05;
+    double rowSample = 0.8;       // fraction of rows used per tree
+    int earlyStoppingRounds = 25;
+    unsigned seed = 42;
+};</code></pre>
+
+      <p><code>rounds</code> is now a maximum. Early stopping will choose how many fitted trees to keep.</p>
+
+      <h2 id="subsample">Row Subsampling</h2>
+      <p>Row subsampling trains each tree on a random subset of rows while still updating predictions for all rows after the tree is fitted. This is stochastic gradient boosting.</p>
+      <pre><code>vector&lt;int&gt; sample_rows(int n, double fraction, mt19937&amp; rng) {
+    vector&lt;int&gt; idx(n);
+    iota(idx.begin(), idx.end(), 0);
+    shuffle(idx.begin(), idx.end(), rng);
+    int keep = max(1, (int)round(fraction * n));
+    idx.resize(keep);
+    return idx;
+}
+
+Matrix take_rows(const Matrix&amp; X, const vector&lt;int&gt;&amp; idx) {
+    Matrix out;
+    out.reserve(idx.size());
+    for (int i : idx) out.push_back(X[i]);
+    return out;
+}
+
+vector&lt;double&gt; take_values(const vector&lt;double&gt;&amp; y, const vector&lt;int&gt;&amp; idx) {
+    vector&lt;double&gt; out;
+    out.reserve(idx.size());
+    for (int i : idx) out.push_back(y[i]);
+    return out;
+}</code></pre>
+
+      <div class="callout"><strong>Train on a subset, update all rows.</strong> The tree sees only the sampled rows during fitting. Once fitted, it predicts for every training row so the ensemble state remains complete.</div>
+
+      <h2 id="validation">Validation Curve</h2>
+      <p>For regression, the training loop can evaluate validation RMSE after every round:</p>
+      <pre><code>struct FitHistory {
+    vector&lt;double&gt; trainRmse;
+    vector&lt;double&gt; validRmse;
+    int bestRound = 0;
+    double bestValid = numeric_limits&lt;double&gt;::infinity();
+};
+
+FitHistory fit_with_validation(RegressionGBM&amp; model,
+                               const Matrix&amp; Xtr,
+                               const vector&lt;double&gt;&amp; ytr,
+                               const Matrix&amp; Xva,
+                               const vector&lt;double&gt;&amp; yva,
+                               const GBMOptions&amp; opt) {
+    mt19937 rng(opt.seed);
+    FitHistory hist;
+    model.F0 = accumulate(ytr.begin(), ytr.end(), 0.0) / ytr.size();
+    vector&lt;double&gt; predTr(Xtr.size(), model.F0);
+    model.trees.clear();
+
+    int stale = 0;
+    for (int m = 0; m &lt; opt.rounds; ++m) {
+        vector&lt;double&gt; residual(Xtr.size());
+        for (size_t i = 0; i &lt; Xtr.size(); ++i)
+            residual[i] = ytr[i] - predTr[i];
+
+        vector&lt;int&gt; rows = sample_rows((int)Xtr.size(), opt.rowSample, rng);
+        Matrix Xsub = take_rows(Xtr, rows);
+        vector&lt;double&gt; rsub = take_values(residual, rows);
+
+        RegTree tree(opt.treeDepth, opt.minSamples);
+        tree.fit(Xsub, rsub);
+
+        for (size_t i = 0; i &lt; Xtr.size(); ++i)
+            predTr[i] += opt.learningRate * tree.predict(Xtr[i]);
+
+        model.trees.push_back(move(tree));
+
+        double trainScore = rmse(model, Xtr, ytr);
+        double validScore = rmse(model, Xva, yva);
+        hist.trainRmse.push_back(trainScore);
+        hist.validRmse.push_back(validScore);
+
+        if (validScore &lt; hist.bestValid) {
+            hist.bestValid = validScore;
+            hist.bestRound = m + 1;
+            stale = 0;
+        } else if (++stale &gt;= opt.earlyStoppingRounds) {
+            break;
+        }
+    }
+
+    model.trees.resize(hist.bestRound);
+    return hist;
+}</code></pre>
+
+      <p>The model keeps the best validation round, not the final attempted round. This mirrors the conceptual early-stopping curve from <a href="../../../../ml/gradient-boosted-machines/regularization.html">GBM Regularization</a>.</p>
+
+      <h2 id="curve">Example Curve</h2>
+      <div class="result">round  20  train RMSE=0.318  valid RMSE=0.351
+round  60  train RMSE=0.168  valid RMSE=0.224
+round 100  train RMSE=0.128  valid RMSE=0.211
+round 140  train RMSE=0.102  valid RMSE=0.219
+early stop: best round = 104, valid RMSE = 0.209</div>
+
+      <figure class="chart">
+        <svg viewBox="0 0 540 235" width="100%" style="max-width:580px" role="img" aria-label="Validation curve with best round selected near 104 trees">
+          <line x1="55" y1="30" x2="55" y2="190" stroke="var(--line)" stroke-width="1"/>
+          <line x1="55" y1="190" x2="500" y2="190" stroke="var(--line)" stroke-width="1"/>
+          <path d="M55 55 C130 100,210 142,500 176" fill="none" stroke="#0a8f6a" stroke-width="3"/>
+          <path d="M55 75 C120 116,200 151,315 158 C390 162,450 153,500 148" fill="none" stroke="#ff6b35" stroke-width="3"/>
+          <line x1="315" y1="30" x2="315" y2="190" stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6 4"/>
+          <text x="325" y="48" fill="#1d4ed8" font-family="Consolas,monospace" font-size="12">best round</text>
+          <text x="430" y="178" fill="#0a8f6a" font-size="12">train</text>
+          <text x="430" y="143" fill="#ff6b35" font-size="12">valid</text>
+          <text x="215" y="222" fill="var(--ink-muted)" font-size="12">boosting rounds</text>
+        </svg>
+        <figcaption>The validation curve bottoms out before training loss finishes falling.</figcaption>
+      </figure>
+
+      <h2 id="importance">Permutation Importance</h2>
+      <p>A simple model inspection tool measures how much validation error increases when one feature column is shuffled:</p>
+      <pre><code>vector&lt;double&gt; permutation_importance(const RegressionGBM&amp; model,
+                                      Matrix X,
+                                      const vector&lt;double&gt;&amp; y,
+                                      mt19937&amp; rng) {
+    int d = (int)X[0].size();
+    double base = rmse(model, X, y);
+    vector&lt;double&gt; imp(d);
+
+    for (int f = 0; f &lt; d; ++f) {
+        vector&lt;double&gt; original;
+        for (auto&amp; row : X) original.push_back(row[f]);
+
+        vector&lt;double&gt; shuffled = original;
+        shuffle(shuffled.begin(), shuffled.end(), rng);
+        for (size_t i = 0; i &lt; X.size(); ++i) X[i][f] = shuffled[i];
+
+        imp[f] = rmse(model, X, y) - base;
+
+        for (size_t i = 0; i &lt; X.size(); ++i) X[i][f] = original[i];
+    }
+    return imp;
+}</code></pre>
+
+      <p>The original column is restored before moving to the next feature. If shuffling a feature destroys validation performance, the model relied on that feature.</p>
+
+      <h2 id="checklist">GBM Implementation Checklist</h2>
+      <ol>
+        <li>Use a held-out validation set, or cross-validation for small datasets.</li>
+        <li>Fit each preprocessing transform on training data only.</li>
+        <li>Start with shallow trees and a small learning rate.</li>
+        <li>Use early stopping to choose the number of trees.</li>
+        <li>Report both the metric being optimized and the metric used by the application.</li>
+      </ol>
+
+      <p>The resulting C++ GBM is still compact: one CART regression tree, one additive loop, and a small evaluation harness. That compactness is the purpose of implementing it from scratch; the core idea is visible enough to connect directly back to the conceptual GBM series.</p>
+
+      <nav class="post-nav">
+        <a class="prev" href="binary-classification.html"><span>Previous</span><span>&#8592; Binary Classification GBM</span></a>
+        <a class="next" href="../../../../ml/gradient-boosted-machines/modern-gbm.html"><span>Next</span><span>Modern GBM Systems &rarr;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../../script.js"></script>
+  <script src="../../../../../blog.js"></script>
+  <script src="../../../../../anim-speed.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count"
+          async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
