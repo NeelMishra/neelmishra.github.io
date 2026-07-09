@@ -270,7 +270,16 @@ var BLOG_TREE = [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/index.html', links: ['ml/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html'] },
                   { title: 'Permutation Importance', file: 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html', links: ['from-scratch/cpp/machine-learning/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html'] },
                   { title: 'LIME from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html'] },
-                  { title: 'Kernel SHAP from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'ml/explainability/shap-lime/choosing-explainers.html'] }
+                  { title: 'Kernel SHAP from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html'] },
+                  {
+                    name: 'tree-shap',
+                    label: 'Tree SHAP',
+                    children: [
+                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', links: ['ml/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html'] },
+                      { title: 'Exact Small Tree', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html'] },
+                      { title: 'Path-Dependent Tree SHAP', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', 'ml/explainability/tree-shap/limitations.html'] }
+                    ]
+                  }
                 ]
               },
               {
@@ -8182,6 +8191,33 @@ var BLOG_TREE = [
               { title: 'Entropy & Information Gain', file: 'ml/loss-functions/entropy/information-gain.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/entropy/maximum-entropy.html'] },
               { title: 'Maximum Entropy & Calibration', file: 'ml/loss-functions/entropy/maximum-entropy.html', links: ['ml/loss-functions/entropy/information-gain.html', 'ml/loss-functions/index.html'] }
             ]
+          },
+          {
+            name: 'kl-divergence',
+            label: 'KL Divergence',
+            children: [
+              { title: 'Foundations', file: 'ml/loss-functions/kl-divergence/index.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/kl-divergence/forward-vs-reverse.html'] },
+              { title: 'Forward vs Reverse KL', file: 'ml/loss-functions/kl-divergence/forward-vs-reverse.html', links: ['ml/loss-functions/kl-divergence/index.html', 'ml/loss-functions/kl-divergence/kl-in-ml.html'] },
+              { title: 'KL in ML Objectives', file: 'ml/loss-functions/kl-divergence/kl-in-ml.html', links: ['ml/loss-functions/kl-divergence/forward-vs-reverse.html', 'ml/loss-functions/js-divergence/index.html'] }
+            ]
+          },
+          {
+            name: 'js-divergence',
+            label: 'JS Divergence',
+            children: [
+              { title: 'Foundations', file: 'ml/loss-functions/js-divergence/index.html', links: ['ml/loss-functions/kl-divergence/kl-in-ml.html', 'ml/loss-functions/js-divergence/gan-connection.html'] },
+              { title: 'JS Divergence and GANs', file: 'ml/loss-functions/js-divergence/gan-connection.html', links: ['ml/loss-functions/js-divergence/index.html', 'ml/loss-functions/js-divergence/properties-and-uses.html'] },
+              { title: 'Properties and Uses', file: 'ml/loss-functions/js-divergence/properties-and-uses.html', links: ['ml/loss-functions/js-divergence/gan-connection.html', 'ml/loss-functions/earth-movers-distance/index.html'] }
+            ]
+          },
+          {
+            name: 'earth-movers-distance',
+            label: "Earth Mover's Distance",
+            children: [
+              { title: 'Foundations', file: 'ml/loss-functions/earth-movers-distance/index.html', links: ['ml/loss-functions/js-divergence/properties-and-uses.html', 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html'] },
+              { title: '1D Wasserstein Distance', file: 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html', links: ['ml/loss-functions/earth-movers-distance/index.html', 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html'] },
+              { title: 'Optimal Transport in ML', file: 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html', links: ['ml/loss-functions/earth-movers-distance/wasserstein-1d.html', 'ml/loss-functions/index.html'] }
+            ]
           }
         ]
       },
@@ -8199,6 +8235,17 @@ var BLOG_TREE = [
               { title: 'Shapley Values', file: 'ml/explainability/shap-lime/shapley-values.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'ml/explainability/shap-lime/kernel-shap.html'] },
               { title: 'Kernel SHAP', file: 'ml/explainability/shap-lime/kernel-shap.html', links: ['ml/explainability/shap-lime/shapley-values.html', 'ml/explainability/shap-lime/choosing-explainers.html'] },
               { title: 'Choosing Explainers', file: 'ml/explainability/shap-lime/choosing-explainers.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] }
+            ]
+          },
+          {
+            name: 'tree-shap',
+            label: 'Tree SHAP',
+            children: [
+              { title: 'Overview', file: 'ml/explainability/tree-shap/index.html', links: ['ml/explainability/shap-lime/choosing-explainers.html', 'ml/explainability/tree-shap/why-tree-shap.html'] },
+              { title: 'Why Tree SHAP', file: 'ml/explainability/tree-shap/why-tree-shap.html', links: ['ml/explainability/tree-shap/index.html', 'ml/explainability/tree-shap/path-contributions.html'] },
+              { title: 'Path Contributions', file: 'ml/explainability/tree-shap/path-contributions.html', links: ['ml/explainability/tree-shap/why-tree-shap.html', 'ml/explainability/tree-shap/ensembles-and-global.html'] },
+              { title: 'Ensembles and Global Summaries', file: 'ml/explainability/tree-shap/ensembles-and-global.html', links: ['ml/explainability/tree-shap/path-contributions.html', 'ml/explainability/tree-shap/limitations.html'] },
+              { title: 'Limitations and Validation', file: 'ml/explainability/tree-shap/limitations.html', links: ['ml/explainability/tree-shap/ensembles-and-global.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html'] }
             ]
           }
         ]
