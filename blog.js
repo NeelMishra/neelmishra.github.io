@@ -230,7 +230,7 @@ var BLOG_TREE = [
             name: 'machine-learning',
             label: 'Machine Learning',
             children: [
-              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] },
+              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] },
               {
                 name: 'decision-trees',
                 label: 'Decision Trees',
@@ -261,6 +261,16 @@ var BLOG_TREE = [
                 label: 'Boosting',
                 children: [
                   { title: 'Gradient Boosting & AdaBoost', file: 'from-scratch/cpp/machine-learning/boosting/index.html', links: ['ml/decision-trees/handwritten-notes/boosting-adaboost.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] }
+                ]
+              },
+              {
+                name: 'explainability',
+                label: 'Explainability',
+                children: [
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/index.html', links: ['ml/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html'] },
+                  { title: 'Permutation Importance', file: 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html', links: ['from-scratch/cpp/machine-learning/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html'] },
+                  { title: 'LIME from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html'] },
+                  { title: 'Kernel SHAP from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'ml/explainability/shap-lime/choosing-explainers.html'] }
                 ]
               },
               {
@@ -8171,6 +8181,24 @@ var BLOG_TREE = [
               { title: 'Cross-Entropy & KL Divergence', file: 'ml/loss-functions/entropy/cross-entropy-kl.html', links: ['ml/loss-functions/entropy/binary-entropy.html', 'ml/loss-functions/entropy/information-gain.html'] },
               { title: 'Entropy & Information Gain', file: 'ml/loss-functions/entropy/information-gain.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/entropy/maximum-entropy.html'] },
               { title: 'Maximum Entropy & Calibration', file: 'ml/loss-functions/entropy/maximum-entropy.html', links: ['ml/loss-functions/entropy/information-gain.html', 'ml/loss-functions/index.html'] }
+            ]
+          }
+        ]
+      },
+      {
+        name: 'explainability',
+        label: 'Explainability',
+        children: [
+          { title: 'Overview', file: 'ml/explainability/index.html', links: ['ml/explainability/shap-lime/index.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] },
+          {
+            name: 'shap-lime',
+            label: 'SHAP & LIME',
+            children: [
+              { title: 'Local Explainability', file: 'ml/explainability/shap-lime/index.html', links: ['ml/explainability/index.html', 'ml/explainability/shap-lime/lime-local-surrogates.html'] },
+              { title: 'LIME: Local Surrogates', file: 'ml/explainability/shap-lime/lime-local-surrogates.html', links: ['ml/explainability/shap-lime/index.html', 'ml/explainability/shap-lime/shapley-values.html'] },
+              { title: 'Shapley Values', file: 'ml/explainability/shap-lime/shapley-values.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'ml/explainability/shap-lime/kernel-shap.html'] },
+              { title: 'Kernel SHAP', file: 'ml/explainability/shap-lime/kernel-shap.html', links: ['ml/explainability/shap-lime/shapley-values.html', 'ml/explainability/shap-lime/choosing-explainers.html'] },
+              { title: 'Choosing Explainers', file: 'ml/explainability/shap-lime/choosing-explainers.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] }
             ]
           }
         ]
