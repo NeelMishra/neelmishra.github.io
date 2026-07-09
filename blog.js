@@ -230,7 +230,18 @@ var BLOG_TREE = [
             name: 'machine-learning',
             label: 'Machine Learning',
             children: [
-              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/decision-trees/index.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] },
+              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/linear-regression/index.html', 'from-scratch/cpp/machine-learning/decision-trees/index.html'] },
+              {
+                name: 'linear-regression',
+                label: 'Linear Regression',
+                children: [
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/linear-regression/index.html', links: ['ml/linear-regression/index.html', 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html'] },
+                  { title: 'Ordinary Least Squares', file: 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', links: ['from-scratch/cpp/machine-learning/linear-regression/index.html', 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html'] },
+                  { title: 'Gradient Descent', file: 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html', links: ['from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html'] },
+                  { title: 'Regularized Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html', links: ['ml/linear-regression/regularized-variants.html', 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html'] },
+                  { title: 'Robust & Quantile Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html', links: ['ml/linear-regression/robust-and-quantile.html', 'ml/linear-regression/diagnostics.html'] }
+                ]
+              },
               {
                 name: 'decision-trees',
                 label: 'Decision Trees',
@@ -8135,6 +8146,18 @@ var BLOG_TREE = [
     name: 'ml',
     label: 'Machine Learning',
     children: [
+      {
+        name: 'linear-regression',
+        label: 'Linear Regression',
+        children: [
+          { title: 'Foundations', file: 'ml/linear-regression/index.html', links: ['ml/linear-regression/least-squares-geometry.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] },
+          { title: 'Least Squares Geometry', file: 'ml/linear-regression/least-squares-geometry.html', links: ['ml/linear-regression/index.html', 'ml/linear-regression/gradient-descent.html'] },
+          { title: 'Gradient Descent', file: 'ml/linear-regression/gradient-descent.html', links: ['ml/linear-regression/least-squares-geometry.html', 'ml/linear-regression/regularized-variants.html'] },
+          { title: 'Regularized Variants', file: 'ml/linear-regression/regularized-variants.html', links: ['ml/linear-regression/gradient-descent.html', 'ml/linear-regression/robust-and-quantile.html'] },
+          { title: 'Robust & Quantile Regression', file: 'ml/linear-regression/robust-and-quantile.html', links: ['ml/linear-regression/regularized-variants.html', 'ml/linear-regression/diagnostics.html'] },
+          { title: 'Assumptions & Diagnostics', file: 'ml/linear-regression/diagnostics.html', links: ['ml/linear-regression/robust-and-quantile.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] }
+        ]
+      },
       {
         name: 'decision-trees',
         label: 'Decision Trees',
