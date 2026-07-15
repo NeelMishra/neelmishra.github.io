@@ -236,7 +236,7 @@ var BLOG_TREE = [
                 label: 'Linear Regression',
                 children: [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/linear-regression/index.html', links: ['ml/linear-regression/index.html', 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html'] },
-                  { title: 'Ordinary Least Squares', file: 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', links: ['from-scratch/cpp/machine-learning/linear-regression/index.html', 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html'] },
+                  { title: 'Ordinary Least Squares', file: 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html'] },
                   { title: 'Gradient Descent', file: 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html', links: ['from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html'] },
                   { title: 'Regularized Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html', links: ['ml/linear-regression/regularized-variants.html', 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html'] },
                   { title: 'Robust & Quantile Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html', links: ['ml/linear-regression/robust-and-quantile.html', 'ml/linear-regression/diagnostics.html'] }
@@ -8150,12 +8150,25 @@ var BLOG_TREE = [
         name: 'linear-regression',
         label: 'Linear Regression',
         children: [
-          { title: 'Foundations', file: 'ml/linear-regression/index.html', links: ['ml/linear-regression/least-squares-geometry.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] },
-          { title: 'Least Squares Geometry', file: 'ml/linear-regression/least-squares-geometry.html', links: ['ml/linear-regression/index.html', 'ml/linear-regression/gradient-descent.html'] },
+          { title: 'Foundations', file: 'ml/linear-regression/index.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/least-squares-geometry.html'] },
+          {
+            name: 'ordinary-least-squares',
+            label: 'Ordinary Least Squares',
+            children: [
+              { title: 'Complete Guide', file: 'ml/linear-regression/ordinary-least-squares/index.html', links: ['ml/linear-regression/index.html', 'ml/linear-regression/ordinary-least-squares/simple-regression.html'] },
+              { title: 'Simple OLS', file: 'ml/linear-regression/ordinary-least-squares/simple-regression.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html'] },
+              { title: 'Multiple OLS & FWL', file: 'ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html', links: ['ml/linear-regression/ordinary-least-squares/simple-regression.html', 'ml/linear-regression/ordinary-least-squares/gauss-markov.html'] },
+              { title: 'Gauss-Markov', file: 'ml/linear-regression/ordinary-least-squares/gauss-markov.html', links: ['ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html', 'ml/linear-regression/ordinary-least-squares/inference-and-intervals.html'] },
+              { title: 'Inference & Intervals', file: 'ml/linear-regression/ordinary-least-squares/inference-and-intervals.html', links: ['ml/linear-regression/ordinary-least-squares/gauss-markov.html', 'ml/linear-regression/ordinary-least-squares/numerical-solvers.html'] },
+              { title: 'Numerical Solvers', file: 'ml/linear-regression/ordinary-least-squares/numerical-solvers.html', links: ['ml/linear-regression/ordinary-least-squares/inference-and-intervals.html', 'ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html'] },
+              { title: 'Influence & Diagnostics', file: 'ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html', links: ['ml/linear-regression/ordinary-least-squares/numerical-solvers.html', 'ml/linear-regression/diagnostics.html'] }
+            ]
+          },
+          { title: 'Least Squares Geometry', file: 'ml/linear-regression/least-squares-geometry.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/gradient-descent.html'] },
           { title: 'Gradient Descent', file: 'ml/linear-regression/gradient-descent.html', links: ['ml/linear-regression/least-squares-geometry.html', 'ml/linear-regression/regularized-variants.html'] },
           { title: 'Regularized Variants', file: 'ml/linear-regression/regularized-variants.html', links: ['ml/linear-regression/gradient-descent.html', 'ml/linear-regression/robust-and-quantile.html'] },
           { title: 'Robust & Quantile Regression', file: 'ml/linear-regression/robust-and-quantile.html', links: ['ml/linear-regression/regularized-variants.html', 'ml/linear-regression/diagnostics.html'] },
-          { title: 'Assumptions & Diagnostics', file: 'ml/linear-regression/diagnostics.html', links: ['ml/linear-regression/robust-and-quantile.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] }
+          { title: 'Assumptions & Diagnostics', file: 'ml/linear-regression/diagnostics.html', links: ['ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] }
         ]
       },
       {
