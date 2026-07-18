@@ -15,9 +15,11 @@ Personal site + technical blog served by **GitHub Pages**. Pure static HTML/CSS/
 A new post is **not visible** until it is registered in two places:
 
 1. **`blog.js` → `BLOG_TREE`** — the nested directory/series structure that drives the sidebar nav. Each leaf is `{ title, file, links: [...] }` where `links` is the cross-link list shown in the post footer (use 1–2 sibling/related post paths).
-2. **`blog-posts.js` → `BLOG_POSTS`** — a flat object keyed by the same `file` path, containing `{ category, series, title, description, meta }`. This drives the blog index cards and search.
+2. **`blog-posts.js` → `BLOG_POSTS`** — a flat object keyed by the same `file` path, containing `{ category, series, title, description, meta }` and optionally `draft: true`. This drives the blog index cards and search.
 
 Keep the keys in `BLOG_POSTS` exactly equal to the `file` values in `BLOG_TREE`. Mismatches silently break the index.
+
+Draft posts must still be registered in both files. Set `draft: true` to keep a page available in the sidebar tree while excluding it from `blog.html` cards, filters, and counts. Draft HTML should use the shared `.wip-tag`, `.wip-banner`, and `.wip-roadmap` classes and include `<meta name="robots" content="noindex, nofollow">`. When publishing, remove `draft`, the WIP markup, and the `noindex` directive together.
 
 **Auto-managed regions — do not hand-edit.** Inside both files, the LeetCode-contests subtree lives between marker comments and is rewritten by `tools/update_registries.py`:
 
@@ -54,7 +56,7 @@ For posts that need math, follow the LeetCode-contest scaffold (`blog/dsa/leetco
 
 There is no test suite, lint, or build. To preview, serve the directory statically (e.g. `python3 -m http.server` from the repo root) and open `index.html` / `blog.html`. Verify any new post by:
 
-1. Confirming it appears in the sidebar tree and on `blog.html`.
+1. Confirming it appears in the sidebar tree and, unless marked `draft: true`, on `blog.html`.
 2. Clicking it loads correctly and the TOC + cross-links populate.
 3. Any animations run when scrolled into view.
 

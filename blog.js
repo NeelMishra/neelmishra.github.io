@@ -230,16 +230,37 @@ var BLOG_TREE = [
             name: 'machine-learning',
             label: 'Machine Learning',
             children: [
-              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/linear-regression/index.html', 'from-scratch/cpp/machine-learning/decision-trees/index.html'] },
+              { title: 'Overview', file: 'from-scratch/cpp/machine-learning/index.html', links: ['from-scratch/cpp/machine-learning/regression/index.html', 'from-scratch/cpp/machine-learning/decision-trees/index.html'] },
               {
-                name: 'linear-regression',
-                label: 'Linear Regression',
+                name: 'regression',
+                label: 'Regression',
                 children: [
-                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/linear-regression/index.html', links: ['ml/linear-regression/index.html', 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html'] },
-                  { title: 'Ordinary Least Squares', file: 'from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html'] },
-                  { title: 'Gradient Descent', file: 'from-scratch/cpp/machine-learning/linear-regression/gradient-descent.html', links: ['from-scratch/cpp/machine-learning/linear-regression/ordinary-least-squares.html', 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html'] },
-                  { title: 'Regularized Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/regularized-regression.html', links: ['ml/linear-regression/regularized-variants.html', 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html'] },
-                  { title: 'Robust & Quantile Regression', file: 'from-scratch/cpp/machine-learning/linear-regression/robust-quantile-regression.html', links: ['ml/linear-regression/robust-and-quantile.html', 'ml/linear-regression/diagnostics.html'] }
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/regression/index.html', links: ['ml/regression/index.html', 'from-scratch/cpp/machine-learning/regression/linear/index.html'] },
+                  {
+                    name: 'linear',
+                    label: 'Linear Regression',
+                    children: [
+                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/regression/linear/index.html', links: ['ml/regression/linear/index.html', 'from-scratch/cpp/machine-learning/regression/linear/ordinary-least-squares.html'] },
+                      { title: 'Ordinary Least Squares', file: 'from-scratch/cpp/machine-learning/regression/linear/ordinary-least-squares.html', links: ['ml/regression/linear/ols-and-projection.html', 'from-scratch/cpp/machine-learning/regression/linear/numerical-solvers.html'] },
+                      { title: 'Numerical Solvers', file: 'from-scratch/cpp/machine-learning/regression/linear/numerical-solvers.html', links: ['ml/regression/linear/numerical-solvers.html', 'from-scratch/cpp/machine-learning/regression/linear/gradient-descent.html'] },
+                      { title: 'Gradient Descent', file: 'from-scratch/cpp/machine-learning/regression/linear/gradient-descent.html', links: ['ml/regression/linear/gradient-descent.html', 'from-scratch/cpp/machine-learning/regression/linear/regularized-regression.html'] },
+                      { title: 'Regularized Regression', file: 'from-scratch/cpp/machine-learning/regression/linear/regularized-regression.html', links: ['ml/regression/linear/regularization.html', 'from-scratch/cpp/machine-learning/regression/linear/robust-quantile-regression.html'] },
+                      { title: 'Robust & Quantile Regression', file: 'from-scratch/cpp/machine-learning/regression/linear/robust-quantile-regression.html', links: ['ml/regression/linear/robust-and-quantile.html', 'from-scratch/cpp/machine-learning/regression/linear/diagnostics-and-metrics.html'] },
+                      { title: 'Diagnostics & Metrics', file: 'from-scratch/cpp/machine-learning/regression/linear/diagnostics-and-metrics.html', links: ['ml/regression/linear/diagnostics-and-evaluation.html', 'from-scratch/cpp/machine-learning/regression/logistic/index.html'] }
+                    ]
+                  },
+                  {
+                    name: 'logistic',
+                    label: 'Logistic Regression',
+                    children: [
+                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/regression/logistic/index.html', links: ['ml/regression/logistic/index.html', 'from-scratch/cpp/machine-learning/regression/logistic/sigmoid-log-loss-gradient.html'] },
+                      { title: 'Sigmoid, Log-Loss & Gradient', file: 'from-scratch/cpp/machine-learning/regression/logistic/sigmoid-log-loss-gradient.html', links: ['ml/regression/logistic/mle-and-log-loss.html', 'from-scratch/cpp/machine-learning/regression/logistic/newton-irls.html'] },
+                      { title: 'Newton & IRLS', file: 'from-scratch/cpp/machine-learning/regression/logistic/newton-irls.html', links: ['ml/regression/logistic/optimization-gradient-newton-irls.html', 'from-scratch/cpp/machine-learning/regression/logistic/regularized-logistic-regression.html'] },
+                      { title: 'Regularized Logistic Regression', file: 'from-scratch/cpp/machine-learning/regression/logistic/regularized-logistic-regression.html', links: ['ml/regression/logistic/regularization-and-separation.html', 'from-scratch/cpp/machine-learning/regression/logistic/multiclass-softmax.html'] },
+                      { title: 'Multiclass Softmax', file: 'from-scratch/cpp/machine-learning/regression/logistic/multiclass-softmax.html', links: ['ml/regression/logistic/multiclass-softmax.html', 'from-scratch/cpp/machine-learning/regression/logistic/evaluation-and-calibration.html'] },
+                      { title: 'Evaluation & Calibration', file: 'from-scratch/cpp/machine-learning/regression/logistic/evaluation-and-calibration.html', links: ['ml/regression/logistic/classification-metrics.html', 'ml/regression/logistic/calibration.html'] }
+                    ]
+                  }
                 ]
               },
               {
@@ -8147,28 +8168,46 @@ var BLOG_TREE = [
     label: 'Machine Learning',
     children: [
       {
-        name: 'linear-regression',
-        label: 'Linear Regression',
+        name: 'regression',
+        label: 'Regression',
         children: [
-          { title: 'Foundations', file: 'ml/linear-regression/index.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/least-squares-geometry.html'] },
+          { title: 'Overview', file: 'ml/regression/index.html', links: ['ml/regression/linear/index.html', 'ml/regression/logistic/index.html'] },
           {
-            name: 'ordinary-least-squares',
-            label: 'Ordinary Least Squares',
+            name: 'linear',
+            label: 'Linear Regression',
             children: [
-              { title: 'Complete Guide', file: 'ml/linear-regression/ordinary-least-squares/index.html', links: ['ml/linear-regression/index.html', 'ml/linear-regression/ordinary-least-squares/simple-regression.html'] },
-              { title: 'Simple OLS', file: 'ml/linear-regression/ordinary-least-squares/simple-regression.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html'] },
-              { title: 'Multiple OLS & FWL', file: 'ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html', links: ['ml/linear-regression/ordinary-least-squares/simple-regression.html', 'ml/linear-regression/ordinary-least-squares/gauss-markov.html'] },
-              { title: 'Gauss-Markov', file: 'ml/linear-regression/ordinary-least-squares/gauss-markov.html', links: ['ml/linear-regression/ordinary-least-squares/multiple-regression-fwl.html', 'ml/linear-regression/ordinary-least-squares/inference-and-intervals.html'] },
-              { title: 'Inference & Intervals', file: 'ml/linear-regression/ordinary-least-squares/inference-and-intervals.html', links: ['ml/linear-regression/ordinary-least-squares/gauss-markov.html', 'ml/linear-regression/ordinary-least-squares/numerical-solvers.html'] },
-              { title: 'Numerical Solvers', file: 'ml/linear-regression/ordinary-least-squares/numerical-solvers.html', links: ['ml/linear-regression/ordinary-least-squares/inference-and-intervals.html', 'ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html'] },
-              { title: 'Influence & Diagnostics', file: 'ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html', links: ['ml/linear-regression/ordinary-least-squares/numerical-solvers.html', 'ml/linear-regression/diagnostics.html'] }
+              { title: 'Overview', file: 'ml/regression/linear/index.html', links: ['ml/regression/index.html', 'ml/regression/linear/what-linear-regression-estimates.html'] },
+              { title: 'What Linear Regression Estimates', file: 'ml/regression/linear/what-linear-regression-estimates.html', links: ['ml/regression/linear/index.html', 'ml/regression/linear/ols-and-projection.html'] },
+              { title: 'OLS & Projection', file: 'ml/regression/linear/ols-and-projection.html', links: ['ml/regression/linear/what-linear-regression-estimates.html', 'ml/regression/linear/gauss-markov-and-inference.html'] },
+              { title: 'Gauss-Markov & Inference', file: 'ml/regression/linear/gauss-markov-and-inference.html', links: ['ml/regression/linear/ols-and-projection.html', 'ml/regression/linear/multicollinearity-and-fwl.html'] },
+              { title: 'Multicollinearity & FWL', file: 'ml/regression/linear/multicollinearity-and-fwl.html', links: ['ml/regression/linear/gauss-markov-and-inference.html', 'ml/regression/linear/model-specification.html'] },
+              { title: 'Model Specification', file: 'ml/regression/linear/model-specification.html', links: ['ml/regression/linear/multicollinearity-and-fwl.html', 'ml/regression/linear/numerical-solvers.html'] },
+              { title: 'Numerical Solvers', file: 'ml/regression/linear/numerical-solvers.html', links: ['ml/regression/linear/model-specification.html', 'ml/regression/linear/gradient-descent.html'] },
+              { title: 'Gradient Descent', file: 'ml/regression/linear/gradient-descent.html', links: ['ml/regression/linear/numerical-solvers.html', 'ml/regression/linear/regularization.html'] },
+              { title: 'Regularization', file: 'ml/regression/linear/regularization.html', links: ['ml/regression/linear/gradient-descent.html', 'ml/regression/linear/robust-and-quantile.html'] },
+              { title: 'Robust & Quantile Regression', file: 'ml/regression/linear/robust-and-quantile.html', links: ['ml/regression/linear/regularization.html', 'ml/regression/linear/diagnostics-and-evaluation.html'] },
+              { title: 'Diagnostics & Evaluation', file: 'ml/regression/linear/diagnostics-and-evaluation.html', links: ['ml/regression/linear/robust-and-quantile.html', 'ml/regression/linear/production-failure-modes.html'] },
+              { title: 'Production Failure Modes', file: 'ml/regression/linear/production-failure-modes.html', links: ['ml/regression/linear/diagnostics-and-evaluation.html', 'ml/regression/linear/interview-derivations.html'] },
+              { title: 'Interview Derivations', file: 'ml/regression/linear/interview-derivations.html', links: ['ml/regression/linear/production-failure-modes.html', 'ml/regression/logistic/index.html'] }
             ]
           },
-          { title: 'Least Squares Geometry', file: 'ml/linear-regression/least-squares-geometry.html', links: ['ml/linear-regression/ordinary-least-squares/index.html', 'ml/linear-regression/gradient-descent.html'] },
-          { title: 'Gradient Descent', file: 'ml/linear-regression/gradient-descent.html', links: ['ml/linear-regression/least-squares-geometry.html', 'ml/linear-regression/regularized-variants.html'] },
-          { title: 'Regularized Variants', file: 'ml/linear-regression/regularized-variants.html', links: ['ml/linear-regression/gradient-descent.html', 'ml/linear-regression/robust-and-quantile.html'] },
-          { title: 'Robust & Quantile Regression', file: 'ml/linear-regression/robust-and-quantile.html', links: ['ml/linear-regression/regularized-variants.html', 'ml/linear-regression/diagnostics.html'] },
-          { title: 'Assumptions & Diagnostics', file: 'ml/linear-regression/diagnostics.html', links: ['ml/linear-regression/ordinary-least-squares/influence-and-diagnostics.html', 'from-scratch/cpp/machine-learning/linear-regression/index.html'] }
+          {
+            name: 'logistic',
+            label: 'Logistic Regression',
+            children: [
+              { title: 'Overview', file: 'ml/regression/logistic/index.html', links: ['ml/regression/index.html', 'ml/regression/logistic/probability-odds-and-interpretation.html'] },
+              { title: 'Probability, Odds & Interpretation', file: 'ml/regression/logistic/probability-odds-and-interpretation.html', links: ['ml/regression/linear/what-linear-regression-estimates.html', 'ml/regression/logistic/mle-and-log-loss.html'] },
+              { title: 'MLE & Log-Loss', file: 'ml/regression/logistic/mle-and-log-loss.html', links: ['ml/regression/logistic/probability-odds-and-interpretation.html', 'ml/regression/logistic/optimization-gradient-newton-irls.html'] },
+              { title: 'Gradient, Newton & IRLS', file: 'ml/regression/logistic/optimization-gradient-newton-irls.html', links: ['ml/regression/logistic/mle-and-log-loss.html', 'ml/regression/logistic/regularization-and-separation.html'] },
+              { title: 'Regularization & Separation', file: 'ml/regression/logistic/regularization-and-separation.html', links: ['ml/regression/logistic/optimization-gradient-newton-irls.html', 'ml/regression/logistic/multiclass-softmax.html'] },
+              { title: 'Multiclass & Softmax', file: 'ml/regression/logistic/multiclass-softmax.html', links: ['ml/regression/logistic/regularization-and-separation.html', 'ml/regression/logistic/thresholds-imbalance-and-costs.html'] },
+              { title: 'Thresholds, Imbalance & Costs', file: 'ml/regression/logistic/thresholds-imbalance-and-costs.html', links: ['ml/regression/logistic/multiclass-softmax.html', 'ml/regression/logistic/classification-metrics.html'] },
+              { title: 'Classification Metrics', file: 'ml/regression/logistic/classification-metrics.html', links: ['ml/regression/logistic/thresholds-imbalance-and-costs.html', 'ml/regression/logistic/calibration.html'] },
+              { title: 'Calibration', file: 'ml/regression/logistic/calibration.html', links: ['ml/regression/logistic/classification-metrics.html', 'ml/regression/logistic/diagnostics-and-production-failures.html'] },
+              { title: 'Diagnostics & Production Failures', file: 'ml/regression/logistic/diagnostics-and-production-failures.html', links: ['ml/regression/logistic/calibration.html', 'ml/regression/logistic/interview-derivations.html'] },
+              { title: 'Interview Derivations', file: 'ml/regression/logistic/interview-derivations.html', links: ['ml/regression/logistic/diagnostics-and-production-failures.html', 'from-scratch/cpp/machine-learning/regression/logistic/index.html'] }
+            ]
+          }
         ]
       },
       {
@@ -9696,6 +9735,7 @@ function flattenBlogTree(nodes, result) {
   var posts = [];
   Object.keys(BLOG_POSTS).forEach(function(file) {
     var p = BLOG_POSTS[file];
+    if (p.draft) return;
     var segs = p.series.split(/\s*&middot;\s*|\s*·\s*/).map(function(s){ return s.trim(); }).filter(Boolean);
     var catLabel = CATEGORY_META[p.category] ? CATEGORY_META[p.category].label : (segs[0] || p.category);
     var inner = segs.slice();
