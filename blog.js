@@ -8207,6 +8207,20 @@ var BLOG_TREE = [
               { title: 'Diagnostics & Production Failures', file: 'ml/regression/logistic/diagnostics-and-production-failures.html', links: ['ml/regression/logistic/calibration.html', 'ml/regression/logistic/interview-derivations.html'] },
               { title: 'Interview Derivations', file: 'ml/regression/logistic/interview-derivations.html', links: ['ml/regression/logistic/diagnostics-and-production-failures.html', 'from-scratch/cpp/machine-learning/regression/logistic/index.html'] }
             ]
+          },
+          {
+            name: 'families',
+            label: 'Regression Families & Interview Guide',
+            children: [
+              { title: 'Regression Types for Interviews', file: 'ml/regression/families/index.html', links: ['ml/regression/index.html', 'ml/regression/families/polynomial-and-basis-regression.html'] },
+              { title: 'Polynomial & Basis Regression', file: 'ml/regression/families/polynomial-and-basis-regression.html', links: ['ml/regression/linear/model-specification.html', 'ml/regression/families/splines-and-gams.html'] },
+              { title: 'Weighted & Generalized Least Squares', file: 'ml/regression/families/weighted-and-generalized-least-squares.html', links: ['ml/regression/linear/gauss-markov-and-inference.html', 'ml/regression/families/generalized-linear-models.html'] },
+              { title: 'Generalized Linear Models', file: 'ml/regression/families/generalized-linear-models.html', links: ['ml/regression/logistic/index.html', 'ml/regression/families/weighted-and-generalized-least-squares.html'] },
+              { title: 'Splines & GAMs', file: 'ml/regression/families/splines-and-gams.html', links: ['ml/regression/families/polynomial-and-basis-regression.html', 'ml/regression/families/generalized-linear-models.html'] },
+              { title: 'Bayesian Regression', file: 'ml/regression/families/bayesian-regression.html', links: ['ml/regression/linear/regularization.html', 'ml/regression/logistic/regularization-and-separation.html'] },
+              { title: 'PCR & PLS', file: 'ml/regression/families/pcr-and-pls.html', links: ['ml/regression/linear/numerical-solvers.html', 'ml/regression/linear/regularization.html'] },
+              { title: 'Censored & Survival Regression', file: 'ml/regression/families/censored-and-survival-regression.html', links: ['ml/regression/families/generalized-linear-models.html', 'ml/regression/linear/diagnostics-and-evaluation.html'] }
+            ]
           }
         ]
       },
