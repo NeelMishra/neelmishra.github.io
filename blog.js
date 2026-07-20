@@ -8171,7 +8171,8 @@ var BLOG_TREE = [
         name: 'regression',
         label: 'Regression',
         children: [
-          { title: 'Overview', file: 'ml/regression/index.html', links: ['ml/regression/linear/index.html', 'ml/regression/logistic/index.html'] },
+          { title: 'Overview', file: 'ml/regression/index.html', links: ['ml/regression/assumptions-linear-and-logistic.html', 'ml/regression/linear/index.html'] },
+          { title: 'Assumptions: Linear vs Logistic', file: 'ml/regression/assumptions-linear-and-logistic.html', links: ['ml/regression/index.html', 'ml/regression/linear/index.html'] },
           {
             name: 'linear',
             label: 'Linear Regression',
