@@ -8271,7 +8271,7 @@ var BLOG_TREE = [
         name: 'loss-functions',
         label: 'Loss Functions',
         children: [
-          { title: 'Overview', file: 'ml/loss-functions/index.html', links: ['ml/loss-functions/entropy/index.html', 'ml/gradient-boosted-machines/loss-functions.html'] },
+          { title: 'Overview', file: 'ml/loss-functions/index.html', links: ['ml/loss-functions/entropy/index.html', 'ml/loss-functions/triplet-loss/index.html'] },
           {
             name: 'entropy',
             label: 'Entropy',
@@ -8307,7 +8307,17 @@ var BLOG_TREE = [
             children: [
               { title: 'Foundations', file: 'ml/loss-functions/earth-movers-distance/index.html', links: ['ml/loss-functions/js-divergence/properties-and-uses.html', 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html'] },
               { title: '1D Wasserstein Distance', file: 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html', links: ['ml/loss-functions/earth-movers-distance/index.html', 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html'] },
-              { title: 'Optimal Transport in ML', file: 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html', links: ['ml/loss-functions/earth-movers-distance/wasserstein-1d.html', 'ml/loss-functions/index.html'] }
+              { title: 'Optimal Transport in ML', file: 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html', links: ['ml/loss-functions/earth-movers-distance/wasserstein-1d.html', 'ml/loss-functions/triplet-loss/index.html'] }
+            ]
+          },
+          {
+            name: 'triplet-loss',
+            label: 'Triplet Loss',
+            children: [
+              { title: 'Foundations', file: 'ml/loss-functions/triplet-loss/index.html', links: ['ml/loss-functions/index.html', 'ml/loss-functions/triplet-loss/geometry-and-gradients.html'] },
+              { title: 'Geometry, Margin & Gradients', file: 'ml/loss-functions/triplet-loss/geometry-and-gradients.html', links: ['ml/loss-functions/triplet-loss/index.html', 'ml/loss-functions/triplet-loss/mining-and-batches.html'] },
+              { title: 'Mining & Batch Construction', file: 'ml/loss-functions/triplet-loss/mining-and-batches.html', links: ['ml/loss-functions/triplet-loss/geometry-and-gradients.html', 'ml/loss-functions/triplet-loss/training-and-evaluation.html'] },
+              { title: 'Training, Evaluation & Failures', file: 'ml/loss-functions/triplet-loss/training-and-evaluation.html', links: ['ml/loss-functions/triplet-loss/mining-and-batches.html', 'ml/loss-functions/index.html'] }
             ]
           }
         ]
