@@ -753,6 +753,65 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'linked-list',
+        label: 'Linked Lists',
+        children: [
+          { title: 'Overview', file: 'dsa/linked-list/index.html', links: ['dsa/linked-list/memory-model.html', 'dsa/linked-list/capstone.html'] },
+          {
+            name: 'll-foundations',
+            label: 'Foundations',
+            children: [
+              { title: 'Nodes, Pointers & Memory', file: 'dsa/linked-list/memory-model.html', links: ['dsa/linked-list/index.html', 'dsa/linked-list/singly-linked-list.html'] },
+              { title: 'Singly Linked List', file: 'dsa/linked-list/singly-linked-list.html', links: ['dsa/linked-list/memory-model.html', 'dsa/linked-list/sentinels-and-tails.html'] },
+              { title: 'Sentinels & Tail Pointers', file: 'dsa/linked-list/sentinels-and-tails.html', links: ['dsa/linked-list/singly-linked-list.html', 'dsa/linked-list/doubly-linked-list.html'] },
+              { title: 'Doubly Linked Lists', file: 'dsa/linked-list/doubly-linked-list.html', links: ['dsa/linked-list/sentinels-and-tails.html', 'dsa/linked-list/circular-linked-list.html'] },
+              { title: 'Circular Linked Lists', file: 'dsa/linked-list/circular-linked-list.html', links: ['dsa/linked-list/doubly-linked-list.html', 'dsa/linked-list/cpp-std-lists.html'] },
+              { title: 'std::list & forward_list', file: 'dsa/linked-list/cpp-std-lists.html', links: ['dsa/linked-list/circular-linked-list.html', 'dsa/linked-list/traversal-patterns.html'] }
+            ]
+          },
+          {
+            name: 'll-techniques',
+            label: 'Core Techniques',
+            children: [
+              { title: 'Traversal & Pointer Surgery', file: 'dsa/linked-list/traversal-patterns.html', links: ['dsa/linked-list/cpp-std-lists.html', 'dsa/linked-list/reversal.html'] },
+              { title: 'Reversing a Linked List', file: 'dsa/linked-list/reversal.html', links: ['dsa/linked-list/traversal-patterns.html', 'dsa/linked-list/k-group-reversal.html'] },
+              { title: 'Sublist & K-Group Reversal', file: 'dsa/linked-list/k-group-reversal.html', links: ['dsa/linked-list/reversal.html', 'dsa/linked-list/fast-slow-pointers.html'] },
+              { title: 'Fast & Slow Pointers', file: 'dsa/linked-list/fast-slow-pointers.html', links: ['dsa/linked-list/k-group-reversal.html', 'dsa/linked-list/cycle-detection.html'] },
+              { title: 'Cycle Detection', file: 'dsa/linked-list/cycle-detection.html', links: ['dsa/linked-list/fast-slow-pointers.html', 'dsa/linked-list/merging.html'] },
+              { title: 'Merging Sorted Lists', file: 'dsa/linked-list/merging.html', links: ['dsa/linked-list/cycle-detection.html', 'dsa/linked-list/sorting.html'] },
+              { title: 'Sorting a Linked List', file: 'dsa/linked-list/sorting.html', links: ['dsa/linked-list/merging.html', 'dsa/linked-list/partitioning-reordering.html'] },
+              { title: 'Partitioning & Reordering', file: 'dsa/linked-list/partitioning-reordering.html', links: ['dsa/linked-list/sorting.html', 'dsa/linked-list/arithmetic.html'] },
+              { title: 'Arithmetic on Lists', file: 'dsa/linked-list/arithmetic.html', links: ['dsa/linked-list/partitioning-reordering.html', 'dsa/linked-list/recursion.html'] },
+              { title: 'Recursion on Lists', file: 'dsa/linked-list/recursion.html', links: ['dsa/linked-list/arithmetic.html', 'dsa/linked-list/random-pointer-clone.html'] }
+            ]
+          },
+          {
+            name: 'll-advanced',
+            label: 'Advanced Structures',
+            children: [
+              { title: 'Random Pointer Deep Copy', file: 'dsa/linked-list/random-pointer-clone.html', links: ['dsa/linked-list/recursion.html', 'dsa/linked-list/flatten-multilevel.html'] },
+              { title: 'Flattening Multilevel Lists', file: 'dsa/linked-list/flatten-multilevel.html', links: ['dsa/linked-list/random-pointer-clone.html', 'dsa/linked-list/lru-cache.html'] },
+              { title: 'LRU Cache', file: 'dsa/linked-list/lru-cache.html', links: ['dsa/linked-list/flatten-multilevel.html', 'dsa/linked-list/lfu-cache.html'] },
+              { title: 'LFU Cache', file: 'dsa/linked-list/lfu-cache.html', links: ['dsa/linked-list/lru-cache.html', 'dsa/linked-list/skip-list.html'] },
+              { title: 'Skip Lists', file: 'dsa/linked-list/skip-list.html', links: ['dsa/linked-list/lfu-cache.html', 'dsa/linked-list/xor-linked-list.html'] },
+              { title: 'XOR Linked Lists', file: 'dsa/linked-list/xor-linked-list.html', links: ['dsa/linked-list/skip-list.html', 'dsa/linked-list/unrolled-intrusive.html'] },
+              { title: 'Unrolled & Intrusive Lists', file: 'dsa/linked-list/unrolled-intrusive.html', links: ['dsa/linked-list/xor-linked-list.html', 'dsa/linked-list/concurrent-lists.html'] },
+              { title: 'Concurrent & Lock-Free Lists', file: 'dsa/linked-list/concurrent-lists.html', links: ['dsa/linked-list/unrolled-intrusive.html', 'dsa/linked-list/pitfalls.html'] }
+            ]
+          },
+          {
+            name: 'll-mastery',
+            label: 'Mastery',
+            children: [
+              { title: 'Pitfalls & Memory Safety', file: 'dsa/linked-list/pitfalls.html', links: ['dsa/linked-list/concurrent-lists.html', 'dsa/linked-list/interview-patterns.html'] },
+              { title: 'Interview Pattern Catalog', file: 'dsa/linked-list/interview-patterns.html', links: ['dsa/linked-list/pitfalls.html', 'dsa/linked-list/problem-catalog.html'] },
+              { title: 'Curated Problem Catalog', file: 'dsa/linked-list/problem-catalog.html', links: ['dsa/linked-list/interview-patterns.html', 'dsa/linked-list/capstone.html'] },
+              { title: 'Capstone: Final Exam', file: 'dsa/linked-list/capstone.html', links: ['dsa/linked-list/problem-catalog.html', 'dsa/linked-list/index.html'] }
+            ]
+          }
+        ]
+      },
+      {
         name: 'complexity',
         label: 'Time & Space Complexity',
         children: [

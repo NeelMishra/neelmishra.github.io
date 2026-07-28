@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="From a single mutex to lock-free lists: hand-over-hand locking, lazy synchronisation, the Treiber stack and Michael-Scott queue with CAS, the ABA problem, safe memory reclamation, and Harris's marked-pointer list.">
+  <title>Concurrent &amp; Lock-Free Lists | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .cmp-table code { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">DSA &middot; Linked Lists</a>
+        <span>&middot; Part 24 of 28</span>
+      </div>
+
+      <h1>Concurrent &amp; Lock-Free Lists</h1>
+      <p class="post-meta">July 2026 &middot; 26 min read</p>
+
+      <p>Every routine so far assumed a single thread. Add a second and every one of them is broken: two <code>push_front</code>s can read the same <code>head</code>, both build a node pointing at it, and one silently overwrites the other. This post climbs the ladder of solutions &mdash; from a mutex a first-year can write to a lock-free list that took researchers a decade to get right &mdash; and, just as importantly, tells you where to stop climbing, because the top rung is almost never where you want to stand.</p>
+
+      <h2 id="coarse-locking">Rung 1: One Big Lock</h2>
+      <p>The correct baseline is a single mutex guarding the entire list. Every operation takes it, does its work, and releases it. It is trivially correct because operations never interleave &mdash; the lock serialises them into a sequential order &mdash; and you should reach for it first, always.</p>
+      <pre><code>#include &lt;mutex&gt;
+
+template &lt;class T&gt;
+class CoarseList {
+    struct Node { T val; Node* next; };
+    Node* head_ = nullptr;
+    std::mutex m_;
+public:
+    void push_front(const T&amp; v) {
+        std::lock_guard&lt;std::mutex&gt; lk(m_);
+        head_ = new Node{ v, head_ };
+    }
+    bool contains(const T&amp; v) {
+        std::lock_guard&lt;std::mutex&gt; lk(m_);
+        for (Node* p = head_; p; p = p-&gt;next)
+            if (p-&gt;val == v) return true;
+        return false;
+    }
+};</code></pre>
+      <p>The flaw is not correctness but <em>scalability</em>: the lock serialises everything, so a hundred threads reading a million-node list take turns as if there were one. A long <code>contains</code> blocks every writer for its whole traversal. Everything below is an attempt to let non-conflicting operations proceed in parallel &mdash; and every attempt costs correctness reasoning you did not previously owe.</p>
+
+      <h2 id="fine-grained">Rung 2: Hand-Over-Hand Locking</h2>
+      <p>Instead of one lock for the list, give every node its own lock and walk them like climbing a rope: hold node <em>i</em>, grab node <em>i</em>+1, only then release <em>i</em>. This <strong>lock coupling</strong> lets two threads operate on different regions of the list at once, because a thread only ever holds two adjacent locks.</p>
+      <pre><code>template &lt;class T&gt;
+struct FNode { T val; FNode* next; std::mutex m; };
+
+// Remove the first node equal to v from a sorted list, using lock coupling.
+template &lt;class T&gt;
+bool remove(FNode&lt;T&gt;* head, const T&amp; v) {
+    FNode&lt;T&gt;* pred = head;
+    pred-&gt;m.lock();
+    FNode&lt;T&gt;* curr = pred-&gt;next;
+    if (curr) curr-&gt;m.lock();
+    while (curr) {
+        if (curr-&gt;val == v) {
+            pred-&gt;next = curr-&gt;next;   // unlink while holding BOTH locks
+            curr-&gt;m.unlock();
+            pred-&gt;m.unlock();
+            delete curr;              // reclamation glossed over for now
+            return true;
+        }
+        pred-&gt;m.unlock();            // release the trailing lock ...
+        pred = curr;                 // ... only after the next one is held
+        curr = curr-&gt;next;
+        if (curr) curr-&gt;m.lock();
+    }
+    pred-&gt;m.unlock();
+    return false;
+}</code></pre>
+      <p>Two rules make this safe. First, <strong>every thread locks in the same direction</strong> &mdash; front to back &mdash; so a cycle of "A waits for B while B waits for A" can never form; a global lock order is the standard deadlock-avoidance discipline. Second, <strong>never release <code>pred</code> before <code>curr</code> is locked</strong>: if you let go of <code>pred</code> first, another thread can splice or delete a node into the gap you are standing over, and your <code>pred-&gt;next = curr-&gt;next</code> corrupts the list. The overlap is the invariant.</p>
+      <div class="callout">
+        <strong>Often slower than the one big lock.</strong> Hand-over-hand takes and releases a lock <em>per node</em>. Each lock is an atomic read-modify-write that bounces the cache line between cores, so traversing an n-node list does 2n atomic operations against the coarse lock's one. Unless contention on the single lock is severe, fine-grained locking usually <em>loses</em> &mdash; a humbling and very common benchmark result.</div>
+
+      <h2 id="optimistic-lazy">Rung 3: Optimistic and Lazy Synchronisation</h2>
+      <p>The expensive part above was locking every node you merely walked past. <strong>Optimistic</strong> synchronisation bets that traversal is contention-free: walk the list with <em>no</em> locks at all, and only once you arrive lock the two nodes you intend to modify &mdash; then <em>validate</em> that they are still adjacent and reachable before committing. If validation fails (someone changed the neighbourhood while you walked), you retry. You have traded guaranteed-correct-but-slow locking for usually-right-and-cheap traversal plus a re-check.</p>
+      <p>The <strong>lazy</strong> list refines this with a <code>marked</code> bit that separates <em>logical</em> deletion from <em>physical</em> unlinking. To remove a node you first set its <code>marked</code> flag (it is now logically gone), then unlink it. Validation becomes a two-field check, and the payoff is enormous: <code>contains</code> needs no locks and no retries at all &mdash; it walks the list and reports whether it found an unmarked matching node. That makes membership queries <strong>wait-free</strong>, the strongest progress guarantee there is.</p>
+      <pre><code>struct LNode {
+    int              key;
+    std::atomic&lt;bool&gt; marked{false};   // logically deleted?
+    LNode*           next;
+    std::mutex       m;
+};
+
+// Wait-free: no locks, no retries, just a scan.
+bool contains(LNode* head, int key) {
+    LNode* curr = head;
+    while (curr &amp;&amp; curr-&gt;key &lt; key)
+        curr = curr-&gt;next;
+    return curr &amp;&amp; curr-&gt;key == key &amp;&amp;
+           !curr-&gt;marked.load(std::memory_order_acquire);
+}</code></pre>
+      <p>This is the design behind Java's <code>ConcurrentSkipListMap</code> and most production lock-based concurrent sets: lock only to mutate, never to read.</p>
+
+      <h2 id="lock-free-cas">Rung 4: Lock-Free with Compare-and-Swap</h2>
+      <p>A <em>lock-free</em> structure uses no locks at all; threads coordinate with a single hardware primitive, <strong>compare-and-swap</strong> (CAS). <code>std::atomic&lt;T&gt;::compare_exchange_weak(expected, desired)</code> atomically checks whether the atomic still equals <code>expected</code> and, if so, sets it to <code>desired</code>; otherwise it loads the current value back into <code>expected</code> and reports failure. The universal pattern is "read, prepare, CAS; if it failed someone beat me, so retry with the fresh value". Lock-free means <em>some</em> thread always makes progress, so a thread suspended mid-operation can never block the others &mdash; the fatal weakness of every lock above.</p>
+      <p>The simplest complete example is the <strong>Treiber stack</strong>: push and pop are single-CAS loops on the head pointer.</p>
+      <pre><code>#include &lt;atomic&gt;
+
+template &lt;class T&gt;
+class TreiberStack {
+    struct Node { T val; Node* next; };
+    std::atomic&lt;Node*&gt; head_{nullptr};
+public:
+    void push(const T&amp; v) {
+        Node* n = new Node{ v, head_.load(std::memory_order_relaxed) };
+        while (!head_.compare_exchange_weak(
+                   n-&gt;next, n,                       // expected = n-&gt;next, desired = n
+                   std::memory_order_release,
+                   std::memory_order_relaxed)) {
+            // CAS failed: n-&gt;next was refreshed with the live head; loop and retry.
+        }
+    }
+    bool pop(T&amp; out) {
+        Node* old = head_.load(std::memory_order_acquire);
+        while (old &amp;&amp; !head_.compare_exchange_weak(
+                          old, old-&gt;next,
+                          std::memory_order_acquire,
+                          std::memory_order_relaxed)) {
+            // old is refreshed on failure; retry.
+        }
+        if (!old) return false;
+        out = old-&gt;val;
+        // delete old;   // NOT SAFE yet — another thread may still read it. See reclamation.
+        return true;
+    }
+};</code></pre>
+      <p>The <strong>Michael&ndash;Scott queue</strong> is the two-lock-free-pointer workhorse behind most concurrent queues. It keeps a <code>head_</code> and a <code>tail_</code>, plus a dummy sentinel node so the two never alias on an empty queue. Its signature move is <em>helping</em>: because linking a new node and advancing <code>tail_</code> are two separate CAS operations, a thread can be suspended between them, leaving <code>tail_</code> lagging one node behind. Any thread that notices this fixes it &mdash; it swings the stale tail forward before doing its own work &mdash; so no thread's stall can wedge the queue.</p>
+      <pre><code>template &lt;class T&gt;
+class MSQueue {
+    struct Node {
+        T val;
+        std::atomic&lt;Node*&gt; next;
+        Node() : val(), next(nullptr) {}
+        explicit Node(const T&amp; v) : val(v), next(nullptr) {}
+    };
+    std::atomic&lt;Node*&gt; head_, tail_;
+public:
+    MSQueue() {
+        Node* dummy = new Node();      // sentinel: head and tail start here
+        head_.store(dummy);
+        tail_.store(dummy);
+    }
+    void enqueue(const T&amp; v) {
+        Node* n = new Node(v);
+        for (;;) {
+            Node* last = tail_.load(std::memory_order_acquire);
+            Node* next = last-&gt;next.load(std::memory_order_acquire);
+            if (last != tail_.load(std::memory_order_acquire)) continue;  // tail moved; reread
+            if (next == nullptr) {
+                if (last-&gt;next.compare_exchange_weak(next, n,             // link n after last
+                        std::memory_order_release, std::memory_order_relaxed)) {
+                    tail_.compare_exchange_strong(last, n,                // try to swing tail
+                        std::memory_order_release, std::memory_order_relaxed);
+                    return;                                              // (ok if this CAS fails)
+                }
+            } else {
+                tail_.compare_exchange_strong(last, next,                // HELP a lagging tail
+                    std::memory_order_release, std::memory_order_relaxed);
+            }
+        }
+    }
+    bool dequeue(T&amp; out) {
+        for (;;) {
+            Node* first = head_.load(std::memory_order_acquire);
+            Node* last  = tail_.load(std::memory_order_acquire);
+            Node* next  = first-&gt;next.load(std::memory_order_acquire);
+            if (first != head_.load(std::memory_order_acquire)) continue;
+            if (first == last) {
+                if (next == nullptr) return false;                       // empty
+                tail_.compare_exchange_strong(last, next,                // help before retry
+                    std::memory_order_release, std::memory_order_relaxed);
+            } else {
+                out = next-&gt;val;                                         // read value first
+                if (head_.compare_exchange_weak(first, next,             // then unlink
+                        std::memory_order_release, std::memory_order_relaxed)) {
+                    // delete first;  // still unsafe — see reclamation
+                    return true;
+                }
+            }
+        }
+    }
+};</code></pre>
+      <p>The <code>acquire</code>/<code>release</code> ordering is not decoration. The <code>release</code> on a successful link publishes the fully-constructed node; the matching <code>acquire</code> on the load guarantees a thread that sees the new pointer also sees the node's initialised fields. Drop them to <code>relaxed</code> and another core can observe the pointer before the value it points to &mdash; a data race that shows up only under load, only on weakly-ordered hardware, and never in your tests.</p>
+
+      <h2 id="msqueue">Watch the Enqueue Race</h2>
+      <p>Two threads enqueue onto the same Michael&ndash;Scott queue. Step through the CAS attempts &mdash; one succeeds, one fails and must retry &mdash; and watch the tail-helping step where the second thread advances a tail the first left lagging.</p>
+
+      <div class="anim-container" id="msqueue-anim">
+        <h4>&#9654; Michael&ndash;Scott Enqueue: CAS, Retry, and Tail-Helping</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Green = a CAS that succeeded, red = one that failed. T1 links node X; T2 finds the tail lagging, helps swing it, then links its own node Y.</p>
+        <svg id="msqueue-svg" width="620" height="230" viewBox="0 0 620 230" role="img" aria-label="Two threads enqueuing onto a Michael-Scott queue with CAS and tail-helping"></svg>
+        <div id="msqueue-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:3.2rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="msqueue-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="msqueue-auto" type="button">Play All</button>
+          <button class="anim-btn" id="msqueue-reset" type="button">Reset</button>
+          <span class="anim-output" id="msqueue-output"></span>
+        </div>
+      </div>
+
+      <h2 id="aba">The ABA Problem</h2>
+      <p>CAS checks whether a value is unchanged, but it can only see the value, not its <em>history</em>. Here is a concrete interleaving that breaks the Treiber stack. The stack is A&nbsp;&rarr;&nbsp;B&nbsp;&rarr;&nbsp;C.</p>
+      <table class="cmp-table">
+        <thead><tr><th>Step</th><th>Thread 1</th><th>Thread 2</th><th>Stack after</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>pop() reads head = A, computes A&rarr;next = B</td><td>&mdash;</td><td>A &rarr; B &rarr; C</td></tr>
+          <tr><td>2</td><td><em>suspended before its CAS</em></td><td>pop A, pop B</td><td>C</td></tr>
+          <tr><td>3</td><td>&mdash;</td><td>free B, then push a new node at B's old address</td><td>A' &rarr; C (A' reuses A's address)</td></tr>
+          <tr><td>4</td><td>CAS(head, A, B) <strong>succeeds</strong> &mdash; head still "looks like" A</td><td>&mdash;</td><td>head = B (freed!) </td></tr>
+        </tbody>
+      </table>
+      <p>The CAS saw <code>head == A</code> and concluded nothing had changed, but everything had: <code>A</code> was freed and its address recycled, and <code>B</code> is no longer in the stack. Head now points at reclaimed memory. This is <strong>ABA</strong> &mdash; a value read as A, changed to B, and changed back to A, fooling a CAS that only compares the final value.</p>
+      <p>Three families of fix exist. <strong>Tagged (versioned) pointers</strong> pack a monotonically increasing counter alongside the pointer &mdash; in the unused low bits of an aligned pointer, or in the high bits, or via a double-width CAS (<code>cmpxchg16b</code>) that swaps pointer-and-counter together. Because the counter always advances, the recycled A carries a different tag and the CAS correctly fails. <strong>Hazard pointers</strong> and <strong>epoch-based reclamation</strong> attack the root cause instead &mdash; they prevent the address from being reused while any thread still holds it &mdash; which is the subject of the next section.</p>
+
+      <h2 id="reclamation">The Hard Part: Safe Memory Reclamation</h2>
+      <p>Every lock-free structure above left a comment where <code>delete</code> should go, because freeing is the genuinely hard problem. You unlinked a node, but you cannot prove no other thread is still reading it &mdash; a lock-free reader took no lock to announce itself. Free too early and you get use-after-free; never free and you leak. Three schemes resolve this.</p>
+      <table class="cmp-table">
+        <thead><tr><th>Scheme</th><th>How it works</th><th>Reader cost</th><th>Reclaim latency</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Hazard pointers</td><td>Each thread publishes the pointers it is about to dereference; a node is freed only once no hazard pointer references it</td><td>a store + fence per access</td><td>bounded (scan the hazard list)</td><td>C++26 <code>std::hazard_pointer</code>; per-reader overhead but tight memory bound</td></tr>
+          <tr><td>RCU (read-copy-update)</td><td>Readers run in lock-free critical sections; writers defer freeing until every pre-existing reader has finished (a grace period)</td><td>near zero</td><td>a full grace period (can be long)</td><td><code>synchronize_rcu()</code>; the Linux kernel's workhorse, read-mostly data</td></tr>
+          <tr><td>Epoch-based</td><td>A global epoch advances; threads announce the epoch they entered; memory retired in epoch <em>e</em> is freed once all threads have moved past <em>e</em></td><td>very low</td><td>a few epochs</td><td>Crossbeam, Folly; a single stalled thread can stall reclamation</td></tr>
+        </tbody>
+      </table>
+      <p>The trade is always the same shape: cheaper reads buy longer reclamation latency and looser memory bounds. Hazard pointers give a hard cap on un-freed nodes at a per-read cost; RCU makes reads almost free but can pin memory for an entire grace period; epochs sit in between and are the usual default in modern C++ lock-free libraries.</p>
+
+      <h2 id="harris">Harris's Lock-Free Linked List</h2>
+      <p>Deleting from a lock-free <em>sorted</em> list hides a subtle race. The naive removal is a single CAS: <code>pred-&gt;next</code> from <code>curr</code> to <code>curr-&gt;next</code>. But suppose that, at the same instant, another thread inserts a node <em>after</em> <code>curr</code> by CASing <code>curr-&gt;next</code>. Both CASes can succeed: <code>pred</code> now skips <code>curr</code>, but the freshly inserted node hangs off <code>curr-&gt;next</code> &mdash; off a node that is no longer in the list. The insertion is silently lost.</p>
+      <p>Harris's 2001 solution splits deletion into two atomic steps and steals a bit to coordinate them. Because nodes are aligned, the low bit of a <code>next</code> pointer is always zero and free to use as a <strong>mark</strong>:</p>
+      <ol>
+        <li><strong>Logical delete:</strong> CAS the mark bit into <code>curr-&gt;next</code>, tagging <code>curr</code> as deleted <em>without</em> unlinking it. Crucially, this changes the value of <code>curr-&gt;next</code>, so any concurrent insert that tries to CAS <code>curr-&gt;next</code> now fails &mdash; you cannot append to a marked node.</li>
+        <li><strong>Physical delete:</strong> CAS <code>pred-&gt;next</code> to swing past <code>curr</code>. If it fails (the neighbourhood moved), re-traverse; a later search will finish the unlinking.</li>
+      </ol>
+      <p>The reason a single CAS cannot do both jobs is exactly this: one CAS on <code>pred-&gt;next</code> unlinks <code>curr</code> but does nothing to stop a concurrent insertion <em>after</em> <code>curr</code>. Marking <code>curr-&gt;next</code> first is what makes such an insertion fail, so the mark-then-swing pair is irreducible. In C++ the mark rides in the pointer itself:</p>
+      <pre><code>// low bit of an aligned Node* is always 0 -&gt; use it as the "deleted" mark
+inline Node* mark(Node* p)    { return reinterpret_cast&lt;Node*&gt;(
+                                    reinterpret_cast&lt;uintptr_t&gt;(p) | 1); }
+inline Node* unmark(Node* p)  { return reinterpret_cast&lt;Node*&gt;(
+                                    reinterpret_cast&lt;uintptr_t&gt;(p) &amp; ~uintptr_t(1)); }
+inline bool  is_marked(Node* p){ return reinterpret_cast&lt;uintptr_t&gt;(p) &amp; 1; }</code></pre>
+
+      <h2 id="strategy-table">Choosing a Rung</h2>
+      <table class="cmp-table">
+        <thead><tr><th>Strategy</th><th>Throughput under contention</th><th>Tail latency</th><th>Progress guarantee</th><th>Difficulty</th></tr></thead>
+        <tbody>
+          <tr><td>Coarse mutex</td><td>low (serialised)</td><td>spiky (convoys)</td><td>blocking</td><td>trivial</td></tr>
+          <tr><td>Fine-grained (hand-over-hand)</td><td>often <em>worse</em> (2n atomics)</td><td>spiky</td><td>blocking</td><td>moderate</td></tr>
+          <tr><td>Optimistic</td><td>good if reads dominate</td><td>retry-dependent</td><td>blocking (writers)</td><td>hard</td></tr>
+          <tr><td>Lazy</td><td>high for read-mostly</td><td>low reads</td><td>wait-free <code>contains</code></td><td>hard</td></tr>
+          <tr><td>Lock-free (CAS)</td><td>high, scales</td><td>low, no convoys</td><td>lock-free</td><td>very hard (+ reclamation)</td></tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <strong>Where to actually stop.</strong> On modern hardware a well-sharded, mutex-protected structure &mdash; or one lock per bucket &mdash; usually beats a hand-written lock-free list, at a fraction of the risk. Lock-free code is worth it only where a stalled thread must never block others (real-time, kernels, signal handlers). Before writing your own, reach for a vetted library: TBB <code>concurrent_queue</code>, <code>folly::MPMCQueue</code>, or <code>moodycamel::ConcurrentQueue</code>. Rolling your own lock-free list is a research exercise, not an engineering default.</div>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Seven situations, in rough order of difficulty. Pick the statement that is actually true.</p>
+      <div class="blog-quiz" id="concurrent-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li>Read Michael &amp; Scott, <em>Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms</em> (PODC 1996). <em>source</em> implement the queue above and stress it with a ThreadSanitizer build.</li>
+        <li>Read Harris, <em>A Pragmatic Implementation of Non-Blocking Linked-Lists</em> (DISC 2001). <em>source</em> implement mark-then-swing deletion and reproduce the lost-insertion race without the mark.</li>
+        <li>Study Herlihy &amp; Shavit, <em>The Art of Multiprocessor Programming</em>, ch. 9. <em>reference</em> build the lazy list and prove its <code>contains</code> is wait-free.</li>
+        <li>Construct an ABA failure in the Treiber stack with three threads, then fix it with a tagged pointer and again with hazard pointers. <em>aba</em> compare the memory bounds.</li>
+        <li>Benchmark a coarse mutex against your lock-free queue at 1, 4, 16, and 64 threads. <em>reality</em> find the crossover and note it is higher than folklore claims.</li>
+        <li><a href="https://leetcode.com/problems/design-circular-queue/">LeetCode 622 &mdash; Design Circular Queue</a> <em>warm-up</em> get the single-threaded logic airtight, then reason about which fields would need to be atomic.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="unrolled-intrusive.html"><span>Previous</span><span>&#8592; Unrolled &amp; Intrusive Lists</span></a>
+        <a class="next" href="pitfalls.html"><span>Next</span><span>Pitfalls, Leaks &amp; Memory Safety &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function msQueueAnim() {
+    var svg = document.getElementById('msqueue-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('msqueue-info');
+    var out = document.getElementById('msqueue-output');
+    var stepBtn = document.getElementById('msqueue-step');
+    var autoBtn = document.getElementById('msqueue-auto');
+    var resetBtn = document.getElementById('msqueue-reset');
+    var runner = null;
+
+    var pos = { dummy: 40, A: 178, X: 316, Y: 454 };
+    var BW = 108, BY = 74, BH = 46;
+
+    var states = [
+      { ax: false, xy: false, tail: 'A', hot: null,
+        t1: 'read tail = A', t1c: 'idle', t2: 'read tail = A', t2c: 'idle',
+        note: 'Both threads read the same tail (A). T1 will append X, T2 will append Y.' },
+      { ax: true, xy: false, tail: 'A', hot: 'AX',
+        t1: 'CAS A.next null\u2192X : OK', t1c: 'ok', t2: 'read tail = A', t2c: 'idle',
+        note: 'T1 links X after A with a successful CAS \u2014 but has not yet swung tail, so tail still lags at A.' },
+      { ax: true, xy: false, tail: 'X', hot: 'tail',
+        t1: '(paused before tail swing)', t1c: 'idle', t2: 'tail lags \u2014 help CAS tail A\u2192X : OK', t2c: 'ok',
+        note: 'T2 sees A.next \u2260 null, so tail is stale. Before its own work it HELPS, swinging tail to X.' },
+      { ax: true, xy: true, tail: 'X', hot: 'XY',
+        t1: '(paused)', t1c: 'idle', t2: 'CAS X.next null\u2192Y : OK', t2c: 'ok',
+        note: 'T2 retries from the fresh tail (X) and links Y after it.' },
+      { ax: true, xy: true, tail: 'Y', hot: 'tail',
+        t1: '(paused)', t1c: 'idle', t2: 'CAS tail X\u2192Y : OK', t2c: 'ok',
+        note: 'T2 swings tail to Y. The queue is now dummy \u2192 A \u2192 X \u2192 Y.' },
+      { ax: true, xy: true, tail: 'Y', hot: 'fail',
+        t1: 'CAS tail A\u2192X : FAIL', t1c: 'fail', t2: 'done', t2c: 'ok',
+        note: 'T1 finally attempts its tail swing, but tail already moved to Y. The CAS fails \u2014 harmlessly, since T2 already helped.' }
+    ];
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+
+    function box(key, label, faded, hot) {
+      svg.appendChild(el('rect', {
+        x: pos[key], y: BY, width: BW, height: BH, rx: 7,
+        fill: hot ? '#bdead2' : (faded ? '#eef4f0' : '#fffdf9'),
+        stroke: hot ? '#0a8f6a' : '#3a7a65', 'stroke-width': hot ? '3' : '2'
+      }));
+      svg.appendChild(el('line', { x1: pos[key] + 68, y1: BY, x2: pos[key] + 68, y2: BY + BH, stroke: '#c7d8ce', 'stroke-width': '1.5' }));
+      svg.appendChild(el('text', { x: pos[key] + 34, y: BY + BH / 2, 'font-size': '13', 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-weight': '700', fill: '#13201a' }, label));
+      svg.appendChild(el('text', { x: pos[key] + 88, y: BY + BH / 2, 'font-size': '10', 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#6a8a78' }, 'nxt'));
+    }
+
+    function edge(fromKey, toKey, hot) {
+      var color = hot ? '#0a8f6a' : '#9bb3a8';
+      var mk = hot ? 'url(#anim-arrow)' : 'url(#anim-arrow)';
+      svg.appendChild(el('line', {
+        x1: pos[fromKey] + BW, y1: BY + BH / 2, x2: pos[toKey] - 2, y2: BY + BH / 2,
+        stroke: color, 'stroke-width': hot ? '3' : '2', 'marker-end': mk
+      }));
+    }
+
+    function tailArrow(key, hot) {
+      var cxp = pos[key] + BW / 2;
+      svg.appendChild(el('text', { x: cxp, y: BY - 24, 'font-size': '12', 'font-weight': '700', 'text-anchor': 'middle', fill: hot ? '#0a8f6a' : '#3a7a65' }, 'tail'));
+      svg.appendChild(el('line', { x1: cxp, y1: BY - 18, x2: cxp, y2: BY - 2, stroke: hot ? '#0a8f6a' : '#3a7a65', 'stroke-width': '2.5', 'marker-end': 'url(#anim-arrow)' }));
+    }
+
+    var i = 0;
+
+    function draw() {
+      svg.innerHTML = '';
+      if (window.addArrowMarker) {
+        window.addArrowMarker(svg, 'anim-arrow', '#0a8f6a');
+        window.addArrowMarker(svg, 'anim-arrow-warn', '#f59e0b');
+      }
+      var s = states[i];
+
+      /* head label over the dummy sentinel */
+      svg.appendChild(el('text', { x: pos.dummy + BW / 2, y: BY - 24, 'font-size': '12', 'font-weight': '700', 'text-anchor': 'middle', fill: '#6a8a78' }, 'head'));
+      svg.appendChild(el('line', { x1: pos.dummy + BW / 2, y1: BY - 18, x2: pos.dummy + BW / 2, y2: BY - 2, stroke: '#9bb3a8', 'stroke-width': '2', 'marker-end': 'url(#anim-arrow)' }));
+
+      box('dummy', 'dummy', true, false);
+      box('A', 'A', false, false);
+      edge('dummy', 'A', false);
+      if (s.ax) { box('X', 'X (T1)', false, s.hot === 'AX'); edge('A', 'X', s.hot === 'AX'); }
+      if (s.xy) { box('Y', 'Y (T2)', false, s.hot === 'XY'); edge('X', 'Y', s.hot === 'XY'); }
+      tailArrow(s.tail, s.hot === 'tail');
+
+      /* thread status panels */
+      var colorOf = { ok: '#0a8f6a', fail: '#c0392b', idle: '#6a8a78' };
+      svg.appendChild(el('text', { x: 12, y: 168, 'font-size': '12.5', 'font-weight': '700', fill: '#13201a' }, 'T1:'));
+      svg.appendChild(el('text', { x: 44, y: 168, 'font-size': '12.5', fill: colorOf[s.t1c] }, s.t1));
+      svg.appendChild(el('text', { x: 12, y: 194, 'font-size': '12.5', 'font-weight': '700', fill: '#13201a' }, 'T2:'));
+      svg.appendChild(el('text', { x: 44, y: 194, 'font-size': '12.5', fill: colorOf[s.t2c] }, s.t2));
+
+      info.innerHTML = '<strong>Step ' + i + ' / 5.</strong> ' + s.note;
+      out.textContent = 'tail \u2192 ' + s.tail;
+    }
+
+    function step() {
+      if (i >= states.length - 1) return;
+      i++;
+      draw();
+      if (i >= states.length - 1) stepBtn.disabled = true;
+    }
+
+    function reset() {
+      if (runner) { runner.cancel(); runner = null; }
+      i = 0;
+      stepBtn.disabled = false;
+      draw();
+    }
+
+    stepBtn.addEventListener('click', step);
+    resetBtn.addEventListener('click', reset);
+    autoBtn.addEventListener('click', function () {
+      reset();
+      var seq = [];
+      for (var k = 0; k < states.length - 1; k++) seq.push(step);
+      runner = window.animRunner(seq, 1500);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('concurrent-quiz', {
+    title: '\u{1F9E0} Concurrency Check',
+    intro: 'Seven situations. Pick the statement that is actually true.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'In hand-over-hand locking, why must you never release pred before curr is locked?',
+        answer: 'A thread could splice or delete a node into the unguarded gap, so your pred->next = curr->next then corrupts the list',
+        distractors: [
+          { text: 'Releasing pred first causes a deadlock with the reverse-direction walker', why: 'Deadlock is prevented by consistent lock ordering, not by the overlap; the overlap prevents structural corruption.' },
+          { text: 'It would double-lock curr, which std::mutex forbids', why: 'curr is locked once; the issue is leaving a region unguarded, not re-locking.' },
+          { text: 'Releasing pred first leaks the lock because unlock happens twice', why: 'The lock is released exactly once; the bug is a concurrent modification in the gap, not a leak.' }
+        ],
+        explain: 'The two-lock overlap is the invariant: at least one of pred/curr is always held across the modified region.' },
+
+      { meaning: 'You replace one coarse mutex with per-node hand-over-hand locking and it gets SLOWER. Why?',
+        answer: 'It performs two atomic lock operations per node walked, and those cache-line bounces cost more than the single lock saved',
+        distractors: [
+          { text: 'Per-node mutexes are larger, so the list no longer fits in cache', why: 'Size matters a little, but the dominant cost is the 2n atomic RMWs and their coherence traffic, not footprint.' },
+          { text: 'Fine-grained locking can deadlock, and the retries slow it down', why: 'With consistent ordering it does not deadlock; the slowdown is raw atomic-operation overhead, not retries.' },
+          { text: 'The compiler cannot inline through mutex calls, adding function overhead', why: 'Call overhead is negligible next to the cache-coherence cost of locking every node.' }
+        ],
+        explain: 'Locking is an atomic read-modify-write; doing it per node bounces cache lines between cores, often losing to one lock.' },
+
+      { meaning: 'The "helping" step in the Michael-Scott queue exists because:',
+        answer: 'Linking a node and advancing tail are two separate CAS ops, so a stalled thread can leave tail lagging \u2014 any thread fixes it',
+        distractors: [
+          { text: 'Two threads may enqueue the same value, and helping deduplicates them', why: 'Helping is about the split link/advance, not duplicates; the queue happily holds equal values.' },
+          { text: 'It lets a thread jump the queue and enqueue ahead of others', why: 'Helping advances a stale tail forward; it does not reorder or prioritise any thread\u2019s element.' },
+          { text: 'CAS on the tail is not atomic, so a second pass is always required', why: 'The CAS is atomic; the second pass exists because linking and swinging tail are two distinct atomic steps.' }
+        ],
+        explain: 'Because enqueue is link-then-swing-tail, a thread suspended between them leaves tail one node behind; helpers advance it so no stall wedges the queue.' },
+
+      { meaning: 'A CAS(head, A, B) succeeds, yet the program is broken. What went wrong?',
+        answer: 'ABA: head was changed away from A and back to a recycled A, so the equal value hid intervening frees',
+        distractors: [
+          { text: 'CAS is not actually atomic on this hardware', why: 'CAS is atomic; the flaw is that it compares only the value, not the history of changes to it.' },
+          { text: 'B was never a valid pointer, so the CAS should not have compiled', why: 'B is a normal pointer; the problem is that the address A was freed and reused between the read and the CAS.' },
+          { text: 'The memory order was release instead of acquire', why: 'Ordering controls visibility, not identity reuse; even with perfect ordering, ABA fools a value-only compare.' }
+        ],
+        explain: 'CAS sees a value, not its history; an A\u2192B\u2192A cycle passes the compare while the node underneath was freed and recycled.' },
+
+      { meaning: 'Why can you not simply call delete on a node right after unlinking it from a lock-free list?',
+        answer: 'Another thread may still be reading it \u2014 it took no lock to announce itself \u2014 so freeing risks use-after-free',
+        distractors: [
+          { text: 'delete is not atomic, so it must be wrapped in a CAS', why: 'The issue is not atomicity of free; it is that concurrent readers hold no lock, so you cannot know they have finished.' },
+          { text: 'The node is read-only once published and cannot be freed', why: 'There is no read-only rule here; the hazard is live readers, addressed by reclamation schemes.' },
+          { text: 'Freeing changes the pointer value and triggers ABA', why: 'Freeing does not itself cause ABA; the danger is a reader dereferencing the node after it is freed.' }
+        ],
+        explain: 'Lock-free readers are invisible, so safe reclamation (hazard pointers, RCU, epochs) is needed to know when no one holds the node.' },
+
+      { meaning: 'Harris marks curr->next before unlinking curr. What does the mark accomplish?',
+        answer: 'It changes curr->next\u2019s value so a concurrent insert after curr fails its CAS \u2014 you cannot append to a logically deleted node',
+        distractors: [
+          { text: 'It frees curr immediately, since the mark signals no readers remain', why: 'The mark is logical deletion only; reclamation is separate and still needs a safe scheme.' },
+          { text: 'It locks curr so no other thread can touch it', why: 'There are no locks; the mark is a value change that makes competing CASes on curr->next fail, not a lock.' },
+          { text: 'It reverses the list direction so pred can be reached from curr', why: 'The list stays singly linked forward; the mark has nothing to do with direction.' }
+        ],
+        explain: 'Marking curr->next makes any insert-after-curr CAS fail, which is exactly why a single unlink CAS is not enough \u2014 you need mark then swing.' },
+
+      { meaning: 'For a read-mostly concurrent set on modern hardware, the pragmatic first choice is:',
+        answer: 'A lock-based lazy or sharded structure \u2014 often a vetted library \u2014 before hand-writing anything lock-free',
+        distractors: [
+          { text: 'Always a hand-written lock-free list, since lock-free is strictly faster', why: 'Lock-free is not strictly faster; a sharded mutex often wins and carries far less risk of subtle bugs.' },
+          { text: 'A single coarse mutex, because contention never matters in practice', why: 'Contention can matter under load; the point is to shard or use a proven library, not to assume it never matters.' },
+          { text: 'Fine-grained hand-over-hand locking, the best general-purpose option', why: 'Hand-over-hand often underperforms even a coarse lock due to per-node atomics; it is rarely the best default.' }
+        ],
+        explain: 'Reach for TBB, folly, or moodycamel first; roll your own lock-free list only where a stalled thread must never block others.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

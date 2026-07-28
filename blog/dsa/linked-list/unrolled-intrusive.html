@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Two production fixes for the linked list: unrolled nodes that pack k elements per cache line, and intrusive lists whose links live inside the element, with the Linux list_head, container_of, and Boost.Intrusive.">
+  <title>Unrolled &amp; Intrusive Lists | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .cmp-table code { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">DSA &middot; Linked Lists</a>
+        <span>&middot; Part 23 of 28</span>
+      </div>
+
+      <h1>Unrolled &amp; Intrusive Lists</h1>
+      <p class="post-meta">July 2026 &middot; 22 min read</p>
+
+      <p>The first post in this series measured the two real costs of a linked list: it chases pointers so it thrashes the cache, and it allocates a node per element so it hammers the allocator. This post is the pair of fixes that production code actually uses. <strong>Unrolled lists</strong> attack the cache cost by packing many elements into each node. <strong>Intrusive lists</strong> attack the allocation cost by putting the links inside the element itself. Neither is exotic &mdash; between them they describe <code>std::deque</code>, the Linux kernel, Boost, and half the game engines you have played.</p>
+
+      <h2 id="two-problems">Two Costs, Two Fixes</h2>
+      <p>Recall the numbers. A <code>Node{ int; Node*; }</code> is 16 bytes of which 8 are payload; the allocator adds a header and rounds up, so a 4-byte integer can occupy 32 bytes of resident memory. And every hop to <code>node-&gt;next</code> is a dependent load the prefetcher cannot anticipate, so a traversal stalls once per element. Unrolled lists shrink the pointer-per-element ratio and let the CPU read many values per cache miss. Intrusive lists remove the per-element allocation entirely. They are orthogonal &mdash; you can have both &mdash; but they solve different problems, so we take them in turn.</p>
+
+      <h2 id="unrolled-idea">Unrolled Lists: Pack the Node</h2>
+      <p>An unrolled linked list stores, in each node, a small <em>array</em> of up to <code>k</code> elements together with a count and a single <code>next</code> pointer. Twelve integers now share one <code>next</code> instead of demanding twelve, so the pointer overhead falls by a factor of <code>k</code>. More importantly, those twelve integers are contiguous, so one cache miss brings in the whole node and the next eleven reads are L1 hits. You have reintroduced the array's sequential locality <em>inside</em> each node while keeping the list's cheap splicing <em>between</em> nodes.</p>
+      <p>The magic number <code>k</code> is chosen to make a node fill one or two cache lines. On a 64-byte line with 4-byte elements, a node's header is a <code>next</code> pointer (8 bytes) plus a count (8 after alignment) = 16 bytes, leaving 48 bytes &mdash; exactly <strong>twelve</strong> 4-byte integers. So <code>k = 12</code> lands one node on one cache line; <code>k = 13</code> or <code>14</code> spills into a second line, which is often still a good trade. Pick <code>k</code> from the element size and the line size, not by feel.</p>
+
+      <h2 id="unrolled-cache">One Miss, Many Elements</h2>
+      <p>The animation walks the same twelve elements through a plain list (one value per node, one cache line each) and an unrolled list (four values per node). Count the cache lines each structure touches to read all twelve.</p>
+
+      <div class="anim-container" id="unrolled-anim">
+        <h4>&#9654; Cache Lines: Plain vs. Unrolled (k = 4)</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Both hold twelve elements. Red = a new cache line fetched from slow memory (a miss); green = a hit already resident in the line just loaded. Watch the totals diverge.</p>
+        <svg id="unrolled-svg" width="620" height="240" viewBox="0 0 620 240" role="img" aria-label="Cache lines touched reading twelve elements from a plain list versus an unrolled list"></svg>
+        <div id="unrolled-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:2.6rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="unrolled-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="unrolled-auto" type="button">Play All</button>
+          <button class="anim-btn" id="unrolled-reset" type="button">Reset</button>
+          <span class="anim-output" id="unrolled-output"></span>
+        </div>
+      </div>
+
+      <p>Twelve reads cost the plain list twelve misses and the unrolled list three. With a realistic <code>k = 12</code> the ratio is 12:1 &mdash; the traversal touches memory a twelfth as often, which is the whole point.</p>
+
+      <h2 id="unrolled-impl">Splitting and Merging Nodes</h2>
+      <p>The node is an array with a count. Insertion walks whole nodes at a time &mdash; skipping <code>count</code> elements per hop instead of one &mdash; then inserts within a node by shifting. The only complication is a <em>full</em> node: split it in half, creating room, then insert into whichever half now owns the position.</p>
+      <pre><code>#include &lt;array&gt;
+#include &lt;cstddef&gt;
+
+template &lt;class T, std::size_t K = 12&gt;
+class UnrolledList {
+    struct Node {
+        Node*            next = nullptr;
+        std::size_t      count = 0;      // slots [0, count) are live
+        std::array&lt;T, K&gt; data{};
+    };
+    Node* head_ = nullptr;
+
+public:
+    void insert(std::size_t pos, const T&amp; value) {
+        if (!head_) head_ = new Node();
+        Node* n = head_;
+        while (n-&gt;next &amp;&amp; pos &gt; n-&gt;count) {   // stride over whole nodes
+            pos -= n-&gt;count;
+            n = n-&gt;next;
+        }
+        if (pos &gt; n-&gt;count) pos = n-&gt;count;    // clamp to this node
+
+        if (n-&gt;count == K) {                    // full: split before inserting
+            Node* right = new Node();
+            std::size_t half = K / 2;
+            right-&gt;count = K - half;
+            for (std::size_t i = 0; i &lt; right-&gt;count; ++i)
+                right-&gt;data[i] = n-&gt;data[half + i];
+            n-&gt;count = half;
+            right-&gt;next = n-&gt;next;
+            n-&gt;next = right;
+            if (pos &gt; half) { n = right; pos -= half; }   // pick the correct half
+        }
+        for (std::size_t i = n-&gt;count; i &gt; pos; --i)      // shift right within node
+            n-&gt;data[i] = n-&gt;data[i - 1];
+        n-&gt;data[pos] = value;
+        ++n-&gt;count;
+    }</code></pre>
+      <p>Erase is the mirror image. Remove the element by shifting left over the hole; then, if the node has fallen below half-full, restore balance by either <em>merging</em> with the next node (when the two together fit in one node) or <em>borrowing</em> a single element from it (when they do not). Keeping every node at least half-full bounds the wasted space and keeps the effective <code>k</code> high.</p>
+      <p>A worked split makes the insert path concrete. Take <code>K = 6</code> and a full node, and insert 25 at position 2:</p>
+      <pre><code>full node: [10 20 30 40 50 60]   count = 6 = K,  insert 25 at pos 2
+  split at half = 3:
+    left  = [10 20 30]           count = 3
+    right = [40 50 60]           count = 3      (right-&gt;next = old next; left-&gt;next = right)
+  pos 2 &lt;= half 3  -&gt;  the insert stays in the LEFT node
+  shift right within left, place 25 at pos 2:
+    left  = [10 20 25 30]        count = 4
+  result: [10 20 25 30] -&gt; [40 50 60] -&gt; ...   (both nodes now comfortably half-full)</code></pre>
+      <pre><code>    void erase(std::size_t pos) {
+        Node* n = head_;
+        while (n &amp;&amp; pos &gt;= n-&gt;count) { pos -= n-&gt;count; n = n-&gt;next; }
+        if (!n) return;
+        for (std::size_t i = pos; i + 1 &lt; n-&gt;count; ++i)   // close the gap
+            n-&gt;data[i] = n-&gt;data[i + 1];
+        --n-&gt;count;
+
+        if (n-&gt;count &gt;= K / 2 || !n-&gt;next) return;          // still balanced, or last node
+        Node* r = n-&gt;next;
+        if (n-&gt;count + r-&gt;count &lt;= K) {                     // merge r into n
+            for (std::size_t i = 0; i &lt; r-&gt;count; ++i)
+                n-&gt;data[n-&gt;count + i] = r-&gt;data[i];
+            n-&gt;count += r-&gt;count;
+            n-&gt;next = r-&gt;next;
+            delete r;
+        } else {                                           // borrow one from r
+            n-&gt;data[n-&gt;count++] = r-&gt;data[0];
+            for (std::size_t i = 0; i + 1 &lt; r-&gt;count; ++i)
+                r-&gt;data[i] = r-&gt;data[i + 1];
+            --r-&gt;count;
+        }
+    }
+
+    template &lt;class F&gt;
+    void for_each(F f) const {
+        for (Node* n = head_; n; n = n-&gt;next)
+            for (std::size_t i = 0; i &lt; n-&gt;count; ++i)
+                f(n-&gt;data[i]);                              // k contiguous reads per node
+    }
+};</code></pre>
+
+      <h2 id="unrolled-complexity">What Unrolling Buys</h2>
+      <table class="cmp-table">
+        <thead><tr><th>Operation</th><th>Plain linked list</th><th>Unrolled (node holds k)</th></tr></thead>
+        <tbody>
+          <tr><td>Search by value</td><td>O(n), one miss per element</td><td>O(n), but ~k&times; fewer cache misses</td></tr>
+          <tr><td>Insert at a known node</td><td>O(1)</td><td>O(k) worst (shift/split), O(1) amortised</td></tr>
+          <tr><td>Pointer overhead</td><td>1 pointer per element</td><td>1 pointer per k elements</td></tr>
+          <tr><td>Space slack</td><td>none</td><td>up to ~50% (nodes kept half-full)</td></tr>
+          <tr><td>Traversal locality</td><td>poor (scattered nodes)</td><td>good (k contiguous per node)</td></tr>
+        </tbody>
+      </table>
+      <p>The complexity class does not change &mdash; search is still O(n) &mdash; but the constant that dominates real benchmarks, the cache-miss count, drops by roughly <code>k</code>. That is why this shape recurs everywhere: <strong><code>std::deque</code></strong> is essentially an unrolled list of fixed-size blocks with an index of block pointers; <strong>ropes</strong> and <strong>gap buffers</strong> unroll text so editors can insert into a megabyte file without shifting it all; and a <strong>B-tree</strong> is the same idea lifted from a list to a tree &mdash; fat nodes holding many keys so each cache miss makes maximal progress. Unrolling is not a niche trick; it is <em>the</em> standard answer to "linked structures are cache-hostile".</p>
+      <div class="callout">
+        <strong>Interview-ready framing.</strong> "An unrolled list trades a little in-node shifting for a k-fold cut in cache misses. It keeps O(1)-ish splicing between nodes and buys back array-like locality within them &mdash; the same reason databases use B-trees instead of binary trees."</div>
+
+      <h2 id="intrusive-idea">Intrusive Lists: Move the Links Inside</h2>
+      <p>The second cost is allocation, and the intrusive list removes it completely. Instead of a separate node that <em>points at</em> your object, the <code>next</code> and <code>prev</code> pointers live <em>inside</em> the object. Threading an element onto a list is then pure pointer assignment &mdash; no <code>new</code>, no node, no second cache line to reach the payload &mdash; and one object can carry several sets of links and thus belong to several lists at once.</p>
+      <p>This inverts ownership. A <code>std::list&lt;T&gt;</code> owns its elements: it allocates a node, copies or moves your <code>T</code> into it, and frees it later. An intrusive list owns <em>nothing</em>; it is merely a chain running through objects whose lifetimes you manage. That single change is why the Linux kernel, which cannot afford an allocation on every enqueue and routinely puts one task on a dozen lists, uses intrusive lists for essentially every list it has.</p>
+
+      <h2 id="list-head">The Linux <code>list_head</code> Pattern</h2>
+      <p>The kernel's design is worth learning exactly, because it is the canonical intrusive list. The links are a tiny standalone struct that you embed inside whatever you want to enlist:</p>
+      <pre><code>struct list_head { struct list_head *next, *prev; };
+
+struct task {
+    int pid;
+    struct list_head run_queue;   // embed the links; the list threads through here
+};</code></pre>
+      <p>The list is <strong>circular with a sentinel</strong>: a standalone <code>list_head</code> whose <code>next</code> and <code>prev</code> both point to itself when the list is empty. Circularity means insertion and deletion never special-case the ends &mdash; there is no null to check &mdash; and the sentinel means the list itself is not one of your objects, so an empty list is still a valid, dereferenceable ring.</p>
+      <pre><code>static inline void __list_add(struct list_head *nw,
+                              struct list_head *prev,
+                              struct list_head *next) {
+    next-&gt;prev = nw;
+    nw-&gt;next   = next;
+    nw-&gt;prev   = prev;
+    prev-&gt;next = nw;
+}
+static inline void list_add(struct list_head *nw, struct list_head *head) {
+    __list_add(nw, head, head-&gt;next);      // splice just after the sentinel
+}
+static inline void list_del(struct list_head *entry) {
+    entry-&gt;prev-&gt;next = entry-&gt;next;        // unlink: neighbours skip over entry
+    entry-&gt;next-&gt;prev = entry-&gt;prev;
+    entry-&gt;next = entry-&gt;prev = NULL;
+}</code></pre>
+      <p>But there is a puzzle. These routines manipulate <code>list_head</code> pointers, yet what you actually want is the enclosing <code>struct task</code>. Given a pointer to the embedded <code>run_queue</code> member, how do you recover the object that contains it? That is <code>container_of</code>, the macro at the heart of the whole pattern:</p>
+      <pre><code>#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))</code></pre>
+      <p>Read it right to left. <code>offsetof(type, member)</code> is the compile-time byte distance from the start of <code>type</code> to <code>member</code>. The pointer <code>ptr</code> aims at the member, sitting exactly that many bytes into the object. Cast <code>ptr</code> to <code>char*</code> so arithmetic counts in bytes, subtract the offset to land on the first byte of the enclosing struct, and cast that address to <code>type*</code>. You have walked backwards from a member to its owner using nothing but a compile-time constant &mdash; zero runtime cost, no stored back-pointer.</p>
+      <p>In C++ the same recovery is type-safe: the return type is a real <code>Task*</code>, so no <code>void*</code> escapes to the call site.</p>
+      <pre><code>#include &lt;cstddef&gt;
+
+struct ListHook { ListHook *next, *prev; };
+struct Task { int pid; ListHook hook; };   // standard-layout: offsetof is well defined
+
+inline Task* task_of(ListHook* h) {
+    return reinterpret_cast&lt;Task*&gt;(
+        reinterpret_cast&lt;char*&gt;(h) - offsetof(Task, hook));
+}</code></pre>
+      <p>Iteration then combines the ring walk with <code>container_of</code>. The kernel wraps it in a macro so call sites read like a normal for-each:</p>
+      <pre><code>#define list_for_each_entry(pos, head, member)                     \
+    for (pos = container_of((head)-&gt;next, typeof(*pos), member);    \
+         &amp;pos-&gt;member != (head);                                    \
+         pos = container_of(pos-&gt;member.next, typeof(*pos), member))</code></pre>
+      <p>Each step advances the embedded <code>member.next</code> around the ring and immediately converts it back to the owning object, stopping when the walk returns to the sentinel <code>head</code>. You iterate objects, not links, and never see the plumbing.</p>
+      <div class="callout">
+        <strong>Why intrusive erase is genuinely O(1).</strong> Because the <code>prev</code> and <code>next</code> links are inside the element, holding a pointer to the element <em>is</em> holding its position. <code>list_del</code> rewires two neighbours and returns &mdash; no search, no allocation, no ownership dance. This is the property the XOR list threw away and the reason schedulers can move a task between run-queues in constant time.</div>
+
+      <h2 id="boost-intrusive">Boost.Intrusive: the Library Version</h2>
+      <p>Writing <code>container_of</code> by hand is fine in C; in C++ you reach for <a href="https://www.boost.org/doc/libs/release/doc/html/intrusive.html">Boost.Intrusive</a>, which generates it for you from a <em>hook</em> you add to your type. A base hook is inherited; a member hook is declared as a field:</p>
+      <pre><code>#include &lt;boost/intrusive/list.hpp&gt;
+using namespace boost::intrusive;
+
+struct Session : public list_base_hook&lt;&gt; {   // base hook: links via inheritance
+    int id;
+};
+using Sessions = list&lt;Session&gt;;               // no allocation on push_back
+
+struct Job {
+    int priority;
+    list_member_hook&lt;&gt; hook;                   // member hook: links as a field
+};
+using Jobs = list&lt;Job, member_hook&lt;Job, list_member_hook&lt;&gt;, &amp;Job::hook&gt;&gt;;</code></pre>
+      <p>Because the hook is a distinct type per list, one object can hold several hooks and live on several lists simultaneously &mdash; a session on both an LRU list and a hash-bucket list, say &mdash; with no copies. Boost also offers <strong><code>auto_unlink</code></strong> mode (<code>list_base_hook&lt;link_mode&lt;auto_unlink&gt;&gt;</code>): the element unlinks itself from whatever list holds it in its own destructor, so destroying an object can never leave a dangling link. The cost is that such lists cannot cache their size in O(1).</p>
+      <p>The one rule you must internalise is <strong>ownership</strong>. The container does not own the elements; <em>you</em> do. The elements must outlive the list, and &mdash; unless you are in <code>auto_unlink</code> mode &mdash; destroying or freeing an element while it is still linked corrupts the list, because its neighbours still point into freed memory. Intrusive lists hand you performance in exchange for managing lifetimes yourself.</p>
+
+      <h2 id="comparison"><code>std::list</code> vs. Intrusive List</h2>
+      <table class="cmp-table">
+        <thead><tr><th>Property</th><th><code>std::list&lt;T&gt;</code></th><th>Intrusive list</th></tr></thead>
+        <tbody>
+          <tr><td>Allocations per insert</td><td>1 (a node)</td><td>0 (links already in the object)</td></tr>
+          <tr><td>Indirection to payload</td><td>node is a separate allocation</td><td>hook is inside the element &mdash; no extra hop</td></tr>
+          <tr><td>Multiple list membership</td><td>needs a node (copy/pointer) per list</td><td>one hook per list, same object, no copies</td></tr>
+          <tr><td>Can insert throw?</td><td>yes &mdash; <code>bad_alloc</code> on node alloc</td><td>no &mdash; it never allocates</td></tr>
+          <tr><td>Erase given an element</td><td>need the iterator</td><td>O(1) from the element pointer itself</td></tr>
+          <tr><td>Who owns / frees elements</td><td>the list</td><td>you do &mdash; elements must outlive the list</td></tr>
+        </tbody>
+      </table>
+      <p>Read top-to-bottom, the intrusive list wins every performance and flexibility row and pays for it in the last one: you take over lifetime management. That is the right trade in a kernel, an allocator, a scheduler, or a game engine's entity lists &mdash; anywhere allocation is the bottleneck and objects already have owners. For ordinary application code where convenience matters more than the last allocation, <code>std::list</code>'s owning model is the safer default.</p>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Six situations spanning both structures. Pick the statement that is actually true.</p>
+      <div class="blog-quiz" id="intrusive-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li>Implement the unrolled list above, then sum ten million elements from it and from a <code>std::list</code>. <em>locality</em> time both and confirm the k-fold cache-miss reduction.</li>
+        <li>Derive the ideal <code>k</code> for <code>T = double</code> on a 64-byte line, then for a 32-byte cache line. <em>tuning</em> account for the 16-byte header each time.</li>
+        <li>Write <code>container_of</code> from scratch and use it to recover a <code>struct task</code> from a pointer to its embedded <code>list_head</code>. <em>offsetof</em> print the offset and verify the pointer arithmetic by hand.</li>
+        <li>Put one object on two intrusive lists at once using two hooks, then remove it from one without touching the other. <em>membership</em> confirm no copies and no allocations occurred.</li>
+        <li>Take a Boost.Intrusive list without <code>auto_unlink</code> and destroy a still-linked element. <em>ownership</em> observe the corruption, then fix it with <code>auto_unlink</code>.</li>
+        <li><a href="https://leetcode.com/problems/lru-cache/">LeetCode 146 &mdash; LRU Cache</a> <em>intrusive</em> reimplement it with an intrusive doubly linked list so moving a node to the front costs zero allocations.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="xor-linked-list.html"><span>Previous</span><span>&#8592; XOR Linked Lists</span></a>
+        <a class="next" href="concurrent-lists.html"><span>Next</span><span>Concurrent &amp; Lock-Free Lists &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function unrolledAnim() {
+    var svg = document.getElementById('unrolled-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('unrolled-info');
+    var out = document.getElementById('unrolled-output');
+    var stepBtn = document.getElementById('unrolled-step');
+    var autoBtn = document.getElementById('unrolled-auto');
+    var resetBtn = document.getElementById('unrolled-reset');
+    var runner = null;
+
+    var N = 12, K = 4;
+    var PW = 40, PGAP = 6, PX0 = 40, PY = 54, BH = 30;
+    var UNW = 176, UNGAP = 26, UNX0 = 40, UNY = 158, CELLW = 40;
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+
+    function px(e) { return PX0 + e * (PW + PGAP); }
+    function nodeX(nd) { return UNX0 + nd * (UNW + UNGAP); }
+    function ux(e) { var nd = Math.floor(e / K), off = e % K; return nodeX(nd) + 8 + off * CELLW; }
+
+    function build() {
+      svg.innerHTML = '';
+      svg.appendChild(el('text', { x: 8, y: 26, 'font-size': '13', 'font-weight': '700', fill: '#c0392b' }, 'Plain list  \u2014  1 value per node, 1 cache line each'));
+      svg.appendChild(el('text', { x: 8, y: 130, 'font-size': '13', 'font-weight': '700', fill: '#0a8f6a' }, 'Unrolled (k = 4)  \u2014  4 values per node, 1 cache line each'));
+
+      var e;
+      for (e = 0; e < N; e++) {
+        svg.appendChild(el('rect', { id: 'p' + e, x: px(e), y: PY, width: PW, height: BH, rx: 5, fill: '#fffdf9', stroke: '#b07', 'stroke-width': '0' }));
+        var pr = document.getElementById('p' + e);
+        pr.setAttribute('stroke', '#c99'); pr.setAttribute('stroke-width', '2');
+        svg.appendChild(el('text', { x: px(e) + PW / 2, y: PY + BH / 2, 'font-size': '12', 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#13201a', 'font-weight': '700' }, String(e + 1)));
+      }
+      /* unrolled node group boxes */
+      for (var nd = 0; nd < N / K; nd++) {
+        svg.appendChild(el('rect', { id: 'un' + nd, x: nodeX(nd), y: UNY - 6, width: UNW, height: BH + 12, rx: 7, fill: '#f3f8f5', stroke: '#9bb3a8', 'stroke-width': '2' }));
+        svg.appendChild(el('text', { x: nodeX(nd) + UNW / 2, y: UNY + BH + 20, 'font-size': '9.5', 'text-anchor': 'middle', fill: '#6a8a78' }, 'node ' + nd + ' = line ' + nd));
+      }
+      for (e = 0; e < N; e++) {
+        svg.appendChild(el('rect', { id: 'u' + e, x: ux(e), y: UNY, width: CELLW - 2, height: BH, rx: 4, fill: '#fffdf9', stroke: '#0a8f6a', 'stroke-width': '1.5' }));
+        svg.appendChild(el('text', { x: ux(e) + (CELLW - 2) / 2, y: UNY + BH / 2, 'font-size': '12', 'text-anchor': 'middle', 'dominant-baseline': 'central', fill: '#13201a', 'font-weight': '700' }, String(e + 1)));
+      }
+    }
+
+    var i = 0, pLines = 0, uSeen = {};
+
+    function step() {
+      if (i >= N) return;
+      /* plain: every element is its own line -> always a miss */
+      pLines++;
+      var pr = document.getElementById('p' + i);
+      if (pr) pr.setAttribute('fill', '#f4c7c0');
+
+      /* unrolled: miss only when we enter a new node */
+      var nd = Math.floor(i / K);
+      var uMiss = !uSeen[nd];
+      uSeen[nd] = true;
+      var uc = document.getElementById('u' + i);
+      if (uc) uc.setAttribute('fill', uMiss ? '#f4c7c0' : '#bdead2');
+      if (uMiss) { var box = document.getElementById('un' + nd); if (box) box.setAttribute('stroke', '#0a8f6a'); }
+
+      var uLines = Object.keys(uSeen).length;
+      info.innerHTML = '<strong>Element ' + (i + 1) + '.</strong> Plain: new line <span style="color:#c0392b">MISS</span> (' + pLines + ' total). ' +
+        'Unrolled: node ' + nd + (uMiss ? ' <span style="color:#c0392b">MISS</span>' : ' <span style="color:#0a8f6a">hit</span>') + ' (' + uLines + ' total).';
+      out.textContent = pLines + ' vs ' + uLines + ' lines';
+      i++;
+      if (i >= N) {
+        stepBtn.disabled = true;
+        info.innerHTML += '<br><strong>Result:</strong> same 12 elements &mdash; plain paid <strong>12</strong> cache misses, unrolled paid <strong>' + Object.keys(uSeen).length + '</strong>.';
+      }
+    }
+
+    function reset() {
+      if (runner) { runner.cancel(); runner = null; }
+      i = 0; pLines = 0; uSeen = {};
+      stepBtn.disabled = false;
+      out.textContent = '';
+      build();
+      info.innerHTML = 'Red = a cache-line miss (trip to slow memory), green = a hit in the line just loaded. Press <strong>Step</strong> to read one element from each.';
+    }
+
+    stepBtn.addEventListener('click', step);
+    resetBtn.addEventListener('click', reset);
+    autoBtn.addEventListener('click', function () {
+      reset();
+      var seq = [];
+      for (var k = 0; k < N; k++) seq.push(step);
+      runner = window.animRunner(seq, 700);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('intrusive-quiz', {
+    title: '\u{1F9E0} Unrolled &amp; Intrusive Check',
+    intro: 'Six situations. Pick the statement that is actually true.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'You store 4-byte ints in an unrolled list on a 64-byte cache line. What k puts one node on one line?',
+        answer: 'k = 12 \u2014 16 bytes of header (next + count) leave 48 bytes = twelve 4-byte ints',
+        distractors: [
+          { text: 'k = 16, since 64 / 4 = 16 elements fit in a line', why: 'That ignores the node header; next plus count already consume 16 bytes, leaving room for only 12 ints.' },
+          { text: 'k = 8, to leave half the line free for growth', why: 'You want the node to fill the line, not sit half-empty; 12 ints exactly fill the remaining 48 bytes.' },
+          { text: 'k does not depend on the cache line, only on the element count', why: 'Choosing k from the line and element sizes is the entire point \u2014 that is what makes a node one miss.' }
+        ],
+        explain: 'Pick k so header + k*sizeof(T) fills one (or two) cache lines: 16 + 12*4 = 64 bytes here.' },
+
+      { meaning: 'Inserting into an unrolled node that is already full (count == K).',
+        answer: 'Split the node in half, then insert into whichever half now owns the position',
+        distractors: [
+          { text: 'Grow the node\u2019s array to 2K so the element fits', why: 'Nodes are fixed-size to stay one cache line; you split rather than grow, keeping the size bound.' },
+          { text: 'Allocate a fresh node and move all K elements into it', why: 'That leaves the old node empty and does not create room efficiently; splitting in half balances both nodes.' },
+          { text: 'Refuse the insert and return an error', why: 'A full node is routine, not an error; splitting handles it in O(k) and keeps the list dense.' }
+        ],
+        explain: 'Splitting a full node keeps nodes between K/2 and K full, bounding slack while making room in O(k).' },
+
+      { meaning: 'container_of(ptr, Task, hook) recovers the enclosing object by:',
+        answer: 'Subtracting offsetof(Task, hook) bytes from ptr, then casting to Task*',
+        distractors: [
+          { text: 'Following a back-pointer that each hook stores to its owner', why: 'No back-pointer is stored; the whole point is zero overhead using the compile-time offset instead.' },
+          { text: 'Adding offsetof(Task, hook) to ptr to move forward to the object', why: 'The member sits after the object start, so you subtract the offset to move back, not add it.' },
+          { text: 'Searching the list for the node whose address matches ptr', why: 'It is O(1) arithmetic, not a search; offsetof gives the exact byte distance at compile time.' }
+        ],
+        explain: 'The member is offsetof bytes into the object, so ptr minus that offset is the object\u2019s first byte.' },
+
+      { meaning: 'Why is threading an element onto an intrusive list allocation-free?',
+        answer: 'The next/prev links live inside the element, so linking is pure pointer assignment \u2014 no node to allocate',
+        distractors: [
+          { text: 'The list preallocates a pool of nodes and reuses them', why: 'There are no separate nodes at all; the links are fields of the element, so nothing is allocated or pooled.' },
+          { text: 'It allocates, but from a faster arena allocator', why: 'It performs zero allocations of any kind; the object already contains its own links.' },
+          { text: 'The element is copied into the list\u2019s internal buffer', why: 'Nothing is copied; the list is just a chain of pointers running through objects you already hold.' }
+        ],
+        explain: 'Because the hook is part of the object, list_add is four pointer writes \u2014 no new, which is why kernels use it.' },
+
+      { meaning: 'One object needs to be on both an LRU list and a hash-bucket list at once.',
+        answer: 'Give it two hooks \u2014 one per list \u2014 and it lives on both with no copies',
+        distractors: [
+          { text: 'Store the object in one list and pointers to it in the other', why: 'That reintroduces indirection and a separate allocation; two intrusive hooks avoid both.' },
+          { text: 'Copy the object into each list so each has its own', why: 'Copies defeat the purpose and desynchronise state; intrusive membership shares the one object via two hooks.' },
+          { text: 'Impossible \u2014 an object can only be on one intrusive list', why: 'Multiple membership is a headline feature: add one hook per list and the object joins them all.' }
+        ],
+        explain: 'Distinct hook types allow a single object to belong to many lists simultaneously with zero copies \u2014 exactly what schedulers need.' },
+
+      { meaning: 'You destroy an object that is still linked into a non-auto_unlink intrusive list.',
+        answer: 'The list is corrupted \u2014 its neighbours now point into freed memory',
+        distractors: [
+          { text: 'The list automatically removes the element in its destructor', why: 'Only auto_unlink mode does that; a plain hook leaves the neighbours dangling when the element dies.' },
+          { text: 'Nothing happens \u2014 the list owns the element and freed it cleanly', why: 'The list does not own the element; you do. It never freed anything and still points at the dead object.' },
+          { text: 'The element leaks because the list still references it', why: 'It is the opposite of a leak: the memory is freed but still linked, so the list dereferences freed memory.' }
+        ],
+        explain: 'Intrusive containers do not own elements; destroying a linked element without auto_unlink leaves dangling neighbour pointers.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

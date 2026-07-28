@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Using std::forward_list and std::list well: the *_after API, splice in all three overloads and its O(n) cross-list gotcha, member sort/merge/unique/remove_if/reverse, the iterator invalidation guarantees that justify these containers, pmr allocators, and when to actually reach for them.">
+  <title>std::forward_list &amp; std::list in Practice | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .cmp-table code { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">DSA &middot; Linked Lists</a>
+        <span>&middot; Part 6 of 28</span>
+      </div>
+
+      <h1>std::forward_list &amp; std::list in Practice</h1>
+      <p class="post-meta">July 2026 &middot; 22 min read</p>
+
+      <p>You now know how to build a linked list. The standard library has already built two, and they are worth knowing not because you should reach for them often &mdash; you usually should not &mdash; but because the few places they win, they win decisively, and for reasons that are invisible in Big-O. This post is about the real APIs: the <code>_after</code> family, the three faces of <code>splice</code> and its one nasty complexity cliff, the member algorithms that exist because <code>std::sort</code> cannot touch these containers, and the iterator-stability guarantee that is the actual reason to choose them.</p>
+
+      <h2 id="what-they-are">What Each Container Actually Is</h2>
+      <p><code>std::forward_list</code> is a <strong>singly linked list</strong>, deliberately kept to the bare minimum: one pointer per node, and famously <em>no</em> <code>size()</code> member and <em>no</em> <code>push_back</code>. Both omissions are principled. A <code>size()</code> would cost either an extra word per list or an O(n) count; <code>push_back</code> would be an O(n) walk. The library refuses to ship either footgun and instead offers <code>before_begin()</code> and the <code>_after</code> operations.</p>
+
+      <p><code>std::list</code> is a <strong>doubly linked list built as a ring around one sentinel node</strong> &mdash; exactly the <a href="doubly-linked-list.html">design from Part 4</a>. Every end operation (<code>push_back</code>, <code>push_front</code>, <code>pop_back</code>, <code>pop_front</code>) is O(1), it iterates in both directions, and since C++11 its <code>size()</code> is required to be O(1) (implementations keep a running count).</p>
+
+      <pre><code>#include &lt;forward_list&gt;
+#include &lt;list&gt;
+
+std::forward_list&lt;int&gt; fl{1, 2, 3};   // singly linked: no size(), no back(), no push_back
+std::list&lt;int&gt;         dl{1, 2, 3};   // doubly linked ring; size() is O(1) since C++11
+
+dl.push_back(4);    dl.push_front(0);   // both O(1)
+// fl.push_back(4);  // does not compile \u2014 forward_list has no push_back</code></pre>
+
+      <h2 id="after-api">The <code>_after</code> API Family</h2>
+      <p>Because a <code>forward_list</code> iterator cannot reach the node <em>before</em> it, every mutating operation is expressed in terms of the position <em>after</em> a given iterator: <code>insert_after</code>, <code>emplace_after</code>, <code>erase_after</code>, and <code>splice_after</code>. The missing predecessor for the very first element is supplied by <code>before_begin()</code> &mdash; an iterator to a notional slot ahead of the first node, which is the dummy-head idea promoted to a first-class API.</p>
+
+      <pre><code>std::forward_list&lt;int&gt; fl{1, 2, 3};
+auto before = fl.before_begin();
+fl.insert_after(before, 0);          // O(1) front insert -&gt; 0 1 2 3
+fl.erase_after(fl.begin());          // remove the element after 0 -&gt; 0 2 3</code></pre>
+
+      <p>This is not a quirk to memorise; it is the singly-linked structure showing through the interface. Anytime an API is entirely <code>_after</code>-shaped, you are looking at a container that only knows how to go forward.</p>
+
+      <h2 id="splice">splice: The O(1) Superpower and Its One Gotcha</h2>
+      <p><code>splice</code> is why <code>std::list</code> exists. It moves nodes from one list into another by <strong>relinking pointers &mdash; no allocation, no element copies or moves, and no iterator invalidation</strong>. It comes in three overloads:</p>
+
+      <pre><code>std::list&lt;int&gt; a{1, 2, 3}, b{9, 8, 7};
+
+a.splice(a.begin(), b);                       // (1) whole list: O(1); b becomes empty
+a.splice(a.end(),   b, b.begin());            // (2) one element: O(1)
+a.splice(a.end(),   b, b.begin(), b.end());   // (3) a range: see the catch below</code></pre>
+
+      <p>Overloads (1) and (2) are unconditionally O(1). Overload (3), the range splice, hides a trap. <strong>Moving a range from a <em>different</em> list is O(n) in the length of that range</strong>, not O(1), because <code>size()</code> must stay O(1) on both lists &mdash; so the implementation has to <code>std::distance(first, last)</code> to know how much to subtract from the source count and add to the destination. Splicing a range <em>within the same list</em> stays O(1), because the total size does not change and no counting is needed.</p>
+
+      <div class="callout">
+        <strong>The exact gotcha, stated precisely:</strong> <code>dst.splice(pos, src, first, last)</code> is O(1) only when <code>&amp;dst == &amp;src</code>. Across two different lists it is O(std::distance(first, last)) &mdash; the price of the O(1) <code>size()</code> guarantee added in C++11. If you are splicing sub-ranges between lists in a hot loop and wondering why it is slow, this is why.</p>
+      </div>
+
+      <p>The single most useful splice is the LRU move-to-front. Given an iterator <code>it</code> to a just-accessed node, promoting it to the most-recently-used position is one O(1) line that keeps <code>it</code> and every other iterator valid:</p>
+
+      <pre><code>// Move the node at 'it' to the front of the same list, in O(1).
+lst.splice(lst.begin(), lst, it);   // 'it' stays valid and now sits at the front</code></pre>
+
+      <p>Pair a <code>std::list&lt;pair&lt;Key,Value&gt;&gt;</code> with an <code>unordered_map&lt;Key, list::iterator&gt;</code> and that one line is the whole heart of an <a href="lru-cache.html">LRU cache</a>. Here is the list order after each access, capacity 3, most-recently-used at the front:</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>Operation</th><th>Action</th><th>List (front &rarr; back)</th></tr></thead>
+        <tbody>
+          <tr><td><code>put(A)</code></td><td><code>push_front</code></td><td>A</td></tr>
+          <tr><td><code>put(B)</code></td><td><code>push_front</code></td><td>B, A</td></tr>
+          <tr><td><code>put(C)</code></td><td><code>push_front</code></td><td>C, B, A</td></tr>
+          <tr><td><code>get(A)</code></td><td><code>splice(begin, lst, itA)</code></td><td>A, C, B</td></tr>
+          <tr><td><code>put(D)</code></td><td>evict back (B), <code>push_front</code></td><td>D, A, C</td></tr>
+          <tr><td><code>get(C)</code></td><td><code>splice(begin, lst, itC)</code></td><td>C, D, A</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="algorithms">merge, sort, unique, remove_if, reverse</h2>
+      <p>These containers ship <strong>member</strong> algorithms that the generic <code>&lt;algorithm&gt;</code> versions cannot provide, because the free functions assume you can move elements and, for sorting, index them randomly. A node-based list can do neither cheaply &mdash; but it <em>can</em> relink, which is exactly what the members do.</p>
+
+      <pre><code>std::list&lt;int&gt; a{1, 4, 5}, b{2, 3, 6};
+
+a.merge(b);        // both sorted -&gt; 1 2 3 4 5 6; stable, O(n+m), b emptied, no allocation
+a.sort();          // list's own bottom-up merge sort: stable, O(n log n), no allocation
+a.unique();        // removes CONSECUTIVE equal elements; sort first for a global dedup
+a.remove(3);       // erase every element == 3
+a.remove_if([](int x){ return x % 2 == 0; });   // erase every element matching a predicate
+a.reverse();       // relink in place, O(n), no allocation</code></pre>
+
+      <p><strong>Why not <code>std::sort</code>?</strong> <code>std::sort</code> requires <em>random-access</em> iterators &mdash; it needs to reach the <em>i</em>-th element in O(1) to partition. <code>list</code> and <code>forward_list</code> offer only bidirectional and forward iterators respectively, so <code>std::sort(l.begin(), l.end())</code> does not even compile. The member <code>sort</code> is a bottom-up merge sort that repeatedly merges runs by <em>splicing</em> nodes, so it is stable and allocates nothing &mdash; it never moves an element, only relinks. This is the one place a linked list sorts competitively, because merge sort is naturally node-friendly.</p>
+
+      <h2 id="invalidation">Iterator and Reference Invalidation</h2>
+      <p>This table is the real reason to choose these containers. For <code>list</code> and <code>forward_list</code>, <strong>insertion invalidates nothing at all, and erasure invalidates only handles to the erased element</strong>. Nothing else &mdash; not iterators, not references, not raw pointers &mdash; ever moves. No other standard sequence container can promise that.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>Container</th><th>On insertion</th><th>On erasure</th></tr></thead>
+        <tbody>
+          <tr><td><code>list</code> / <code>forward_list</code></td><td>Nothing invalidated</td><td>Only the erased element's iterators/refs</td></tr>
+          <tr><td><code>vector</code></td><td>Reallocation invalidates <em>everything</em>; otherwise all at/after the point</td><td>Everything at/after the erased position</td></tr>
+          <tr><td><code>deque</code></td><td>Middle insert invalidates all iterators; ends invalidate iterators but keep references valid</td><td>Middle erase invalidates all; end erase only the erased</td></tr>
+        </tbody>
+      </table>
+
+      <p>If your code holds long-lived iterators, pointers, or references to elements while the container keeps mutating &mdash; a cache, a graph of nodes, an observer registry &mdash; this stability is worth more than all the cache-locality you give up. It is the guarantee, not the asymptotics, that should drive the choice.</p>
+
+      <h2 id="erase-remove">Why the erase&ndash;remove Idiom Does Not Apply</h2>
+      <p>On a <code>vector</code> you delete matching elements with the erase&ndash;remove idiom: <code>v.erase(std::remove_if(v.begin(), v.end(), pred), v.end());</code>. <code>std::remove_if</code> works by <em>shifting surviving elements forward</em> and returning the new logical end. That is precisely the wrong tool for a list: shifting means move-assigning values between nodes, which throws away the node identity and iterator stability you chose a list for.</p>
+
+      <pre><code>// DON'T do this on a list \u2014 it moves values between nodes and defeats the point:
+// lst.erase(std::remove_if(lst.begin(), lst.end(), pred), lst.end());
+
+// DO use the member \u2014 it unlinks matching nodes directly, keeping every other
+// iterator valid, in O(n) with no element moves:
+lst.remove_if(pred);</code></pre>
+
+      <p>The member <code>remove</code>/<code>remove_if</code> exists so that deletion is a pointer operation, not a value shuffle. Reach for it every time; the generic idiom is for contiguous containers.</p>
+
+      <h2 id="pmr">Recovering Locality with pmr</h2>
+      <p>The one honest complaint about <code>std::list</code> &mdash; every node is a separate heap allocation, so traversal is a pointer chase across scattered memory &mdash; has a practical fix. Give the list a polymorphic memory resource backed by a contiguous arena, and its nodes come out of one block with near-array locality and no per-node <code>malloc</code>:</p>
+
+      <pre><code>#include &lt;memory_resource&gt;
+#include &lt;list&gt;
+
+std::byte buffer[1 &lt;&lt; 16];
+std::pmr::monotonic_buffer_resource pool{buffer, sizeof(buffer)};
+std::pmr::list&lt;int&gt; lst{&amp;pool};    // nodes carved from 'buffer', contiguously
+
+for (int i = 0; i &lt; 1000; ++i) lst.push_back(i);   // no per-node heap allocation</code></pre>
+
+      <p>A <code>monotonic_buffer_resource</code> allocates by simply bumping a pointer and frees nothing until it is destroyed, so a freshly built <code>pmr::list</code> traverses almost as fast as a vector while keeping <code>list</code>'s O(1) splice and iterator stability. When you need the guarantees but the profiler blames cache misses, this is the fix to try before abandoning the container.</p>
+
+      <h2 id="when-to-use">When to Actually Use These</h2>
+      <table class="cmp-table">
+        <thead><tr><th>Container</th><th>Reach for it when</th><th>Avoid when</th></tr></thead>
+        <tbody>
+          <tr><td><code>vector</code></td><td>The default. Index access, cache locality, tight memory, append-heavy.</td><td>You need stable references across mid-container insert/erase.</td></tr>
+          <tr><td><code>deque</code></td><td>Fast push/pop at <em>both</em> ends; references survive end-operations; no reallocation spikes.</td><td>You need contiguous storage or mid-container reference stability.</td></tr>
+          <tr><td><code>list</code></td><td>Stable iterators under arbitrary insert/erase, O(1) splice/merge, O(1) erase given an iterator.</td><td>You mostly traverse or index &mdash; the cache misses will hurt.</td></tr>
+          <tr><td><code>forward_list</code></td><td>Absolute minimum memory, forward-only, many small lists, intrusive-style chains.</td><td>You need size(), back(), or reverse traversal.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Default to <code>vector</code>; justify anything else.</strong> Reach for <code>list</code> when you can name the specific guarantee you need &mdash; &ldquo;iterators must stay valid while I erase from the middle&rdquo; or &ldquo;I splice whole sublists in O(1)&rdquo;. If you cannot name it, you want a <code>vector</code>. The cache-locality gap from Part 1 means a <code>vector</code> often beats a <code>list</code> even at things the list is theoretically better at.
+      </div>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Each item is a situation; pick the statement that is actually correct about the standard containers.</p>
+      <div class="blog-quiz" id="stdlist-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li><a href="https://leetcode.com/problems/lru-cache/">LeetCode 146 &mdash; LRU Cache</a> <em>splice</em> <code>std::list</code> + hash map; the move-to-front one-liner is the core.</li>
+        <li><a href="https://leetcode.com/problems/merge-two-sorted-lists/">LeetCode 21 &mdash; Merge Two Sorted Lists</a> <em>merge</em> hand-implement what <code>list::merge</code> does.</li>
+        <li><a href="https://leetcode.com/problems/sort-list/">LeetCode 148 &mdash; Sort List</a> <em>sort</em> the bottom-up merge sort behind <code>list::sort</code>.</li>
+        <li><a href="https://leetcode.com/problems/merge-k-sorted-lists/">LeetCode 23 &mdash; Merge k Sorted Lists</a> <em>merge</em> repeated merging, exactly <code>list::merge</code> at scale.</li>
+        <li><a href="https://leetcode.com/problems/design-linked-list/">LeetCode 707 &mdash; Design Linked List</a> <em>api</em> reproduce the container interface by hand.</li>
+        <li><a href="https://leetcode.com/problems/remove-duplicates-from-sorted-list/">LeetCode 83 &mdash; Remove Duplicates from Sorted List</a> <em>unique</em> the <code>sort</code>-then-<code>unique</code> pattern in miniature.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="circular-linked-list.html"><span>Previous</span><span>&#8592; Circular Linked Lists</span></a>
+        <a class="next" href="traversal-patterns.html"><span>Next</span><span>Traversal &amp; Pointer-Surgery Patterns &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  BlogQuiz.create('stdlist-quiz', {
+    title: '\u{1F9F0} Standard Containers Check',
+    intro: 'Six situations. Pick the statement that is actually correct.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'You call dst.splice(pos, src, first, last) to move a range between two different lists.',
+        answer: 'O(n) in the range length \u2014 size() must be adjusted, so the range is counted',
+        distractors: [
+          { text: 'O(1) always, since splice only relinks pointers', why: 'Relinking is O(1), but across different lists the element counts must change, which needs std::distance.' },
+          { text: 'O(n) because every node is copied into dst', why: 'No nodes are copied; the cost is only the distance() needed to fix both size() values.' },
+          { text: 'It fails to compile across two different lists', why: 'It compiles and works; it is merely O(range) instead of O(1) when the lists differ.' }
+        ],
+        explain: 'Range splice is O(1) only within one list; across lists it is O(distance(first,last)) due to the O(1) size() guarantee.' },
+
+      { meaning: 'Why can std::sort not be used on a std::list?',
+        answer: 'std::sort needs random-access iterators; list offers only bidirectional ones',
+        distractors: [
+          { text: 'list elements are const-qualified and cannot be reordered', why: 'list elements are mutable; the blocker is iterator category, not constness.' },
+          { text: 'std::sort is not stable and list requires stability', why: 'Stability is unrelated to the compile error; std::sort simply cannot index a list in O(1).' },
+          { text: 'list has no begin()/end()', why: 'It has both; they are just bidirectional iterators, which std::sort does not accept.' }
+        ],
+        explain: 'That is why list ships a member sort() \u2014 a node-splicing merge sort that is stable and allocation-free.' },
+
+      { meaning: 'You insert an element into the middle of a std::list while holding iterators to other elements.',
+        answer: 'All existing iterators, pointers, and references stay valid',
+        distractors: [
+          { text: 'All iterators after the insertion point are invalidated', why: 'That is vector behaviour; list insertion relinks nodes and moves nothing, so nothing is invalidated.' },
+          { text: 'Only references stay valid; iterators are invalidated', why: 'Both stay valid on a list; insertion never touches existing nodes.' },
+          { text: 'Everything is invalidated because the sentinel moves', why: 'The sentinel does not move, and insertion adds a node without disturbing existing ones.' }
+        ],
+        explain: 'Insertion never invalidates anything on list/forward_list \u2014 the guarantee that justifies choosing them.' },
+
+      { meaning: 'You want to delete all elements matching a predicate from a std::list.',
+        answer: 'Use the member lst.remove_if(pred) \u2014 it unlinks nodes and keeps other iterators valid',
+        distractors: [
+          { text: 'Use lst.erase(std::remove_if(begin, end, pred), end), the erase-remove idiom', why: 'std::remove_if shifts values between nodes, defeating the node identity and stability you chose list for.' },
+          { text: 'Loop and call erase() on each match without saving the next iterator', why: 'erase() invalidates the erased iterator; advancing it afterwards is undefined \u2014 remove_if avoids the whole issue.' },
+          { text: 'Assign a filtered copy back to the list', why: 'That reallocates every node and invalidates all iterators \u2014 the opposite of what list is for.' }
+        ],
+        explain: 'The member remove/remove_if unlinks matching nodes directly; the erase-remove idiom is for contiguous containers.' },
+
+      { meaning: 'std::forward_list omits size() and push_back. Why?',
+        answer: 'To stay minimal: size() would cost a word or O(n), and push_back would be O(n)',
+        distractors: [
+          { text: 'They were deprecated and removed in C++17', why: 'They were never present; it is an original design choice, not a deprecation.' },
+          { text: 'Because forward_list is immutable after construction', why: 'forward_list is fully mutable via the _after operations; it simply avoids O(n) or costly members.' },
+          { text: 'Because a singly linked list cannot be traversed to its end', why: 'It can be traversed to the end; the point is that doing so for push_back/size would be O(n).' }
+        ],
+        explain: 'forward_list is the deliberately bare singly linked container: one pointer per node, _after API, no O(n) conveniences.' },
+
+      { meaning: 'A std::list is too slow to traverse but you need its iterator stability and O(1) splice.',
+        answer: 'Back it with a pmr monotonic_buffer_resource so nodes come from one contiguous arena',
+        distractors: [
+          { text: 'Switch to std::vector; it has the same iterator guarantees', why: 'vector invalidates iterators on reallocation and mid-erase \u2014 it does not have list\u2019s stability.' },
+          { text: 'Call list::reserve() to make the nodes contiguous', why: 'list has no reserve(); node placement is controlled by the allocator, e.g. a pmr resource.' },
+          { text: 'Nothing can help; list is always scattered in memory', why: 'A pmr arena allocator gives near-array locality while keeping list\u2019s guarantees.' }
+        ],
+        explain: 'std::pmr::list over a monotonic_buffer_resource recovers most of the locality loss without giving up splice or stability.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
