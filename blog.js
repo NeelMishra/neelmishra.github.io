@@ -630,10 +630,19 @@ var BLOG_TREE = [
             name: 'sliding-window',
             label: 'Sliding Window',
             children: [
-              { title: 'Overview', file: 'dsa/arrays/sliding-window/index.html', links: ['dsa/arrays/sliding-window/fixed-size.html'] },
-              { title: 'Fixed-Size Window', file: 'dsa/arrays/sliding-window/fixed-size.html', links: ['dsa/arrays/sliding-window/index.html', 'dsa/arrays/sliding-window/variable-size.html'] },
-              { title: 'Variable-Size Window', file: 'dsa/arrays/sliding-window/variable-size.html', links: ['dsa/arrays/sliding-window/fixed-size.html', 'dsa/arrays/sliding-window/patterns.html'] },
-              { title: 'Competition Patterns', file: 'dsa/arrays/sliding-window/patterns.html', links: ['dsa/arrays/sliding-window/variable-size.html'] }
+              { title: 'Foundations', file: 'dsa/arrays/sliding-window/index.html', links: ['dsa/arrays/sliding-window/fixed-size.html', 'dsa/arrays/sliding-window/failure-modes.html'] },
+              { title: 'Fixed-Size Fundamentals', file: 'dsa/arrays/sliding-window/fixed-size.html', links: ['dsa/arrays/sliding-window/index.html', 'dsa/arrays/sliding-window/frequency-windows.html'] },
+              { title: 'Frequency & Multiset Windows', file: 'dsa/arrays/sliding-window/frequency-windows.html', links: ['dsa/arrays/sliding-window/fixed-size.html', 'dsa/arrays/sliding-window/variable-size.html'] },
+              { title: 'Longest Valid Windows', file: 'dsa/arrays/sliding-window/variable-size.html', links: ['dsa/arrays/sliding-window/frequency-windows.html', 'dsa/arrays/sliding-window/shortest-window.html'] },
+              { title: 'Shortest / Coverage Windows', file: 'dsa/arrays/sliding-window/shortest-window.html', links: ['dsa/arrays/sliding-window/variable-size.html', 'dsa/arrays/sliding-window/counting-subarrays.html'] },
+              { title: 'Counting Subarrays', file: 'dsa/arrays/sliding-window/counting-subarrays.html', links: ['dsa/arrays/sliding-window/shortest-window.html', 'dsa/arrays/sliding-window/patterns.html'] },
+              { title: 'Monotonic Deque', file: 'dsa/arrays/sliding-window/patterns.html', links: ['dsa/arrays/sliding-window/counting-subarrays.html', 'dsa/arrays/sliding-window/dual-deque-range.html'] },
+              { title: 'Dual-Deque Range Windows', file: 'dsa/arrays/sliding-window/dual-deque-range.html', links: ['dsa/arrays/sliding-window/patterns.html', 'dsa/arrays/sliding-window/sum-product-windows.html'] },
+              { title: 'Sum & Product Windows', file: 'dsa/arrays/sliding-window/sum-product-windows.html', links: ['dsa/arrays/sliding-window/dual-deque-range.html', 'dsa/arrays/sliding-window/transformations.html'] },
+              { title: 'Transformations', file: 'dsa/arrays/sliding-window/transformations.html', links: ['dsa/arrays/sliding-window/sum-product-windows.html', 'dsa/arrays/sliding-window/advanced-patterns.html'] },
+              { title: 'Advanced & Contest Variants', file: 'dsa/arrays/sliding-window/advanced-patterns.html', links: ['dsa/arrays/sliding-window/transformations.html', 'dsa/arrays/sliding-window/failure-modes.html'] },
+              { title: 'Failure Modes & Alternatives', file: 'dsa/arrays/sliding-window/failure-modes.html', links: ['dsa/arrays/sliding-window/advanced-patterns.html', 'dsa/arrays/sliding-window/capstone.html'] },
+              { title: 'Capstone: Competition Playbook', file: 'dsa/arrays/sliding-window/capstone.html', links: ['dsa/arrays/sliding-window/failure-modes.html', 'dsa/arrays/sliding-window/index.html'] }
             ]
           },
           {
