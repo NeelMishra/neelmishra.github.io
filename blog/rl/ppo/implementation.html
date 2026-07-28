@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The implementation details that decide whether PPO reproduces: advantage normalisation, gradient clipping, masking and truncation bugs, the handful of hyperparameters that matter, the diagnostic curves to watch, and the named failure modes with fixes.">
+  <title>Implementation Details &amp; Debugging | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .cmp-table code { font-size: 0.86em; }
+    .key-eq { background: rgba(10,143,106,0.06); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 1rem; margin: 1.1rem 0; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">RL &middot; PPO</a>
+        <span>&middot; Part 11 of 12</span>
+      </div>
+
+      <h1>Implementation Details &amp; Debugging</h1>
+      <p class="post-meta">July 2026 &middot; 22 min read</p>
+
+      <p><a href="full-algorithm.html">Part 10</a> finished the objective. If the algorithm were the objective, you could implement PPO from that one line and be done. You cannot. The uncomfortable open secret of policy-gradient RL is that the published loss is maybe half of what determines whether a run succeeds; the other half is a pile of implementation choices that no paper puts in its abstract, that vary between codebases, and that turn a diverging run into a converging one. This post is about that second half: the details that actually move outcomes, the handful of knobs that matter, the dashboard that tells you what is happening, and the named ways it fails.</p>
+
+      <h2 id="where-we-are">Where We Are: The Objective Is Not the Algorithm</h2>
+
+      <p>The loss from Part 10 assumes clean advantages, well-scaled gradients, correctly masked sequences, and a critic that tracks returns. Every one of those is an assumption you have to actively engineer. Two careful groups implemented the <em>same</em> PPO equations and got materially different results; the discrepancy lived entirely in code-level choices, which is the thesis of Engstrom et al.&rsquo;s &ldquo;Implementation Matters&rdquo; and the motivation for Huang et al.&rsquo;s catalogue of thirty-seven PPO details. Treat what follows as the missing appendix to the objective.</p>
+
+      <h2 id="details-that-matter">The Details That Actually Change Outcomes</h2>
+
+      <p><strong>Advantage normalisation (whitening).</strong> After GAE, subtract the mean and divide by the standard deviation of the advantages so the batch has zero mean and unit variance. Without it, the scale of the policy gradient rides on the arbitrary scale of the reward, and the effective learning rate wanders as reward magnitude drifts. The subtlety is <em>where</em> you normalise: per-minibatch whitening uses statistics from a few dozen tokens and is noisier; per-batch (whole-rollout) whitening is more stable and is the usual choice. Mixing them up silently changes the effective step size.</p>
+
+      <p><strong>Value-loss clipping.</strong> Many codebases clip the critic&rsquo;s prediction to a trust region around its old value, mirroring the policy clip. It is widely copied and, on the evidence, of dubious benefit &mdash; controlled studies find it rarely helps and sometimes hurts. Keep it if your reference implementation has it and you are matching results; do not treat it as load-bearing.</p>
+
+      <p><strong>Global gradient-norm clipping.</strong> Clip the total gradient norm across all parameters to a fixed ceiling (commonly $0.5$ or $1.0$) before the optimiser step. This is the cheapest insurance in the whole loop: one bad minibatch that produces an enormous gradient cannot blow up the weights. Nearly every stable run has it.</p>
+
+      <p><strong>Shared versus separate actor&ndash;critic trunks.</strong> A scalar value head bolted onto the policy trunk saves a full model&rsquo;s worth of memory, but the two heads now fight over shared features, and a large value loss can corrupt the representation the policy depends on. Separate networks are cleaner and more stable but cost more memory. At LLM scale the shared trunk with a carefully scaled value loss is common; when the critic misbehaves, decoupling is the first structural fix to try.</p>
+
+      <p><strong>Learning-rate ratio, Adam epsilon, reward scaling.</strong> The critic often wants a higher learning rate than the policy &mdash; it is doing plain regression and can afford to move faster, while the policy must inch. Adam&rsquo;s $\epsilon$ (the denominator floor, not the clip $\epsilon$) matters more than people expect at this scale; too small and updates explode on flat gradients. And reward whitening or scaling &mdash; standardising the reward-model outputs before they enter GAE &mdash; keeps advantages in a sane range across prompts with wildly different raw scores.</p>
+
+      <p><strong>Masking, and the truncation bug.</strong> Two masking mistakes are endemic. The first: letting prompt tokens or padding contribute to the loss. Prompt tokens were not generated by the policy; training on them teaches the model to predict its own input. Mask them to zero in every term. The second is subtler and a genuine source of silent bugs: a sequence cut off by the maximum-length limit is <em>not</em> a terminated episode. A real EOS means the value beyond it is zero; a truncation means there was more to come, so the last value should <strong>bootstrap</strong> off $V_\phi$, not be treated as terminal. Conflate the two and you systematically mis-estimate returns for every long response.</p>
+
+      <div class="callout">
+        <strong>A truncated sequence is not a terminal state.</strong> This one line causes more quiet damage than any other. If your GAE loop sets the bootstrap term to zero at the max-length cutoff, you are telling the critic that every long answer ended in a state worth exactly nothing &mdash; punishing length for a reason that has nothing to do with quality. Track a real <code>done</code> flag (EOS reached) separately from a <code>truncated</code> flag (length cap), and only zero the bootstrap on <code>done</code>.
+      </div>
+
+      <h2 id="hyperparameters">The Hyperparameters That Matter</h2>
+
+      <p>PPO exposes dozens of knobs; most can be left at their defaults forever. These are the ones worth understanding, with a typical range and the symptom of setting each one wrong.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>Knob</th><th>Typical</th><th>Symptom when wrong</th></tr></thead>
+        <tbody>
+          <tr><td>Clip $\epsilon$</td><td>0.1 &ndash; 0.2</td><td>Too large: updates too aggressive, unstable. Too small: learning crawls, <code>clipfrac</code> saturates.</td></tr>
+          <tr><td>Inner epochs $K$</td><td>1 &ndash; 4</td><td>Too many: policy drifts far off the behaviour policy, KL spikes. Too few: wasted rollouts, slow.</td></tr>
+          <tr><td>Minibatch size</td><td>hardware-bound</td><td>Too small: noisy whitening and gradients. Too large: fewer steps per rollout.</td></tr>
+          <tr><td>Discount $\gamma$</td><td>$\approx 1.0$</td><td>Below ~0.99 for LLMs: near-terminal reward gets discounted away over long responses.</td></tr>
+          <tr><td>GAE $\lambda$</td><td>$\approx 0.95$</td><td>Toward 1: high-variance advantages. Toward 0: biased, over-trusts a shaky critic.</td></tr>
+          <tr><td>KL coefficient $\beta$</td><td>problem-specific</td><td>Too low: policy runs away, reward hacking. Too high: policy frozen near the reference, no learning.</td></tr>
+          <tr><td>Policy learning rate</td><td>1e-6 &ndash; 1e-5</td><td>Too high: entropy collapse, KL explosion. Too low: no visible improvement.</td></tr>
+          <tr><td>Entropy coefficient $c_2$</td><td>0 &ndash; 0.01</td><td>Too high: injects noise, garbled text. Too low/zero: risk of premature collapse.</td></tr>
+        </tbody>
+      </table>
+
+      <p>Be honest about the ranking: of these, $K$ and $\beta$ are the two that most often decide a run. $K$ governs how far you let the policy stray from the data it was trained on before refreshing; $\beta$ governs how hard the reference leash pulls back. Get those two into a sensible range and the rest usually forgive you.</p>
+
+      <h2 id="diagnostics">The Diagnostic Dashboard</h2>
+
+      <p>You do not debug PPO by reading the loss &mdash; the loss is a sum of three terms fighting each other and tells you almost nothing. You debug it by watching a small dashboard of curves, each of which has a known healthy shape and a known pathology. The essentials: <strong>mean reward</strong> (should rise, then plateau &mdash; not spike), <strong>KL to the reference</strong> (should grow slowly and stay bounded), <strong>clipfrac</strong> (fraction of tokens clipped, healthy around $0.1$&ndash;$0.3$), <strong>approx_kl</strong> between old and new policy per update (should stay small, a few hundredths), <strong>explained variance</strong> of the critic (should climb toward $1$), <strong>entropy</strong> (should ease down gently, never crash), <strong>gradient norm</strong> (steady, no spikes), and <strong>response length</strong> (watch for runaway inflation).</p>
+
+      <div class="anim-container" id="ppo-diagnostics-anim">
+        <h4>&#9654; Reading the Dashboard</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Four sparklines &mdash; reward, KL to reference, entropy, explained variance. Step through the scenarios: a healthy run and then three failures. The red panel is the tell; the caption names the diagnosis.</p>
+        <svg id="ppo-diag-svg" width="600" height="270" viewBox="0 0 600 270" role="img" aria-label="Diagnostic dashboard sparklines cycling through healthy and pathological PPO runs"></svg>
+        <div id="ppo-diag-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:3rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="ppo-diag-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="ppo-diag-auto" type="button">Play All</button>
+          <button class="anim-btn" id="ppo-diag-reset" type="button">Reset</button>
+          <span class="anim-output" id="ppo-diag-output"></span>
+        </div>
+      </div>
+
+      <h2 id="diagnostics-code">Diagnostics in Code</h2>
+
+      <p>Three of these are worth computing exactly, and all three fit in a few lines. Note the KL estimator: the naive $\log\pi_{\text{old}} - \log\pi_{\text{new}}$ is unbiased but high-variance and can go negative; Schulman&rsquo;s $k_3$ estimator $(r-1)-\log r$ is always non-negative and far steadier.</p>
+
+      <pre><code>def diagnostics(old_logp, new_logp, values, returns, eps, mask):
+    with torch.no_grad():
+        logratio = new_logp - old_logp
+        ratio    = torch.exp(logratio)
+        approx_kl = masked_mean((ratio - 1) - logratio, mask)      # k3, non-negative
+        clipfrac  = masked_mean((ratio - 1).abs().gt(eps).float(), mask)
+        resid_var = (returns - values).var()
+        explained_var = 1.0 - resid_var / (returns.var() + 1e-8)
+    return approx_kl.item(), clipfrac.item(), explained_var.item()</code></pre>
+
+      <p>Put numbers through it. Suppose over five tokens the log-ratios are $[0.01, -0.02, 0.25, -0.30, 0.05]$, so the ratios are about $[1.01, 0.98, 1.28, 0.74, 1.05]$. With $\epsilon=0.2$, two of the five exceed the band ($1.28$ and $0.74$), so <code>clipfrac</code> $=2/5=0.40$ &mdash; high, a sign the step was too big. The $k_3$ estimator gives <code>approx_kl</code> $\approx 0.015$, borderline. Now explained variance: take returns $[0.75, 0.80, -0.65, -0.60, 0.20]$ and critic values $[0.50, 0.60, -0.40, -0.55, 0.10]$. The residuals have variance $0.033$ and the returns have variance $0.395$, so</p>
+
+      <div class="key-eq">$$\text{explained\_var} = 1 - \frac{0.033}{0.395} \approx 0.92.$$</div>
+
+      <p>A critic that explains $92\%$ of the variance in returns is healthy. If that number sits near zero &mdash; or worse, goes negative &mdash; the critic is predicting no better than a constant, and every advantage you feed the policy is noise.</p>
+
+      <h2 id="failure-modes">Named Failure Modes</h2>
+
+      <p>Most PPO failures are one of a small cast of characters. Learn to recognise them by their signature curve.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>Entropy crashes toward zero; outputs become one repeated template</td><td>Entropy collapse &mdash; the policy over-committed to a locally high-reward form</td><td>Add or raise the entropy bonus, lower the LR, tighten $\epsilon$</td></tr>
+          <tr><td>KL to reference explodes; text scores well but reads as gibberish</td><td>KL explosion &mdash; the policy ran away from the reference</td><td>Raise $\beta$ (or use an adaptive controller), lower the LR, reduce $K$</td></tr>
+          <tr><td>Explained variance stuck near zero all run</td><td>The critic never learns &mdash; usually value LR or advantage normalisation</td><td>Raise value LR, check whitening, consider a separate critic trunk</td></tr>
+          <tr><td>Reward-model score climbs while real quality falls</td><td>Reward hacking (see <a href="kl-and-reward-hacking.html">Part 9</a>) &mdash; the policy exploits the proxy</td><td>Strengthen the KL leash, audit outputs by hand, improve the reward model</td></tr>
+          <tr><td>Response length inflates without quality gain</td><td>Length is correlated with reward in the model; the policy games it</td><td>Length-normalise or penalise length; re-check truncation handling</td></tr>
+          <tr><td>Loss becomes NaN after a few hundred steps</td><td>Ratio overflow from unstable log-prob differences</td><td>Clamp the log-ratio before <code>exp</code>, add grad-norm clipping, lower LR</td></tr>
+          <tr><td>Everything looks calm but nothing improves</td><td>Reward has near-zero variance across the batch, so advantages vanish</td><td>Increase reward signal/variance, check the reward model actually discriminates</td></tr>
+        </tbody>
+      </table>
+
+      <p>That last row is the quietest and the most demoralising. The curves are flat and serene, the run does not crash, and the model simply never gets better &mdash; because if every completion in a batch earns nearly the same reward, the advantages are all near zero and there is no gradient signal to speak of. This exact failure is what motivates the group-based methods of <a href="beyond-ppo.html">Part 12</a>, which need reward variance <em>within</em> a group to function at all.</p>
+
+      <h2 id="testing">Testing an Implementation</h2>
+
+      <p>You do not have to trust PPO code; you can test it. Four checks catch the overwhelming majority of bugs before you waste a GPU-week:</p>
+
+      <pre><code># 1) The ratio must be exactly 1 on the first inner epoch.
+assert torch.allclose(ratio_epoch0, torch.ones_like(ratio_epoch0), atol=1e-5)
+
+# 2) Whitened advantages are centred (mean approx 0) and scaled (std approx 1).
+adv_w = whiten(adv, mask)
+assert masked_mean(adv_w, mask).abs().item() &lt; 1e-4
+
+# 3) GAE with lambda=1 must equal the Monte-Carlo advantage on a tiny trajectory.
+adv_gae, _ = gae(r, v, mask, gamma=1.0, lam=1.0)
+mc = discounted_return(r, gamma=1.0) - v[:-1]
+assert torch.allclose(adv_gae, mc, atol=1e-5)
+
+# 4) Smoke test: overfit a single prompt; reward must reach the ceiling.
+for _ in range(200):
+    ppo_step(single_prompt)
+assert reward(single_prompt) &gt; 0.95 * max_reward</code></pre>
+
+      <p>Test 1 is the cheapest and catches an astonishing number of bugs &mdash; a wrong ratio on epoch zero means your <code>old_logprob</code> was recorded incorrectly or detached at the wrong moment. Test 3 validates the single most error-prone loop in the codebase against a brute-force computation you can check by hand. Test 4 is the RL equivalent of overfitting one batch in supervised learning: if PPO cannot memorise a single prompt, no hyperparameter will save it on a real dataset.</p>
+
+      <p>With the details nailed down and the dashboard watched, PPO is a reliable tool. But it is a heavy one &mdash; four models, a critic to babysit, a reward model to keep from being hacked. That weight is exactly what the next generation of methods set out to shed. On to <a href="beyond-ppo.html">Part 12</a>.</p>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Read the symptom, name the diagnosis a seasoned practitioner would reach for.</p>
+      <div class="blog-quiz" id="ppo-debug-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li><a href="https://arxiv.org/abs/2005.12729">Engstrom et al., Implementation Matters in Deep Policy Gradients</a> <em>paper</em> the case study showing code-level choices, not the objective, explained the results gap.</li>
+        <li><a href="https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/">Huang et al., The 37 Implementation Details of Proximal Policy Optimization</a> <em>blog</em> the reproducibility checklist behind this whole post.</li>
+        <li><a href="https://arxiv.org/abs/2203.02155">Ouyang et al., InstructGPT</a> <em>paper</em> the hyperparameters and KL control used for a real RLHF run.</li>
+        <li><em>exercise</em> Implement <code>diagnostics()</code> and reproduce the <code>clipfrac</code> $=0.40$ and explained-variance $=0.92$ numbers above from the arrays given.</li>
+        <li><em>exercise</em> Break test 1 on purpose by forgetting to detach <code>old_logprob</code>, and watch which downstream curve moves first.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="full-algorithm.html"><span>Previous</span><span>&#8592; The Complete PPO Training Loop</span></a>
+        <a class="next" href="beyond-ppo.html"><span>Next</span><span>GRPO, DPO &amp; Beyond &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function ppoDiagAnim() {
+    var svg = document.getElementById('ppo-diag-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('ppo-diag-info');
+    var out = document.getElementById('ppo-diag-output');
+    var stepBtn = document.getElementById('ppo-diag-step');
+    var autoBtn = document.getElementById('ppo-diag-auto');
+    var resetBtn = document.getElementById('ppo-diag-reset');
+
+    var GREEN = '#0a8f6a', RED = '#c0392b', GREY = '#94a99c', LINE = '#6a8a78';
+    var idx = 0, runner = null;
+
+    var panels = [
+      { key: 'reward', title: 'mean reward', x: 30, y: 44 },
+      { key: 'kl', title: 'KL to reference', x: 315, y: 44 },
+      { key: 'entropy', title: 'policy entropy', x: 30, y: 162 },
+      { key: 'ev', title: 'explained variance', x: 315, y: 162 }
+    ];
+    var PW = 255, PH = 84;
+
+    var scenarios = [
+      { name: 'Healthy run', bad: [],
+        diag: 'Healthy: reward rises then plateaus, KL stays bounded, entropy eases gently, the critic climbs toward full explained variance. Nothing to fix.',
+        data: {
+          reward: [.20, .24, .30, .36, .42, .48, .54, .60, .64, .67, .69, .70],
+          kl: [.20, .22, .24, .23, .25, .24, .26, .25, .27, .26, .28, .27],
+          entropy: [.72, .68, .63, .58, .54, .51, .49, .48, .47, .46, .46, .45],
+          ev: [.30, .40, .50, .58, .65, .70, .75, .78, .81, .83, .84, .85]
+        } },
+      { name: 'Entropy collapse', bad: ['entropy'],
+        diag: 'Entropy collapse: entropy falls off a cliff and the output degenerates to a single template. Reward can still look great, which is the trap. Fix: entropy bonus up, LR down, tighten epsilon.',
+        data: {
+          reward: [.30, .40, .52, .63, .72, .80, .85, .88, .90, .91, .92, .92],
+          kl: [.20, .24, .30, .34, .36, .35, .34, .33, .32, .31, .30, .30],
+          entropy: [.70, .60, .45, .30, .18, .10, .06, .04, .03, .03, .02, .02],
+          ev: [.30, .40, .48, .55, .60, .63, .65, .66, .67, .67, .68, .68]
+        } },
+      { name: 'KL explosion', bad: ['kl'],
+        diag: 'KL explosion: the policy runs away from the reference. Reward-model score spikes then collapses as the text turns to gibberish that games the proxy. Fix: raise beta, lower LR, reduce K.',
+        data: {
+          reward: [.25, .35, .48, .60, .72, .82, .88, .90, .86, .80, .72, .65],
+          kl: [.18, .22, .30, .42, .55, .68, .78, .86, .91, .94, .96, .97],
+          entropy: [.60, .58, .55, .50, .44, .40, .45, .55, .65, .70, .72, .74],
+          ev: [.40, .42, .40, .36, .30, .24, .18, .14, .10, .08, .07, .06]
+        } },
+      { name: 'Dead critic', bad: ['ev'],
+        diag: 'Dead critic: explained variance never leaves zero, so the advantages are noise and the policy learns nothing useful. Fix: raise the value LR, check advantage whitening, try a separate critic trunk.',
+        data: {
+          reward: [.30, .31, .30, .32, .31, .33, .32, .31, .32, .33, .32, .33],
+          kl: [.20, .21, .22, .21, .22, .23, .22, .23, .22, .23, .22, .23],
+          entropy: [.65, .63, .62, .61, .60, .60, .59, .59, .58, .58, .57, .57],
+          ev: [.05, .06, .05, .07, .06, .05, .06, .07, .06, .05, .06, .07]
+        } }
+    ];
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+
+    function drawPanel(p, sc) {
+      var isBad = sc.bad.indexOf(p.key) !== -1;
+      var col = isBad ? RED : GREEN;
+      svg.appendChild(el('rect', {
+        x: p.x, y: p.y, width: PW, height: PH, rx: 8,
+        fill: isBad ? 'rgba(192,57,43,0.06)' : 'var(--card,#fffdf9)',
+        stroke: isBad ? RED : LINE, 'stroke-width': isBad ? '2' : '1.2'
+      }));
+      svg.appendChild(el('text', { x: p.x + 10, y: p.y + 16, 'font-size': '11.5', 'font-weight': '700', fill: col }, p.title));
+      if (isBad) svg.appendChild(el('text', { x: p.x + PW - 10, y: p.y + 16, 'font-size': '10.5', 'font-weight': '700', fill: RED, 'text-anchor': 'end' }, 'watch this'));
+
+      var data = sc.data[p.key];
+      var x0 = p.x + 10, x1 = p.x + PW - 12, yTop = p.y + 24, yBot = p.y + PH - 10;
+      /* baseline */
+      svg.appendChild(el('line', { x1: x0, y1: yBot, x2: x1, y2: yBot, stroke: GREY, 'stroke-width': '1', 'stroke-dasharray': '3 3' }));
+      var d = 'M';
+      for (var i = 0; i < data.length; i++) {
+        var px = x0 + (x1 - x0) * i / (data.length - 1);
+        var py = yBot - data[i] * (yBot - yTop);
+        d += (i ? ' L' : ' ') + px.toFixed(1) + ' ' + py.toFixed(1);
+      }
+      svg.appendChild(el('path', { d: d, fill: 'none', stroke: col, 'stroke-width': '2.4' }));
+      var lx = x1, ly = yBot - data[data.length - 1] * (yBot - yTop);
+      svg.appendChild(el('circle', { cx: lx, cy: ly, r: 3.5, fill: col }));
+    }
+
+    function build() {
+      svg.innerHTML = '';
+      var sc = scenarios[idx];
+      svg.appendChild(el('text', { x: 300, y: 22, 'font-size': '13.5', 'font-weight': '800', fill: sc.bad.length ? RED : GREEN, 'text-anchor': 'middle' }, 'Scenario ' + (idx + 1) + '/4 \u2014 ' + sc.name));
+      panels.forEach(function (p) { drawPanel(p, sc); });
+      info.innerHTML = '<strong>' + sc.name + '.</strong> ' + sc.diag;
+      out.textContent = sc.name;
+    }
+
+    function doStep() { idx = (idx + 1) % scenarios.length; build(); }
+    function reset() { if (runner) { runner.cancel(); runner = null; } idx = 0; build(); }
+
+    stepBtn.addEventListener('click', doStep);
+    resetBtn.addEventListener('click', reset);
+    autoBtn.addEventListener('click', function () {
+      if (runner) { runner.cancel(); runner = null; }
+      idx = 0; build();
+      var steps = [];
+      for (var k = 1; k < scenarios.length; k++) steps.push(doStep);
+      runner = window.animRunner(steps, 1300);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('ppo-debug-quiz', {
+    title: '\u{1F9EA} Diagnose the run',
+    intro: 'Each item is a symptom from the dashboard. Pick the diagnosis a seasoned practitioner reaches for first.',
+    promptLabel: 'Symptom:',
+    bank: [
+      { meaning: 'Explained variance of the critic sits near zero for the entire run.',
+        answer: 'the critic is not learning, usually a value learning rate or advantage-normalisation problem',
+        distractors: [
+          { text: 'the policy has collapsed to one template', why: 'that is entropy collapse, whose tell is entropy crashing, not explained variance; the critic metric points at the critic' },
+          { text: 'the KL penalty is set too high', why: 'a high KL penalty freezes the policy near the reference; it does not by itself keep the critic from fitting returns' },
+          { text: 'the reward model is perfectly calibrated', why: 'reward-model quality does not explain a critic that predicts no better than a constant' }
+        ],
+        explain: 'Near-zero explained variance means advantages are noise; check value LR, whitening, and consider decoupling the critic.' },
+      { meaning: 'The reward-model score keeps climbing but human-judged quality is clearly falling.',
+        answer: 'reward hacking, the policy is exploiting the reward model rather than improving',
+        distractors: [
+          { text: 'healthy convergence, since reward is going up', why: 'rising proxy reward with falling real quality is the definition of the proxy being gamed, not convergence' },
+          { text: 'the entropy bonus is too high and adding noise', why: 'a noisy entropy term degrades scores; here the score is rising, which points to exploitation of the reward model' },
+          { text: 'the critic is overfitting the returns', why: 'critic overfitting shows up as poor explained variance, not as a rising reward with falling quality' }
+        ],
+        explain: 'The fix is a stronger KL leash to the reference and a better reward model; cross-reference Part 9.' },
+      { meaning: 'Policy entropy drops sharply toward zero within a few hundred steps.',
+        answer: 'entropy collapse, the policy has degenerated to a single high-reward template',
+        distractors: [
+          { text: 'a dead critic that never learns', why: 'a dead critic shows up in explained variance, not in a collapsing entropy curve' },
+          { text: 'normal warmup that will recover on its own', why: 'a sharp crash toward zero does not self-recover; the distribution has already committed' },
+          { text: 'the discount gamma is set too low', why: 'gamma affects credit assignment over the sequence, not the sudden narrowing of the output distribution' }
+        ],
+        explain: 'Raise the entropy bonus, lower the learning rate, or tighten epsilon before the collapse locks in.' },
+      { meaning: 'clipfrac is pinned near 0.8 on almost every update.',
+        answer: 'nearly every token wants to move past the clip band, so the updates are too large',
+        distractors: [
+          { text: 'the clip range epsilon is too large so nothing clips', why: 'a high clipfrac means a lot IS being clipped, which is the opposite of nothing clipping' },
+          { text: 'the critic has fully converged', why: 'critic convergence is read from explained variance; clipfrac reports how far the policy tries to step' },
+          { text: 'the reward has no variance across the batch', why: 'no reward variance gives near-zero advantages and near-zero clipping, not saturated clipping' }
+        ],
+        explain: 'Lower the learning rate or raise the KL coefficient so the policy stops slamming into the clip boundary every step.' },
+      { meaning: 'The loss becomes NaN a few hundred steps into training.',
+        answer: 'ratio overflow from unstable log-prob differences; clamp the log-ratio before exponentiating',
+        distractors: [
+          { text: 'the learning rate is exactly zero', why: 'a zero learning rate freezes training, it does not produce NaN; NaN comes from an overflow or divide-by-zero' },
+          { text: 'too many inner epochs cause gradient underflow', why: 'underflow drives values to zero, not to NaN; the classic NaN source here is exp of a large log-ratio' },
+          { text: 'the reward happens to be exactly zero', why: 'a zero reward yields zero advantage, which is harmless, not a NaN' }
+        ],
+        explain: 'Guard the log-ratio, add global grad-norm clipping, and lower the LR to keep exp() in range.' },
+      { meaning: 'Curves are calm, nothing crashes, yet the model never improves and advantages are all near zero.',
+        answer: 'the reward has almost no variance across the batch, so there is no learning signal',
+        distractors: [
+          { text: 'the learning rate is far too high', why: 'a too-high LR shows up as instability and spikes, not as serene curves with zero advantages' },
+          { text: 'the KL coefficient is far too high', why: 'an over-tight KL freezes the policy but the tell there is a pinned-low KL and no movement, not vanishing advantages from flat reward' },
+          { text: 'the entropy coefficient went negative', why: 'a negative entropy coefficient would push toward collapse, not produce uniformly zero advantages across the batch' }
+        ],
+        explain: 'If every completion scores the same, there is nothing to prefer; this is exactly the gap the group methods of Part 12 attack.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

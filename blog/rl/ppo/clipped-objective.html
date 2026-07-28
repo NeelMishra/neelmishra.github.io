@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The clipped surrogate objective is the heart of PPO. This post starts from TRPO's trust region, derives clipping as a cheap first-order substitute, explains why the min makes the bound pessimistic, and walks the gradient in every case.">
+  <title>The Clipped Surrogate Objective | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .key-eq { background: rgba(10,143,106,0.06); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 1rem; margin: 1.1rem 0; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">RL &middot; PPO</a>
+        <span>&middot; Part 8 of 12</span>
+      </div>
+
+      <h1>The Clipped Surrogate Objective</h1>
+      <p class="post-meta">July 2026 &middot; 24 min read</p>
+
+      <p>This is the post the whole series has been building toward. Everything so far &mdash; returns, the critic, the advantage, GAE, the importance ratio &mdash; was apparatus for estimating how good each token was and reusing an expensive batch. The <a href="importance-sampling.html">previous post</a> left us with a surrogate objective, $L(\theta)=\hat{\mathbb{E}}_t[r_t(\theta)\hat{A}_t]$, and a warning stapled to it: the moment the policy drifts, the importance weights explode. PPO is the two-symbol fix for that warning. One <code>clip</code>, one <code>min</code>.</p>
+
+      <h2 id="where-we-are">The Problem We Inherited</h2>
+
+      <p>The surrogate has a failure mode that is worse than mere variance. Maximise $r_t(\theta)\hat{A}_t$ with no constraint and a plain optimiser will do the obvious thing: for any token with positive advantage it will push $r_t(\theta)$ as high as it can, and for negative advantage as low as it can, because the objective is <em>linear</em> in the ratio and linear functions have no interior maximum. A single aggressive update can move $\pi_\theta$ arbitrarily far from $\pi_{\theta_{\text{old}}}$.</p>
+
+      <p>That is self-defeating for two independent reasons. First, the importance weights are only trustworthy near $r_t(\theta)=1$; far from it the estimate is dominated by its rarest samples. Second &mdash; and this is the subtler one &mdash; the advantages $\hat{A}_t$ were computed under $\pi_{\theta_{\text{old}}}$. They are estimates of how much better than average each token was <em>for the old policy</em>. Move far enough and &ldquo;better than average&rdquo; is measured against a distribution you no longer have, so the very quantity you are ascending becomes stale. The step invalidates both the weights and the signal that justified the step. We need to stay in a neighbourhood where both remain approximately valid.</p>
+
+      <h2 id="trust-regions">Trust Regions: What TRPO Did</h2>
+
+      <p>The principled answer predates PPO. Trust Region Policy Optimization (<a href="https://arxiv.org/abs/1502.05477">Schulman et al., 2015</a>) makes the neighbourhood explicit. Maximise the surrogate, but subject to a hard cap on how far the new policy is allowed to move from the old one, measured by the average KL divergence between their token distributions:</p>
+
+      <div class="key-eq">
+        $$\max_{\theta}\; \hat{\mathbb{E}}_t\!\big[r_t(\theta)\,\hat{A}_t\big] \qquad\text{subject to}\qquad \hat{\mathbb{E}}_t\!\big[\mathrm{D}_{\mathrm{KL}}\!\big(\pi_{\theta_{\text{old}}}(\cdot\mid s_t)\,\Vert\,\pi_\theta(\cdot\mid s_t)\big)\big]\le\delta.$$
+      </div>
+
+      <p>This is exactly right in spirit and genuinely works: the constraint is the &ldquo;trust region&rdquo; &mdash; the ball around $\pi_{\theta_{\text{old}}}$ within which the surrogate is a trustworthy model of the true objective. The problem is that it is a <em>constrained</em> optimisation. TRPO solves it by linearising the objective and taking a quadratic approximation of the KL constraint, which turns the step into a natural-gradient direction requiring the Fisher information matrix. That matrix is far too large to form for a real network, so TRPO computes matrix&ndash;vector products with it via conjugate gradient, then does a line search to satisfy the constraint. It is a lot of moving parts.</p>
+
+      <p>At the scale and shape of language models, the cost compounds. The conjugate-gradient inner loop and the Fisher&ndash;vector products are expensive per step. Parameter sharing between the policy and value heads muddies the Fisher estimate. Stochastic regularisers like dropout, and the general non-smoothness of large-batch language training, break the second-order assumptions the derivation leans on. None of this is fatal, but all of it is friction, and it is friction in the hottest part of the loop. PPO's entire pitch is to keep the trust-region <em>intuition</em> while throwing away the second-order machinery &mdash; to get most of the benefit from a first-order objective you can write in three lines and drop into any autodiff optimiser.</p>
+
+      <h2 id="clipping-as-design">Designing the Clip</h2>
+
+      <p>So set aside the constraint and ask the design question directly: what objective, differentiated by plain SGD, has no incentive to push $r_t(\theta)$ far outside a band around $1$? Take the good-action case, $\hat{A}_t\gt 0$, where the surrogate wants $r_t(\theta)$ large. The incentive is the slope of the objective in $r_t(\theta)$. To kill the incentive past $1+\epsilon$, make the objective <em>flat</em> there. The obvious instrument is to clip the ratio:</p>
+
+      <p>$$\text{clip}\big(r_t(\theta),\,1-\epsilon,\,1+\epsilon\big)\,\hat{A}_t.$$</p>
+
+      <p>Clip the ratio into $[1-\epsilon,1+\epsilon]$ before multiplying by the advantage, and once $r_t(\theta)$ leaves the band the term stops changing, so its gradient is zero. For a good action that is exactly what we want above $1+\epsilon$. But clipping <em>alone</em> is not enough, and seeing why is the crux of PPO. Consider a good action whose ratio is already below the band, at $r_t(\theta)\lt 1-\epsilon$ &mdash; a token a previous inner epoch over-suppressed. The clip pins the term at $(1-\epsilon)\hat{A}_t$, a constant, so there is no gradient to pull it back up. Worse, in the bad-action case a pure clip can actually <em>reward</em> an unboundedly large step: if $\hat{A}_t\lt 0$ and the ratio has run above $1+\epsilon$, the clipped term $(1+\epsilon)\hat{A}_t$ is a fixed, relatively mild penalty, so the optimiser is free to let the ratio run even further with no additional cost. A pure clip removes the incentive on one side but leaves loopholes on the other.</p>
+
+      <p>PPO closes the loopholes by taking the elementwise <strong>minimum</strong> of the clipped and unclipped terms:</p>
+
+      <div class="key-eq">
+        $$L^{\text{CLIP}}(\theta)\;=\;\hat{\mathbb{E}}_t\Big[\min\big(\,r_t(\theta)\,\hat{A}_t,\;\; \text{clip}(r_t(\theta),\,1-\epsilon,\,1+\epsilon)\,\hat{A}_t\,\big)\Big].$$
+      </div>
+
+      <p>Because $\min(a,b)\le a$ and $\min(a,b)\le b$ for any $a,b$, the clipped objective is a <strong>pessimistic lower bound</strong> on the unclipped surrogate, everywhere and termwise. That single word, <em>pessimistic</em>, is the design. Whenever clipping would make the objective look <em>better</em> than the honest unclipped value, the <code>min</code> ignores the clip and keeps the honest value; whenever clipping makes it look worse, the <code>min</code> keeps the pessimistic clipped value. You only ever get the benefit of the doubt in the direction that makes you cautious. This is the eighth milestone of the running objective &mdash; the loss is now $-\min\big(r_t(\theta)\hat{A}_t,\ \text{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat{A}_t\big)$.</p>
+
+      <h2 id="the-cases">The Four Cases (Really Six)</h2>
+
+      <p>The <code>min</code> plus the sign of the advantage produce a small, exhaustive set of behaviours. There are two signs of $\hat{A}_t$ and three regions for $r_t(\theta)$ &mdash; below the band, inside it, above it &mdash; giving six rows. Work each one by asking which of the two terms is smaller, because that is the one the <code>min</code> selects, and whether that term still depends on $\theta$, because that is whether a gradient flows.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>$\hat{A}_t$</th><th>region of $r_t(\theta)$</th><th><code>min</code> keeps</th><th>gradient</th><th>interpretation</th></tr></thead>
+        <tbody>
+          <tr><td>$\gt 0$</td><td>$r\lt 1-\epsilon$</td><td>unclipped $r\hat{A}$</td><td><strong>flows</strong></td><td>A good token was over-suppressed below the band; the gradient pulls its probability back up. You are undoing an over-correction.</td></tr>
+          <tr><td>$\gt 0$</td><td>$1-\epsilon\le r\le1+\epsilon$</td><td>either (equal)</td><td><strong>flows</strong></td><td>Inside the trust region the two terms coincide; this is an ordinary policy-gradient step.</td></tr>
+          <tr><td>$\gt 0$</td><td>$r\gt 1+\epsilon$</td><td>clipped $(1{+}\epsilon)\hat{A}$</td><td><strong>zero</strong></td><td>A good token already made much more likely; the incentive to push it further is removed on this batch.</td></tr>
+          <tr><td>$\lt 0$</td><td>$r\lt 1-\epsilon$</td><td>clipped $(1{-}\epsilon)\hat{A}$</td><td><strong>zero</strong></td><td>A bad token already made much less likely; stop driving it down on the strength of one sample.</td></tr>
+          <tr><td>$\lt 0$</td><td>$1-\epsilon\le r\le1+\epsilon$</td><td>either (equal)</td><td><strong>flows</strong></td><td>Inside the trust region; an ordinary policy-gradient step lowering the token's probability.</td></tr>
+          <tr><td>$\lt 0$</td><td>$r\gt 1+\epsilon$</td><td>unclipped $r\hat{A}$</td><td><strong>flows (full)</strong></td><td>A bad token that became <em>more</em> likely; the <code>min</code> keeps the uncapped penalty, so it is punished at full strength.</td></tr>
+        </tbody>
+      </table>
+
+      <p>Read the &ldquo;gradient&rdquo; column and the asymmetry jumps out. The flat, zero-gradient region always sits on the <em>rewarding</em> side of the objective &mdash; the side where pushing the ratio further would raise $L^{\text{CLIP}}$. For a good action that rewarding side is $r\gt 1+\epsilon$ (making a good token yet more likely); for a bad action it is $r\lt 1-\epsilon$ (making a bad token yet less likely). On the <em>costly</em> side, the <code>min</code> always retains the unclipped term, so the penalty is never capped. Rows one and six are the ones people miss: PPO keeps pushing when the ratio is on the <em>wrong</em> side of the band, and only goes flat once you are already winning. It caps your greed, never your caution.</p>
+
+      <p>The animation below is a case-walker. Step through the six combinations and watch, for each, the two candidate terms on a value axis, which one the <code>min</code> rings, and whether the gradient survives.</p>
+
+      <div class="anim-container" id="ppo-clip-cases-anim">
+        <h4>&#9654; Which Term Does the <code>min</code> Keep?</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Top strip: where the ratio $r_t(\theta)$ sits relative to the band $[1-\epsilon,1+\epsilon]$. Bottom axis: the two candidate values, unclipped $r\hat{A}$ (steel) and clipped $\text{clip}(r)\hat{A}$ (green). The gold ring marks the term the <code>min</code> selects; the badge says whether a gradient flows. Step through all six cases.</p>
+        <svg id="ppo-clip-cases-svg" width="620" height="300" viewBox="0 0 620 300" role="img" aria-label="Case walker showing which term the PPO minimum selects for each sign of advantage and ratio region"></svg>
+        <div id="ppo-clip-cases-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:3.2rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="ppo-clip-cases-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="ppo-clip-cases-auto" type="button">Play All</button>
+          <button class="anim-btn" id="ppo-clip-cases-reset" type="button">Reset</button>
+          <span class="anim-output" id="ppo-clip-cases-output"></span>
+        </div>
+      </div>
+
+      <h3 id="worked-example">A Worked Numeric Example</h3>
+
+      <p>Take $\epsilon=0.2$, so the band is $[0.8,1.2]$, and run five concrete $(\hat{A}_t,\,r_t(\theta))$ pairs through both branches. <code>surr1</code> is the unclipped term $r\hat{A}$, <code>surr2</code> the clipped term $\text{clip}(r)\hat{A}$, and PPO keeps the smaller.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>$\hat{A}_t$</th><th>$r_t(\theta)$</th><th>surr1 $=r\hat{A}$</th><th>$\text{clip}(r)$</th><th>surr2</th><th>$\min$ keeps</th><th>gradient?</th></tr></thead>
+        <tbody>
+          <tr><td>+0.80</td><td>0.70</td><td>+0.56</td><td>0.80</td><td>+0.64</td><td><strong>+0.56</strong> (unclipped)</td><td>flows</td></tr>
+          <tr><td>+0.80</td><td>1.10</td><td>+0.88</td><td>1.10</td><td>+0.88</td><td><strong>+0.88</strong> (in band)</td><td>flows</td></tr>
+          <tr><td>+0.80</td><td>1.60</td><td>+1.28</td><td>1.20</td><td>+0.96</td><td><strong>+0.96</strong> (clipped)</td><td>zero</td></tr>
+          <tr><td>&minus;0.80</td><td>0.70</td><td>&minus;0.56</td><td>0.80</td><td>&minus;0.64</td><td><strong>&minus;0.64</strong> (clipped)</td><td>zero</td></tr>
+          <tr><td>&minus;0.80</td><td>1.60</td><td>&minus;1.28</td><td>1.20</td><td>&minus;0.96</td><td><strong>&minus;1.28</strong> (unclipped)</td><td>flows</td></tr>
+        </tbody>
+      </table>
+
+      <p>The last row is the pessimism made arithmetic. A token with a negative advantage has drifted to $r=1.6$, well above the band. The clipped term would score it a gentle $-0.96$; the unclipped term scores it a harsh $-1.28$. The <code>min</code> takes the harsher $-1.28$ and lets the gradient flow, so a bad token that became more likely is dragged back down at full strength. Compare row three: a <em>good</em> token at the same $r=1.6$ is capped at $+0.96$ with zero gradient. Same ratio, opposite advantage, opposite treatment &mdash; that is the asymmetry.</p>
+
+      <h2 id="movement-not-bounded">What Clipping Does Not Do</h2>
+
+      <p>Here is the point most summaries get wrong. Clipping does <strong>not</strong> bound how far $\theta$ can move. It bounds the <em>gradient</em>, not the parameters. In the flat regions the gradient contribution from those tokens is zero, so they stop <em>encouraging</em> further movement &mdash; but other tokens in the same minibatch still have live gradients, and nothing in $L^{\text{CLIP}}$ forbids the optimiser from taking a large step overall. Run many inner epochs, or pair the clip with a generous learning rate, and the policy can still wander a long way from $\pi_{\theta_{\text{old}}}$ over the course of the update. The clip removes the local incentive to leave the trust region; it does not build a wall.</p>
+
+      <div class="callout">
+        <strong>Clipping is a soft, per-token brake, not a hard constraint.</strong> TRPO enforced an actual KL ball; PPO only flattens the objective near its edges. In practice this is why robust implementations still <em>measure</em> the KL between $\pi_\theta$ and $\pi_{\theta_{\text{old}}}$ each epoch and <em>early-stop</em> the inner loop when it exceeds a threshold. The clip does most of the work; the KL check catches the cases where it was not enough. The next post adds a second, different KL &mdash; against the frozen reference model &mdash; for an entirely separate reason.</p>
+      </div>
+
+      <h2 id="choosing-epsilon">Choosing &epsilon;, and the clipfrac Diagnostic</h2>
+
+      <p>The clip width $\epsilon$ is the one hyperparameter this objective introduces, and it is remarkably forgiving. Values in $0.1$&ndash;$0.2$ are standard; $0.2$ is the paper's default and a fine starting point. Smaller $\epsilon$ makes a tighter trust region &mdash; more conservative, slower, more stable &mdash; while larger $\epsilon$ lets each update move further and risks the very drift the clip exists to contain. Its effect is entangled with two other knobs: the number of inner epochs and the minibatch size. More inner epochs over the same batch means more opportunities to drift, so a tighter $\epsilon$ or an earlier KL stop pairs naturally with aggressive reuse; smaller minibatches mean noisier ratios, which argues for a little more caution.</p>
+
+      <p>The diagnostic that tells you whether $\epsilon$ is doing anything is the <strong>clip fraction</strong>: the share of tokens whose ratio left the band and were therefore clipped on this update. A clipfrac that is a small but non-trivial slice &mdash; very roughly the low tens of percent at most &mdash; means the clip is engaging on the tail without gagging the whole batch. A clipfrac near zero means the updates are so timid the clip never binds and you could likely afford a larger step; a clipfrac that climbs toward a large fraction of tokens means the policy is trying to leap out of the trust region on nearly every token, and something upstream &mdash; learning rate, epoch count, advantage scale &mdash; is too hot. Watch it next to the measured KL; together they are the two-number dashboard for whether the trust region is holding.</p>
+
+      <h2 id="code">The Clipped Loss in Code</h2>
+
+      <p>The whole objective is a handful of lines. Every tensor is shaped $(B,T)$ over the response positions, and <code>old_logprobs</code> and <code>advantages</code> arrive detached from the rollout and GAE stages.</p>
+
+      <pre><code>def ppo_clip_loss(new_logprobs, old_logprobs, advantages, mask, eps=0.2):
+    # ratio r_t(theta), formed in log-space for numerical stability
+    ratio = torch.exp(new_logprobs - old_logprobs)                 # (B, T)
+
+    surr1 = ratio * advantages                                     # unclipped  r * A
+    clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)             # ratio pinned to band
+    surr2 = clipped * advantages                                   # clipped   clip(r) * A
+
+    # take the WORSE of the two per token: the pessimistic lower bound.
+    # negate because optimisers minimise and we want to MAXimise L_CLIP.
+    per_token = -torch.min(surr1, surr2)                           # (B, T)
+    loss = (per_token * mask).sum() / mask.sum().clamp(min=1.0)    # masked mean
+
+    # diagnostic only (no grad): fraction of real tokens that got clipped
+    with torch.no_grad():
+        left_band = (torch.abs(ratio - 1.0) &gt; eps).float()
+        clipfrac = (left_band * mask).sum() / mask.sum().clamp(min=1.0)
+
+    return loss, clipfrac</code></pre>
+
+      <p>Three details earn their place. The <code>min</code> is elementwise and comes <em>before</em> the mean, so the pessimism is applied per token, not to the batch as a whole. The negation turns the maximisation of $L^{\text{CLIP}}$ into a minimisation for the optimiser. And the <code>clipfrac</code> is computed under <code>no_grad</code> because it is a monitoring number, not part of the objective &mdash; feeding it into the loss would be meaningless, since the clip's whole point is that its gradient is zero where it binds.</p>
+
+      <p>That loss is called several times over the <em>same</em> frozen batch &mdash; the off-policy reuse from Part 7 &mdash; and because the clip bounds the gradient but not the step, a robust loop also measures the drift each epoch and bails out when it grows too large:</p>
+
+      <pre><code>def ppo_update(policy, batch, opt, eps=0.2, inner_epochs=4, target_kl=0.02):
+    # batch is the FROZEN rollout: tokens, old_logprobs, advantages, mask
+    for epoch in range(inner_epochs):
+        new_logprobs = policy.logprobs(batch.tokens)          # (B, T), needs grad
+        loss, clipfrac = ppo_clip_loss(
+            new_logprobs, batch.old_logprobs, batch.advantages, batch.mask, eps)
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        opt.step()
+
+        # clipping bounds the GRADIENT, not the step -- so watch the actual drift.
+        # approx KL between old and new policy over this batch (samples from old):
+        with torch.no_grad():
+            approx_kl = ((batch.old_logprobs - new_logprobs) * batch.mask).sum() \
+                        / batch.mask.sum().clamp(min=1.0)
+        if approx_kl.abs() &gt; 1.5 * target_kl:
+            break            # this batch has drifted far enough; stop reusing it
+    return loss, clipfrac</code></pre>
+
+      <p>The early-stop is the pragmatic admission that the clip is a soft brake: most of the time all four inner epochs run, but when a batch turns out to move the policy unusually fast, the loop stops reusing it rather than trusting the clip to hold the line by itself.</p>
+
+
+      <h2 id="where-this-leaves-us">Where This Leaves Us</h2>
+
+      <p>The objective is now recognisably PPO. Written as a loss to minimise, per token:</p>
+
+      <div class="key-eq">
+        $$-\,L^{\text{CLIP}}(\theta)\;=\;-\min\!\big(r_t(\theta)\,\hat{A}_t,\;\; \text{clip}(r_t(\theta),\,1-\epsilon,\,1+\epsilon)\,\hat{A}_t\big),\qquad r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}.$$
+      </div>
+
+      <p>It reuses expensive rollouts safely, resists the importance-weight explosion, and needs nothing more than first-order autodiff. But look at what it still does <em>not</em> control. The clip constrains movement relative to $\pi_{\theta_{\text{old}}}$ &mdash; last iteration's policy &mdash; and says nothing about drift away from the original model you started with; run enough iterations of small, legal steps and you can walk arbitrarily far from the checkpoint that made the model coherent in the first place. And nothing here stops the policy from exploiting a flawed reward model, quietly maximising a proxy that stops correlating with quality. Both gaps are the subject of the next post, <a href="kl-and-reward-hacking.html">KL Penalties, Reference Models &amp; Reward Hacking</a>.</p>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Six questions on the clip, the <code>min</code>, and the cases. Reason each one from &ldquo;which term is smaller, and does it depend on theta?&rdquo;</p>
+      <div class="blog-quiz" id="ppo-clip-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li>For a good action ($\hat{A}_t\gt 0$), plot $L^{\text{CLIP}}$ as a function of $r_t(\theta)$ by hand and mark where the slope is zero. Then do the bad-action case and confirm the flat region flips sides. <em>derivation</em> reproduce the case table geometrically.</li>
+        <li>Prove that $L^{\text{CLIP}}(\theta)\le \hat{\mathbb{E}}_t[r_t(\theta)\hat{A}_t]$ termwise, and identify precisely which tokens make the inequality strict. <em>derivation</em> the pessimism is $\min(a,b)\le a$.</li>
+        <li>Implement <code>ppo_clip_loss</code> and log <code>clipfrac</code> and the batch KL over a training run; deliberately raise the learning rate until the clip starts binding on most tokens and watch both diagnostics react. <em>exercise</em> build the two-number dashboard.</li>
+        <li>Explain, in two sentences, why clipping bounds the gradient but not the parameter step, and what mechanism you would add to bound the step itself. <em>concept</em> this motivates early-stopping on KL.</li>
+        <li><a href="https://arxiv.org/abs/1707.06347">Schulman et al., Proximal Policy Optimization Algorithms</a> (2017) <em>paper</em> read Section 3 and Figure 1; the clipped objective and its plot are the source for this post.</li>
+        <li><a href="https://arxiv.org/abs/1502.05477">Schulman et al., Trust Region Policy Optimization</a> (2015) <em>paper</em> Sections 2&ndash;5 for the constrained problem PPO approximates.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="importance-sampling.html"><span>Previous</span><span>&#8592; Off-Policy Reuse &amp; Importance Sampling</span></a>
+        <a class="next" href="kl-and-reward-hacking.html"><span>Next</span><span>KL Penalties &amp; Reward Hacking &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function ppoClipCasesAnim() {
+    var svg = document.getElementById('ppo-clip-cases-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('ppo-clip-cases-info');
+    var out = document.getElementById('ppo-clip-cases-output');
+    var stepBtn = document.getElementById('ppo-clip-cases-step');
+    var autoBtn = document.getElementById('ppo-clip-cases-auto');
+    var resetBtn = document.getElementById('ppo-clip-cases-reset');
+
+    var EPS = 0.2;
+    var cases = [
+      { A: 1,  r: 0.70, region: 'r < 1\u2212\u03B5',
+        note: 'A good token over-suppressed <em>below</em> the band. The gradient flows to pull its probability back up &mdash; PPO undoes the over-correction.' },
+      { A: 1,  r: 1.00, region: '1\u2212\u03B5 \u2264 r \u2264 1+\u03B5',
+        note: 'Inside the trust region: clipped and unclipped agree, so this is an ordinary policy-gradient step.' },
+      { A: 1,  r: 1.50, region: 'r > 1+\u03B5',
+        note: 'A good token already pushed <em>past</em> the top of the band. The min switches to the clipped term and the gradient is zero &mdash; no incentive to push a good token further on one batch.' },
+      { A: -1, r: 0.70, region: 'r < 1\u2212\u03B5',
+        note: 'A bad token already pushed <em>below</em> the band. The min switches to the clipped term, gradient zero &mdash; stop driving a bad token down on one sample.' },
+      { A: -1, r: 1.00, region: '1\u2212\u03B5 \u2264 r \u2264 1+\u03B5',
+        note: 'Inside the trust region: an ordinary policy-gradient step, now lowering the bad token\u2019s probability.' },
+      { A: -1, r: 1.50, region: 'r > 1+\u03B5',
+        note: 'A bad token that became <em>more</em> likely. The min keeps the unclipped term, so the penalty is applied at <strong>full strength</strong> &mdash; the pessimism that never lets a bad step off the hook.' }
+    ];
+    var idx = 0, runner = null;
+
+    var RX0 = 80, RX1 = 545, RY = 78, RMIN = 0.4, RMAX = 1.8;
+    var VX0 = 80, VX1 = 545, VY = 205, VMIN = -1.8, VMAX = 1.8;
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function rx(r) { return RX0 + (r - RMIN) / (RMAX - RMIN) * (RX1 - RX0); }
+    function vx(v) { return VX0 + (v - VMIN) / (VMAX - VMIN) * (VX1 - VX0); }
+    function clampR(r) { return Math.max(1 - EPS, Math.min(1 + EPS, r)); }
+
+    function render() {
+      svg.innerHTML = '';
+      var c = cases[idx];
+      var unclipped = c.r * c.A;
+      var clipped = clampR(c.r) * c.A;
+      var selected = Math.min(unclipped, clipped);
+      var gradZero = clipped < unclipped - 1e-9;
+
+      /* header */
+      svg.appendChild(el('text', { x: 20, y: 26, 'font-size': '13', 'font-weight': '700', fill: c.A > 0 ? '#0a8f6a' : '#c0392b' },
+        'Case ' + (idx + 1) + ' of 6:   A ' + (c.A > 0 ? '> 0  (good token)' : '< 0  (bad token)') + ',   r = ' + c.r.toFixed(2)));
+
+      /* ---- ratio strip ---- */
+      svg.appendChild(el('text', { x: 20, y: RY - 22, 'font-size': '11', fill: '#6a8a78' }, 'ratio r  relative to band:'));
+      svg.appendChild(el('rect', { x: rx(1 - EPS), y: RY - 12, width: rx(1 + EPS) - rx(1 - EPS), height: 24, fill: 'rgba(10,143,106,0.10)' }));
+      svg.appendChild(el('line', { x1: RX0, y1: RY, x2: RX1, y2: RY, stroke: '#6a8a78', 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: rx(1), y1: RY - 14, x2: rx(1), y2: RY + 14, stroke: '#6a8a78', 'stroke-width': '1', 'stroke-dasharray': '3 3' }));
+      svg.appendChild(el('text', { x: rx(1 - EPS), y: RY + 26, 'font-size': '10', fill: '#0a8f6a', 'text-anchor': 'middle' }, '1\u2212\u03B5'));
+      svg.appendChild(el('text', { x: rx(1 + EPS), y: RY + 26, 'font-size': '10', fill: '#0a8f6a', 'text-anchor': 'middle' }, '1+\u03B5'));
+      svg.appendChild(el('text', { x: rx(1), y: RY - 18, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'middle' }, '1.0'));
+      svg.appendChild(el('circle', { cx: rx(c.r), cy: RY, r: 6, fill: '#f59e0b', stroke: '#fff', 'stroke-width': '2' }));
+      svg.appendChild(el('text', { x: rx(c.r), y: RY + 26, 'font-size': '10.5', 'font-weight': '700', fill: '#b26a00', 'text-anchor': 'middle' }, c.region));
+
+      /* ---- value axis ---- */
+      svg.appendChild(el('text', { x: 20, y: VY - 30, 'font-size': '11', fill: '#6a8a78' }, 'candidate objective values (the min is ringed):'));
+      svg.appendChild(el('line', { x1: VX0, y1: VY, x2: VX1, y2: VY, stroke: '#6a8a78', 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: vx(0), y1: VY - 40, x2: vx(0), y2: VY + 40, stroke: '#6a8a78', 'stroke-width': '1', 'stroke-dasharray': '3 3' }));
+      svg.appendChild(el('text', { x: vx(0), y: VY + 54, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'middle' }, '0'));
+      svg.appendChild(el('text', { x: VX1, y: VY + 54, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'end' }, 'objective value'));
+
+      /* unclipped dot (steel, above the line) */
+      svg.appendChild(el('circle', { cx: vx(unclipped), cy: VY - 16, r: 6, fill: '#5b7fa6', stroke: '#fff', 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: vx(unclipped), y1: VY - 10, x2: vx(unclipped), y2: VY, stroke: '#5b7fa6', 'stroke-width': '1' }));
+      svg.appendChild(el('text', { x: vx(unclipped), y: VY - 26, 'font-size': '10.5', fill: '#5b7fa6', 'text-anchor': 'middle' }, 'r\u00B7A=' + unclipped.toFixed(2)));
+
+      /* clipped dot (green, below the line) */
+      svg.appendChild(el('circle', { cx: vx(clipped), cy: VY + 16, r: 6, fill: '#0a8f6a', stroke: '#fff', 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: vx(clipped), y1: VY + 10, x2: vx(clipped), y2: VY, stroke: '#0a8f6a', 'stroke-width': '1' }));
+      svg.appendChild(el('text', { x: vx(clipped), y: VY + 40, 'font-size': '10.5', fill: '#0a8f6a', 'text-anchor': 'middle' }, 'clip\u00B7A=' + clipped.toFixed(2)));
+
+      /* selection ring on whichever term is the min */
+      var selY = (gradZero ? VY + 16 : VY - 16);
+      svg.appendChild(el('circle', { cx: vx(selected), cy: selY, r: 11, fill: 'none', stroke: '#f59e0b', 'stroke-width': '2.5' }));
+
+      /* badge */
+      svg.appendChild(el('text', { x: 300, y: 288, 'font-size': '12', 'font-weight': '700', 'text-anchor': 'middle', fill: gradZero ? '#b26a00' : '#0a8f6a' },
+        gradZero ? 'min keeps the CLIPPED term   \u2192   gradient = 0 (flat)' : 'min keeps the UNCLIPPED term   \u2192   gradient flows'));
+    }
+
+    function describe() {
+      var c = cases[idx];
+      info.innerHTML = '<strong>Case ' + (idx + 1) + '/6</strong> &mdash; ' + c.note;
+      out.textContent = 'case ' + (idx + 1) + '/6';
+    }
+
+    function doStep() {
+      idx = (idx + 1) % cases.length;
+      render(); describe();
+    }
+
+    function reset() {
+      if (runner) { runner.cancel(); runner = null; }
+      idx = 0;
+      render(); describe();
+    }
+
+    stepBtn.addEventListener('click', doStep);
+    resetBtn.addEventListener('click', reset);
+    autoBtn.addEventListener('click', function () {
+      reset();
+      var steps = [], k;
+      for (k = 0; k < cases.length; k++) steps.push(doStep);
+      runner = window.animRunner(steps, 1300);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('ppo-clip-quiz', {
+    title: '\u{1F9E0} Clipped Objective Check',
+    intro: 'Click Start. For each case, decide which term the min keeps and whether a gradient flows.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'A token has positive advantage and its ratio has climbed to 1.6, with epsilon = 0.2. What does the min do?',
+        answer: 'It keeps the clipped term (1+epsilon)*A, whose gradient is zero, so there is no push to raise the probability further.',
+        distractors: [
+          { text: 'It keeps the unclipped term r*A and pushes the probability higher still.', why: 'For a good action above the band the unclipped term is the LARGER one, so the min discards it; the clipped term wins.' },
+          { text: 'It sets the loss to zero for that token.', why: 'The loss is the clipped value (1+epsilon)*A, not zero; only the gradient vanishes, not the objective value.' },
+          { text: 'It flips the sign of the advantage to discourage the token.', why: 'Clipping never changes the sign of the advantage; it only caps the term and removes the gradient.' }
+        ],
+        explain: 'Good action, ratio above the band: clipped term selected, gradient zero, incentive to push further removed.' },
+
+      { meaning: 'A token has negative advantage and its ratio has climbed to 1.6 (above the band). How is it treated?',
+        answer: 'The min keeps the unclipped term r*A, so the penalty applies at full strength and the gradient flows.',
+        distractors: [
+          { text: 'The clipped term caps the penalty, so the gradient is zero.', why: 'On the costly side the unclipped penalty is MORE negative, so the min keeps it; the penalty is never capped for a bad action that grew more likely.' },
+          { text: 'Nothing happens because the ratio is outside the band.', why: 'Being outside the band does not disable the token; here it is precisely where the full-strength penalty applies.' },
+          { text: 'The token is skipped and excluded from the batch mean.', why: 'No token is dropped; every masked-in token contributes, and this one contributes a full-strength negative term.' }
+        ],
+        explain: 'This is the pessimism: a bad token that became more likely is punished uncapped.' },
+
+      { meaning: 'Why does PPO take the minimum of the clipped and unclipped terms instead of just using the clipped term?',
+        answer: 'Because a bare clip leaves loopholes; the min makes the objective a pessimistic lower bound, keeping the honest term whenever clipping would look too favourable.',
+        distractors: [
+          { text: 'Because the minimum is cheaper to compute than a clamp.', why: 'Both operations are trivial; the min is chosen for its pessimism, not its cost.' },
+          { text: 'Because the minimum guarantees the ratio never leaves the band.', why: 'Neither min nor clip bounds the ratio; they shape the gradient, and the ratio can still leave the band.' },
+          { text: 'Because it makes the objective differentiable everywhere.', why: 'The clipped term alone is already differentiable almost everywhere; the min is about pessimism, not smoothness.' }
+        ],
+        explain: 'min(a,b) is at most either argument, so L_CLIP is a lower bound on the unclipped surrogate.' },
+
+      { meaning: 'A good token (positive advantage) has a ratio of 0.7, below the band. What happens?',
+        answer: 'The unclipped term is smaller, so the min keeps it and the gradient flows to push the probability back up toward the band.',
+        distractors: [
+          { text: 'The clipped term is kept and the gradient is zero.', why: 'Below the band for a good action, the clipped term (1-epsilon)*A is the LARGER one, so the min discards it; the unclipped term wins and the gradient survives.' },
+          { text: 'The token is already inside the trust region, so nothing special happens.', why: 'A ratio of 0.7 with epsilon 0.2 is below 0.8, so it is outside the band, not inside it.' },
+          { text: 'The penalty is capped because the ratio is far from one.', why: 'This is a positive-advantage token, so there is no penalty to cap; the min keeps the reward-side term with a live gradient.' }
+        ],
+        explain: 'Row one of the case table: PPO undoes an over-correction by pulling an over-suppressed good token back up.' },
+
+      { meaning: 'Does the clipped objective bound how far the policy parameters can move in one update?',
+        answer: 'No. It flattens the objective near the band edges, removing the gradient incentive to move further, but it does not cap the parameter step itself.',
+        distractors: [
+          { text: 'Yes, it enforces a hard KL ball around the old policy just like TRPO.', why: 'TRPO enforces the hard KL ball; PPO only softens the objective and leaves the step size unconstrained.' },
+          { text: 'Yes, because clipping the ratio also clips the size of the gradient step.', why: 'Clipping zeroes the gradient of clipped tokens but other tokens keep live gradients, so the overall step is not bounded.' },
+          { text: 'No, and that is why PPO must run exactly one inner epoch per batch.', why: 'PPO runs several inner epochs; the lack of a hard bound is handled by measuring KL and early-stopping, not by limiting epochs to one.' }
+        ],
+        explain: 'Clipping bounds the gradient, not the parameters; implementations early-stop on measured KL to bound the step.' },
+
+      { meaning: 'What is the clipfrac diagnostic, and what does a value near zero suggest?',
+        answer: 'It is the fraction of tokens whose ratio left the band. Near zero means the clip rarely binds, so updates are timid and you could likely afford a larger step.',
+        distractors: [
+          { text: 'It is the fraction of the loss contributed by clipping, and near zero means training has converged.', why: 'Clipfrac counts clipped tokens, not a share of the loss, and a low value signals timid steps, not convergence.' },
+          { text: 'It is the average ratio across the batch, and near zero means the policy collapsed.', why: 'The average ratio sits near one, not zero; clipfrac is a count of band-leaving tokens, a different quantity.' },
+          { text: 'It is the KL divergence from the reference model, and near zero means no reward hacking.', why: 'That is a different diagnostic; clipfrac concerns the old policy and the band, not the reference model.' }
+        ],
+        explain: 'Watch clipfrac alongside the measured KL: together they tell you whether the trust region is holding.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

@@ -9597,6 +9597,49 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        name: 'ppo',
+        label: 'PPO for LLMs',
+        children: [
+          { title: 'Overview', file: 'rl/ppo/index.html', links: ['rl/ppo/rl-for-llms.html', 'rl/ppo/clipped-objective.html'] },
+          {
+            name: 'ppo-setup',
+            label: 'The Setup',
+            children: [
+              { title: 'RL Framing of LLMs', file: 'rl/ppo/rl-for-llms.html', links: ['rl/ppo/index.html', 'rl/ppo/rewards-and-returns.html'] },
+              { title: 'Rewards &amp; Returns', file: 'rl/ppo/rewards-and-returns.html', links: ['rl/ppo/rl-for-llms.html', 'rl/ppo/policy-gradients.html'] },
+              { title: 'Policy Gradients', file: 'rl/ppo/policy-gradients.html', links: ['rl/ppo/rewards-and-returns.html', 'rl/ppo/value-function.html'] },
+              { title: 'The Value Function', file: 'rl/ppo/value-function.html', links: ['rl/ppo/policy-gradients.html', 'rl/ppo/advantage.html'] }
+            ]
+          },
+          {
+            name: 'ppo-advantage',
+            label: 'Advantage Estimation',
+            children: [
+              { title: 'Advantage: Q minus V', file: 'rl/ppo/advantage.html', links: ['rl/ppo/value-function.html', 'rl/ppo/gae.html'] },
+              { title: 'Bias, Variance &amp; GAE', file: 'rl/ppo/gae.html', links: ['rl/ppo/advantage.html', 'rl/ppo/importance-sampling.html'] },
+              { title: 'Importance Sampling', file: 'rl/ppo/importance-sampling.html', links: ['rl/ppo/gae.html', 'rl/ppo/clipped-objective.html'] }
+            ]
+          },
+          {
+            name: 'ppo-core',
+            label: 'PPO Itself',
+            children: [
+              { title: 'The Clipped Objective', file: 'rl/ppo/clipped-objective.html', links: ['rl/ppo/importance-sampling.html', 'rl/ppo/kl-and-reward-hacking.html'] },
+              { title: 'KL Penalties &amp; Reward Hacking', file: 'rl/ppo/kl-and-reward-hacking.html', links: ['rl/ppo/clipped-objective.html', 'rl/ppo/full-algorithm.html'] },
+              { title: 'The Full Training Loop', file: 'rl/ppo/full-algorithm.html', links: ['rl/ppo/kl-and-reward-hacking.html', 'rl/ppo/implementation.html'] }
+            ]
+          },
+          {
+            name: 'ppo-practice',
+            label: 'Practice &amp; Beyond',
+            children: [
+              { title: 'Implementation &amp; Debugging', file: 'rl/ppo/implementation.html', links: ['rl/ppo/full-algorithm.html', 'rl/ppo/beyond-ppo.html'] },
+              { title: 'GRPO, DPO &amp; Beyond', file: 'rl/ppo/beyond-ppo.html', links: ['rl/ppo/implementation.html', 'rl/ppo/index.html'] }
+            ]
+          }
+        ]
       }
     ]
   },

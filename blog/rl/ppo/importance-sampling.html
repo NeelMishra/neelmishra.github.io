@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Generating rollouts dominates the cost of RLHF, so PPO reuses each batch for several updates. This post derives importance sampling from first principles, shows how the probability ratio replaces the log-probability, and why that ratio is dangerous.">
+  <title>Off-Policy Reuse &amp; Importance Sampling | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .key-eq { background: rgba(10,143,106,0.06); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 1rem; margin: 1.1rem 0; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">RL &middot; PPO</a>
+        <span>&middot; Part 7 of 12</span>
+      </div>
+
+      <h1>Off-Policy Reuse &amp; Importance Sampling</h1>
+      <p class="post-meta">July 2026 &middot; 20 min read</p>
+
+      <p>The previous post handed us a good advantage estimator. <a href="gae.html">GAE</a> gave a per-token $\hat{A}_t$ with a $\lambda$ dial that trades bias against variance, and the running objective stood at $-\log\pi_\theta(a_t\mid s_t)\,\hat{A}_t$ with $\hat{A}_t=\hat{A}_t^{\text{GAE}(\gamma,\lambda)}$. Every derivation up to here quietly assumed one thing: that the tokens we are averaging over were sampled from the policy we are currently optimising. This post is about what happens when that assumption becomes too expensive to keep &mdash; and the correction that lets us break it on purpose.</p>
+
+      <h2 id="where-we-are">Where We Are, and the Wall We Hit</h2>
+
+      <p>Here is the loop implied by everything so far. Sample a batch of responses from the current policy, score them, compute advantages, take one gradient step. Then, because the gradient step moved $\theta$, the batch is now off-policy, so throw it away and sample a fresh batch. One batch, one update. It is correct, and it is ruinously slow. To see why, you have to look at where the wall-clock time actually goes.</p>
+
+      <h2 id="the-economics">The Economics of a Rollout</h2>
+
+      <p>The two halves of the loop are not remotely the same price. Consider what it takes to produce one training example versus what it takes to learn from it.</p>
+
+      <p><strong>Generating a response is autoregressive.</strong> To sample a 400-token answer, the model runs a forward pass to produce the distribution over the first token, samples one token, appends it, runs another forward pass for the second token, and so on &mdash; four hundred forward passes, each depending on the output of the last. There is no teacher forcing here, because there is no ground-truth continuation to feed in; the model is writing the sequence it will later be graded on. And there is no parallelism across time, because token $t$ cannot be computed until token $t-1$ exists. This sequential decode is the single most expensive phase of RLHF, and it is why serving and rollout infrastructure is where the engineering effort concentrates.</p>
+
+      <p><strong>A gradient step is one forward&ndash;backward pass.</strong> Once the 400 tokens exist, computing $\log\pi_\theta$ for all of them is a <em>single</em> batched forward pass over the full sequence &mdash; every position at once, exactly the parallelism that decoding could not use &mdash; plus one backward pass. Compared to 400 sequential decode steps, the update is close to free.</p>
+
+      <div class="callout">
+        <strong>The asymmetry is the whole motivation.</strong> You pay a large, sequential, hard-to-parallelise cost to <em>generate</em> a batch, and a small, fully-parallel cost to <em>learn</em> from it. Using that batch for exactly one update, then discarding it, wastes the expensive half of the loop. PPO's first move &mdash; before any clipping &mdash; is to squeeze several updates out of each batch. Everything in this post exists to make that safe.</p>
+      </div>
+
+      <h2 id="the-stale-batch">The Stale-Batch Problem</h2>
+
+      <p>Reusing a batch sounds harmless until you re-read the policy gradient. In <a href="policy-gradients.html">Part 3</a> the estimator was an expectation over trajectories drawn from the policy being differentiated:</p>
+
+      <div class="key-eq">
+        $$\nabla_\theta J(\theta) \;=\; \mathbb{E}_{\tau\sim\pi_\theta}\!\big[\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,\hat{A}_t\big].$$
+      </div>
+
+      <p>The subscript $\tau\sim\pi_\theta$ is load-bearing. The Monte Carlo estimate &mdash; average the bracketed quantity over your sampled tokens &mdash; is only valid because those tokens came from $\pi_\theta$. Take one update, and the parameters are now $\theta'$, but the stored tokens still came from $\pi_{\theta_{\text{old}}}$. Average over them again as if nothing happened and you are estimating an expectation under the <em>old</em> distribution while pretending it is the new one. That is not a small numerical slip; it is silently optimising a different objective, and it gets worse with every extra epoch you squeeze out of the stale data.</p>
+
+      <p>So we want two contradictory things: to reuse $\pi_{\theta_{\text{old}}}$'s samples for several updates of $\pi_\theta$, and to keep computing an honest expectation under $\pi_\theta$. Importance sampling is exactly the tool that reconciles them.</p>
+
+      <h2 id="importance-sampling">Importance Sampling, Derived</h2>
+
+      <p>The identity is one line and worth deriving rather than quoting, because the derivation tells you precisely where it can go wrong. Take any function $f$ and any two distributions $p$ and $q$ with the single requirement that $q(x)\gt 0$ wherever $p(x)f(x)\neq 0$. Then multiply and divide the summand by $q(x)$:</p>
+
+      <div class="key-eq">
+        $$\mathbb{E}_{x\sim p}[f(x)] \;=\; \sum_x p(x)\,f(x) \;=\; \sum_x q(x)\,\frac{p(x)}{q(x)}\,f(x) \;=\; \mathbb{E}_{x\sim q}\!\left[\frac{p(x)}{q(x)}\,f(x)\right].$$
+      </div>
+
+      <p>That is the entire trick. The middle step is algebra &mdash; inserting $q(x)/q(x)=1$ &mdash; and the outer steps are just the definition of an expectation read left-to-right and then right-to-left. The factor $p(x)/q(x)$ is the <strong>importance weight</strong>: it re-weights each sample drawn from $q$ so that the average comes out as if the samples had been drawn from $p$. A sample that is twice as likely under $p$ as under $q$ counts double; one that is half as likely counts half. Nothing is approximated, so the identity is <em>exact</em>. The catch, which we return to, is hiding in that divide-by-$q$.</p>
+
+      <h2 id="the-surrogate-objective">The Surrogate Objective</h2>
+
+      <p>Now specialise. We want an expectation under $\pi_\theta$ but only have samples from $\pi_{\theta_{\text{old}}}$, so set $p=\pi_\theta$ and $q=\pi_{\theta_{\text{old}}}$. For the per-token objective, with the sampled token $a_t$ playing the role of $x$:</p>
+
+      <p>$$\mathbb{E}_{a_t\sim\pi_\theta}\!\big[\hat{A}_t\big] \;=\; \mathbb{E}_{a_t\sim\pi_{\theta_{\text{old}}}}\!\left[\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}\,\hat{A}_t\right].$$</p>
+
+      <p>The importance weight here has a name and a symbol &mdash; it is the <strong>probability ratio</strong> $r_t(\theta)$, always written with its argument to keep it distinct from the reward $r_t$:</p>
+
+      <div class="key-eq">
+        $$r_t(\theta) \;=\; \frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}, \qquad L(\theta) \;=\; \hat{\mathbb{E}}_t\big[\,r_t(\theta)\,\hat{A}_t\,\big].$$
+      </div>
+
+      <p>This is the <strong>surrogate objective</strong>, and it is the sixth milestone in the running construction. Where Part 6 had $-\log\pi_\theta(a_t\mid s_t)\,\hat{A}_t$, the log-probability is gone and a plain ratio has taken its place:</p>
+
+      <p>$$\underbrace{-\log\pi_\theta(a_t\mid s_t)\,\hat{A}_t}_{\text{Part 6, on-policy}} \;\longrightarrow\; \underbrace{-\,r_t(\theta)\,\hat{A}_t}_{\text{Part 7, off-policy}}.$$</p>
+
+      <p>The word <em>surrogate</em> is doing honest work: $L(\theta)$ is a stand-in objective we maximise over several inner epochs while holding the sampled data and the advantages fixed, precisely because it stays defined as $\theta$ moves away from $\theta_{\text{old}}$. But swapping a log for a ratio should make you suspicious &mdash; the policy gradient we spent Part 3 deriving had a gradient of a <em>log</em> in it. Where did that go?</p>
+
+      <h2 id="where-the-log-went">Where the Log Went</h2>
+
+      <p>This is the step readers get stuck on, so treat it carefully. The two forms look different &mdash; one carries $\nabla_\theta\log\pi_\theta$, the other a bare ratio &mdash; yet they must agree at the point where the data was collected, because at that point nothing has been reused yet. Evaluate the gradient of the ratio at $\theta=\theta_{\text{old}}$. The denominator $\pi_{\theta_{\text{old}}}$ is a constant with respect to $\theta$ (it is a fixed snapshot), so</p>
+
+      <p>$$\nabla_\theta\, r_t(\theta)\Big|_{\theta_{\text{old}}} \;=\; \frac{\nabla_\theta\,\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}\bigg|_{\theta_{\text{old}}} \;=\; \frac{\nabla_\theta\,\pi_\theta(a_t\mid s_t)}{\pi_\theta(a_t\mid s_t)}\bigg|_{\theta_{\text{old}}} \;=\; \nabla_\theta\log\pi_\theta(a_t\mid s_t)\Big|_{\theta_{\text{old}}}.$$</p>
+
+      <p>The middle equality holds because at $\theta=\theta_{\text{old}}$ the numerator's policy and the denominator's snapshot are the same distribution, so $\pi_{\theta_{\text{old}}}=\pi_\theta$ there. The last equality is just the definition of the log-derivative, $\nabla\log u=\nabla u/u$. So the surrogate has <em>exactly the same gradient as the policy gradient</em> at the collection point, and differs from it only as $\theta$ drifts away. That is the property you want and could not have designed better by hand: near $\theta_{\text{old}}$ the surrogate is the policy gradient, and further out it is a smooth extrapolation that stays well-defined instead of becoming undefined. The log did not disappear; it is the ratio's behaviour at the one point where the two must coincide.</p>
+
+      <h2 id="computing-the-ratio">Computing the Ratio in Practice</h2>
+
+      <p>Three implementation facts fall out of this and are worth pinning down, because getting any of them wrong produces a loss that looks plausible and trains to nonsense.</p>
+
+      <ul>
+        <li><strong>Compute the ratio in log-space.</strong> Never form $\pi_\theta/\pi_{\theta_{\text{old}}}$ as a quotient of probabilities &mdash; token probabilities routinely underflow, and dividing two tiny floats is exactly where precision dies. Store and subtract log-probabilities, then exponentiate once: $r_t(\theta)=\exp\!\big(\log\pi_\theta-\log\pi_{\theta_{\text{old}}}\big)$.</li>
+        <li><strong>The old log-probs are data, not parameters.</strong> $\log\pi_{\theta_{\text{old}}}$ is computed during rollout and stored alongside the tokens. It must be <code>detach()</code>ed &mdash; gradients flow only through the numerator $\pi_\theta$. If you let gradient leak into the denominator you are differentiating your own baseline.</li>
+        <li><strong>At the first inner epoch the ratio is identically one.</strong> Before any update, $\pi_\theta=\pi_{\theta_{\text{old}}}$ token-for-token, so every $r_t(\theta)=1$. This is the single best assertion to put in a test: if the first-epoch ratio is not all ones, your old and new log-probs are misaligned (wrong tokens gathered, an off-by-one on the prompt mask, or a sampling temperature you forgot to apply on one side).</li>
+      </ul>
+
+      <p>The old log-probs are collected during the rollout itself, inside a no-grad context, which is what makes them detached by construction &mdash; there is no graph to detach from. You record the log-probability of each token <em>at the moment you sample it</em>:</p>
+
+      <pre><code>@torch.no_grad()
+def rollout(policy, prompts, max_new_tokens):
+    # generate responses AND record the log-prob of every sampled token
+    # under the CURRENT policy -- this snapshot is pi_theta_old
+    tokens, old_logprobs = [], []
+    state = prompts
+    for _ in range(max_new_tokens):
+        logits = policy(state)[:, -1, :]            # (B, V) next-token scores
+        dist = torch.distributions.Categorical(logits=logits)
+        a = dist.sample()                           # (B,) one token per row
+        old_logprobs.append(dist.log_prob(a))       # (B,) logprob of the pick
+        tokens.append(a)
+        state = torch.cat([state, a.unsqueeze(1)], dim=1)
+    # no grad was tracked, so these come out already detached
+    return torch.stack(tokens, 1), torch.stack(old_logprobs, 1)   # (B, T), (B, T)</code></pre>
+
+      <p>Later, during the update, the same tokens are re-scored by the live policy &mdash; this time <em>with</em> gradients &mdash; and the two log-prob tensors are subtracted to form the ratio:</p>
+
+      <pre><code>import torch
+import torch.nn.functional as F
+
+def token_logprobs(logits, actions):
+    # logits:  (B, T, V) scores from a policy over the response positions
+    # actions: (B, T)    the tokens actually emitted during the rollout
+    logp = F.log_softmax(logits, dim=-1)                     # (B, T, V)
+    return logp.gather(-1, actions.unsqueeze(-1)).squeeze(-1)  # (B, T)
+
+def surrogate_loss(new_logits, old_logprobs, actions, mask, advantages):
+    # old_logprobs : (B, T) stored at rollout time, ALREADY detached
+    # advantages   : (B, T) from GAE, detached (critic is trained separately)
+    # mask         : (B, T) 1.0 on real response tokens, 0.0 on prompt / pad
+    new_logprobs = token_logprobs(new_logits, actions)      # (B, T), needs grad
+
+    # r_t(theta) = pi_theta / pi_theta_old, formed in log-space for stability
+    ratio = torch.exp(new_logprobs - old_logprobs)          # (B, T)
+
+    # unclipped surrogate  r_t * A_t   (Part 8 will wrap this in a clip)
+    per_token = ratio * advantages                          # (B, T)
+
+    # average only over real tokens; a masked mean, not a plain mean
+    loss = -(per_token * mask).sum() / mask.sum().clamp(min=1.0)
+    return loss, ratio
+
+# cheap, decisive test for the whole pipeline:
+#   at inner epoch 0 the policy has not moved, so every ratio must be 1
+first_epoch_ratio = torch.exp(old_logprobs - old_logprobs)  # exactly ones
+assert torch.allclose(first_epoch_ratio, torch.ones_like(first_epoch_ratio))</code></pre>
+
+      <p>Every shape is annotated because the bugs live in the shapes: a ratio computed against the wrong axis, or a mask that includes the prompt, will not raise an error &mdash; it will just quietly learn the wrong thing.</p>
+
+      <h2 id="the-danger">The Danger: When Importance Weights Explode</h2>
+
+      <p>Importance sampling is unbiased <em>in expectation</em>. Its variance is another story, and the divide-by-$q$ we flagged earlier is the culprit. When $p$ and $q$ are close the weights sit near one and everything is calm. When they diverge, the weights can become enormous, and a single sample with a huge weight can dominate the entire batch average &mdash; an estimator that is correct on average but useless on any particular batch.</p>
+
+      <p>Concretely: suppose a token had probability $0.001$ under $\pi_{\theta_{\text{old}}}$ &mdash; something the old policy almost never said &mdash; and after a couple of updates the new policy assigns it $0.05$. The ratio is</p>
+
+      <p>$$r_t(\theta) \;=\; \frac{0.05}{0.001} \;=\; 50.$$</p>
+
+      <p>One token, weight fifty. If its advantage is positive, that single token pushes on the gradient as hard as fifty ordinary tokens, off the strength of a probability estimate that was barely resolved to begin with. The rare-token direction is exactly where the old policy gave you the least data and the new policy is most likely to have swung, so this is not a corner case &mdash; it is the generic failure of unconstrained off-policy reuse.</p>
+
+      <p>Watch it happen. The animation shows two distributions over five tokens; stepping drifts the new policy away from the old one, and the per-token ratios climb &mdash; violently for the low-probability tokens.</p>
+
+      <div class="anim-container" id="ppo-is-ratio-anim">
+        <h4>&#9654; Importance Weights Blowing Up</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Grey bars are the old policy $\pi_{\theta_{\text{old}}}$; green bars are the drifting new policy $\pi_\theta$. The number above each token pair is the ratio $r_t(\theta)$. Step to push the new policy further away and watch the rare-token ratios detonate while the common tokens barely move.</p>
+        <svg id="ppo-is-ratio-svg" width="620" height="250" viewBox="0 0 620 250" role="img" aria-label="Bar chart of old versus new token probabilities with per-token importance ratios"></svg>
+        <div id="ppo-is-ratio-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:2.8rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="ppo-is-ratio-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="ppo-is-ratio-auto" type="button">Play All</button>
+          <button class="anim-btn" id="ppo-is-ratio-reset" type="button">Reset</button>
+          <span class="anim-output" id="ppo-is-ratio-output"></span>
+        </div>
+      </div>
+
+      <h3 id="worked-table">A Worked Batch of Five Tokens</h3>
+
+      <p>Numbers make the failure concrete. Below is a five-token batch with stored old log-probs, freshly computed new log-probs, the resulting ratio $r_t(\theta)=\exp(\log\pi_\theta-\log\pi_{\theta_{\text{old}}})$, the GAE advantage, and the per-token surrogate contribution $r_t(\theta)\,\hat{A}_t$. Four tokens are ordinary; token 5 is the rare one that the new policy suddenly likes.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>token</th><th>$\log\pi_{\theta_{\text{old}}}$</th><th>$\log\pi_\theta$</th><th>$r_t(\theta)$</th><th>$\hat{A}_t$</th><th>$r_t(\theta)\,\hat{A}_t$</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>&minus;0.51</td><td>&minus;0.62</td><td>0.90</td><td>+0.50</td><td>+0.45</td></tr>
+          <tr><td>2</td><td>&minus;1.20</td><td>&minus;1.10</td><td>1.11</td><td>&minus;0.30</td><td>&minus;0.33</td></tr>
+          <tr><td>3</td><td>&minus;0.92</td><td>&minus;0.85</td><td>1.07</td><td>+0.20</td><td>+0.21</td></tr>
+          <tr><td>4</td><td>&minus;2.30</td><td>&minus;2.20</td><td>1.11</td><td>+0.40</td><td>+0.44</td></tr>
+          <tr><td><strong>5</strong></td><td>&minus;6.91</td><td>&minus;3.00</td><td><strong>49.9</strong></td><td>+0.60</td><td><strong>+29.9</strong></td></tr>
+        </tbody>
+      </table>
+
+      <p>Token 5 had probability $e^{-6.91}\approx0.001$ under the old policy and $e^{-3.00}\approx0.050$ under the new one &mdash; the exact $50\times$ ratio from above. The mean surrogate over the batch is $(0.45-0.33+0.21+0.44+29.9)/5\approx6.13$, of which token 5 alone supplies $29.9$. A single sample is contributing about $97\%$ of the batch signal, and it is the sample the old policy sampled least reliably. Your gradient is now a rumour about one rare token wearing the disguise of a batch average.</p>
+
+      <div class="callout">
+        <strong>This is the exact problem PPO's clipping solves.</strong> Do not try to fix the variance with a bigger batch or a smaller learning rate &mdash; those only postpone it. The structural fix is to <em>refuse to trust the ratio once it leaves a neighbourhood of one</em>, which is precisely what the clipped surrogate objective does. We have earned the ratio; the next post earns the clip.</p>
+      </div>
+
+      <h2 id="where-this-leaves-us">Where This Leaves Us</h2>
+
+      <p>The objective now reuses each expensive batch for several cheap updates by re-weighting stale samples with $r_t(\theta)$, and the reuse is exact in expectation with the same gradient as the policy gradient at $\theta_{\text{old}}$:</p>
+
+      <div class="key-eq">
+        $$L(\theta) \;=\; \hat{\mathbb{E}}_t\big[\,r_t(\theta)\,\hat{A}_t\,\big], \qquad r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}.$$
+      </div>
+
+      <p>But it is a loaded weapon: the moment $\pi_\theta$ wanders far from $\pi_{\theta_{\text{old}}}$, the importance weights explode and the estimate is dominated by its rarest samples. The next post, <a href="clipped-objective.html">The Clipped Surrogate Objective</a>, turns that observation into the single design decision that defines PPO &mdash; capping the incentive to let the ratio run away.</p>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Six questions on off-policy reuse and the ratio. Read each situation and pick the statement that is actually true.</p>
+      <div class="blog-quiz" id="ppo-is-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li>Derive the importance-sampling identity yourself for a continuous variable, replacing the sum with an integral, and write down the precise condition on $q$ that the derivation needs. <em>derivation</em> the support condition is the whole safety story.</li>
+        <li>Implement <code>surrogate_loss</code> above and add the first-epoch assertion. Then deliberately shift one token's new log-prob and confirm its ratio, and its share of the batch mean, both blow up. <em>exercise</em> reproduce the five-token table.</li>
+        <li>Show algebraically that $\nabla_\theta r_t(\theta)\big|_{\theta_{\text{old}}}=\nabla_\theta\log\pi_\theta(a_t\mid s_t)\big|_{\theta_{\text{old}}}$ and explain in one sentence why the surrogate and the policy gradient must agree there. <em>derivation</em> the collection point is special.</li>
+        <li>Estimate, for a model you know, the ratio of decode FLOPs to one optimisation-step FLOPs for a 400-token response, and use it to argue how many inner epochs are worth taking. <em>estimate</em> the economics justify the reuse.</li>
+        <li><a href="https://arxiv.org/abs/1707.06347">Schulman et al., Proximal Policy Optimization Algorithms</a> (2017) <em>paper</em> read Section 3 for the surrogate objective before the clip is introduced.</li>
+        <li><a href="https://arxiv.org/abs/1502.05477">Schulman et al., Trust Region Policy Optimization</a> (2015) <em>paper</em> Section 3 derives the same surrogate as a lower bound on the true objective &mdash; the argument Part 8 leans on.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="gae.html"><span>Previous</span><span>&#8592; Bias, Variance &amp; GAE</span></a>
+        <a class="next" href="clipped-objective.html"><span>Next</span><span>The Clipped Surrogate Objective &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function ppoIsRatioAnim() {
+    var svg = document.getElementById('ppo-is-ratio-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('ppo-is-ratio-info');
+    var out = document.getElementById('ppo-is-ratio-output');
+    var stepBtn = document.getElementById('ppo-is-ratio-step');
+    var autoBtn = document.getElementById('ppo-is-ratio-auto');
+    var resetBtn = document.getElementById('ppo-is-ratio-reset');
+
+    var oldP = [0.50, 0.25, 0.13, 0.08, 0.04];
+    var target = [0.22, 0.18, 0.18, 0.12, 0.30];
+    var STEPS = 6;
+    var drift = 0, runner = null;
+    var X0 = 60, X1 = 590, Y0 = 34, Y1 = 200, PMAX = 0.55;
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function newP(k) {
+      var f = k / STEPS, arr = [], i;
+      for (i = 0; i < oldP.length; i++) arr.push(oldP[i] + f * (target[i] - oldP[i]));
+      return arr;
+    }
+    function yb(p) { return Y1 - (p / PMAX) * (Y1 - Y0); }
+
+    function maxRatio(np) {
+      var i, r, mr = 0, mi = 0;
+      for (i = 0; i < np.length; i++) { r = np[i] / oldP[i]; if (r > mr) { mr = r; mi = i; } }
+      return { r: mr, i: mi };
+    }
+
+    function render() {
+      svg.innerHTML = '';
+      svg.appendChild(el('line', { x1: X0, y1: Y1, x2: X1, y2: Y1, stroke: '#6a8a78', 'stroke-width': '1.5' }));
+      svg.appendChild(el('text', { x: X0 - 8, y: yb(PMAX) + 4, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'end' }, PMAX.toFixed(2)));
+      svg.appendChild(el('text', { x: X0 - 8, y: Y1, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'end' }, '0'));
+
+      var np = newP(drift), n = oldP.length, slot = (X1 - X0) / n, bw = 20, i, cx, r, big;
+      for (i = 0; i < n; i++) {
+        cx = X0 + slot * i + slot / 2;
+        svg.appendChild(el('rect', { x: cx - bw - 2, y: yb(oldP[i]), width: bw, height: Y1 - yb(oldP[i]), fill: '#c9d6cf' }));
+        svg.appendChild(el('rect', { x: cx + 2, y: yb(np[i]), width: bw, height: Y1 - yb(np[i]), fill: '#0a8f6a' }));
+        svg.appendChild(el('text', { x: cx, y: Y1 + 16, 'font-size': '11', fill: '#6a8a78', 'text-anchor': 'middle' }, '\u03C0 t' + (i + 1)));
+        r = np[i] / oldP[i]; big = r >= 2;
+        svg.appendChild(el('text', {
+          x: cx, y: yb(Math.max(oldP[i], np[i])) - 6,
+          'font-size': big ? '12.5' : '10.5', 'font-weight': big ? '700' : '400',
+          fill: big ? '#c0392b' : '#3a5a4a', 'text-anchor': 'middle'
+        }, 'r=' + r.toFixed(2)));
+      }
+      svg.appendChild(el('rect', { x: X0, y: Y0 - 6, width: 11, height: 11, fill: '#c9d6cf' }));
+      svg.appendChild(el('text', { x: X0 + 16, y: Y0 + 4, 'font-size': '10.5', fill: '#6a8a78' }, 'old \u03C0'));
+      svg.appendChild(el('rect', { x: X0 + 74, y: Y0 - 6, width: 11, height: 11, fill: '#0a8f6a' }));
+      svg.appendChild(el('text', { x: X0 + 90, y: Y0 + 4, 'font-size': '10.5', fill: '#6a8a78' }, 'new \u03C0'));
+      svg.appendChild(el('text', { x: X1, y: Y0 + 4, 'font-size': '11', 'font-weight': '700', fill: '#6a8a78', 'text-anchor': 'end' }, 'drift ' + drift + '/' + STEPS));
+    }
+
+    function describe() {
+      var np = newP(drift), m = maxRatio(np);
+      var msg;
+      if (drift === 0) {
+        msg = '<strong>drift 0/' + STEPS + '</strong>: the new policy still equals the old one, so every ratio is exactly 1 &mdash; the surrogate matches the on-policy estimate.';
+      } else {
+        msg = '<strong>drift ' + drift + '/' + STEPS + '</strong>: the rare token <strong>t' + (m.i + 1) + '</strong> now carries r = ' + m.r.toFixed(2) + '. A token that was unlikely under the old policy but likely under the new one blows the ratio up and dominates the batch average.';
+      }
+      info.innerHTML = msg;
+      out.textContent = 'max r = ' + m.r.toFixed(2);
+    }
+
+    function doStep() {
+      if (drift >= STEPS) return;
+      drift++;
+      render(); describe();
+      if (drift >= STEPS) stepBtn.disabled = true;
+    }
+
+    function reset() {
+      if (runner) { runner.cancel(); runner = null; }
+      drift = 0; stepBtn.disabled = false;
+      render(); describe();
+    }
+
+    stepBtn.addEventListener('click', doStep);
+    resetBtn.addEventListener('click', reset);
+    autoBtn.addEventListener('click', function () {
+      reset();
+      var steps = [], k;
+      for (k = 0; k < STEPS; k++) steps.push(doStep);
+      runner = window.animRunner(steps, 900);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('ppo-is-quiz', {
+    title: '\u{1F9E0} Off-Policy Reuse Check',
+    intro: 'Click Start. Pick the statement that is actually true; wrong picks explain the specific misconception.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'Vanilla policy gradient throws a whole batch of rollouts away after a single update. Why?',
+        answer: 'The samples were drawn from the current policy, and one update moves the policy, so the stored samples are no longer on-policy.',
+        distractors: [
+          { text: 'The reward model can only score each response once before it must be retrained.', why: 'The reward model is fixed during PPO; nothing about scoring forces the batch to be discarded.' },
+          { text: 'The GPU memory holding the rollouts is freed automatically after the backward pass.', why: 'Memory management is an implementation detail; the batch is discarded for a statistical reason, not a memory one.' },
+          { text: 'Advantages computed by GAE become invalid the instant the critic is updated.', why: 'GAE advantages are treated as fixed targets during the update; staleness comes from the policy moving, not the critic.' }
+        ],
+        explain: 'The policy gradient is an expectation under the current policy, so its Monte Carlo estimate is only valid on on-policy samples.' },
+
+      { meaning: 'The importance-sampling identity rewrites an expectation over p as an expectation over q by multiplying the integrand by which factor?',
+        answer: 'p(x) / q(x)',
+        distractors: [
+          { text: 'q(x) / p(x)', why: 'This is the reciprocal; it would re-weight samples the wrong direction and does not recover the expectation under p.' },
+          { text: 'log p(x) minus log q(x)', why: 'That is the log of the weight, not the weight; the identity multiplies by the ratio itself, not its logarithm.' },
+          { text: 'p(x) times q(x)', why: 'A product of densities is not a valid re-weighting and does not integrate back to the expectation under p.' }
+        ],
+        explain: 'Insert q(x)/q(x) = 1 inside the sum; the surviving factor p(x)/q(x) is the importance weight.' },
+
+      { meaning: 'In the surrogate objective, the probability ratio r_t(theta) is defined as:',
+        answer: 'pi_theta(a_t | s_t) divided by pi_theta_old(a_t | s_t)',
+        distractors: [
+          { text: 'pi_theta_old(a_t | s_t) divided by pi_theta(a_t | s_t)', why: 'The new policy goes on top and the old snapshot on the bottom; this ratio is upside down.' },
+          { text: 'the reward r_t at step t', why: 'That is the reward, which collides in notation with the ratio; r_t(theta) with its argument is always the probability ratio.' },
+          { text: 'pi_theta(a_t | s_t) divided by pi_ref(a_t | s_t)', why: 'The reference model appears in the KL penalty, not in the importance ratio; the denominator here is the old policy.' }
+        ],
+        explain: 'The ratio re-weights old-policy samples to estimate an expectation under the new policy.' },
+
+      { meaning: 'At the very first inner epoch, before any gradient update has been applied, what is the value of every r_t(theta)?',
+        answer: 'exactly 1, because the new policy still equals the old snapshot',
+        distractors: [
+          { text: 'exactly 0, because no learning has happened yet', why: 'A ratio of identical probabilities is 1, not 0; zero would make the whole surrogate vanish.' },
+          { text: 'close to 1 but noisy, because of sampling variance', why: 'It is exactly 1, not approximately; the two log-probs are computed from the same parameters and cancel to the last bit.' },
+          { text: 'equal to the advantage A_t at that token', why: 'The ratio and the advantage are independent quantities; the ratio starts at 1 regardless of the advantage.' }
+        ],
+        explain: 'This exact-ones property is the cheapest sanity check that old and new log-probs are aligned.' },
+
+      { meaning: 'Why compute the ratio as exp(new_logprob minus old_logprob) rather than dividing the two probabilities?',
+        answer: 'Numerical stability: token probabilities underflow, and subtracting log-probs then exponentiating avoids dividing two tiny numbers.',
+        distractors: [
+          { text: 'It makes the ratio differentiable, which a direct division would not be.', why: 'Division is perfectly differentiable; the motivation is floating-point precision, not differentiability.' },
+          { text: 'It clips the ratio into a safe range automatically.', why: 'Exponentiating a log-difference does no clipping at all; a large log-difference still yields a huge ratio.' },
+          { text: 'It removes the need to store the old log-probabilities.', why: 'You still need the old log-probs to subtract; the log-space form is about stability, not storage.' }
+        ],
+        explain: 'Work in log-space, subtract, exponentiate once; never divide raw probabilities.' },
+
+      { meaning: 'Importance sampling is unbiased in expectation. What breaks when the new and old policies diverge?',
+        answer: 'The variance explodes: a token rare under the old policy but likely under the new one gets a huge weight that dominates the batch.',
+        distractors: [
+          { text: 'The estimator becomes biased and systematically overshoots the true gradient.', why: 'It stays unbiased in expectation; the problem is variance, not bias.' },
+          { text: 'The ratio becomes negative and flips the sign of the advantage.', why: 'A ratio of probabilities is always non-negative; it can be huge but never negative.' },
+          { text: 'The advantages saturate and stop distinguishing good tokens from bad.', why: 'Advantages are unaffected by the ratio; it is the importance weight, not the advantage, that blows up.' }
+        ],
+        explain: 'High weight variance from divergent policies is exactly the failure clipping is designed to contain.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

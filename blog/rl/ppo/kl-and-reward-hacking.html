@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Why clipping is not enough for language models: the frozen reference model, per-token KL as a reward penalty versus a loss term, what reward hacking really looks like, the k3 KL estimator, and adaptive KL controllers.">
+  <title>KL Penalties, Reference Models &amp; Reward Hacking | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .key-eq { background: rgba(10,143,106,0.06); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 1rem; margin: 1.1rem 0; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">RL &middot; PPO</a>
+        <span>&middot; Part 9 of 12</span>
+      </div>
+
+      <h1>KL Penalties, Reference Models &amp; Reward Hacking</h1>
+      <p class="post-meta">July 2026 &middot; 21 min read</p>
+
+      <p>The <a href="clipped-objective.html">clipped objective</a> keeps each update close to the policy that collected the batch. That is enough to make the optimisation stable, and it is <em>not</em> enough to make the result good. Two things it never looked at: how far the policy has crept from the model you started with after hundreds of small legal steps, and whether the reward it is diligently maximising still means anything. This post is about the mechanism that addresses both &mdash; a KL penalty against a frozen reference model &mdash; and about the failure it exists to prevent, which is the most characteristic pathology in all of RLHF.</p>
+
+      <h2 id="where-we-are">Two Gaps the Clip Left Open</h2>
+
+      <p>Recall precisely what the clip constrains: the ratio $r_t(\theta)=\pi_\theta/\pi_{\theta_{\text{old}}}$, where $\pi_{\theta_{\text{old}}}$ is <em>last iteration's</em> policy. Every iteration, $\pi_{\theta_{\text{old}}}$ is refreshed to wherever the policy currently sits. So the clip is a constraint that moves with you. Take two hundred iterations of small, individually-legal steps and the policy can end up somewhere the original model would not recognise &mdash; each step was within the trust region of the step before it, but the composition of two hundred such steps is unbounded. Nothing in $L^{\text{CLIP}}$ anchors the policy to a fixed point.</p>
+
+      <p>The second gap is deeper. The reward signal in RLHF is not the truth; it is a model of the truth. Optimise a model of the truth hard enough and you stop optimising the truth. Both gaps have the same fix, and it hangs on a distinction worth stating carefully before anything else.</p>
+
+      <h2 id="two-different-kls">The Distinction That Organises Everything</h2>
+
+      <div class="callout">
+        <strong>Clipping and the KL penalty constrain two different things against two different anchors.</strong> The <em>clip</em> constrains the step relative to $\pi_{\theta_{\text{old}}}$ &mdash; last iteration's policy, refreshed every iteration &mdash; and its job is <em>optimisation stability</em>. The <em>KL penalty</em> constrains the policy relative to $\pi_{\text{ref}}$ &mdash; the frozen SFT checkpoint, never updated for the entire run &mdash; and its job is <em>not destroying the model</em>. One is a moving guardrail on the size of each step; the other is a fixed tether to the coherent model you began with. They are not redundant, and confusing them is the single most common mistake people make reading a PPO implementation.</p>
+      </div>
+
+      <p>Say it once more in the concrete, because it is that important. $\pi_{\theta_{\text{old}}}$ is a photograph taken at the start of each iteration and thrown away at the end. $\pi_{\text{ref}}$ is a photograph taken once, before training began, and kept in a drawer for reference for the whole run. Clipping asks &ldquo;did I move too far since the last photo?&rdquo; The KL penalty asks &ldquo;have I wandered too far from who I originally was?&rdquo;</p>
+
+      <h2 id="reward-hacking">Reward Hacking and Goodhart's Law</h2>
+
+      <p>Why tether the policy to its old self at all? Because the reward model is a <em>learned proxy</em>. It was trained on a finite dataset of human preference comparisons, and it is accurate in the region of response-space where those comparisons lived &mdash; near the SFT model's own outputs &mdash; and increasingly unreliable the further you travel from that region. This is Goodhart's law in its cleanest form: a measure that is a good proxy for quality under normal conditions stops being one the moment it becomes the target of hard optimisation. The optimiser's entire job is to search response-space for the highest reward, which means its entire job is to find the places where the proxy is wrong and reward is high.</p>
+
+      <p>Concretely, and in ways you can watch happen, an unconstrained policy tends to discover things like these:</p>
+
+      <ul>
+        <li><strong>Degenerate repetition.</strong> A phrasing or sentence the reward model happens to score highly, repeated with slight variation, because the model found a local pocket the RM over-rewards.</li>
+        <li><strong>Length inflation.</strong> If longer answers were mildly preferred by annotators &mdash; and they usually were &mdash; the policy learns that padding raises reward, and responses swell with qualifications and restated premises that add no content.</li>
+        <li><strong>Flattery and hedging.</strong> Deferential openers, excessive agreement, and safe non-answers that the RM associates with &ldquo;helpful and harmless&rdquo; without checking whether the question was actually answered.</li>
+        <li><strong>Boilerplate scaffolding.</strong> Formulaic introductions and summaries &mdash; &ldquo;Great question! Here are the key points&rdquo; &mdash; that pattern-match to high-scoring training responses regardless of the prompt.</li>
+        <li><strong>Template collapse.</strong> In the limit, the policy converges to one high-scoring response shape and emits variations of it no matter what was asked, having found a single point that games the proxy.</li>
+      </ul>
+
+      <p>The diagnostic signature is unmistakable once you know to look for it: the reward-model score climbs smoothly and convincingly while human evaluation and held-out quality flatten and then <em>fall</em>. The gap between the two is the reward hacking, quantified. The animation makes the shape concrete &mdash; and shows what the KL penalty does to it.</p>
+
+      <div class="anim-container" id="ppo-kl-drift-anim">
+        <h4>&#9654; Reward Hacking, and the KL Tether</h4>
+        <p style="margin:0 0 0.5rem;font-size:0.88rem;color:var(--ink-muted)">Step to advance training. The amber curve is the reward-model score; the green curve is true held-out quality. Toggle the KL penalty to see the difference: without it the proxy climbs while true quality peaks and collapses; with it the policy stays near $\pi_{\text{ref}}$ and true quality holds.</p>
+        <svg id="ppo-kl-drift-svg" width="620" height="270" viewBox="0 0 620 270" role="img" aria-label="Two training curves, reward-model score and held-out quality, with and without a KL penalty"></svg>
+        <div id="ppo-kl-drift-info" style="margin-top:0.4rem;font-family:Consolas,monospace;font-size:0.85rem;min-height:3.2rem;color:var(--ink-muted)"></div>
+        <div class="anim-controls">
+          <button class="anim-btn" id="ppo-kl-drift-step" type="button">Step &rarr;</button>
+          <button class="anim-btn" id="ppo-kl-drift-auto" type="button">Play All</button>
+          <button class="anim-btn" id="ppo-kl-drift-toggle" type="button">KL penalty: OFF</button>
+          <button class="anim-btn" id="ppo-kl-drift-reset" type="button">Reset</button>
+          <span class="anim-output" id="ppo-kl-drift-output"></span>
+        </div>
+      </div>
+
+      <h2 id="kl-penalty-two-placements">The KL Penalty, Two Placements</h2>
+
+      <p>The fix is to penalise divergence from the reference. The penalty is the KL divergence between the current policy and the frozen reference, per token:</p>
+
+      <p>$$\mathrm{D}_{\mathrm{KL}}\big(\pi_\theta \,\Vert\, \pi_{\text{ref}}\big)(s_t)\;=\;\mathbb{E}_{a\sim\pi_\theta}\!\left[\log\frac{\pi_\theta(a\mid s_t)}{\pi_{\text{ref}}(a\mid s_t)}\right].$$</p>
+
+      <p>Where you insert it changes what it interacts with, and the two common placements are <em>not</em> equivalent.</p>
+
+      <p><strong>Placement 1 &mdash; reward shaping.</strong> This is the InstructGPT recipe (<a href="https://arxiv.org/abs/2203.02155">Ouyang et al., 2022</a>). Fold the penalty into the per-token reward before any advantage is computed, using the single-sample estimate of the KL:</p>
+
+      <div class="key-eq">
+        $$\tilde{r}_t \;=\; r_t \;-\; \beta\big(\log\pi_\theta(a_t\mid s_t) - \log\pi_{\text{ref}}(a_t\mid s_t)\big).$$
+      </div>
+
+      <p>Because the penalty is now part of the reward, it flows through the entire machinery of the previous posts &mdash; the return $G_t$, the GAE advantage $\hat{A}_t$, and the critic's value targets all see it, exactly as they would see any environment reward. It is credit-assigned across the sequence like everything else. And it quietly fixes a problem we have carried since the start: outcome-only rewards are terminal-sparse, a single scalar at the end of a 400-token response. The per-token KL is <em>dense</em> &mdash; every token gets a signal &mdash; so shaping the reward this way densifies the learning signal as an underrated side effect. This is the ninth milestone of the running objective: the reward the whole pipeline optimises is now $\tilde{r}_t$, not $r_t$.</p>
+
+      <p><strong>Placement 2 &mdash; a direct loss term.</strong> Alternatively, leave the reward alone and subtract $\beta\,\mathrm{D}_{\mathrm{KL}}$ from the objective directly, alongside $L^{\text{CLIP}}$. This is simpler and more transparent, but the penalty no longer passes through GAE or the critic; it acts only as an extra gradient on the policy, penalising average divergence rather than being attributed token by token.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th></th><th>reward shaping (Placement 1)</th><th>direct loss term (Placement 2)</th></tr></thead>
+        <tbody>
+          <tr><td>where it enters</td><td>added to the per-token reward $\tilde{r}_t$ <em>before</em> GAE</td><td>subtracted from the objective <em>after</em> advantages</td></tr>
+          <tr><td>flows through GAE &amp; critic</td><td>yes &mdash; returns, advantages, value targets all include it</td><td>no &mdash; a separate additive gradient on the policy</td></tr>
+          <tr><td>densifies the sparse reward</td><td>yes &mdash; every token carries a KL signal</td><td>no &mdash; does not touch the reward structure</td></tr>
+          <tr><td>credit assignment</td><td>attributed across the sequence, like any reward</td><td>penalises the average divergence directly</td></tr>
+          <tr><td>typical home</td><td>InstructGPT and classic RLHF stacks</td><td>simpler or more recent implementations</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="estimating-kl">Estimating the KL Without Blowing Up</h2>
+
+      <p>You never have the full KL; you have samples. The obvious estimator drops the expectation and uses the single realised token:</p>
+
+      <p>$$\widehat{\mathrm{KL}}_{\text{naive}} \;=\; \log\pi_\theta(a_t\mid s_t) - \log\pi_{\text{ref}}(a_t\mid s_t).$$</p>
+
+      <p>It is unbiased &mdash; its expectation under $\pi_\theta$ is the true KL &mdash; but it is high-variance, and crucially it can be <em>negative</em> for an individual token, whenever the policy happened to sample a token it rates <em>lower</em> than the reference does. A per-step penalty that flickers negative is a noisy signal to hand the critic, and a KL <em>measurement</em> that can come out below zero is a confusing thing to threshold a controller on. John Schulman's widely-used low-variance alternative &mdash; the &ldquo;k3&rdquo; estimator &mdash; fixes both. With $\rho = \pi_{\text{ref}}/\pi_\theta$,</p>
+
+      <div class="key-eq">
+        $$\widehat{\mathrm{KL}}_{k3} \;=\; \rho - 1 - \log\rho, \qquad \rho=\frac{\pi_{\text{ref}}(a_t\mid s_t)}{\pi_\theta(a_t\mid s_t)}.$$
+      </div>
+
+      <p>The function $x-1-\log x$ is zero at $x=1$ and strictly positive everywhere else, so this estimate is <strong>always non-negative</strong>, matching the fact that a true KL cannot be negative. It is still unbiased &mdash; a short calculation shows $\mathbb{E}_{\pi_\theta}[\rho-1-\log\rho]=\mathrm{D}_{\mathrm{KL}}(\pi_\theta\Vert\pi_{\text{ref}})$, because $\mathbb{E}_{\pi_\theta}[\rho]=1$ and $\mathbb{E}_{\pi_\theta}[-\log\rho]$ is exactly the KL &mdash; and it has markedly lower variance. Implementations reach for it whenever they need a stable KL number to log, to threshold, or to feed an adaptive controller.</p>
+
+      <pre><code>def kl_penalty_k3(logp_policy, logp_ref):
+    # Schulman's low-variance, non-negative KL estimate.
+    # rho = pi_ref / pi_theta = exp(logp_ref - logp_policy)
+    log_rho = logp_ref - logp_policy
+    rho = torch.exp(log_rho)
+    return rho - 1.0 - log_rho          # always &gt;= 0, unbiased for KL(pi_theta || pi_ref)</code></pre>
+
+      <p>And here is the reward-shaping placement in code, using the signed single-sample penalty per token and dropping the terminal reward-model score onto the last real token of each sequence:</p>
+
+      <pre><code>def shape_rewards(logp_policy, logp_ref, rm_score, mask, beta=0.2):
+    # logp_policy, logp_ref : (B, T) log-probs of the SAMPLED tokens
+    # rm_score              : (B,)   scalar reward-model score per sequence
+    # dense, signed per-token KL penalty (log pi_theta - log pi_ref)
+    kl = logp_policy - logp_ref                                # (B, T)
+    shaped = -beta * kl                                        # penalty on every token
+    # add the terminal RM score at each row's last real token
+    last = mask.long().sum(dim=1) - 1                          # (B,) final-token index
+    rows = torch.arange(shaped.size(0))
+    shaped[rows, last] = shaped[rows, last] + rm_score         # sparse reward lands here
+    return shaped * mask                                       # zero the padding</code></pre>
+
+      <h2 id="adaptive-kl">Adaptive Controllers and Early Stopping</h2>
+
+      <p>How large should $\beta$ be? Too small and the tether is slack and the policy hacks the reward anyway; too large and the penalty dominates, the policy refuses to leave the reference, and nothing is learned. A fixed $\beta$ is a guess that is wrong for most of training, because the natural scale of the KL changes as the policy moves. The adaptive controller from the InstructGPT work turns $\beta$ into a feedback loop: pick a <em>target</em> KL, measure the actual KL each iteration, and nudge $\beta$ up when the measured KL overshoots the target and down when it undershoots.</p>
+
+      <pre><code>class AdaptiveKL:
+    def __init__(self, beta, target):
+        self.beta, self.target = beta, target
+    def update(self, measured_kl):
+        # proportional control: raise beta if we drifted too far, lower it if too close
+        err = measured_kl / self.target - 1.0
+        err = max(-0.2, min(0.2, err))     # clamp the proportional error for stability
+        self.beta = self.beta * (1.0 + err)
+        return self.beta</code></pre>
+
+      <p>The trade-off against a fixed coefficient is the usual one: the controller keeps the KL where you asked it to sit, at the cost of another moving part with its own target and gain to tune. Many modern stacks take a blunter and very effective route instead &mdash; keep $\beta$ fixed (or drop the reward-shaping penalty entirely) and <strong>early-stop the inner epochs</strong> the moment the measured policy-to-old KL crosses a threshold. That is the same measured-KL check the clipping post gestured at, now doing double duty: it caps per-update drift and, iteration after iteration, keeps the policy from running away from the reference.</p>
+
+      <h2 id="the-cost">The Cost: A Fourth Model in Memory</h2>
+
+      <p>The reference model is not free. Up to this point the training loop has held three networks: the policy $\pi_\theta$ being trained, the critic $V_\phi$ being trained, and the reward model scoring completions. The KL penalty adds a fourth &mdash; $\pi_{\text{ref}}$ &mdash; and it is the same size as the policy. Four large models resident at once is the defining memory burden of PPO-based RLHF, and it is the setup for two later threads: the <a href="full-algorithm.html">full training loop</a> has to orchestrate all four, and the critique in the finale is largely about this cost being what motivates critic-free successors.</p>
+
+      <p>There is one consolation. The reference model is <em>frozen</em> &mdash; pure inference, no gradients, no optimiser state &mdash; and so is the reward model. Only the policy and critic carry the heavy optimiser and activation memory of training. Because the reference never updates, it can be quantised, kept in a lower precision, or offloaded to CPU or a separate device and queried in batches, trading a little latency for a lot of memory. It has to be <em>present</em>; it does not have to be expensive.</p>
+
+      <h2 id="worked-example">A Worked Numeric Example</h2>
+
+      <p>Take $\beta=0.2$ and four tokens of one response. Columns are the policy and reference log-probs of the sampled token, the signed single-sample KL $\log\pi_\theta-\log\pi_{\text{ref}}$, its scaled penalty $\beta\cdot\text{KL}$, the base reward $r_t$ (zero until the terminal token, which carries a reward-model score of $+1.20$), and the shaped reward $\tilde{r}_t=r_t-\beta\cdot\text{KL}$.</p>
+
+      <table class="cmp-table">
+        <thead><tr><th>token</th><th>$\log\pi_\theta$</th><th>$\log\pi_{\text{ref}}$</th><th>KL (naive)</th><th>$\beta\cdot$KL</th><th>base $r_t$</th><th>shaped $\tilde{r}_t$</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>&minus;0.30</td><td>&minus;0.35</td><td>+0.05</td><td>+0.010</td><td>0</td><td>&minus;0.010</td></tr>
+          <tr><td>2</td><td>&minus;0.20</td><td>&minus;0.90</td><td>+0.70</td><td>+0.140</td><td>0</td><td>&minus;0.140</td></tr>
+          <tr><td>3</td><td>&minus;1.50</td><td>&minus;1.20</td><td>&minus;0.30</td><td>&minus;0.060</td><td>0</td><td>+0.060</td></tr>
+          <tr><td>4 (end)</td><td>&minus;0.50</td><td>&minus;0.55</td><td>+0.05</td><td>+0.010</td><td>+1.20</td><td>+1.190</td></tr>
+        </tbody>
+      </table>
+
+      <p>Three things to read off it. Token 2 is the policy being much more confident than the reference &mdash; a strong divergence &mdash; and it draws the largest penalty, exactly the drift we want to discourage. Token 3 shows the naive estimator's pathology: the policy sampled a token it rates <em>lower</em> than the reference, so the single-sample KL is negative and the &ldquo;penalty&rdquo; briefly becomes a small reward &mdash; a variance artefact the k3 estimator would remove. And every intermediate token now carries a nonzero shaped reward, so the once-terminal-only signal is dense all along the sequence, with the reward model's $+1.20$ still landing on the final token where it belongs.</p>
+
+      <h2 id="where-this-leaves-us">Where This Leaves Us</h2>
+
+      <p>The objective now has two guardrails serving two purposes. The clip holds each step near last iteration's policy for stability; the KL penalty holds the policy near the frozen reference so it neither wanders into incoherence nor hacks the reward model. Folded into the reward, the quantity the pipeline maximises is</p>
+
+      <div class="key-eq">
+        $$\tilde{r}_t \;=\; r_t \;-\; \beta\big(\log\pi_\theta(a_t\mid s_t) - \log\pi_{\text{ref}}(a_t\mid s_t)\big), \qquad \text{ascended via } L^{\text{CLIP}}(\theta).$$
+      </div>
+
+      <p>What is still missing is the plumbing: a value-function loss to train the critic that produced $\hat{A}_t$, an entropy bonus to keep the policy from collapsing, and the orchestration of all four models across a rollout&ndash;score&ndash;optimise cycle. Assembling those into the single objective PPO actually minimises is the job of the next post, <a href="full-algorithm.html">The Complete PPO Training Loop</a>.</p>
+
+      <h2 id="check">Check Yourself</h2>
+      <p>Six questions on reference models, reward hacking, and the KL penalty. Keep the two anchors &mdash; old policy versus reference &mdash; straight.</p>
+      <div class="blog-quiz" id="ppo-kl-quiz"></div>
+
+      <h2 id="practice">Practice</h2>
+      <ul class="practice-list">
+        <li>Prove that $x-1-\log x\ge 0$ for all $x\gt 0$ with equality only at $x=1$, and use it to argue the k3 estimator is non-negative. <em>derivation</em> convexity of $-\log$.</li>
+        <li>Show $\mathbb{E}_{\pi_\theta}[\rho-1-\log\rho]=\mathrm{D}_{\mathrm{KL}}(\pi_\theta\Vert\pi_{\text{ref}})$ using $\mathbb{E}_{\pi_\theta}[\rho]=1$. <em>derivation</em> why k3 stays unbiased.</li>
+        <li>Implement <code>shape_rewards</code> and confirm that, with $\beta=0$, GAE and the loss reduce exactly to the previous post's outcome-only setup. <em>exercise</em> the penalty is an additive shaping term.</li>
+        <li>Instrument a training run to log reward-model score and a held-out quality metric together; deliberately lower $\beta$ until the two curves diverge and identify which hacking mode appears first. <em>exercise</em> reproduce the animation's shape.</li>
+        <li><a href="https://arxiv.org/abs/2203.02155">Ouyang et al., Training Language Models to Follow Instructions with Human Feedback</a> (2022) <em>paper</em> the KL-shaped reward and adaptive coefficient in their original setting.</li>
+        <li><a href="https://arxiv.org/abs/2009.01325">Stiennon et al., Learning to Summarize from Human Feedback</a> (2020) <em>paper</em> an early, careful account of the reference-KL penalty and reward over-optimisation.</li>
+      </ul>
+
+      <nav class="post-nav">
+        <a class="prev" href="clipped-objective.html"><span>Previous</span><span>&#8592; The Clipped Surrogate Objective</span></a>
+        <a class="next" href="full-algorithm.html"><span>Next</span><span>The Complete PPO Training Loop &#8594;</span></a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../anim-speed.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  (function ppoKlDriftAnim() {
+    var svg = document.getElementById('ppo-kl-drift-svg');
+    if (!svg) return;
+    var NS = 'http://www.w3.org/2000/svg';
+    var info = document.getElementById('ppo-kl-drift-info');
+    var out = document.getElementById('ppo-kl-drift-output');
+    var stepBtn = document.getElementById('ppo-kl-drift-step');
+    var autoBtn = document.getElementById('ppo-kl-drift-auto');
+    var toggleBtn = document.getElementById('ppo-kl-drift-toggle');
+    var resetBtn = document.getElementById('ppo-kl-drift-reset');
+
+    var rmOff  = [0.10, 0.30, 0.48, 0.62, 0.73, 0.81, 0.87, 0.91, 0.94, 0.96, 0.97];
+    var trOff  = [0.12, 0.34, 0.52, 0.63, 0.66, 0.62, 0.53, 0.42, 0.31, 0.22, 0.15];
+    var rmOn   = [0.10, 0.28, 0.42, 0.53, 0.60, 0.65, 0.68, 0.70, 0.71, 0.72, 0.72];
+    var trOn   = [0.12, 0.33, 0.50, 0.60, 0.66, 0.69, 0.70, 0.71, 0.71, 0.71, 0.71];
+    var N = rmOff.length;
+    var shown = 0, klOn = false, runner = null;
+
+    var X0 = 70, X1 = 585, Y0 = 34, Y1 = 205;
+
+    function el(tag, attrs, text) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function px(i) { return X0 + (i / (N - 1)) * (X1 - X0); }
+    function py(v) { return Y1 - v * (Y1 - Y0); }
+    function rmSeries() { return klOn ? rmOn : rmOff; }
+    function trSeries() { return klOn ? trOn : trOff; }
+
+    function polyline(series, color, upto) {
+      var d = '', i;
+      for (i = 0; i <= upto; i++) d += (i === 0 ? 'M' : 'L') + ' ' + px(i).toFixed(1) + ' ' + py(series[i]).toFixed(1) + ' ';
+      if (upto >= 1) svg.appendChild(el('path', { d: d, fill: 'none', stroke: color, 'stroke-width': '3' }));
+      svg.appendChild(el('circle', { cx: px(upto), cy: py(series[upto]), r: 5, fill: color, stroke: '#fff', 'stroke-width': '1.5' }));
+    }
+
+    function render() {
+      svg.innerHTML = '';
+      var g;
+      /* axes */
+      svg.appendChild(el('line', { x1: X0, y1: Y1, x2: X1, y2: Y1, stroke: '#6a8a78', 'stroke-width': '1.5' }));
+      svg.appendChild(el('line', { x1: X0, y1: Y0, x2: X0, y2: Y1, stroke: '#6a8a78', 'stroke-width': '1.5' }));
+      for (g = 0; g <= 4; g++) {
+        var yy = Y0 + (g / 4) * (Y1 - Y0);
+        svg.appendChild(el('line', { x1: X0, y1: yy, x2: X1, y2: yy, stroke: '#eee', 'stroke-width': '1' }));
+      }
+      svg.appendChild(el('text', { x: X0 - 8, y: Y0 + 4, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'end' }, '1.0'));
+      svg.appendChild(el('text', { x: X0 - 8, y: Y1, 'font-size': '10', fill: '#6a8a78', 'text-anchor': 'end' }, '0'));
+      svg.appendChild(el('text', { x: (X0 + X1) / 2, y: Y1 + 22, 'font-size': '11', fill: '#6a8a78', 'text-anchor': 'middle' }, 'training steps \u2192'));
+
+      /* curves */
+      polyline(rmSeries(), '#f59e0b', shown);
+      polyline(trSeries(), '#0a8f6a', shown);
+
+      /* legend + status */
+      svg.appendChild(el('rect', { x: X0 + 6, y: Y0 - 2, width: 11, height: 11, fill: '#f59e0b' }));
+      svg.appendChild(el('text', { x: X0 + 22, y: Y0 + 8, 'font-size': '10.5', fill: '#6a8a78' }, 'reward-model score'));
+      svg.appendChild(el('rect', { x: X0 + 170, y: Y0 - 2, width: 11, height: 11, fill: '#0a8f6a' }));
+      svg.appendChild(el('text', { x: X0 + 186, y: Y0 + 8, 'font-size': '10.5', fill: '#6a8a78' }, 'held-out quality'));
+      svg.appendChild(el('text', { x: X1, y: Y0 + 8, 'font-size': '11', 'font-weight': '700', 'text-anchor': 'end', fill: klOn ? '#0a8f6a' : '#c0392b' },
+        klOn ? 'KL penalty ON' : 'KL penalty OFF'));
+    }
+
+    function describe() {
+      var rm = rmSeries()[shown], tr = trSeries()[shown];
+      var msg = '<strong>step ' + shown + '/' + (N - 1) + '</strong> &mdash; RM score ' + rm.toFixed(2) + ', held-out quality ' + tr.toFixed(2) + '. ';
+      if (!klOn) {
+        if (shown <= 4) msg += 'Both climb together; the policy is genuinely improving so far.';
+        else msg += 'The reward model keeps climbing while held-out quality has peaked and is falling &mdash; the policy is exploiting the proxy. This is reward hacking.';
+      } else {
+        msg += 'The KL penalty holds the policy near the reference: the reward model saturates lower, but held-out quality rises and plateaus instead of collapsing.';
+      }
+      info.innerHTML = msg;
+      out.textContent = 'gap ' + (rm - tr).toFixed(2);
+    }
+
+    function doStep() {
+      if (shown >= N - 1) return;
+      shown++;
+      render(); describe();
+      if (shown >= N - 1) stepBtn.disabled = true;
+    }
+
+    function setToggleLabel() { toggleBtn.textContent = 'KL penalty: ' + (klOn ? 'ON' : 'OFF'); }
+
+    function reset() {
+      if (runner) { runner.cancel(); runner = null; }
+      shown = 0; stepBtn.disabled = false;
+      setToggleLabel();
+      render(); describe();
+    }
+
+    stepBtn.addEventListener('click', doStep);
+    resetBtn.addEventListener('click', reset);
+    toggleBtn.addEventListener('click', function () {
+      klOn = !klOn;
+      setToggleLabel();
+      render(); describe();
+    });
+    autoBtn.addEventListener('click', function () {
+      if (runner) { runner.cancel(); runner = null; }
+      shown = 0; stepBtn.disabled = false;
+      render(); describe();
+      var steps = [], k;
+      for (k = 0; k < N - 1; k++) steps.push(doStep);
+      runner = window.animRunner(steps, 700);
+    });
+
+    reset();
+  })();
+
+  BlogQuiz.create('ppo-kl-quiz', {
+    title: '\u{1F9E0} KL &amp; Reward-Hacking Check',
+    intro: 'Click Start. Keep the two anchors straight: the old policy versus the frozen reference.',
+    promptLabel: 'Situation:',
+    bank: [
+      { meaning: 'What does the clipping mechanism constrain, and against which policy?',
+        answer: 'It constrains the size of each update relative to the old policy, the snapshot that collected the current batch.',
+        distractors: [
+          { text: 'It constrains the policy relative to the frozen reference model.', why: 'That is the KL penalty, not clipping; clipping is anchored to the old policy, which is refreshed every iteration.' },
+          { text: 'It constrains the reward-model score from growing too fast.', why: 'Clipping never looks at the reward-model score; it acts on the probability ratio between new and old policies.' },
+          { text: 'It constrains the entropy of the policy to prevent collapse.', why: 'Entropy is handled by a separate bonus term; clipping bounds the ratio, not the entropy.' }
+        ],
+        explain: 'Clipping is a moving guardrail on step size against the old policy; the KL penalty is a fixed tether to the reference.' },
+
+      { meaning: 'Which model is the reference model, and how often is it updated during PPO training?',
+        answer: 'The frozen SFT checkpoint, never updated for the entire run.',
+        distractors: [
+          { text: 'The previous iteration policy, refreshed at the start of every iteration.', why: 'That is the old policy used by clipping; the reference is fixed for the whole run, not refreshed each iteration.' },
+          { text: 'The reward model, updated whenever new preference data arrives.', why: 'The reward model is a separate scorer and is also fixed during PPO; the reference is the frozen SFT policy.' },
+          { text: 'A running exponential average of the policy weights.', why: 'The reference is a single frozen checkpoint, not a moving average of the policy.' }
+        ],
+        explain: 'A fixed reference is what makes the KL penalty a tether to the original coherent model.' },
+
+      { meaning: 'The reward-model score keeps rising while held-out human quality peaks and then falls. What is happening?',
+        answer: 'Reward hacking: the policy is exploiting regions where the learned proxy is wrong, so the proxy climbs while true quality drops.',
+        distractors: [
+          { text: 'The critic has diverged and is producing bad value estimates.', why: 'A diverging critic shows up as unstable advantages, not as a steady RM-up, quality-down gap; this signature is proxy over-optimisation.' },
+          { text: 'The learning rate is too low, so training has stalled.', why: 'A stall would flatten both curves; here the RM score is actively rising while quality falls, which is over-optimisation, not a stall.' },
+          { text: 'The KL penalty is too strong and is suppressing learning.', why: 'A too-strong penalty keeps quality flat and low, not peaking then collapsing while the RM soars; that gap is hacking.' }
+        ],
+        explain: 'The widening gap between reward-model score and held-out quality is the fingerprint of reward hacking.' },
+
+      { meaning: 'In the reward-shaping placement, why does folding the KL into the per-token reward help beyond limiting drift?',
+        answer: 'It densifies an otherwise terminal-only reward, giving every token a learning signal that flows through GAE and the critic.',
+        distractors: [
+          { text: 'It removes the need for a critic entirely.', why: 'The critic is still trained; shaping changes the reward the critic regresses on, it does not eliminate the critic.' },
+          { text: 'It makes the reward model unnecessary after the first step.', why: 'The reward model still scores every rollout; shaping adds a KL term, it does not replace the RM.' },
+          { text: 'It guarantees the KL estimate is always non-negative.', why: 'The signed single-sample penalty used in shaping can go negative; non-negativity is a property of the k3 estimator, not of shaping.' }
+        ],
+        explain: 'A dense per-token penalty is an underrated side benefit of the reward-shaping placement.' },
+
+      { meaning: 'Why do implementations prefer the k3 estimator rho - 1 - log rho over the naive log-prob difference?',
+        answer: 'It is non-negative and much lower variance while remaining unbiased, so it is a stable number to log, threshold, or control on.',
+        distractors: [
+          { text: 'It is biased low, which conveniently makes the penalty gentler.', why: 'k3 is unbiased, not biased low; its advantage is variance and non-negativity, not a softer penalty.' },
+          { text: 'It avoids needing the reference model log-probs.', why: 'k3 still uses the reference log-probs inside rho; it just combines them into a non-negative form.' },
+          { text: 'It clips the KL into the trust region automatically.', why: 'k3 estimates the KL; it performs no clipping and has nothing to do with the ratio band.' }
+        ],
+        explain: 'The naive single-sample KL can go negative and is noisy; k3 fixes both while staying unbiased.' },
+
+      { meaning: 'What is the memory consequence of adding a reference model, and what softens it?',
+        answer: 'It is a fourth large model resident at once, but because it is frozen it can be quantised or offloaded and run as pure inference.',
+        distractors: [
+          { text: 'It doubles optimiser state, since the reference is trained alongside the policy.', why: 'The reference is never trained, so it carries no optimiser state; only the policy and critic do.' },
+          { text: 'It has no memory cost because it shares weights with the policy.', why: 'The reference is a separate frozen copy; it must be held in memory independently of the moving policy.' },
+          { text: 'It replaces the reward model, so the model count stays at three.', why: 'The reference is in addition to the reward model, bringing the count to four: policy, critic, reward model, reference.' }
+        ],
+        explain: 'Four models is PPO’s defining memory burden; the frozen reference and reward model can at least be quantised or offloaded.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
