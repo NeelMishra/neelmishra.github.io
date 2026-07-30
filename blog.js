@@ -13,22 +13,8 @@ var BLOG_TREE = [
           { title: 'Maps & Sets', file: 'cpp/stl/maps-sets.html', links: ['cpp/stl/vectors.html', 'cpp/stl/iterators.html'] },
           { title: 'Iterators', file: 'cpp/stl/iterators.html', links: ['cpp/stl/maps-sets.html', 'cpp/stl/algorithms.html'] },
           { title: 'Algorithms', file: 'cpp/stl/algorithms.html', links: ['cpp/stl/iterators.html', 'cpp/stl/smart-pointers.html'] },
-          { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/deep-dives/raii.html'] },
-          {
-            name: 'heaps',
-            label: 'Heaps & Priority Queues',
-            children: [
-              { title: 'Overview', file: 'cpp/stl/heaps/index.html', links: ['cpp/stl/heaps/heap-fundamentals.html', 'cpp/stl/algorithms.html'] },
-              { title: 'The Binary Heap From Scratch', file: 'cpp/stl/heaps/heap-fundamentals.html', links: ['cpp/stl/heaps/index.html', 'cpp/stl/heaps/priority-queue-max-heap.html'] },
-              { title: 'priority_queue & Max-Heaps', file: 'cpp/stl/heaps/priority-queue-max-heap.html', links: ['cpp/stl/heaps/heap-fundamentals.html', 'cpp/stl/heaps/min-heap.html'] },
-              { title: 'Building a Min-Heap', file: 'cpp/stl/heaps/min-heap.html', links: ['cpp/stl/heaps/priority-queue-max-heap.html', 'cpp/stl/heaps/custom-comparators.html'] },
-              { title: 'Custom Comparators', file: 'cpp/stl/heaps/custom-comparators.html', links: ['cpp/stl/heaps/min-heap.html', 'cpp/stl/heaps/pairs-and-structs.html'] },
-              { title: 'Pairs, Tuples & Structs', file: 'cpp/stl/heaps/pairs-and-structs.html', links: ['cpp/stl/heaps/custom-comparators.html', 'cpp/stl/heaps/heap-algorithms.html'] },
-              { title: 'The <algorithm> Heap Family', file: 'cpp/stl/heaps/heap-algorithms.html', links: ['cpp/stl/heaps/pairs-and-structs.html', 'cpp/stl/heaps/patterns.html'] },
-              { title: 'Classic Heap Patterns', file: 'cpp/stl/heaps/patterns.html', links: ['cpp/stl/heaps/heap-algorithms.html', 'cpp/stl/heaps/performance-pitfalls.html'] },
-              { title: 'Performance & Pitfalls', file: 'cpp/stl/heaps/performance-pitfalls.html', links: ['cpp/stl/heaps/patterns.html', 'cpp/stl/heaps/index.html'] }
-            ]
-          }
+          { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/stl/heaps.html'] },
+          { title: 'Heaps & Priority Queues', file: 'cpp/stl/heaps.html', links: ['cpp/stl/algorithms.html', 'dsa/trees/heap/index.html'] }
         ]
       },
       {
