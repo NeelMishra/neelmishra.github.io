@@ -14,7 +14,8 @@ var BLOG_TREE = [
           { title: 'Iterators', file: 'cpp/stl/iterators.html', links: ['cpp/stl/maps-sets.html', 'cpp/stl/algorithms.html'] },
           { title: 'Algorithms', file: 'cpp/stl/algorithms.html', links: ['cpp/stl/iterators.html', 'cpp/stl/smart-pointers.html'] },
           { title: 'Smart Pointers', file: 'cpp/stl/smart-pointers.html', links: ['cpp/stl/algorithms.html', 'cpp/stl/heaps.html'] },
-          { title: 'Heaps & Priority Queues', file: 'cpp/stl/heaps.html', links: ['cpp/stl/algorithms.html', 'dsa/trees/heap/index.html'] }
+          { title: 'Heaps & Priority Queues', file: 'cpp/stl/heaps.html', links: ['cpp/stl/algorithms.html', 'dsa/trees/heap/index.html'] },
+          { title: 'Lambdas', file: 'cpp/stl/lambdas.html', links: ['cpp/stl/algorithms.html', 'cpp/stl/heaps.html'] }
         ]
       },
       {
