@@ -818,6 +818,54 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'heap',
+        label: 'Heaps',
+        children: [
+          { title: 'Overview', file: 'dsa/heap/index.html', links: ['dsa/heap/array-encoding.html', 'dsa/heap/capstone.html'] },
+          {
+            name: 'heap-foundations',
+            label: 'Foundations',
+            children: [
+              { title: 'Complete Trees & Array Encoding', file: 'dsa/heap/array-encoding.html', links: ['dsa/heap/index.html', 'dsa/heap/heap-property.html'] },
+              { title: 'The Heap Property, push & pop', file: 'dsa/heap/heap-property.html', links: ['dsa/heap/array-encoding.html', 'dsa/heap/sift-operations.html'] },
+              { title: 'Sift-Up & Sift-Down', file: 'dsa/heap/sift-operations.html', links: ['dsa/heap/heap-property.html', 'dsa/heap/build-heap.html'] },
+              { title: 'Building a Heap in O(n)', file: 'dsa/heap/build-heap.html', links: ['dsa/heap/sift-operations.html', 'dsa/heap/cpp-priority-queue.html'] },
+              { title: 'std::priority_queue', file: 'dsa/heap/cpp-priority-queue.html', links: ['dsa/heap/build-heap.html', 'dsa/heap/heapsort.html'] }
+            ]
+          },
+          {
+            name: 'heap-techniques',
+            label: 'Core Techniques',
+            children: [
+              { title: 'Heapsort', file: 'dsa/heap/heapsort.html', links: ['dsa/heap/cpp-priority-queue.html', 'dsa/heap/top-k.html'] },
+              { title: 'Top-K & Bounded Heaps', file: 'dsa/heap/top-k.html', links: ['dsa/heap/heapsort.html', 'dsa/heap/k-way-merge.html'] },
+              { title: 'K-Way Merge', file: 'dsa/heap/k-way-merge.html', links: ['dsa/heap/top-k.html', 'dsa/heap/two-heaps.html'] },
+              { title: 'Two Heaps & Running Median', file: 'dsa/heap/two-heaps.html', links: ['dsa/heap/k-way-merge.html', 'dsa/heap/scheduling.html'] },
+              { title: 'Scheduling & Intervals', file: 'dsa/heap/scheduling.html', links: ['dsa/heap/two-heaps.html', 'dsa/heap/greedy-heaps.html'] },
+              { title: 'Greedy with a Heap', file: 'dsa/heap/greedy-heaps.html', links: ['dsa/heap/scheduling.html', 'dsa/heap/indexed-heaps.html'] }
+            ]
+          },
+          {
+            name: 'heap-advanced',
+            label: 'Advanced Structures',
+            children: [
+              { title: 'Indexed Heaps & Lazy Deletion', file: 'dsa/heap/indexed-heaps.html', links: ['dsa/heap/greedy-heaps.html', 'dsa/heap/d-ary-heaps.html'] },
+              { title: 'D-ary Heaps & Cache Behaviour', file: 'dsa/heap/d-ary-heaps.html', links: ['dsa/heap/indexed-heaps.html', 'dsa/heap/mergeable-heaps.html'] },
+              { title: 'Mergeable Heaps', file: 'dsa/heap/mergeable-heaps.html', links: ['dsa/heap/d-ary-heaps.html', 'dsa/heap/pitfalls.html'] }
+            ]
+          },
+          {
+            name: 'heap-mastery',
+            label: 'Mastery',
+            children: [
+              { title: 'Pitfalls & Comparator Traps', file: 'dsa/heap/pitfalls.html', links: ['dsa/heap/mergeable-heaps.html', 'dsa/heap/interview-patterns.html'] },
+              { title: 'Interview Pattern Catalog', file: 'dsa/heap/interview-patterns.html', links: ['dsa/heap/pitfalls.html', 'dsa/heap/capstone.html'] },
+              { title: 'Capstone: Event Simulator', file: 'dsa/heap/capstone.html', links: ['dsa/heap/interview-patterns.html', 'dsa/heap/index.html'] }
+            ]
+          }
+        ]
+      },
+      {
         name: 'complexity',
         label: 'Time & Space Complexity',
         children: [

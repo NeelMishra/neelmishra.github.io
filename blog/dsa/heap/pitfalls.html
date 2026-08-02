@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Comparators that violate strict weak ordering and why that is undefined behaviour, multi-key comparison done safely with std::tie, overflow inside comparators, dangling references from top(), mutating queued elements, and a table of cases where a heap is the wrong tool.">
+  <title>Pitfalls: Comparators, Overflow & Invalidation | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../../../tree-diagrams.css">
+  <style>
+    .practice-list { padding-left: 1.2rem; }
+    .practice-list li { margin: 0.4rem 0; line-height: 1.5; }
+    .practice-list li em { color: var(--ink-muted); font-style: normal; font-size: 0.85em; padding: 0.05rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; margin: 0 0.3rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.4rem 0; font-size: 0.92rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .cmp-table thead tr { border-bottom: 2px solid var(--line); }
+    .cmp-table code { white-space: nowrap; }
+    .heap-node circle { fill: var(--card, #fffdf9); stroke: var(--brand, #0a8f6a); stroke-width: 2.5; }
+    .heap-node text { font-family: "Manrope", sans-serif; font-size: 14px; font-weight: 700; fill: var(--ink, #13201a); text-anchor: middle; dominant-baseline: central; }
+    .heap-edge { stroke: #3a7a65; stroke-width: 2.2; fill: none; }
+    .heap-hot circle { fill: #ffeaa7; stroke: #c98a00; }
+    .heap-done circle { fill: #d7f5e9; stroke: #0a8f6a; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar">
+      <nav class="blog-nav"></nav>
+      <div class="toc-section"><h4>Table of Contents</h4><ul></ul></div>
+    </aside>
+
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html">DSA &middot; Heaps</a>
+        <span>&middot; Part 15 of 17</span>
+      </div>
+
+      <h1>Pitfalls: Comparators, Overflow &amp; Invalidation</h1>
+      <p class="post-meta">August 2026 &middot; 21 min read</p>
+
+      <p>Heaps fail quietly. A broken comparator does not throw; it returns plausible values for a while and then produces one that is wrong. A dangling reference into a heap does not crash; it reads a value that used to be there. This post collects the failure modes that actually bite, roughly in order of how often they do.</p>
+
+      <h2 id="swo">1. Comparators That Are Not Strict Weak Orderings</h2>
+      <p>The most common serious bug, and formally undefined behaviour.</p>
+
+      <p>Your comparator must satisfy three properties: <strong>irreflexivity</strong> (<code>cmp(x,x)</code> is false), <strong>asymmetry</strong> (if <code>cmp(x,y)</code> then not <code>cmp(y,x)</code>), and <strong>transitivity</strong>. The standard library assumes all three and may index past the end of the container when they fail.</p>
+
+      <pre><code>// BROKEN: cmp(x, x) is true, violating irreflexivity
+auto bad = [](const Task&amp; a, const Task&amp; b) { return a.priority &lt;= b.priority; };
+
+// CORRECT
+auto good = [](const Task&amp; a, const Task&amp; b) { return a.priority &lt; b.priority; };</code></pre>
+
+      <p>Multi-key comparators are where this most often goes wrong. The naive version silently breaks transitivity:</p>
+
+      <pre><code>// BROKEN: when priorities are equal this returns false both ways round,
+// but it also reports a &lt; b and b &lt; a as false for genuinely different tasks
+bool operator()(const Task&amp; a, const Task&amp; b) const {
+    if (a.priority &lt; b.priority) return true;
+    if (a.deadline &lt; b.deadline) return true;      // reached even when a.priority &gt; b.priority
+    return false;
+}
+
+// CORRECT: settle each key completely before moving to the next
+bool operator()(const Task&amp; a, const Task&amp; b) const {
+    if (a.priority != b.priority) return a.priority &lt; b.priority;
+    return a.deadline &lt; b.deadline;
+}
+
+// Or let the library do it
+bool operator()(const Task&amp; a, const Task&amp; b) const {
+    return std::tie(a.priority, a.deadline) &lt; std::tie(b.priority, b.deadline);
+}</code></pre>
+
+      <p><code>std::tie</code> is the safest habit &mdash; it produces a correct lexicographic ordering by construction, and it is impossible to get the fallthrough wrong.</p>
+
+      <div class="callout">
+        <strong>How to catch it.</strong> libstdc++ ships debug-mode comparator checks: compile with <code>-D_GLIBCXX_DEBUG</code> and it will assert on irreflexivity violations. It is worth enabling in test builds &mdash; it turns silent UB into an immediate, named failure.
+      </div>
+
+      <h2 id="direction">2. Getting the Heap Direction Backwards</h2>
+      <p>Covered in <a href="cpp-priority-queue.html">Part 5</a> and <a href="top-k.html">Part 7</a>, but it deserves restating because it is so frequent:</p>
+
+      <ul>
+        <li><code>std::priority_queue</code> with the default <code>std::less</code> is a <strong>max</strong>-heap.</li>
+        <li>To find the <strong>k largest</strong>, you keep a <strong>min</strong>-heap of size k.</li>
+        <li>To sort <strong>ascending</strong> with heapsort, you build a <strong>max</strong>-heap.</li>
+      </ul>
+
+      <p>All three feel inverted the first several times. The unifying rule: <em>the root must always be the element you are most willing to give up.</em></p>
+
+      <h2 id="overflow">3. Overflow Inside the Comparator</h2>
+      <p>Especially insidious, because overflow does not merely give a wrong number &mdash; it breaks the ordering axioms and reintroduces bug #1.</p>
+
+      <pre><code>// BROKEN: a.x - b.x overflows for large opposite-signed values
+bool operator()(const P&amp; a, const P&amp; b) const { return a.x - b.x &lt; 0; }
+
+// CORRECT
+bool operator()(const P&amp; a, const P&amp; b) const { return a.x &lt; b.x; }</code></pre>
+
+      <p>The subtract-and-compare idiom is common in code ported from C or Java and is wrong in all of them. Compare directly.</p>
+
+      <p>Watch accumulations too. In <a href="top-k.html">Part 7</a>'s k-closest-points, <code>x*x + y*y</code> needs <code>long long</code> the moment coordinates exceed ~46,000. And in <a href="scheduling.html">Part 10</a>'s CPU scheduler, summing <code>n</code> durations of 10<sup>9</sup> each overflows <code>int</code> almost immediately.</p>
+
+      <h2 id="dangling">4. References Invalidated by Mutation</h2>
+      <pre><code>const int&amp; best = pq.top();
+pq.pop();
+use(best);                 // DANGLING: the element is gone</code></pre>
+
+      <p><code>top()</code> returns a reference into the underlying container. <code>pop</code> destroys that element, and <code>push</code> may reallocate the vector, invalidating every outstanding reference. Copy before mutating:</p>
+
+      <pre><code>int best = pq.top();       // copy
+pq.pop();
+use(best);                 // safe</code></pre>
+
+      <h2 id="mutating">5. Mutating an Element Already in the Heap</h2>
+      <pre><code>std::priority_queue&lt;Task*&gt; pq;
+// ...
+someTask-&gt;priority = 99;   // the heap has no idea; nothing re-sifts</code></pre>
+
+      <p>The heap invariant is established at insertion time. Changing the key of a resident element corrupts the structure silently, and the corruption surfaces later as an out-of-order pop. If you need this, use lazy deletion or an indexed heap from <a href="indexed-heaps.html">Part 12</a>.</p>
+
+      <p>The same applies to heaps of pointers where the pointed-to object is mutated elsewhere &mdash; a very easy mistake in a codebase where the objects have other owners.</p>
+
+      <h2 id="empty">6. Reading top() on an Empty Heap</h2>
+      <p><code>std::priority_queue::top()</code> on an empty queue is undefined behaviour, not an exception. It typically returns garbage rather than crashing.</p>
+
+      <pre><code>while (!pq.empty()) { auto x = pq.top(); pq.pop(); ... }   // correct
+
+for (int i = 0; i &lt; k; ++i) { auto x = pq.top(); pq.pop(); }  // UB if size &lt; k</code></pre>
+
+      <p>The second form appears constantly in top-k code where fewer than <code>k</code> elements were actually inserted.</p>
+
+      <h2 id="stability">7. Expecting Stability</h2>
+      <p>Heaps are not stable: equal elements emerge in unspecified relative order, and it can differ between runs or implementations. If insertion order must break ties, put a sequence number in the key:</p>
+
+      <pre><code>struct Item {
+    int priority;
+    long seq;                       // monotonically increasing at insertion
+};
+
+struct Cmp {
+    bool operator()(const Item&amp; a, const Item&amp; b) const {
+        if (a.priority != b.priority) return a.priority &lt; b.priority;
+        return a.seq &gt; b.seq;       // earlier insertion wins
+    }
+};</code></pre>
+
+      <p>This also removes any dependence on unspecified behaviour, which makes tests deterministic.</p>
+
+      <h2 id="wrong-tool">8. Using a Heap When Something Else Is Better</h2>
+      <table class="cmp-table">
+        <thead><tr><th>You need</th><th>Not a heap</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>Membership test</td><td>O(n) search</td><td><code>unordered_set</code></td></tr>
+          <tr><td>k-th smallest, one time, in memory</td><td>O(n log k)</td><td><code>nth_element</code>, O(n)</td></tr>
+          <tr><td>Sliding window maximum</td><td>O(n log n)</td><td>monotonic deque, O(n)</td></tr>
+          <tr><td>Sorted iteration</td><td>pop everything</td><td><code>std::sort</code> or <code>std::set</code></td></tr>
+          <tr><td>Frequent arbitrary erase</td><td>no erase at all</td><td><code>std::set</code> / <code>multiset</code></td></tr>
+          <tr><td>Both min and max</td><td>one end only</td><td>two heaps, or <code>std::set</code></td></tr>
+          <tr><td>Fixed small priority range</td><td>O(log n)</td><td>bucket queue, O(1)</td></tr>
+        </tbody>
+      </table>
+
+      <p>The sliding-window-maximum row is worth dwelling on: it is a common interview question where the heap answer is accepted but the monotonic deque is asymptotically better. Knowing when your tool is second-best is part of knowing the tool.</p>
+
+      <h2 id="checklist">Review Checklist</h2>
+      <ol>
+        <li>Is the comparator a strict weak ordering? Does it use <code>&lt;</code> and never <code>&lt;=</code>?</li>
+        <li>Multi-key comparison written with <code>std::tie</code> or with complete per-key resolution?</li>
+        <li>Min-heap or max-heap &mdash; and does it match what the algorithm actually needs?</li>
+        <li>Any arithmetic inside the comparator that could overflow?</li>
+        <li>Is <code>top()</code> copied before any mutation?</li>
+        <li>Are elements immutable while resident in the heap?</li>
+        <li>Is <code>empty()</code> checked before every <code>top()</code>?</li>
+        <li>Are ties broken deterministically if that matters?</li>
+        <li>Under lazy deletion, is a live count tracked separately from <code>heap.size()</code>?</li>
+        <li>Is a heap even the right structure here?</li>
+      </ol>
+
+      <div class="blog-quiz" id="pitfalls-quiz"></div>
+
+    </article>
+  </div>
+
+  <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../blog-quiz.js"></script>
+  <script>
+  BlogQuiz.create('pitfalls-quiz', {
+    title: 'Check Yourself: Pitfalls',
+    intro: 'Four questions on the failure modes that bite hardest.',
+    bank: [
+      { meaning: 'What is wrong with a comparator that returns a.priority <= b.priority?',
+        answer: 'cmp(x,x) is true, violating irreflexivity; the library may then index past the end of the container',
+        distractors: [
+          { text: 'Nothing; it just makes the heap stable for equal elements', why: 'It does not produce stability, and it is undefined behaviour rather than a harmless variation.' },
+          { text: 'It inverts the heap into a min-heap', why: 'Inversion is what std::greater does safely. Using <= breaks the ordering axioms entirely.' },
+          { text: 'It is slower because it performs an extra comparison', why: 'The cost is identical. The problem is correctness, not speed.' }
+        ],
+        explain: 'Strict weak ordering requires cmp(x,x) == false. Sift loops rely on it to terminate within bounds - violating it is genuine UB.' },
+
+      { meaning: 'const int& best = pq.top(); pq.pop(); use(best); What happens?',
+        answer: 'best dangles: top() returns a reference into the container and pop destroys that element',
+        distractors: [
+          { text: 'It works, because top() returns a copy', why: 'top() returns a const reference precisely to avoid copying; that is what makes this dangerous.' },
+          { text: 'It works, because the element is only logically removed', why: 'pop genuinely destroys the element via the underlying container.' },
+          { text: 'It throws std::out_of_range after the pop', why: 'There is no check at all - it is silent undefined behaviour reading freed or reused storage.' }
+        ],
+        explain: 'Copy before mutating: int best = pq.top(); Note that push can also reallocate the vector and invalidate references.' },
+
+      { meaning: 'You have a heap of Task* and you write task->priority = 99 on a queued task.',
+        answer: 'The heap is silently corrupted; nothing re-sifts the element and pops will come out of order later',
+        distractors: [
+          { text: 'The heap re-sifts automatically on the next push or pop', why: 'Nothing observes the mutation. Sifting only happens on elements the heap itself moves.' },
+          { text: 'It is fine as long as the priority only increases', why: 'Either direction breaks the invariant relative to parent or children.' },
+          { text: 'It throws because the comparator detects the inconsistency', why: 'Comparators are called only during sifts and have no memory of previous values.' }
+        ],
+        explain: 'The invariant is established at insertion. Use lazy deletion - push a new entry and skip stale ones - or an indexed heap with a real update operation.' },
+
+      { meaning: 'For the sliding window maximum problem, why is a heap not the best tool?',
+        answer: 'A monotonic deque solves it in O(n); the heap needs lazy deletion and costs O(n log n)',
+        distractors: [
+          { text: 'A heap cannot solve it at all', why: 'It can, with lazy deletion of out-of-window entries. It is simply not optimal.' },
+          { text: 'Because the window maximum changes too frequently for a heap', why: 'Frequency is not the issue; the issue is that a heap cannot evict by position, only by priority.' },
+          { text: 'Because heaps cannot store duplicate values', why: 'Heaps handle duplicates perfectly well.' }
+        ],
+        explain: 'A monotonic deque keeps candidates in decreasing order and evicts by index in O(1) amortised - O(n) overall, versus O(n log n) for the heap.' }
+    ]
+  });
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
