@@ -660,9 +660,16 @@ var BLOG_TREE = [
             name: 'binary-search',
             label: 'Binary Search',
             children: [
-              { title: 'Fundamentals', file: 'dsa/arrays/binary-search/index.html', links: ['dsa/arrays/binary-search/advanced.html'] },
-              { title: 'Advanced', file: 'dsa/arrays/binary-search/advanced.html', links: ['dsa/arrays/binary-search/index.html', 'dsa/arrays/binary-search/patterns.html'] },
-              { title: 'Competition Patterns', file: 'dsa/arrays/binary-search/patterns.html', links: ['dsa/arrays/binary-search/advanced.html'] }
+              { title: 'Fundamentals', file: 'dsa/arrays/binary-search/index.html', links: ['dsa/arrays/binary-search/boundaries.html'] },
+              { title: 'Boundary Search', file: 'dsa/arrays/binary-search/boundaries.html', links: ['dsa/arrays/binary-search/index.html', 'dsa/arrays/binary-search/answer-space.html'] },
+              { title: 'Binary Search on the Answer', file: 'dsa/arrays/binary-search/answer-space.html', links: ['dsa/arrays/binary-search/boundaries.html', 'dsa/arrays/binary-search/min-max.html'] },
+              { title: 'Minimize Max / Maximize Min', file: 'dsa/arrays/binary-search/min-max.html', links: ['dsa/arrays/binary-search/answer-space.html', 'dsa/arrays/binary-search/advanced.html'] },
+              { title: 'Rotated Sorted Arrays', file: 'dsa/arrays/binary-search/advanced.html', links: ['dsa/arrays/binary-search/min-max.html', 'dsa/arrays/binary-search/peaks.html'] },
+              { title: 'Peaks & Mountain Arrays', file: 'dsa/arrays/binary-search/peaks.html', links: ['dsa/arrays/binary-search/advanced.html', 'dsa/arrays/binary-search/order-statistics.html'] },
+              { title: 'Order Statistics in Value Spaces', file: 'dsa/arrays/binary-search/order-statistics.html', links: ['dsa/arrays/binary-search/peaks.html', 'dsa/arrays/binary-search/partition.html'] },
+              { title: 'Median of Two Sorted Arrays', file: 'dsa/arrays/binary-search/partition.html', links: ['dsa/arrays/binary-search/order-statistics.html', 'dsa/arrays/binary-search/continuous.html'] },
+              { title: 'Continuous / Real-Valued Search', file: 'dsa/arrays/binary-search/continuous.html', links: ['dsa/arrays/binary-search/partition.html', 'dsa/arrays/binary-search/patterns.html'] },
+              { title: 'Recognition & Capstone', file: 'dsa/arrays/binary-search/patterns.html', links: ['dsa/arrays/binary-search/continuous.html', 'dsa/arrays/binary-search/index.html'] }
             ]
           },
           {
