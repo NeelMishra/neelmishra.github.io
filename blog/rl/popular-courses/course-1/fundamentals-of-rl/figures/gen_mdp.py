@@ -101,14 +101,20 @@ def fig_recycling_robot():
     stub connects each state to its action dots, and a coloured arrow leaves
     every dot for the resulting next state, labelled with the transition
     probability and the reward earned on that transition.
+
+    Layout: each state keeps its own action dots on its own side (high's on the
+    left, low's on the right), and the two long cross-state arrows are routed on
+    opposite sides -- the rescue over the top, the alpha-split under the bottom
+    -- so they never cross. Concrete course values are r_search = +10,
+    r_wait = +1, and -20 on the rescue.
     """
     import numpy as np
     from matplotlib.patches import Circle, FancyArrowPatch
     import matplotlib.lines as mlines
 
-    fig, ax = plt.subplots(figsize=(10.4, 6.2))
-    ax.set_xlim(-2.2, 12.2)
-    ax.set_ylim(-4.3, 4.3)
+    fig, ax = plt.subplots(figsize=(11.0, 5.9))
+    ax.set_xlim(-3.4, 13.4)
+    ax.set_ylim(-4.9, 4.0)
     ax.axis("off")
     ax.set_aspect("equal")
 
@@ -121,11 +127,11 @@ def fig_recycling_robot():
 
     states = {"high": (0.0, 0.0), "low": (10.0, 0.0)}
     actions = {
-        "h_search":   (3.0, 2.6),
-        "h_wait":     (0.0, -2.9),
-        "l_search":   (7.0, 2.6),
+        "h_search":   (0.0, -2.9),
+        "h_wait":     (0.0, 2.9),
+        "l_search":   (10.0, 2.9),
         "l_wait":     (10.0, -2.9),
-        "l_recharge": (5.0, -3.1),
+        "l_recharge": (5.0, 0.0),
     }
 
     def edge_pt(state, toward, gap=0.0):
@@ -182,33 +188,41 @@ def fig_recycling_robot():
                 fontsize=15, fontweight="bold", color=INK, zorder=5)
 
     # action-name tags next to each dot
-    lbl(3.0, 3.15, "search", SEARCH, fs=10.5)
-    lbl(7.0, 3.15, "search", SEARCH, fs=10.5)
-    lbl(-0.9, -2.9, "wait", WAIT, fs=10.5)
-    lbl(10.9, -2.9, "wait", WAIT, fs=10.5)
-    lbl(5.0, -3.65, "recharge", RECHARGE, fs=10.5)
+    lbl(0.95, 3.28, "wait", WAIT, fs=10.5)
+    lbl(0.95, -3.3, "search", SEARCH, fs=10.5)
+    lbl(9.05, 3.28, "search", SEARCH, fs=10.5)
+    lbl(9.05, -3.3, "wait", WAIT, fs=10.5)
+    lbl(5.0, 0.52, "recharge", RECHARGE, fs=10.5)
 
-    # high / search  ->  high (alpha)  and  low (1 - alpha)
-    arrow("h_search", "high", SEARCH, rad=0.32)
-    lbl(1.15, 2.35, r"$\alpha,\ r_{\mathrm{search}}$", SEARCH)
-    arrow("h_search", "low", SEARCH, rad=-0.22)
-    lbl(5.6, 3.45, r"$1-\alpha,\ r_{\mathrm{search}}$", SEARCH)
-
-    # low / search  ->  low (beta)  and  high (1 - beta, rescued)
-    arrow("l_search", "low", SEARCH, rad=-0.32)
-    lbl(8.85, 2.35, r"$\beta,\ r_{\mathrm{search}}$", SEARCH)
-    arrow("l_search", "high", RESCUE, rad=0.30)
-    lbl(4.4, 1.55, r"$1-\beta,\ -20$  (rescued)", RESCUE)
-
-    # wait loops (deterministic self-returns)
+    # high / wait -> high (deterministic self-return), top-left
     loop("h_wait", "high", WAIT, side=-1)
-    lbl(-1.35, -1.5, r"$1,\ r_{\mathrm{wait}}$", WAIT)
+    lbl(-2.45, 1.62, r"$1,\ r_{\mathrm{wait}}$", WAIT)
+
+    # high / search -> high (alpha) bottom-left loop, and -> low (1-alpha)
+    # routed along the bottom so it never meets the rescue arrow up top
+    loop("h_search", "high", SEARCH, side=-1)
+    lbl(-2.45, -1.62, r"$\alpha,\ r_{\mathrm{search}}$", SEARCH)
+    arrow("h_search", "low", SEARCH, rad=0.22)
+    lbl(5.0, -3.42, r"$1-\alpha,\ r_{\mathrm{search}}\ (+10)$", SEARCH)
+
+    # low / search -> low (beta) top-right loop, and -> high (1-beta, rescued)
+    # routed over the top
+    loop("l_search", "low", SEARCH, side=+1)
+    lbl(12.45, 1.62, r"$\beta,\ r_{\mathrm{search}}$", SEARCH)
+    arrow("l_search", "high", RESCUE, rad=0.22)
+    lbl(5.0, 3.36, r"$1-\beta,\ r_{\mathrm{rescued}}\ (-20)$", RESCUE)
+
+    # low / wait -> low (deterministic self-return), bottom-right
     loop("l_wait", "low", WAIT, side=+1)
-    lbl(11.35, -1.5, r"$1,\ r_{\mathrm{wait}}$", WAIT)
+    lbl(12.45, -1.62, r"$1,\ r_{\mathrm{wait}}\ (+1)$", WAIT)
 
     # recharge -> high (deterministic, reward 0)
-    arrow("l_recharge", "high", RECHARGE, rad=0.08)
-    lbl(2.55, -2.55, r"$1,\ 0$", RECHARGE)
+    arrow("l_recharge", "high", RECHARGE, rad=0.0)
+    lbl(2.6, 0.32, r"$1,\ 0$", RECHARGE)
+
+    # notation reminder, as in the source sketch
+    ax.text(5.0, -4.5, r"notation:   $p,\ \mathrm{reward}$", ha="center",
+            va="center", fontsize=11.5, color=MUTED, style="italic", zorder=6)
 
     fig.tight_layout()
     fig.savefig(os.path.join(HERE, "recycling-robot-mdp.png"))
