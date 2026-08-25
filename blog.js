@@ -9587,12 +9587,12 @@ var BLOG_TREE = [
         label: 'Popular Courses',
         children: [
           {
-            name: 'course-1',
-            label: 'Course 1',
+            name: 'coursera-rl',
+            label: 'Coursera: Reinforcement Learning',
             children: [
               {
                 name: 'fundamentals-of-rl',
-                label: 'Coursera: Fundamentals of RL',
+                label: 'Course 1 &middot; Fundamentals of Reinforcement Learning',
                 children: [
                   { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/course-1/fundamentals-of-rl/k-armed-bandits.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/markov-decision-processes.html', 'mlops/llm-fundamentals/rlhf-overview.html'] },
                   { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/course-1/fundamentals-of-rl/markov-decision-processes.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/k-armed-bandits.html', 'rl/popular-courses/course-1/fundamentals-of-rl/policies-and-value-functions.html'] },
