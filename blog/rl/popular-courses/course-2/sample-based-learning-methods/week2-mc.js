@@ -23,16 +23,18 @@
       }
       text('mc-return-gamma-value', gamma.toFixed(2));
       list.innerHTML = '';
-      for (var i = 0; i < rewards.length; i++) {
+      for (var i = rewards.length - 1; i >= 0; i--) {
+        var order = rewards.length - i;
         var step = document.createElement('div');
         step.className = 'mc-return-step';
         step.innerHTML = '<strong>G<sub>' + i + '</sub> = ' + returns[i].toFixed(3) + '</strong>' +
-          '<span>R<sub>' + (i + 1) + '</sub> = ' + rewards[i] + '</span>' +
+          '<span class="mc-compute-order">Step ' + order + ' of ' + rewards.length + '</span>' +
+          '<span>R<sub>' + (i + 1) + '</sub> = ' + rewards[i] + ' &middot; target for S<sub>' + i + '</sub></span>' +
           '<code>' + rewards[i] + ' + ' + gamma.toFixed(2) + 'G<sub>' + (i + 1) + '</sub></code>';
         list.appendChild(step);
       }
-      text('mc-return-summary', 'Backward recursion gives G0 = ' + returns[0].toFixed(3) +
-        '; the last update begins with G5 = 0.');
+      text('mc-return-summary', 'Start with G5 = 0, then compute G4 \u2192 G3 \u2192 G2 \u2192 G1 \u2192 G0. ' +
+        'The start-state target is G0 = ' + returns[0].toFixed(3) + '.');
     }
 
     slider.addEventListener('input', render);
