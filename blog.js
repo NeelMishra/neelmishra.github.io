@@ -9600,7 +9600,16 @@ var BLOG_TREE = [
                   { title: 'Bellman Equations &amp; Optimality', file: 'rl/popular-courses/course-1/fundamentals-of-rl/bellman-equations-and-optimality.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/policies-and-value-functions.html', 'rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html'] },
                   { title: 'Iterative Policy Evaluation', file: 'rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/bellman-equations-and-optimality.html', 'rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html'] },
                   { title: 'Policy Improvement &amp; Policy Iteration', file: 'rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html', 'rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html'] },
-                  { title: 'Value Iteration &amp; Dynamic Programming in Practice', file: 'rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html', 'rl/ppo/index.html'] }
+                  { title: 'Value Iteration &amp; Dynamic Programming in Practice', file: 'rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html', 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html'] }
+                ]
+              },
+              {
+                name: 'sample-based-learning-methods',
+                label: 'Course 2 &middot; Sample-based Learning Methods',
+                children: [
+                  { title: 'Monte Carlo Prediction: Values from Complete Episodes', file: 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html', 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html'] },
+                  { title: 'Monte Carlo Control: Exploration, GPI &amp; Epsilon-Soft Policies', file: 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html', 'rl/popular-courses/course-2/sample-based-learning-methods/off-policy-monte-carlo.html'] },
+                  { title: 'Off-Policy Monte Carlo &amp; Importance Sampling', file: 'rl/popular-courses/course-2/sample-based-learning-methods/off-policy-monte-carlo.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html', 'rl/ppo/index.html'] }
                 ]
               }
             ]
