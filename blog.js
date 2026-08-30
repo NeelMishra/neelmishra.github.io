@@ -9594,22 +9594,78 @@ var BLOG_TREE = [
                 name: 'fundamentals-of-rl',
                 label: 'Course 1 &middot; Fundamentals of Reinforcement Learning',
                 children: [
-                  { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/course-1/fundamentals-of-rl/k-armed-bandits.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/markov-decision-processes.html', 'mlops/llm-fundamentals/rlhf-overview.html'] },
-                  { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/course-1/fundamentals-of-rl/markov-decision-processes.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/k-armed-bandits.html', 'rl/popular-courses/course-1/fundamentals-of-rl/policies-and-value-functions.html'] },
-                  { title: 'Policies &amp; Value Functions', file: 'rl/popular-courses/course-1/fundamentals-of-rl/policies-and-value-functions.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/markov-decision-processes.html', 'rl/popular-courses/course-1/fundamentals-of-rl/bellman-equations-and-optimality.html'] },
-                  { title: 'Bellman Equations &amp; Optimality', file: 'rl/popular-courses/course-1/fundamentals-of-rl/bellman-equations-and-optimality.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/policies-and-value-functions.html', 'rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html'] },
-                  { title: 'Iterative Policy Evaluation', file: 'rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/bellman-equations-and-optimality.html', 'rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html'] },
-                  { title: 'Policy Improvement &amp; Policy Iteration', file: 'rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/iterative-policy-evaluation.html', 'rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html'] },
-                  { title: 'Value Iteration &amp; Dynamic Programming in Practice', file: 'rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/policy-improvement-and-iteration.html', 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html'] }
+                  {
+                    name: 'week-1',
+                    label: 'Week 1 &middot; Bandits',
+                    children: [
+                      { title: 'K-Armed Bandits &amp; Action Values', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-1/k-armed-bandits.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-2/markov-decision-processes.html', 'mlops/llm-fundamentals/rlhf-overview.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-2',
+                    label: 'Week 2 &middot; Markov Decision Processes',
+                    children: [
+                      { title: 'Markov Decision Processes &amp; the Return', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-2/markov-decision-processes.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-1/k-armed-bandits.html', 'rl/popular-courses/course-1/fundamentals-of-rl/week-3/policies-and-value-functions.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-3',
+                    label: 'Week 3 &middot; Values &amp; Optimality',
+                    children: [
+                      { title: 'Policies &amp; Value Functions', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-3/policies-and-value-functions.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-2/markov-decision-processes.html', 'rl/popular-courses/course-1/fundamentals-of-rl/week-3/bellman-equations-and-optimality.html'] },
+                      { title: 'Bellman Equations &amp; Optimality', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-3/bellman-equations-and-optimality.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-3/policies-and-value-functions.html', 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/iterative-policy-evaluation.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-4',
+                    label: 'Week 4 &middot; Dynamic Programming',
+                    children: [
+                      { title: 'Iterative Policy Evaluation', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/iterative-policy-evaluation.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-3/bellman-equations-and-optimality.html', 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/policy-improvement-and-iteration.html'] },
+                      { title: 'Policy Improvement &amp; Policy Iteration', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/policy-improvement-and-iteration.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-4/iterative-policy-evaluation.html', 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/value-iteration-and-gpi.html'] },
+                      { title: 'Value Iteration &amp; Dynamic Programming in Practice', file: 'rl/popular-courses/course-1/fundamentals-of-rl/week-4/value-iteration-and-gpi.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-4/policy-improvement-and-iteration.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-prediction.html'] }
+                    ]
+                  }
                 ]
               },
               {
                 name: 'sample-based-learning-methods',
                 label: 'Course 2 &middot; Sample-based Learning Methods',
                 children: [
-                  { title: 'Monte Carlo Prediction: Values from Complete Episodes', file: 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/value-iteration-and-gpi.html', 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html'] },
-                  { title: 'Monte Carlo Control: Exploration, GPI &amp; Epsilon-Soft Policies', file: 'rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-prediction.html', 'rl/popular-courses/course-2/sample-based-learning-methods/off-policy-monte-carlo.html'] },
-                  { title: 'Off-Policy Monte Carlo &amp; Importance Sampling', file: 'rl/popular-courses/course-2/sample-based-learning-methods/off-policy-monte-carlo.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/monte-carlo-control.html', 'rl/ppo/index.html'] }
+                  {
+                    name: 'week-2',
+                    label: 'Week 2 &middot; Monte Carlo Methods',
+                    children: [
+                      { title: 'Monte Carlo Prediction: Values from Complete Episodes', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-prediction.html', links: ['rl/popular-courses/course-1/fundamentals-of-rl/week-4/value-iteration-and-gpi.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-control.html'] },
+                      { title: 'Monte Carlo Control: Exploration, GPI &amp; Epsilon-Soft Policies', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-control.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-prediction.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/off-policy-monte-carlo.html'] },
+                      { title: 'Off-Policy Monte Carlo &amp; Importance Sampling', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-2/off-policy-monte-carlo.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-2/monte-carlo-control.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-zero-prediction.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-3',
+                    label: 'Week 3 &middot; TD Prediction',
+                    children: [
+                      { title: 'TD(0) Prediction from First Principles', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-zero-prediction.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-2/off-policy-monte-carlo.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-vs-monte-carlo.html'] },
+                      { title: 'Why TD Often Learns Faster than Monte Carlo', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-vs-monte-carlo.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-zero-prediction.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/sarsa.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-4',
+                    label: 'Week 4 &middot; TD Control',
+                    children: [
+                      { title: 'Sarsa: On-Policy TD Control', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/sarsa.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-3/td-vs-monte-carlo.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/q-learning.html'] },
+                      { title: 'Q-Learning: Off-Policy TD Control', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/q-learning.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-4/sarsa.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/expected-sarsa.html'] },
+                      { title: 'Expected Sarsa: Average the Next Action', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-4/expected-sarsa.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-4/q-learning.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/models-and-planning.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-5',
+                    label: 'Week 5 &middot; Planning &amp; Dyna',
+                    children: [
+                      { title: 'Models, Simulated Experience &amp; Planning', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/models-and-planning.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-4/expected-sarsa.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html'] },
+                      { title: 'Dyna-Q: Learning and Planning Together', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/models-and-planning.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html'] },
+                      { title: 'Dyna-Q+: Planning with Inaccurate Models', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html', 'rl/ppo/index.html'] }
+                    ]
+                  }
                 ]
               }
             ]

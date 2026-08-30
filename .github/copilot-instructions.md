@@ -6,7 +6,7 @@ Personal site + technical blog served by **GitHub Pages**. Pure static HTML/CSS/
 
 - Top-level HTML pages: `index.html`, `experience.html`, `projects.html`, `blog.html`.
 - Shared globals: `styles.css` (site), `blog.css` (blog), `tree-diagrams.css` (post diagrams), `script.js` (IntersectionObserver `reveal` animations), `anim-speed.js` (animation helpers), `blog-quiz.js` (shared self-assessment quiz widget — see below).
-- Blog posts live under `blog/<category>/<series>/<slug>.html` (e.g. `blog/cpp/stl/vectors.html`, `blog/mlops/llm-training/...`). Categories: `cp`, `cpp`, `dsa`, `hld`, `lld`, `ml`, `mlops`.
+- Blog posts live under `blog/<category>/<series>/<slug>.html` (e.g. `blog/cpp/stl/vectors.html`, `blog/mlops/llm-training/...`). Course notes use an additional required week directory: `blog/rl/popular-courses/<course>/<course-name>/week-<N>/<slug>.html`. Keep future course material grouped this way. Categories include `cp`, `cpp`, `dsa`, `hld`, `lld`, `ml`, `mlops`, and `rl`.
 - `assets/logos/` for image assets. `capture_collage.py` is a one-off Playwright script that snapshots `threaded_trees_collage.html` into a GIF/PNG.
 - `tools/` contains the LeetCode contest automation pipeline (Python) — see "Tooling pipeline" below.
 
