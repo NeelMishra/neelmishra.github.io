@@ -64,16 +64,25 @@
     function render() {
       var epsilon = Number(slider.value);
       var mixed = probabilities();
+      var epsilonGreedy = [];
+      for (var g = 0; g < base.length; g++) {
+        epsilonGreedy[g] = epsilon / base.length + (g === 0 ? 1 - epsilon : 0);
+      }
       text('mc-epsilon-value', epsilon.toFixed(2));
       text('mc-epsilon-floor', (epsilon / base.length).toFixed(4));
       chart.innerHTML = '';
       for (var i = 0; i < base.length; i++) {
         var row = document.createElement('div');
-        row.className = 'mc-bar-row';
+        row.className = 'mc-bar-row mc-compare-row';
         row.innerHTML = '<span class="mc-bar-label">' + labels[i] + '</span>' +
-          '<span class="mc-bar-track"><span class="mc-bar mixed" style="display:block;width:' +
-          (100 * mixed[i]).toFixed(2) + '%"></span></span>' +
-          '<span class="mc-bar-value">' + mixed[i].toFixed(4) + '</span>';
+          '<span class="mc-bar-pair">' +
+            '<span class="mc-bar-track"><span class="mc-bar mixed" style="display:block;width:' +
+              (100 * mixed[i]).toFixed(2) + '%"></span></span>' +
+            '<span class="mc-bar-track"><span class="mc-bar target" style="display:block;width:' +
+              (100 * epsilonGreedy[i]).toFixed(2) + '%"></span></span>' +
+          '</span>' +
+          '<span class="mc-bar-values"><span>' + mixed[i].toFixed(4) + '</span><span>' +
+            epsilonGreedy[i].toFixed(4) + '</span></span>';
         chart.appendChild(row);
       }
       text('mc-epsilon-counts', 'Samples: a1=' + counts[0] + ', a2=' + counts[1] + ', a3=' + counts[2]);
