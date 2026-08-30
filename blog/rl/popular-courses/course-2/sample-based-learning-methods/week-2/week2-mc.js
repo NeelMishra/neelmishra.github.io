@@ -177,8 +177,10 @@
       text('mc-is-ordinary', samples.length ? ordinary.toFixed(3) : '\u2014');
       text('mc-is-weighted', samples.length ? normalized.toFixed(3) : '\u2014');
       text('mc-is-note', samples.length > 12
-        ? 'Showing the latest 12 draws. A rare x=2 or x=4 carries a large ratio because b almost never selects it.'
-        : 'The target mean is 2.200. Draw from b and watch the correction trade bias for variance.');
+        ? 'Estimates use all ' + samples.length + ' draws; the table shows only the latest 12. Rare x=2 or x=4 rows contribute 16 and create visible jumps.'
+        : samples.length
+          ? 'Each row is one draw from b. The estimates use every row accumulated since reset.'
+          : 'Target mean: 2.200. Raw behavior mean: 1.300. Draw from b to see importance correction and variance.');
     }
 
     drawButton.addEventListener('click', function () {
