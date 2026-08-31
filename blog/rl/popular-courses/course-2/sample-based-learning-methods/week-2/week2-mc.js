@@ -154,14 +154,12 @@
 
     function render() {
       body.innerHTML = '';
-      var weightedSum = 0;
-      var weightSum = 0;
+      var correctedSum = 0;
       var start = Math.max(0, samples.length - 12);
       for (var i = 0; i < samples.length; i++) {
         var index = samples[i];
         var rho = target[index] / behavior[index];
-        weightedSum += rho * values[index];
-        weightSum += rho;
+        correctedSum += rho * values[index];
         if (i >= start) {
           var row = document.createElement('tr');
           row.innerHTML = '<td>' + (i + 1) + '</td><td>' + values[index] + '</td><td>' +
@@ -171,13 +169,11 @@
         }
       }
 
-      var ordinary = samples.length ? weightedSum / samples.length : 0;
-      var normalized = weightSum ? weightedSum / weightSum : 0;
+      var ordinary = samples.length ? correctedSum / samples.length : 0;
       text('mc-is-count', String(samples.length));
       text('mc-is-ordinary', samples.length ? ordinary.toFixed(3) : '\u2014');
-      text('mc-is-weighted', samples.length ? normalized.toFixed(3) : '\u2014');
       text('mc-is-note', samples.length > 12
-        ? 'Estimates use all ' + samples.length + ' draws; the table shows only the latest 12. Rare x=2 or x=4 rows contribute 16 and create visible jumps.'
+        ? 'The ordinary estimate uses all ' + samples.length + ' draws; the table shows only the latest 12. Rare x=2 or x=4 rows contribute 16 and create visible jumps.'
         : samples.length
           ? 'Each row is one draw from b. The estimates use every row accumulated since reset.'
           : 'Target mean: 2.200. Raw behavior mean: 1.300. Draw from b to see importance correction and variance.');
