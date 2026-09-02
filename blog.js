@@ -8734,6 +8734,34 @@ var BLOG_TREE = [
           }
         ]
       },
+      {
+        name: 'diffusion-models',
+        label: 'Diffusion &amp; Flow Models',
+        children: [
+          {
+            name: 'popular-courses',
+            label: 'Popular Courses',
+            children: [
+              {
+                name: 'mit-6-s184',
+                label: 'MIT 6.S184 &middot; Generative AI with SDEs',
+                children: [
+                  {
+                    name: 'lecture-01',
+                    label: 'Lecture 1 &middot; Flow &amp; Diffusion Foundations',
+                    children: [
+                      { title: 'Generative Modeling as Distribution Transport', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/generative-modeling-as-transport.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', 'dl/transformers/index.html'] },
+                      { title: 'Flows, Vector Fields &amp; ODEs', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/generative-modeling-as-transport.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html'] },
+                      { title: 'Euler Sampling &amp; Neural Flow Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html'] },
+                      { title: 'Brownian Motion, SDEs &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/generative-modeling-as-transport.html'] }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     ]
   },
   {
@@ -9935,7 +9963,7 @@ function flattenBlogTree(nodes, result) {
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
-    dl:    { label: 'Deep Learning', blurb: 'Neural architectures in depth, starting with the transformer.' },
+    dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
