@@ -9702,7 +9702,32 @@ var BLOG_TREE = [
                     children: [
                       { title: 'Models, Simulated Experience &amp; Planning', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/models-and-planning.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-4/expected-sarsa.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html'] },
                       { title: 'Dyna-Q: Learning and Planning Together', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/models-and-planning.html', 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html'] },
-                      { title: 'Dyna-Q+: Planning with Inaccurate Models', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html', 'rl/ppo/index.html'] }
+                      { title: 'Dyna-Q+: Planning with Inaccurate Models', file: 'rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/generalization-and-parameterized-values.html'] }
+                    ]
+                  }
+                ]
+              },
+              {
+                name: 'prediction-and-control-with-function-approximation',
+                label: 'Course 3 &middot; Prediction &amp; Control with Function Approximation',
+                children: [
+                  {
+                    name: 'week-2',
+                    label: 'Week 2 &middot; On-policy Prediction with Approximation',
+                    children: [
+                      { title: 'Generalization &amp; Parameterized Value Functions', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/generalization-and-parameterized-values.html', links: ['rl/popular-courses/course-2/sample-based-learning-methods/week-5/dyna-q-plus.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/msve-and-gradient-monte-carlo.html'] },
+                      { title: 'MSVE, Gradient Monte Carlo &amp; State Aggregation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/msve-and-gradient-monte-carlo.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/generalization-and-parameterized-values.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/semi-gradient-td.html'] },
+                      { title: 'Semi-Gradient TD &amp; Linear Function Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/semi-gradient-td.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/msve-and-gradient-monte-carlo.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/td-fixed-point-vs-monte-carlo.html'] },
+                      { title: 'The TD Fixed Point &amp; TD versus Monte Carlo', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/td-fixed-point-vs-monte-carlo.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/semi-gradient-td.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/coarse-coding.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-3',
+                    label: 'Week 3 &middot; Constructing Features for Prediction',
+                    children: [
+                      { title: 'Coarse Coding: Overlapping Features', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/coarse-coding.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/td-fixed-point-vs-monte-carlo.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html'] },
+                      { title: 'Generalization Geometry in Coarse Coding', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/coarse-coding.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html'] },
+                      { title: 'Tile Coding &amp; Sparse TD Updates', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html', 'rl/ppo/index.html'] }
                     ]
                   }
                 ]
