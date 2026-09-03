@@ -12,18 +12,6 @@
     reset.addEventListener('click',function(){heads=0;n=0;seed=12345;render();});render();
   })();
 
-  (function dyna(){
-    var slider=byId('dyna-planning');if(!slider)return;
-    function render(){
-      var n=Number(slider.value);
-      setText('dyna-planning-value',String(n));
-      setText('dyna-planning-value-copy',String(n));
-      setText('dyna-total-updates',String(1+n));
-      setText('dyna-ratio','1 real transition -> '+n+' simulated updates');
-    }
-    slider.addEventListener('input',render);render();
-  })();
-
   (function bonus(){
     var tau=byId('dyna-tau'),kappa=byId('dyna-kappa');if(!tau||!kappa)return;
     function render(){
