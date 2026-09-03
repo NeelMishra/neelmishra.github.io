@@ -24,31 +24,4 @@
     render();
   })();
 
-  (function initEpisode(){
-    var grid=byId('td-online-values'),step=byId('td-online-step'),reset=byId('td-online-reset'),status=byId('td-online-status');
-    if(!grid||!step||!reset||!status)return;
-    var states=['A','B','C','D','E'];
-    var path=[0,1,2,3,4,5];
-    var values,idx,alpha=.1;
-    function resetAll(){values=[.5,.5,.5,.5,.5];idx=0;render(-1);status.textContent='No transition observed yet. The episode will finish with reward +1.';}
-    function render(active){
-      grid.innerHTML='';
-      states.forEach(function(name,i){
-        var cell=document.createElement('div');
-        cell.className='sb-value'+(i===active?' active':'');
-        cell.innerHTML='<strong>'+name+'</strong><span>V = '+values[i].toFixed(3)+'</span>';
-        grid.appendChild(cell);
-      });
-    }
-    step.addEventListener('click',function(){
-      if(idx>=path.length-1){status.textContent='Episode complete. Reset to replay the online updates.';return;}
-      var s=path[idx],sp=path[idx+1],r=sp===5?1:0,nextValue=sp===5?0:values[sp];
-      var before=values[s],delta=r+nextValue-before;
-      values[s]=before+alpha*delta;
-      status.textContent=states[s]+' updates immediately from transition '+states[s]+' -> '+(sp===5?'terminal':states[sp])+': delta = '+delta.toFixed(3)+', V = '+values[s].toFixed(3)+'.';
-      idx++;render(s);
-    });
-    reset.addEventListener('click',resetAll);
-    resetAll();
-  })();
 })();
