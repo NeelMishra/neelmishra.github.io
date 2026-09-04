@@ -9775,7 +9775,14 @@ var BLOG_TREE = [
                     children: [
                       { title: 'Coarse Coding: Overlapping Features', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/coarse-coding.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-2/td-fixed-point-vs-monte-carlo.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html'] },
                       { title: 'Generalization Geometry in Coarse Coding', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/coarse-coding.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html'] },
-                      { title: 'Tile Coding &amp; Sparse TD Updates', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html', 'rl/ppo/index.html'] }
+                      { title: 'Tile Coding &amp; Sparse TD Updates', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/generalization-in-coarse-coding.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-4',
+                    label: 'Week 4 &middot; Control with Approximation',
+                    children: [
+                      { title: 'Episodic Sarsa with Function Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', 'rl/ppo/index.html'] }
                     ]
                   }
                 ]

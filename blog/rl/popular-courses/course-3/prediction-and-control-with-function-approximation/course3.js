@@ -693,4 +693,123 @@
     deltaInput.addEventListener('input', render);
     render();
   })();
+
+  (function initStackedActions() {
+    var stateInput = byId('stack-state');
+    var actionInput = byId('stack-action');
+    var svg = byId('stack-svg');
+    var vectorEl = byId('stack-vector');
+    if (!stateInput || !actionInput || !svg || !vectorEl) return;
+
+    var STATES = [
+      { name: 's0', bits: [1, 0, 0, 1] },
+      { name: 's1', bits: [0, 1, 1, 0] },
+      { name: 's2', bits: [1, 1, 0, 0] },
+      { name: 's3', bits: [0, 0, 1, 1] }
+    ];
+    var WEIGHTS = [
+      [0.7, 0.1, 0.4, 0.3],
+      [2.2, 1.0, 0.6, 1.8],
+      [1.3, 1.1, 0.9, 1.7]
+    ];
+    var BLOCK_COLORS = [COLOR.red, COLOR.green, COLOR.blue];
+
+    function actionValue(bits, action) {
+      var total = 0;
+      for (var i = 0; i < bits.length; i++) {
+        if (bits[i]) total += WEIGHTS[action][i];
+      }
+      return total;
+    }
+
+    function render() {
+      var state = STATES[Number(stateInput.value)];
+      var action = Number(actionInput.value);
+      var values = [0, 1, 2].map(function (a) { return actionValue(state.bits, a); });
+      var best = values.indexOf(Math.max(values[0], values[1], values[2]));
+
+      clear(svg);
+      label(svg, 60, 24, 'x(s)', COLOR.ink, 13, 'middle', 800);
+      label(svg, 250, 24, 'x(s, a)', COLOR.ink, 13, 'middle', 800);
+      label(svg, 400, 24, 'w', COLOR.ink, 13, 'middle', 800);
+      label(svg, 560, 24, 'q(s, a, w)', COLOR.ink, 13, 'middle', 800);
+
+      var cell = 20;
+      var top = 40;
+      for (var i = 0; i < 4; i++) {
+        var on = state.bits[i] === 1;
+        svg.appendChild(svgEl('rect', {
+          x: 40, y: top + i * cell, width: 40, height: cell - 2, rx: 4,
+          fill: on ? COLOR.paleGreen : '#fff',
+          stroke: on ? COLOR.green : COLOR.line,
+          'stroke-width': 1.2
+        }));
+        label(svg, 60, top + i * cell + 14, String(state.bits[i]), on ? COLOR.green : COLOR.muted, 11, 'middle', 700);
+      }
+      label(svg, 60, top + 4 * cell + 18, state.name, COLOR.muted, 11);
+
+      for (var a = 0; a < 3; a++) {
+        var blockTop = top + a * (4 * cell + 16);
+        var live = a === action;
+        for (var j = 0; j < 4; j++) {
+          var bit = live ? state.bits[j] : 0;
+          svg.appendChild(svgEl('rect', {
+            x: 210, y: blockTop + j * cell, width: 80, height: cell - 2, rx: 4,
+            fill: bit ? 'rgba(10,143,106,0.16)' : '#fff',
+            stroke: live ? BLOCK_COLORS[a] : COLOR.line,
+            'stroke-width': live ? 1.4 : 1
+          }));
+          label(svg, 250, blockTop + j * cell + 14, String(bit), bit ? COLOR.green : COLOR.muted, 11, 'middle', 700);
+
+          svg.appendChild(svgEl('rect', {
+            x: 360, y: blockTop + j * cell, width: 80, height: cell - 2, rx: 4,
+            fill: live && bit ? 'rgba(201,138,43,0.16)' : '#fff',
+            stroke: BLOCK_COLORS[a],
+            'stroke-width': 1.1
+          }));
+          label(svg, 400, blockTop + j * cell + 14, WEIGHTS[a][j].toFixed(1), COLOR.ink, 11, 'middle', live && bit ? 800 : 500);
+        }
+        label(svg, 172, blockTop + 2 * cell + 4, 'a' + a, BLOCK_COLORS[a], 13, 'middle', 800);
+
+        var barWidth = Math.max(6, values[a] * 26);
+        svg.appendChild(svgEl('rect', {
+          x: 480, y: blockTop + 2 * cell - 16, width: barWidth, height: 22, rx: 5,
+          fill: a === best ? COLOR.green : COLOR.gray,
+          opacity: a === best ? 0.9 : 0.45
+        }));
+        label(svg, 480 + barWidth + 8, blockTop + 2 * cell, values[a].toFixed(1), COLOR.ink, 12, 'start', 800);
+        if (a === best) label(svg, 480, blockTop + 2 * cell + 18, 'greedy', COLOR.green, 10, 'start', 700);
+      }
+
+      vectorEl.innerHTML = '';
+      for (var b = 0; b < 3; b++) {
+        var tag = document.createElement('span');
+        tag.textContent = 'a' + b;
+        tag.style.opacity = b === action ? '1' : '0.45';
+        vectorEl.appendChild(tag);
+        for (var k = 0; k < 4; k++) {
+          var bitValue = b === action ? state.bits[k] : 0;
+          var chip = document.createElement('span');
+          chip.className = 'fa-feature-bit' + (bitValue ? ' active' : '');
+          chip.textContent = String(bitValue);
+          vectorEl.appendChild(chip);
+        }
+      }
+
+      var activeCount = state.bits.reduce(function (sum, v) { return sum + v; }, 0);
+      setText('stack-state-value', state.name);
+      setText('stack-action-value', 'a' + action);
+      setText('stack-q0', values[0].toFixed(1));
+      setText('stack-q1', values[1].toFixed(1));
+      setText('stack-q2', values[2].toFixed(1));
+      setText('stack-status', 'x(' + state.name + ', a' + action + ') has ' + activeCount +
+        ' non-zero entries out of 12, all inside block a' + action +
+        '. A Sarsa update on a' + action + ' would change only those ' + activeCount +
+        ' weights. The greedy action here is a' + best + '.');
+    }
+
+    stateInput.addEventListener('input', render);
+    actionInput.addEventListener('input', render);
+    render();
+  })();
 })();
