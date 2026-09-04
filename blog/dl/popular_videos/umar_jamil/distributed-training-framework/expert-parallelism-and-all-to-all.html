@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Place experts on different devices, ship each token to the ranks owning its experts with an all-to-all, combine the results on the way back, and compose expert parallelism with tensor parallelism for MoE layers.">
+  <title>Expert Parallelism &amp; All-to-All | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 14 &middot; Chapters 27&ndash;30</span></div>
+      <h1>Expert Parallelism &amp; All-to-All</h1>
+      <p class="post-meta">September 2026 &middot; 25 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Sparse activation does not make the parameters go away.</strong> A 671B-parameter MoE still needs 671B parameters stored somewhere, even if each token touches 37B of them. Expert parallelism puts different experts on different devices — and since tokens must then travel to their experts, introduces the one collective this series has not yet used: all-to-all.</div>
+
+      <h2 id="problem">Why MoE forces a new axis</h2>
+      <p>Data parallelism replicates. For a dense model that is merely wasteful; for an MoE it is impossible, because the total parameter count is the thing that grew. The other axes do not fit either:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Axis</th><th>Applied to an MoE layer</th></tr></thead><tbody>
+        <tr><td>Data parallel</td><td>Replicates all $E$ experts on every device. Defeats the point entirely.</td></tr>
+        <tr><td>Tensor parallel</td><td>Works — shard each expert's matrices — but every device still stores a slice of <em>every</em> expert, and the shards become small and inefficient.</td></tr>
+        <tr><td>Pipeline parallel</td><td>Splits by layer, so an individual MoE layer is still whole on one device.</td></tr>
+        <tr><td><strong>Expert parallel</strong></td><td>Give each device $E/P$ <em>whole</em> experts. Memory divides by $P$ and each expert matmul stays full size.</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>Expert parallelism shards the layer by expert index.</strong> Non-expert weights — attention, norms, the router — stay replicated as usual. Only the expert bank is distributed.</div>
+      <p>The catch is immediate. A token arriving on device 0 may be routed to an expert living on device 5. Either the expert comes to the token or the token goes to the expert, and experts are far larger than tokens.</p>
+
+      <h2 id="all-to-all">All-to-all: the distributed transpose</h2>
+      <p>The routing produces, on every device, a pile of tokens destined for every other device. Every rank has data for every rank — which is precisely the all-to-all pattern.</p>
+      <div class="dt-flow">
+        <div class="dt-flow-node"><strong>Dispatch</strong><span>all-to-all: send each token to the rank owning its expert</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Compute</strong><span>each rank runs its own experts on whatever arrived</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Combine</strong><span>all-to-all: send the outputs back to the originating rank</span></div>
+      </div>
+      <p>The combine is the exact inverse permutation of the dispatch. Once results return, each token's $k$ expert outputs are weighted by their gate values and summed into the residual stream.</p>
+      <div class="dt-definition"><strong>The backward pass needs no new machinery.</strong> All-to-all is a permutation of data, and the adjoint of a permutation is its inverse. From the duality table, the backward of an all-to-all is another all-to-all with source and destination swapped — so backward dispatch <em>is</em> forward combine, and vice versa.</div>
+
+      <h3 id="capacity-again">Why fixed-size buffers matter here</h3>
+      <p>An all-to-all is far more efficient when every rank sends the same number of bytes to every other rank, because the transfer sizes are known in advance and no metadata exchange is needed. Routing, however, is data-dependent and uneven.</p>
+      <p>This is exactly what the capacity factor from the previous note buys: it fixes the per-expert buffer at $C=\text{cf}\cdot kT/E$ tokens, so the all-to-all becomes a uniform, statically shaped collective. The price is dropped tokens on overflow and padded compute on underflow.</p>
+      <div class="dt-warning"><strong>Load balance is now a systems problem, not only a quality problem.</strong> The all-to-all is synchronous: every rank waits for the slowest. A skewed router makes one device the bottleneck for the entire group, so balancing losses pay for themselves in throughput long before they pay for themselves in loss.</div>
+
+      <h2 id="cost">The bandwidth bill</h2>
+      <p>Each rank sends a $(P-1)/P$ fraction of its routed tokens, each a vector of width $d$. With $T$ tokens per rank and top-$k$ routing, one dispatch moves</p>
+      <div class="key-eq">$$kT\,d\cdot\frac{P-1}{P}\cdot\text{bytes}.$$</div>
+      <p>Dispatch and combine double it, and the backward pass doubles it again — four all-to-alls per MoE layer per step. For $d=7168$, $T=8192$, $k=8$, BF16, across 58 layers:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>EP degree</th><th>One dispatch</th><th>Per layer per step</th><th>Whole model per step</th></tr></thead><tbody>
+        <tr><td>8</td><td>784 MiB</td><td>3.1 GiB</td><td>178 GiB</td></tr>
+        <tr><td>16</td><td>840 MiB</td><td>3.3 GiB</td><td>190 GiB</td></tr>
+        <tr><td>64</td><td>882 MiB</td><td>3.4 GiB</td><td>200 GiB</td></tr>
+        <tr><td>256</td><td>892 MiB</td><td>3.5 GiB</td><td>202 GiB</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>The volume barely grows with $P$.</strong> The factor $(P-1)/P$ saturates at 1, exactly as it did for all-reduce. Widening the expert-parallel group is nearly free in bytes — what changes is <em>which links</em> those bytes cross, and that is what actually decides the cost.</div>
+      <p>Hence <em>node-limited routing</em>: constrain each token to experts residing on at most a small number of nodes, so most all-to-all traffic stays on the fast intra-node fabric. It is a routing constraint adopted for a purely topological reason.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="ep-p">EP degree</label><input id="ep-p" type="range" min="2" max="8" step="1" value="4"><strong id="ep-p-value"></strong>
+          <label for="ep-phase">phase</label><input id="ep-phase" type="range" min="0" max="3" step="1" value="1"><strong id="ep-phase-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="ep-svg" class="dt-svg" viewBox="0 0 660 290" role="img" aria-label="Tokens moving between ranks during the all-to-all dispatch, expert computation, and all-to-all combine phases of an expert-parallel MoE layer."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="ep-experts"></strong><span>experts per device</span></div>
+          <div class="dt-metric"><strong id="ep-mem"></strong><span>expert memory / device</span></div>
+          <div class="dt-metric"><strong id="ep-vol"></strong><span>all-to-all / layer / step</span></div>
+          <div class="dt-metric"><strong id="ep-frac"></strong><span>tokens leaving each rank</span></div>
+        </div>
+        <div class="dt-status" id="ep-status"></div>
+        <figcaption>256 experts of width 2048 over a $d=7168$ model, 8192 tokens per rank, top-8 routing, BF16. Colours identify the rank a token originated on, so you can watch it leave and return.</figcaption>
+      </figure>
+
+      <h2 id="tp-for-moe">Tensor parallelism for experts</h2>
+      <p>Expert parallelism divides memory by $P$ but cannot exceed $E$, and with few experts each device may still hold too much. Tensor parallelism applies to an expert exactly as it does to a dense FFN — the gate and up projections column-parallel, the down projection row-parallel, one all-reduce at the end.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>EP: split by expert</h3><p>Whole experts on separate devices. Matmuls stay large and efficient. Communication is all-to-all on tokens. Limited by $E$.</p></div>
+        <div class="dt-panel"><h3>TP: split inside an expert</h3><p>Every device holds a slice of every expert. Communication is all-reduce on activations. Matmuls shrink and can become inefficient.</p></div>
+      </div>
+
+      <h3 id="etp">Expert tensor parallelism</h3>
+      <p>The two are orthogonal, so combine them: arrange $P=P_{\text{EP}}\times P_{\text{TP}}$ as a two-dimensional grid. Each EP group owns a distinct set of experts, and within a group the TP ranks shard those experts' matrices.</p>
+      <div class="key-eq">$$\text{expert memory per device}=\frac{E}{P_{\text{EP}}}\cdot\frac{3\,d\,d_{\text{ff}}}{P_{\text{TP}}}.$$</div>
+      <p>The communication pattern nests: an all-to-all across the EP axis to place tokens, then an all-reduce within the TP axis to finish each expert's matmul.</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Symptom</th><th>Adjust</th></tr></thead><tbody>
+        <tr><td>Expert matmuls too small to reach peak</td><td>Lower $P_{\text{TP}}$, raise $P_{\text{EP}}$</td></tr>
+        <tr><td>$P_{\text{EP}}$ already equals $E$ and memory still tight</td><td>Raise $P_{\text{TP}}$ — the only remaining option</td></tr>
+        <tr><td>All-to-all crossing node boundaries</td><td>Keep the EP group within a node, or use node-limited routing</td></tr>
+        <tr><td>One rank consistently late</td><td>Fix routing balance before touching the parallelism layout</td></tr>
+      </tbody></table></div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Expert parallelism shards the expert bank and pays for it with two all-to-alls per layer, whose volume barely grows with group size but whose cost depends entirely on which links it crosses. Fixed capacity buffers make the collective statically shaped, and tensor parallelism composes on a second axis when the expert count runs out.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Explain why data parallelism cannot be used for the expert bank. <em>reasoning</em></li>
+        <li>Derive the backward collective for an all-to-all from the duality table. <em>derivation</em></li>
+        <li>Compute the all-to-all volume per layer for $d=4096$, $T=4096$, $k=2$, $P=16$. <em>calculation</em></li>
+        <li>Explain why the capacity factor is a systems requirement here, not just a quality knob. <em>reasoning</em></li>
+        <li>Given $E=64$ experts and 128 devices, propose an EP/TP split and justify it. <em>design</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="mixture-of-experts.html"><span>Previous</span><span>&#8592; Mixture of Experts</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var pIn = D.byId('ep-p'), phIn = D.byId('ep-phase'), svg = D.byId('ep-svg');
+    if (!pIn || !phIn || !svg) return;
+
+    var E = 256, DFF = 2048, Dm = 7168, T = 8192, K = 8, BYTES = 2;
+    var PHASES = ['before routing', 'all-to-all dispatch', 'expert compute', 'all-to-all combine'];
+    var COLORS = ['#3a7bd5', '#0a8f6a', '#c98a2b', '#b83a3a', '#7a5cc4', '#2f8f8f', '#a8517a', '#6b7a72'];
+
+    function render() {
+      var P = Number(pIn.value), phase = Number(phIn.value);
+      var perDev = Math.max(1, Math.floor(E / P));
+      var mem = perDev * 3 * Dm * DFF * BYTES;
+      var vol = 4 * K * T * Dm * BYTES * (P - 1) / P;
+
+      D.clear(svg);
+      D.label(svg, 330, 22, 'expert-parallel MoE layer, ' + P + ' ranks: ' + PHASES[phase],
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      var X0 = 40, W = 600, colW = W / P, top = 48, boxH = 84;
+      for (var r = 0; r < P; r++) {
+        var x = X0 + r * colW;
+        D.rect(svg, x + 3, top, colW - 8, boxH, 'rgba(58,123,213,0.04)', D.COLOR.line, 6);
+        D.label(svg, x + colW / 2, top + 15, 'rank ' + r, D.COLOR.ink, 10.5, 'middle', 800);
+        D.label(svg, x + colW / 2, top + 30, perDev + ' experts', D.COLOR.muted, 9);
+
+        var slotW = (colW - 16) / P;
+        for (var c = 0; c < P; c++) {
+          // Which origin rank does this slot hold at this phase?
+          var origin = (phase === 0 || phase === 3) ? r : c;
+          var show = phase !== 0 || c === 0;
+          if (phase === 0 && c > 0) continue;
+          var w = phase === 0 ? colW - 16 : slotW - 1.5;
+          var xx = phase === 0 ? x + 8 : x + 8 + c * slotW;
+          D.rect(svg, xx, top + 42, Math.max(2, w), 24,
+            COLORS[origin % COLORS.length], '#fff', 3);
+        }
+        D.label(svg, x + colW / 2, top + 78,
+          phase === 0 ? 'own tokens' : phase === 3 ? 'results home' : 'from all ranks',
+          D.COLOR.muted, 8.5);
+      }
+
+      var arrowY = top + boxH + 26;
+      if (phase === 1 || phase === 3) {
+        D.arrowMarker(svg, 'ep-arr', D.COLOR.gold);
+        for (var a = 0; a < P; a++) {
+          for (var b = 0; b < P; b++) {
+            if (a === b) continue;
+            var x1 = X0 + a * colW + colW / 2, x2 = X0 + b * colW + colW / 2;
+            var path = 'M' + x1 + ' ' + arrowY + ' Q ' + ((x1 + x2) / 2) + ' ' + (arrowY + 42) + ' ' + x2 + ' ' + arrowY;
+            svg.appendChild(D.svgEl('path', { d: path, fill: 'none', stroke: D.COLOR.gold,
+              'stroke-width': 0.8, opacity: 0.5 }));
+          }
+        }
+        D.label(svg, 330, arrowY + 62, 'every rank exchanges with every other rank: this is the all-to-all',
+          D.COLOR.gold, 10.5, 'middle', 700);
+      } else if (phase === 2) {
+        D.label(svg, 330, arrowY + 20,
+          'no communication: each rank runs its own experts on whatever arrived', D.COLOR.green, 11, 'middle', 700);
+      } else {
+        D.label(svg, 330, arrowY + 20,
+          'the router has scored every token; nothing has moved yet', D.COLOR.muted, 11, 'middle', 700);
+      }
+
+      D.setText('ep-p-value', String(P));
+      D.setText('ep-phase-value', PHASES[phase]);
+      D.setText('ep-experts', String(perDev));
+      D.setText('ep-mem', D.bytes(mem));
+      D.setText('ep-vol', D.bytes(vol));
+      D.setText('ep-frac', (100 * (P - 1) / P).toFixed(0) + '%');
+      D.setText('ep-status', 'Splitting ' + E + ' experts across ' + P + ' ranks leaves ' + perDev +
+        ' whole experts per device, needing ' + D.bytes(mem) + ' instead of ' + D.bytes(mem * P) +
+        ' if replicated. The price is four all-to-alls per layer per step, dispatch and combine in each direction, moving ' +
+        D.bytes(vol) + '. Note that ' + (100 * (P - 1) / P).toFixed(0) +
+        '% of every rank\u2019s tokens leave the device, and that this fraction saturates at 100% rather than growing without bound, so widening the group costs little in bytes and much in which links are used.');
+    }
+
+    pIn.addEventListener('input', render);
+    phIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
