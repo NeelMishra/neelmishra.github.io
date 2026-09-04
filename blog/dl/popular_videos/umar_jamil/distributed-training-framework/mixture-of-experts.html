@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Decouple parameter count from FLOPs per token with sparse expert routing: top-k gating, the capacity factor and token dropping, load-balancing losses, shared and fine-grained experts, and why the router is the hard part.">
+  <title>Mixture of Experts from First Principles | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 13 &middot; Chapter 26</span></div>
+      <h1>Mixture of Experts from First Principles</h1>
+      <p class="post-meta">September 2026 &middot; 26 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Capacity and cost are the same thing in a dense model, and they need not be.</strong> Every token pays for every parameter because every parameter participates in every forward pass. Mixture of experts breaks that link: hold many parameters, activate a few per token, and pay only for what you activate.</div>
+
+      <h2 id="idea">Breaking the link</h2>
+      <p>From the FLOPs note, a dense model costs $6N$ training FLOPs per token, where $N$ counts <em>all</em> parameters. Scaling capacity therefore scales cost one-for-one.</p>
+      <p>An MoE layer replaces the single feed-forward network with $E$ independent copies — the <em>experts</em> — plus a small <em>router</em> that picks which $k$ of them each token visits.</p>
+      <div class="key-eq">$$\text{FFN}(\mathbf x)\ \longrightarrow\ \sum_{i\in\text{Top-}k(\mathbf x)}g_i(\mathbf x)\,E_i(\mathbf x).$$</div>
+      <div class="dt-definition"><strong>Two parameter counts, not one.</strong> <em>Total</em> parameters set memory; <em>active</em> parameters set FLOPs per token. With $E$ experts and top-$k$ routing the ratio is $E/k$, and only the active count enters $6N$.</div>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Configuration</th><th>Experts $E$</th><th>Top-$k$</th><th>Total FFN params</th><th>Active per token</th><th>Sparsity</th></tr></thead><tbody>
+        <tr><td>Dense</td><td>1</td><td>1</td><td>baseline</td><td>same</td><td>100%</td></tr>
+        <tr><td>8 large experts</td><td>8</td><td>2</td><td>45.1B</td><td>11.3B</td><td>25%</td></tr>
+        <tr><td>256 fine experts + 1 shared</td><td>256</td><td>8</td><td>656.5B</td><td>23.0B</td><td>3.5%</td></tr>
+      </tbody></table></div>
+      <p>The second row buys 29 times the parameters for the FLOPs of a much smaller model. That is the entire pitch, and the rest of this note is about what it costs.</p>
+
+      <h2 id="router">The router</h2>
+      <p>The router is a single linear layer, $E$ outputs wide:</p>
+      <div class="key-eq">$$\mathbf s=\text{softmax}\big(W_r\mathbf x\big)\in\mathbb R^{E},\qquad \text{Top-}k(\mathbf x)=\text{indices of the }k\text{ largest }s_i,$$</div>
+      <p>and the chosen experts' outputs are combined with their (renormalized) gate values as weights. It is a tiny amount of arithmetic guarding an enormous amount of parameter.</p>
+      <div class="dt-warning"><strong>Top-$k$ is not differentiable, and that is the central difficulty.</strong> The gradient flows through the gate <em>values</em> $g_i$ of the selected experts, never through the selection itself. An expert that is never chosen receives no gradient, so it never improves, so it is never chosen. Routing collapse is the default outcome unless something actively prevents it.</div>
+
+      <h3 id="balancing">Load balancing</h3>
+      <p>The standard remedy is an auxiliary loss that penalizes uneven routing. Let $f_i$ be the fraction of tokens dispatched to expert $i$ and $P_i$ the mean router probability assigned to it:</p>
+      <div class="key-eq">$$\mathcal L_{\text{aux}}=\alpha\,E\sum_{i=1}^{E}f_i\,P_i.$$</div>
+      <p>The $f_i$ term is a count and carries no gradient; $P_i$ does. Pushing down $P_i$ for over-subscribed experts is what nudges the router toward balance. The multiplier $E$ normalizes the loss so that a perfectly uniform distribution gives $\mathcal L_{\text{aux}}=1$ for any $E$, which makes $\alpha$ transferable across configurations.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>$\alpha$ too small</h3><p>Experts collapse onto a few favourites. Effective capacity drops to a fraction of what you paid for, and the extra parameters are dead weight.</p></div>
+        <div class="dt-panel"><h3>$\alpha$ too large</h3><p>Routing becomes near-uniform, which means near-random. Experts cannot specialize, and the model behaves like a noisier dense one.</p></div>
+      </div>
+      <p>Because the auxiliary loss perturbs the objective you actually care about, recent systems prefer a <em>bias-based</em> alternative: keep a per-expert bias added to the routing scores only for the top-$k$ selection, and adjust it up or down between steps according to observed load. Balance is enforced without touching the gradient of the language-modelling loss at all.</p>
+
+      <h2 id="capacity">Capacity and dropped tokens</h2>
+      <p>Balance matters for a second, purely mechanical reason. Expert buffers must be allocated with a fixed shape before routing is known, so each expert gets room for a bounded number of tokens:</p>
+      <div class="key-eq">$$C=\text{capacity factor}\times\frac{k\,T}{E},$$</div>
+      <p>where $T$ is the tokens in the batch and $kT/E$ is the average load. A capacity factor of $1.25$ gives 25% headroom.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Overflow</h3><p>Tokens beyond an expert's capacity are <em>dropped</em>: they skip the layer and pass through on the residual stream alone. Not a crash, just silent quality loss concentrated on the tokens the router was most confident about.</p></div>
+        <div class="dt-panel"><h3>Underflow</h3><p>Unused buffer slots are padded and computed anyway. Wasted FLOPs, wasted bandwidth.</p></div>
+      </div>
+      <div class="dt-definition"><strong>The capacity factor is a direct trade between dropped tokens and wasted compute</strong>, and good load balancing is what lets you set it near 1.0. It also matters enormously for the all-to-all in the next note, which needs fixed-size buffers to be efficient.</div>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="moe-e">experts $E$</label><input id="moe-e" type="range" min="0" max="5" step="1" value="3"><strong id="moe-e-value"></strong>
+          <label for="moe-k">top-$k$</label><input id="moe-k" type="range" min="1" max="8" step="1" value="2"><strong id="moe-k-value"></strong>
+          <label for="moe-cf">capacity factor</label><input id="moe-cf" type="range" min="100" max="200" step="5" value="125"><strong id="moe-cf-value"></strong>
+          <label for="moe-skew">routing skew</label><input id="moe-skew" type="range" min="0" max="100" step="5" value="30"><strong id="moe-skew-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="moe-svg" class="dt-svg" viewBox="0 0 660 280" role="img" aria-label="Per-expert token load against the capacity line, showing dropped tokens on overloaded experts and wasted padding on underloaded ones."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="moe-total"></strong><span>total FFN params</span></div>
+          <div class="dt-metric"><strong id="moe-active"></strong><span>active per token</span></div>
+          <div class="dt-metric"><strong id="moe-drop"></strong><span>tokens dropped</span></div>
+          <div class="dt-metric"><strong id="moe-waste"></strong><span>buffer wasted</span></div>
+        </div>
+        <div class="dt-status" id="moe-status"></div>
+        <figcaption>A $d=7168$ model with expert width 2048 over 58 layers, batch of 8192 tokens. &ldquo;Routing skew&rdquo; interpolates from perfectly uniform routing to a heavily collapsed distribution.</figcaption>
+      </figure>
+
+      <h2 id="design">Design choices that matter</h2>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p><strong>Fine-grained experts.</strong> Rather than 8 experts the width of a dense FFN, use 256 narrow ones and route to 8. The active parameter count is unchanged, but the number of possible expert <em>combinations</em> explodes, so the model can express far more specialized mixtures at the same cost.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p><strong>Shared experts.</strong> Reserve one or two experts that <em>every</em> token visits. Common knowledge that all tokens need — basic syntax, frequent patterns — lives there instead of being duplicated across every routed expert, which frees the routed ones to genuinely specialize.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p><strong>Where to place MoE layers.</strong> Replacing every FFN is common, but many designs keep the first block or two dense, since early representations are still generic and routing on them is unreliable.</p>
+        </div></div>
+        <div class="dt-step"><strong>4</strong><div>
+          <p><strong>Router precision.</strong> Compute the router in FP32. It is a tiny matmul, and near-ties between experts in BF16 flip the top-$k$ selection, making routing non-deterministic across otherwise identical runs.</p>
+        </div></div>
+      </div>
+
+      <h2 id="costs">The honest cost sheet</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>What you gain</th><th>What you pay</th></tr></thead><tbody>
+        <tr><td>Many more parameters at fixed FLOPs per token</td><td>Memory scales with <em>total</em> parameters, so the model must be sharded across many devices regardless of how few are active</td></tr>
+        <tr><td>Better loss at equal training compute</td><td>An all-to-all dispatch and combine per MoE layer, the subject of the next note</td></tr>
+        <tr><td>Specialization across domains</td><td>A new failure mode — routing collapse — plus a hyperparameter ($\alpha$ or a bias schedule) that must be tuned</td></tr>
+        <tr><td>Cheaper inference per token than a dense model of equal capacity</td><td>Poor arithmetic intensity: each expert sees few tokens, so its matmuls are small and memory-bound</td></tr>
+      </tbody></table></div>
+      <div class="dt-warning"><strong>MoE is a systems bet as much as a modelling one.</strong> The parameters have to live somewhere, and unlike a dense model you cannot simply replicate them. That is why expert parallelism exists, and why MoE only pays off at a scale where you were going to shard anyway.</div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Separate total from active parameters; route each token to $k$ of $E$ experts; keep the routing balanced with an auxiliary loss or a bias controller so the capacity factor can sit near one. Fine-grained experts widen the combination space and shared experts absorb what everyone needs.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>For $E=64$, $k=8$, give the total-to-active parameter ratio and the training FLOPs per token. <em>calculation</em></li>
+        <li>Explain why top-$k$ selection is non-differentiable and where the gradient does flow. <em>reasoning</em></li>
+        <li>Show that the auxiliary loss equals 1 under uniform routing for any $E$. <em>derivation</em></li>
+        <li>Compute the capacity for $T=8192$, $E=64$, $k=8$ at a capacity factor of 1.25. <em>calculation</em></li>
+        <li>Argue why fine-grained experts help even though the active parameter count is unchanged. <em>analysis</em></li>
+        <li>Explain why a bias-based balancer avoids perturbing the language-modelling gradient. <em>design</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="context-parallelism-and-ring-attention.html"><span>Previous</span><span>&#8592; Context Parallelism &amp; Ring Attention</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var eIn = D.byId('moe-e'), kIn = D.byId('moe-k'), cfIn = D.byId('moe-cf'), skIn = D.byId('moe-skew');
+    var svg = D.byId('moe-svg');
+    if (!eIn || !kIn || !cfIn || !skIn || !svg) return;
+
+    var EXPERTS = [4, 8, 16, 64, 128, 256];
+    var Dm = 7168, DFF = 2048, LAYERS = 58, TOKENS = 8192;
+
+    function render() {
+      var E = EXPERTS[Number(eIn.value)];
+      var k = Math.min(Number(kIn.value), E);
+      var cf = Number(cfIn.value) / 100;
+      var skew = Number(skIn.value) / 100;
+
+      var perExpert = 3 * Dm * DFF;
+      var total = LAYERS * E * perExpert;
+      var active = LAYERS * k * perExpert;
+
+      // Build a skewed routing distribution: blend uniform with a geometric profile.
+      var w = [], sum = 0;
+      for (var i = 0; i < E; i++) {
+        var geo = Math.pow(0.75, i * 8 / E);
+        var v = (1 - skew) * 1 + skew * geo * E / 2;
+        w.push(v); sum += v;
+      }
+      var assigned = w.map(function (v) { return v / sum * k * TOKENS; });
+      var capacity = cf * k * TOKENS / E;
+      var dropped = 0, used = 0;
+      assigned.forEach(function (a) {
+        dropped += Math.max(0, a - capacity);
+        used += Math.min(a, capacity);
+      });
+      var wasted = E * capacity - used;
+
+      D.clear(svg);
+      D.label(svg, 330, 22, 'tokens routed to each of ' + E + ' experts, top-' + k +
+        ' routing', D.COLOR.ink, 12.5, 'middle', 800);
+
+      var X0 = 44, X1 = 616, top = 46, H = 168;
+      var maxA = Math.max(capacity * 1.15, Math.max.apply(null, assigned));
+      var bw = (X1 - X0) / E;
+      var capY = top + H - H * capacity / maxA;
+
+      for (var j = 0; j < E; j++) {
+        var h = H * assigned[j] / maxA;
+        var over = assigned[j] > capacity;
+        var x = X0 + j * bw;
+        if (over) {
+          var hc = H * capacity / maxA;
+          D.rect(svg, x, top + H - hc, Math.max(1, bw - 1.2), hc, D.COLOR.blue, null, 1);
+          D.rect(svg, x, top + H - h, Math.max(1, bw - 1.2), h - hc, D.COLOR.red, null, 1);
+        } else {
+          D.rect(svg, x, top + H - h, Math.max(1, bw - 1.2), h, D.COLOR.blue, null, 1);
+        }
+      }
+      D.line(svg, X0, capY, X1, capY, D.COLOR.gold, 1.8, '5 4');
+      D.label(svg, X1 + 2, capY - 6, 'capacity ' + capacity.toFixed(0), D.COLOR.gold, 10, 'end', 800);
+      D.line(svg, X0, top + H, X1, top + H, D.COLOR.gray, 1.2);
+      D.label(svg, 330, top + H + 20, 'experts, sorted by load', D.COLOR.muted, 10.5);
+      D.label(svg, 330, top + H + 38, 'blue = processed, red = dropped, gap below the dashed line = padded buffer',
+        D.COLOR.muted, 10);
+
+      D.setText('moe-e-value', String(E));
+      D.setText('moe-k-value', String(k));
+      D.setText('moe-cf-value', cf.toFixed(2));
+      D.setText('moe-skew-value', skew === 0 ? 'uniform' : (100 * skew).toFixed(0) + '%');
+      D.setText('moe-total', D.si(total));
+      D.setText('moe-active', D.si(active));
+      D.setText('moe-drop', (100 * dropped / (k * TOKENS)).toFixed(1) + '%');
+      D.setText('moe-waste', (100 * wasted / (E * capacity)).toFixed(1) + '%');
+      D.setText('moe-status', 'With ' + E + ' experts and top-' + k + ' routing the layer holds ' +
+        D.si(total) + ' feed-forward parameters but activates only ' + D.si(active) +
+        ' per token, a ' + (total / active).toFixed(1) + 'x ratio, so training costs 6 x ' + D.si(active) +
+        ' FLOPs per token rather than 6 x ' + D.si(total) + '. ' +
+        (dropped > 0
+          ? 'At this skew the busiest experts overflow and ' + (100 * dropped / (k * TOKENS)).toFixed(1) +
+            '% of routed tokens are dropped, silently skipping the layer. Raise the capacity factor to catch them, or fix the balance so you do not have to.'
+          : 'Routing fits within capacity, so no tokens are dropped, but ' +
+            (100 * wasted / (E * capacity)).toFixed(1) + '% of the allocated buffer is padding that still costs FLOPs and bandwidth.'));
+    }
+
+    [eIn, kIn, cfIn, skIn].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
