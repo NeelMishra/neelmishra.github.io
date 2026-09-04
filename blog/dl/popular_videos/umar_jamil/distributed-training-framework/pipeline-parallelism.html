@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Split a model by layer across devices, discover the pipeline bubble, shrink it with microbatching, derive the bubble fraction and the microbatch count needed to hide it, and account for the activation memory pipelining creates.">
+  <title>Pipeline Parallelism from First Principles | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 9 &middot; Chapters 14, 17</span></div>
+      <h1>Pipeline Parallelism from First Principles</h1>
+      <p class="post-meta">September 2026 &middot; 24 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Layers are sequential, and that is the whole problem.</strong> Put layer 1 on device 0 and layer 2 on device 1 and device 1 has nothing to do until device 0 finishes. Pipelining recovers the lost time by keeping several batches in flight at once, and everything interesting is about how many, and what that costs in memory.</div>
+
+      <h2 id="split">Splitting by depth</h2>
+      <p>Data parallelism replicates the model and splits the batch. Pipeline parallelism does the opposite: it splits the model and passes the batch through. With $P$ stages, stage $p$ owns a contiguous run of $L/P$ layers.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>What it costs to communicate</h3><p>Only the activations crossing stage boundaries, a tensor of shape $(B,S,d)$, sent point-to-point to exactly one neighbour. There is no collective and no all-reduce. For a 4096-wide model this is small compared to sending gradients.</p></div>
+        <div class="dt-panel"><h3>What it buys</h3><p>Each device stores $1/P$ of the parameters, gradients and optimizer state — the same factor as ZeRO-3, but with far less traffic. Pipelining is the cheapest way to spread a model across nodes over a slow network.</p></div>
+      </div>
+
+      <h2 id="bubble">The bubble</h2>
+      <p>Run one batch through a 4-stage pipeline and watch the devices. Stage 0 computes, then stage 1, then 2, then 3; the backward pass returns in reverse. At every instant exactly one device is busy.</p>
+      <div class="key-eq">$$\text{utilization}=\frac1P.$$</div>
+      <p>Four devices to get one device's throughput is worse than useless. The fix is to break the minibatch into $m$ <em>microbatches</em> and push them in one after another, so that while stage 1 works on microbatch 1, stage 0 has already started microbatch 2.</p>
+      <div class="dt-definition"><strong>The bubble</strong> is the idle time at the start, while the pipeline fills, and at the end, while it drains. It does not disappear with microbatching — it is amortized over more useful work.</div>
+      <p>Count it. Let one microbatch's forward-plus-backward cost on one stage be $t$. A perfect pipeline would take $m\,t$. The real pipeline needs $P-1$ extra slots to fill and drain:</p>
+      <div class="key-eq">$$T=(m+P-1)\,t,\qquad
+      \boxed{\text{bubble fraction}=\frac{T-mt}{T}=\frac{P-1}{m+P-1}.}$$</div>
+      <p>Two readings of that formula matter. It falls as $m$ grows, and it rises with $P$. Setting it below a target $\epsilon$ requires</p>
+      <div class="key-eq">$$m\ \ge\ \frac{1-\epsilon}{\epsilon}(P-1),$$</div>
+      <p>so a 10% bubble needs $m\ge 9(P-1)$: 28 microbatches for 4 stages, 64 for 8, 136 for 16.</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Stages $P$</th><th>$m=4$</th><th>$m=8$</th><th>$m=16$</th><th>$m=32$</th><th>$m=64$</th></tr></thead><tbody>
+        <tr><td>2</td><td>20.0%</td><td>11.1%</td><td>5.9%</td><td>3.0%</td><td>1.5%</td></tr>
+        <tr><td>4</td><td>42.9%</td><td>27.3%</td><td>15.8%</td><td>8.6%</td><td>4.5%</td></tr>
+        <tr><td>8</td><td>63.6%</td><td>46.7%</td><td>30.4%</td><td>17.9%</td><td>9.9%</td></tr>
+        <tr><td>16</td><td>78.9%</td><td>65.2%</td><td>48.4%</td><td>31.9%</td><td>19.0%</td></tr>
+      </tbody></table></div>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="pp-stages">stages $P$</label><input id="pp-stages" type="range" min="2" max="8" step="1" value="4"><strong id="pp-stages-value"></strong>
+          <label for="pp-micro">microbatches $m$</label><input id="pp-micro" type="range" min="1" max="16" step="1" value="8"><strong id="pp-micro-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="pp-svg" class="dt-svg" viewBox="0 0 660 280" role="img" aria-label="A Gantt chart of a GPipe schedule showing forward and backward slots per stage, with the fill and drain bubbles shaded."></svg></div>
+        <div class="dt-legend">
+          <span><i class="dt-swatch blue"></i>forward</span>
+          <span><i class="dt-swatch green"></i>backward</span>
+          <span><i class="dt-swatch gray"></i>idle (bubble)</span>
+        </div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="pp-bubble"></strong><span>bubble fraction</span></div>
+          <div class="dt-metric"><strong id="pp-util"></strong><span>utilization</span></div>
+          <div class="dt-metric"><strong id="pp-peak"></strong><span>peak in-flight activations</span></div>
+          <div class="dt-metric"><strong id="pp-need"></strong><span>$m$ for a 10% bubble</span></div>
+        </div>
+        <div class="dt-status" id="pp-status"></div>
+        <figcaption>A GPipe schedule: all $m$ forward passes, then all $m$ backward passes. Backward slots are drawn twice as wide because the backward pass costs roughly two forward passes.</figcaption>
+      </figure>
+
+      <h2 id="memory">The memory that pipelining creates</h2>
+      <p>Microbatching is not free, and the price is activation memory. A microbatch's activations must be kept from the moment its forward pass runs until its backward pass consumes them. In a plain all-forward-then-all-backward schedule, stage 0 runs <em>every</em> forward before <em>any</em> backward, so it holds activations for all $m$ microbatches at once.</p>
+      <div class="key-eq">$$\text{peak activation memory at stage }0\ \propto\ m\times(\text{activations for one microbatch}).$$</div>
+      <div class="dt-warning"><strong>The two knobs fight each other.</strong> Raising $m$ shrinks the bubble and grows activation memory, in direct proportion. This tension is the entire subject of pipeline scheduling: the next note shows how 1F1B keeps the same bubble fraction while capping in-flight activations at $P$ rather than $m$.</div>
+      <p>The imbalance is also spatial. Stage 0 holds the most activations and stage $P-1$ the fewest, because the last stage's microbatches are consumed almost immediately. Memory is therefore lopsided across the pipeline even when compute is perfectly balanced.</p>
+
+      <h2 id="balance">Balancing the stages</h2>
+      <p>The pipeline runs at the speed of its slowest stage, so an uneven split wastes time on every microbatch, not just once. Equal layer counts are the obvious split and usually the wrong one:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Source of imbalance</th><th>Effect</th><th>Mitigation</th></tr></thead><tbody>
+        <tr><td>Embedding table on stage 0</td><td>Large parameter and gradient memory, but almost no compute.</td><td>Give stage 0 extra transformer blocks to compensate.</td></tr>
+        <tr><td>Output head and loss on the last stage</td><td>A $V\times d$ matmul plus a softmax over the vocabulary is genuinely expensive, and the logits tensor is huge.</td><td>Give the last stage fewer blocks; compute the loss in chunks.</td></tr>
+        <tr><td>Tied embeddings across stages 0 and $P-1$</td><td>One tensor lives on two devices and receives gradients on both.</td><td>An explicit all-reduce between those two ranks before the step.</td></tr>
+        <tr><td>Heterogeneous devices or interconnects</td><td>The slowest link throttles everything.</td><td>Profile, then assign layers by measured time rather than by count.</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>Balance by measured time, not by layer count.</strong> Profile one microbatch per candidate split and equalize wall-clock, not parameters. A 5% imbalance costs 5% of every microbatch for the whole run.</div>
+
+      <h2 id="implementation">What the implementation must get right</h2>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p><strong>Send and receive in a deadlock-free order.</strong> If every stage posts a blocking receive before its send, the pipeline deadlocks instantly. Either alternate the order by parity of the rank, or use non-blocking primitives and wait afterwards.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p><strong>Shapes must be known in advance.</strong> The receiver has to allocate before the data arrives. Variable sequence lengths mean either padding to a fixed shape or sending metadata first.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p><strong>Accumulate gradients across microbatches.</strong> Each microbatch produces a partial gradient; the optimizer must step once, after all $m$ have been accumulated. This is the time-domain version of the same summation argument from the autograd note.</p>
+        </div></div>
+        <div class="dt-step"><strong>4</strong><div>
+          <p><strong>Scale the loss by $1/m$.</strong> Otherwise the accumulated gradient is $m$ times too large — the same trap as gradient accumulation without pipelining.</p>
+        </div></div>
+      </div>
+
+      <h2 id="versus">Pipeline versus tensor parallelism</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th></th><th>Pipeline</th><th>Tensor</th></tr></thead><tbody>
+        <tr><td>Split along</td><td>layers (depth)</td><td>inside each matmul (width)</td></tr>
+        <tr><td>Communication</td><td>point-to-point, once per stage boundary</td><td>collective, several times per block</td></tr>
+        <tr><td>Volume per step</td><td>low</td><td>high</td></tr>
+        <tr><td>Tolerates slow links</td><td>yes — use across nodes</td><td>no — keep inside a node</td></tr>
+        <tr><td>Main cost</td><td>the bubble, and activation memory</td><td>bandwidth, and synchronization</td></tr>
+      </tbody></table></div>
+      <p>They are complementary, which is why production runs combine them: tensor parallel within a node over the fast fabric, pipeline parallel across nodes over the slow one, data parallel on top. The device-mesh note assembles exactly that.</p>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Pipelining gives you a $1/P$ memory reduction for almost no bandwidth, at the cost of a bubble of $(P-1)/(m+P-1)$. Microbatching shrinks the bubble in proportion to $m$ and grows activation memory in proportion to $m$. Resolving that trade is what pipeline schedules are for.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Derive the bubble fraction $(P-1)/(m+P-1)$ from the fill-and-drain argument. <em>derivation</em></li>
+        <li>Invert it to find the $m$ needed for a 5% bubble at $P=8$. <em>calculation</em></li>
+        <li>Explain why stage 0 holds more activations than the last stage. <em>reasoning</em></li>
+        <li>Give a layer assignment for $L=32$, $P=4$ that accounts for the embedding and the output head. <em>design</em></li>
+        <li>Describe a send/receive ordering that deadlocks, and one that does not. <em>debugging</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="data-parallelism-ddp-and-fsdp.html"><span>Previous</span><span>&#8592; Data Parallelism: DDP, ZeRO and FSDP</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var pIn = D.byId('pp-stages'), mIn = D.byId('pp-micro'), svg = D.byId('pp-svg');
+    if (!pIn || !mIn || !svg) return;
+
+    function render() {
+      var P = Number(pIn.value), m = Number(mIn.value);
+      // GPipe: forward slot width 1, backward slot width 2.
+      var slots = [];
+      var totalSlots = (m + P - 1) * 3;
+      var X0 = 84, X1 = 612, top = 52, rowH = Math.min(30, 170 / P);
+      var unit = (X1 - X0) / totalSlots;
+
+      D.clear(svg);
+      D.label(svg, (X0 + X1) / 2, 24, 'GPipe schedule: ' + P + ' stages, ' + m + ' microbatches',
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      for (var p = 0; p < P; p++) {
+        var y = top + p * rowH;
+        D.label(svg, X0 - 10, y + rowH * 0.65, 'stage ' + p, D.COLOR.muted, 10.5, 'end', 700);
+        D.rect(svg, X0, y, X1 - X0, rowH - 3, 'rgba(158,170,164,0.16)', null, 3);
+        for (var k = 0; k < m; k++) {
+          var fStart = (p + k) * unit;
+          D.rect(svg, X0 + fStart, y, unit - 0.6, rowH - 3, D.COLOR.blue, null, 2);
+        }
+        var bBase = (m + P - 1) + (P - 1 - p);
+        for (var k2 = 0; k2 < m; k2++) {
+          var bStart = (bBase + k2 * 2) * unit;
+          D.rect(svg, X0 + bStart, y, 2 * unit - 0.6, rowH - 3, D.COLOR.green, null, 2);
+        }
+      }
+
+      var bubble = (P - 1) / (m + P - 1);
+      var need = Math.ceil(9 * (P - 1));
+      var yEnd = top + P * rowH + 12;
+      D.line(svg, X0, yEnd, X1, yEnd, D.COLOR.gray, 1.2);
+      D.label(svg, X0, yEnd + 16, 'time', D.COLOR.muted, 10, 'start');
+      D.label(svg, (X0 + X1) / 2, yEnd + 32,
+        'grey regions are the fill and drain bubbles; every stage is idle for P-1 slots',
+        D.COLOR.muted, 10.5);
+
+      D.setText('pp-stages-value', String(P));
+      D.setText('pp-micro-value', String(m));
+      D.setText('pp-bubble', (100 * bubble).toFixed(1) + '%');
+      D.setText('pp-util', (100 * (1 - bubble)).toFixed(1) + '%');
+      D.setText('pp-peak', m + ' microbatches');
+      D.setText('pp-need', String(need));
+      D.setText('pp-status', 'With ' + P + ' stages and ' + m + ' microbatches the bubble is ' +
+        (100 * bubble).toFixed(1) + '%, so ' + (100 * (1 - bubble)).toFixed(1) +
+        '% of the theoretical throughput is reachable. Reaching a 10% bubble at this depth needs m >= ' +
+        need + '. But note the memory column: stage 0 must hold activations for all ' + m +
+        ' microbatches at once under this schedule, because it finishes every forward before the first backward arrives.');
+    }
+
+    pIn.addEventListener('input', render);
+    mIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
