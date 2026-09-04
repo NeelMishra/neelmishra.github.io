@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="DDP gradient bucketing and backward overlap, the 16-bytes-per-parameter memory ledger that motivates ZeRO, what each ZeRO stage shards, and how FSDP turns a replicated model into a sharded one with all-gather and reduce-scatter.">
+  <title>Data Parallelism: DDP, ZeRO and FSDP | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 8 &middot; Chapters 16, 20</span></div>
+      <h1>Data Parallelism: DDP, ZeRO and FSDP</h1>
+      <p class="post-meta">September 2026 &middot; 26 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>DDP replicates everything, and that is its limit.</strong> The gradient all-reduce scales beautifully, but every rank still stores a full copy of the parameters, the gradients and the optimizer state. ZeRO observes that a replica which is identical everywhere is $P-1$ copies of wasted memory, and eliminates it one category at a time.</div>
+
+      <h2 id="ddp">DDP, and why it works</h2>
+      <p>The correctness argument was settled in the autograd note: parameters are replicated, replication is a fan-out, and the chain rule turns a fan-out into a sum. So a mean all-reduce of per-rank gradients gives exactly the full-batch gradient. Everything here is about making that all-reduce cheap.</p>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p><strong>Bucket the gradients.</strong> A large model has thousands of parameter tensors. One collective each would pay the per-message latency thousands of times. DDP groups gradients into buckets of roughly 25&nbsp;MB and issues one all-reduce per bucket.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p><strong>Fire on completion, not at the end.</strong> Backpropagation produces gradients in reverse layer order, so the last layer's bucket is ready long before the first layer's. A hook marks each gradient ready, and the bucket's collective launches the moment its last member arrives.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p><strong>Overlap.</strong> Those collectives run on a separate stream while the remaining layers are still computing. In a healthy run almost all communication disappears behind the backward pass.</p>
+        </div></div>
+      </div>
+      <div class="dt-warning"><strong>Bucket order must match on every rank.</strong> Ranks must issue collectives in the same sequence. If control flow differs between ranks — a conditional branch, a layer skipped on some inputs — some gradients never become ready, the bucket never fires, and the job hangs rather than erroring.</div>
+
+      <h2 id="ledger">The memory ledger</h2>
+      <p>Mixed-precision training with Adam keeps five things per parameter:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Category</th><th>Contents</th><th>Bytes per parameter</th></tr></thead><tbody>
+        <tr><td>Parameters</td><td>BF16 weights used in the forward pass</td><td>2</td></tr>
+        <tr><td>Gradients</td><td>BF16 gradients</td><td>2</td></tr>
+        <tr><td rowspan="3">Optimizer state</td><td>FP32 master copy of the weights</td><td>4</td></tr>
+        <tr><td>Adam first moment</td><td>4</td></tr>
+        <tr><td>Adam second moment</td><td>4</td></tr>
+        <tr><td colspan="2"><strong>Total</strong></td><td><strong>16</strong></td></tr>
+      </tbody></table></div>
+      <p>Twelve of those sixteen bytes are optimizer state, and here is the key observation: <strong>the optimizer state is only touched during the update step</strong>, after the gradient all-reduce and before the next forward pass. For the rest of the step it sits idle, occupying identical bytes on every rank.</p>
+      <div class="dt-definition"><strong>The ZeRO insight.</strong> A tensor that is bit-identical on all $P$ ranks and needed only briefly does not have to be replicated. Shard it, and gather or reconstruct just the piece each rank needs, when it needs it.</div>
+
+      <h2 id="stages">The three stages</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Stage</th><th>Sharded</th><th>Replicated</th><th>Bytes per parameter</th><th>Communication per step</th></tr></thead><tbody>
+        <tr><td>DDP</td><td>nothing</td><td>params, grads, optimizer</td><td>$16$</td><td>$2N$ (all-reduce)</td></tr>
+        <tr><td>ZeRO-1</td><td>optimizer state</td><td>params, grads</td><td>$4+\dfrac{12}{P}$</td><td>$2N$</td></tr>
+        <tr><td>ZeRO-2</td><td>optimizer state, gradients</td><td>params</td><td>$2+\dfrac{14}{P}$</td><td>$2N$</td></tr>
+        <tr><td>ZeRO-3 / FSDP</td><td>everything</td><td>nothing</td><td>$\dfrac{16}{P}$</td><td>$3N$</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>Stages 1 and 2 are free.</strong> They move the same number of bytes as DDP. The reason is the decomposition from the collectives note: DDP's all-reduce <em>is</em> a reduce-scatter followed by an all-gather. ZeRO-1 and ZeRO-2 simply stop after the reduce-scatter, update the shard each rank owns, and all-gather the updated parameters instead of the gradients. Same two halves, same volume, far less memory. If you are running plain DDP and fit comfortably, you are leaving this on the table for nothing.</div>
+      <p>ZeRO-3 is the one with a real cost. Parameters are no longer resident, so they must be gathered for the forward pass, discarded, and gathered again for the backward pass:</p>
+      <div class="key-eq">$$\underbrace{N}_{\text{all-gather (fwd)}}+\underbrace{N}_{\text{all-gather (bwd)}}+\underbrace{N}_{\text{reduce-scatter (grads)}}=3N,$$</div>
+      <p>which is $1.5\times$ DDP's volume. In exchange, memory falls by a factor of $P$ with no upper bound.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="zero-n">parameters $N$</label><input id="zero-n" type="range" min="0" max="5" step="1" value="3"><strong id="zero-n-value"></strong>
+          <label for="zero-p">ranks $P$</label><input id="zero-p" type="range" min="0" max="6" step="1" value="3"><strong id="zero-p-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="zero-svg" class="dt-svg" viewBox="0 0 660 280" role="img" aria-label="Per-rank memory for DDP and the three ZeRO stages, split into parameters, gradients and optimizer state."></svg></div>
+        <div class="dt-legend">
+          <span><i class="dt-swatch blue"></i>parameters</span>
+          <span><i class="dt-swatch gold"></i>gradients</span>
+          <span><i class="dt-swatch green"></i>optimizer state</span>
+          <span><i class="dt-swatch red"></i>exceeds 80 GB</span>
+        </div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="zero-ddp"></strong><span>DDP per rank</span></div>
+          <div class="dt-metric"><strong id="zero-z2"></strong><span>ZeRO-2 per rank</span></div>
+          <div class="dt-metric"><strong id="zero-z3"></strong><span>ZeRO-3 per rank</span></div>
+          <div class="dt-metric"><strong id="zero-min"></strong><span>min stage that fits 80 GB</span></div>
+        </div>
+        <div class="dt-status" id="zero-status"></div>
+        <figcaption>Model state only; activations are extra and are usually what consumes the remaining headroom. The 80 GB line marks a typical accelerator.</figcaption>
+      </figure>
+
+      <h2 id="fsdp">How FSDP actually runs</h2>
+      <p>FSDP is ZeRO-3 organized around <em>units</em> — typically one transformer block each. A unit is the granularity at which parameters are gathered and released.</p>
+      <div class="dt-algorithm">
+        <div class="dt-algorithm-title">One FSDP step</div>
+        <div class="dt-algorithm-body">
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">1</span><span><span class="dt-algorithm-keyword">forward</span>, for each unit in order:</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">2</span><span>all-gather this unit's parameter shards into a full set</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">3</span><span>run the unit; save activations needed for backward</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">4</span><span>free the gathered parameters immediately</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">5</span><span><span class="dt-algorithm-keyword">backward</span>, for each unit in reverse:</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">6</span><span>all-gather the parameters again (they were discarded)</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">7</span><span>compute input and weight gradients</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">8</span><span>reduce-scatter the weight gradients, so each rank keeps only its shard</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">9</span><span>free the gathered parameters and the full gradient</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">10</span><span><span class="dt-algorithm-keyword">update</span>: each rank steps only the shard it owns; no further communication</span></div>
+        </div>
+      </div>
+      <p>Peak parameter memory is therefore <em>one unit's worth</em> of gathered weights plus $N/P$ of shards, not $N$. Unit size is the tuning knob:</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Smaller units</h3><p>Less transient memory, but more collectives, each too small to reach peak bandwidth. Latency starts to dominate.</p></div>
+        <div class="dt-panel"><h3>Larger units</h3><p>Efficient collectives, but a bigger transient spike and less opportunity to overlap, since a unit cannot start until its whole gather lands.</p></div>
+      </div>
+      <div class="dt-definition"><strong>Prefetching is what makes it viable.</strong> While unit $i$ computes, the gather for unit $i+1$ is already in flight. Without prefetch, every unit stalls on its own gather and FSDP is dramatically slower than DDP; with it, the extra $N$ of traffic largely disappears behind compute. If FSDP is much slower than expected, prefetching is the first thing to check.</div>
+
+      <h2 id="hybrid">Hybrid sharding</h2>
+      <p>Full ZeRO-3 across a 512-rank cluster shards very finely, but every all-gather then crosses the slow inter-node network. Hybrid sharding splits the difference by using two mesh axes:</p>
+      <div class="dt-flow">
+        <div class="dt-flow-node"><strong>Shard within a node</strong><span>8 ranks over NVLink, all-gather stays local</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Replicate across nodes</strong><span>plain gradient all-reduce between nodes</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Result</strong><span>memory divided by 8, chatty traffic on the fast link</span></div>
+      </div>
+      <p>Memory drops by the intra-node group size rather than the whole world size, which is usually enough, and the expensive parameter gathers never leave the node. This is the first genuinely two-dimensional parallelism scheme in the series, and it previews the device-mesh note.</p>
+
+      <h2 id="choosing">Choosing a stage</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Situation</th><th>Use</th></tr></thead><tbody>
+        <tr><td>Model state fits comfortably per rank</td><td>ZeRO-1 or ZeRO-2 — same communication as DDP, strictly less memory</td></tr>
+        <tr><td>Parameters alone do not fit</td><td>ZeRO-3 / FSDP, with prefetching enabled and unit size tuned</td></tr>
+        <tr><td>Fast intra-node fabric, slow inter-node</td><td>hybrid sharding</td></tr>
+        <tr><td>A single layer does not fit on one device</td><td>data parallelism is not the answer; go to tensor or pipeline parallelism</td></tr>
+      </tbody></table></div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Sixteen bytes per parameter, twelve of them idle most of the step. ZeRO-1 and ZeRO-2 remove that waste for free because DDP's all-reduce was already a reduce-scatter plus an all-gather. ZeRO-3 removes the rest for a 1.5x communication surcharge that prefetching mostly hides.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Derive the bytes-per-parameter column for all four rows. <em>derivation</em></li>
+        <li>Explain why ZeRO-1 and ZeRO-2 move the same bytes as DDP, using the all-reduce decomposition. <em>reasoning</em></li>
+        <li>Show why ZeRO-3 needs two all-gathers rather than one. <em>reasoning</em></li>
+        <li>For a 70B model, find the smallest $P$ at which ZeRO-3 fits model state in 80 GB per rank. <em>calculation</em></li>
+        <li>Explain how a rank-dependent branch can hang a DDP job. <em>debugging</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="communication-collectives.html"><span>Previous</span><span>&#8592; Distributed Communication Collectives</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var nIn = D.byId('zero-n'), pIn = D.byId('zero-p'), svg = D.byId('zero-svg');
+    if (!nIn || !pIn || !svg) return;
+
+    var SIZES = [1e9, 7e9, 13e9, 70e9, 175e9, 671e9];
+    var LABELS = ['1B', '7B', '13B', '70B', '175B', '671B'];
+    var RANKS = [1, 2, 8, 16, 64, 256, 1024];
+    var LIMIT = 80 * 1e9;
+
+    function parts(N, P, stage) {
+      if (stage === 0) return [2 * N, 2 * N, 12 * N];
+      if (stage === 1) return [2 * N, 2 * N, 12 * N / P];
+      if (stage === 2) return [2 * N, 2 * N / P, 12 * N / P];
+      return [2 * N / P, 2 * N / P, 12 * N / P];
+    }
+
+    function render() {
+      var N = SIZES[Number(nIn.value)], P = RANKS[Number(pIn.value)];
+      var names = ['DDP', 'ZeRO-1', 'ZeRO-2', 'ZeRO-3'];
+      var totals = [0, 1, 2, 3].map(function (s) {
+        return parts(N, P, s).reduce(function (a, b) { return a + b; }, 0);
+      });
+      var maxT = totals[0];
+
+      D.clear(svg);
+      D.label(svg, 330, 24, 'model state per rank at ' + LABELS[Number(nIn.value)] +
+        ' parameters on ' + P + ' rank(s)', D.COLOR.ink, 12.5, 'middle', 800);
+
+      var X0 = 108, X1 = 588, top = 48, rowH = 50;
+      var limitX = X0 + (X1 - X0) * Math.min(1, LIMIT / maxT);
+      if (LIMIT < maxT) {
+        D.line(svg, limitX, top - 8, limitX, top + 4 * rowH - 6, D.COLOR.red, 1.6, '4 3');
+        D.label(svg, limitX, top - 12, '80 GB', D.COLOR.red, 10, 'middle', 800);
+      }
+
+      var colors = [D.COLOR.blue, D.COLOR.gold, D.COLOR.green];
+      var fits = -1;
+      [0, 1, 2, 3].forEach(function (s) {
+        var y = top + s * rowH, pr = parts(N, P, s), tot = totals[s];
+        D.label(svg, X0 - 10, y + 19, names[s], D.COLOR.ink, 11.5, 'end', 700);
+        var x = X0;
+        pr.forEach(function (v, k) {
+          var w = (X1 - X0) * v / maxT;
+          if (w > 0.5) D.rect(svg, x, y, w, 28, colors[k], '#fff', 4);
+          x += w;
+        });
+        var ok = tot <= LIMIT;
+        if (ok && fits < 0) fits = s;
+        D.label(svg, x + 8, y + 19, D.bytes(tot) + (ok ? '' : '  x'), ok ? D.COLOR.ink : D.COLOR.red,
+          11, 'start', 800);
+      });
+
+      D.setText('zero-n-value', LABELS[Number(nIn.value)]);
+      D.setText('zero-p-value', String(P));
+      D.setText('zero-ddp', D.bytes(totals[0]));
+      D.setText('zero-z2', D.bytes(totals[2]));
+      D.setText('zero-z3', D.bytes(totals[3]));
+      D.setText('zero-min', fits < 0 ? 'none' : names[fits]);
+      D.setText('zero-status', fits < 0
+        ? 'Even full sharding across ' + P + ' ranks leaves ' + D.bytes(totals[3]) +
+          ' per rank, above the 80 GB line. Model state alone does not fit: you need more ranks, or another parallelism axis such as tensor or pipeline parallelism.'
+        : 'At ' + P + ' ranks, ' + names[fits] + ' is the lightest stage whose model state fits in 80 GB, at ' +
+          D.bytes(totals[fits]) + ' per rank. DDP would need ' + D.bytes(totals[0]) +
+          '. Remember stages 1 and 2 cost exactly the same communication as DDP, so the only real decision is whether the extra 1.5x traffic of stage 3 is worth the further ' +
+          (totals[2] / totals[3]).toFixed(1) + 'x memory saving. Activations are not counted here and typically claim much of what is left.');
+    }
+
+    nIn.addEventListener('input', render);
+    pIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
