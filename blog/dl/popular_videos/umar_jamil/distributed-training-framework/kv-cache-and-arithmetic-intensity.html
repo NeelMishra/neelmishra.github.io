@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Why autoregressive decoding is memory-bound, how to size the KV cache exactly, the roofline model and arithmetic intensity, why batching fixes the weight reads but not the cache reads, and how MQA and GQA trade quality for bandwidth.">
+  <title>The KV Cache &amp; Arithmetic Intensity | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 4 &middot; Chapter 6</span></div>
+      <h1>The KV Cache &amp; Arithmetic Intensity</h1>
+      <p class="post-meta">September 2026 &middot; 25 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Generating a token from a 70B model moves 140 GB of weights to do 140 GFLOPs of arithmetic.</strong> That is one FLOP per byte, against hardware built for roughly 295. Decoding is not slow because the model is big; it is slow because almost nothing is computed per byte read. Every optimization in this note follows from that ratio.</div>
+
+      <h2 id="why-cache">Why a cache exists at all</h2>
+      <p>Autoregressive generation appends one token at a time. Naively, producing token $t+1$ means running the whole prefix $1..t$ through the model again — $O(S^2)$ total work to emit $S$ tokens, most of it recomputation.</p>
+      <p>But causal attention has a convenient property: the key and value vectors of past tokens <strong>never change</strong>. Token $j$'s key depends only on token $j$, and the causal mask means it cannot be influenced by anything after it. So compute each $\mathbf k_j,\mathbf v_j$ once and keep them.</p>
+      <div class="dt-definition"><strong>The KV cache</strong> stores $\mathbf k$ and $\mathbf v$ for every past position, in every layer. With it, a decoding step projects only the <em>new</em> token into $\mathbf q,\mathbf k,\mathbf v$, appends the new $\mathbf k,\mathbf v$ to the cache, and attends the single new query against the whole cache. Per-token work drops from $O(S)$ layer passes to $O(1)$.</div>
+      <div class="dt-flow">
+        <div class="dt-flow-node"><strong>Prefill</strong><span>whole prompt at once, fills the cache, big matmuls</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Decode</strong><span>one token at a time, reads the cache, matrix-vector</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Cache grows</strong><span>one entry per layer per step, forever</span></div>
+      </div>
+
+      <h2 id="size">Sizing the cache exactly</h2>
+      <p>Per token, per layer, we store one key and one value for each key-value head:</p>
+      <div class="key-eq">$$\text{bytes per token}=2\times L\times h_{kv}\times d_h\times \text{bytes per element}.$$</div>
+      <p>The leading $2$ is for K and V, not for the byte width — that is the last factor. Multiplying by sequence length and batch:</p>
+      <div class="key-eq">$$\boxed{\text{KV cache}=2\,L\,h_{kv}\,d_h\,S\,B\cdot\text{bytes}.}$$</div>
+      <p>Take an 80-layer model with $d_h=128$ in BF16. Per token per layer, one head costs $2\cdot128\cdot2=512$ bytes.</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Attention variant</th><th>$h_{kv}$</th><th>Per token</th><th>8k context, 1 sequence</th><th>128k context, 32 sequences</th></tr></thead><tbody>
+        <tr><td>Multi-head (MHA)</td><td>64</td><td>2560 KiB</td><td>20.0 GiB</td><td>10 TiB</td></tr>
+        <tr><td>Grouped-query (GQA)</td><td>8</td><td>320 KiB</td><td>2.5 GiB</td><td>1.25 TiB</td></tr>
+        <tr><td>Multi-query (MQA)</td><td>1</td><td>40 KiB</td><td>0.31 GiB</td><td>160 GiB</td></tr>
+      </tbody></table></div>
+      <div class="dt-warning"><strong>The cache is per sequence, and it does not shrink.</strong> Model weights are shared by every request in a batch; the cache is not. At long context and moderate batch it dwarfs the model itself, which is why serving systems spend so much effort on paging and eviction, and why the next note's whole purpose is to compress it.</div>
+
+      <h2 id="roofline">Arithmetic intensity and the roofline</h2>
+      <p>A kernel's speed is capped by whichever of two resources runs out first. Let $W$ be the FLOPs it performs and $Q$ the bytes it moves between memory and the chip. Its <em>arithmetic intensity</em> is</p>
+      <div class="key-eq">$$I=\frac{W}{Q}\quad\text{FLOPs per byte.}$$</div>
+      <p>Given peak compute $F_{\text{peak}}$ and peak bandwidth $\beta_{\text{peak}}$, achievable throughput is</p>
+      <div class="key-eq">$$\text{FLOP/s}\le\min\big(F_{\text{peak}},\ I\cdot\beta_{\text{peak}}\big).$$</div>
+      <p>The two regimes meet at the <em>ridge point</em> $I^\star=F_{\text{peak}}/\beta_{\text{peak}}$. For an H100 with roughly 989 TFLOP/s of dense BF16 and 3.35 TB/s of HBM,</p>
+      <div class="key-eq">$$I^\star=\frac{989\times10^{12}}{3.35\times10^{12}}\approx 295\ \text{FLOPs per byte}.$$</div>
+      <div class="dt-definition"><strong>You must do about 300 FLOPs on every byte you read</strong> just to keep an H100 busy. Anything below that leaves the tensor cores idle waiting for memory, no matter how the kernel is written.</div>
+
+      <h3 id="decode-bound">Decoding sits at $I\approx B$</h3>
+      <p>Now apply it. Generating one token with batch size $B$:</p>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p><strong>Bytes.</strong> Every weight must be read once, regardless of $B$. In BF16 that is $2N$ bytes.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p><strong>FLOPs.</strong> Each of the $B$ sequences performs $2N$ FLOPs, so $2NB$ in total.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p><strong>Intensity.</strong></p>
+          <div class="key-eq">$$I=\frac{2NB}{2N}=B.$$</div>
+          <p>The arithmetic intensity of decoding is, to a first approximation, <em>just the batch size</em>.</p>
+        </div></div>
+      </div>
+      <p>At $B=1$ the intensity is $1$, roughly 300 times below the ridge. The consequence is a hard latency floor:</p>
+      <div class="key-eq">$$t_{\min}=\frac{2N}{\beta_{\text{peak}}}=\frac{1.4\times10^{11}}{3.35\times10^{12}}\approx 42\ \text{ms per token},$$</div>
+      <p>about 24 tokens per second for a 70B model on one H100-class device, <em>even with a perfect implementation</em>. No kernel fusion helps; the bytes have to move.</p>
+      <p>Prefill is the opposite. Processing $S$ prompt tokens at once reads the same weights but does $S$ times the arithmetic, so $I\approx S$. At $S=2048$ prefill is comfortably compute-bound. This is why prompt processing and generation have completely different performance characteristics and are increasingly scheduled as separate phases.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="kv-batch">batch $B$</label><input id="kv-batch" type="range" min="0" max="10" step="1" value="0"><strong id="kv-batch-value"></strong>
+          <label for="kv-ctx">context $S$</label><input id="kv-ctx" type="range" min="9" max="17" step="1" value="13"><strong id="kv-ctx-value"></strong>
+          <label for="kv-heads">$h_{kv}$</label><input id="kv-heads" type="range" min="0" max="3" step="1" value="1"><strong id="kv-heads-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="kv-svg" class="dt-svg" viewBox="0 0 660 300" role="img" aria-label="A roofline plot with arithmetic intensity on the horizontal axis and attainable throughput on the vertical axis, marking where decoding and prefill land."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="kv-cache"></strong><span>KV cache size</span></div>
+          <div class="dt-metric"><strong id="kv-intensity"></strong><span>decode intensity</span></div>
+          <div class="dt-metric"><strong id="kv-util"></strong><span>peak compute reachable</span></div>
+          <div class="dt-metric"><strong id="kv-latency"></strong><span>min ms / token</span></div>
+        </div>
+        <div class="dt-status" id="kv-status"></div>
+        <figcaption>A 70B-parameter, 80-layer model with $d_h=128$ in BF16, on hardware with 989&nbsp;TFLOP/s and 3.35&nbsp;TB/s. Both axes are logarithmic. The ridge sits at 295 FLOPs per byte.</figcaption>
+      </figure>
+
+      <h2 id="batching-limit">Batching helps the weights, not the cache</h2>
+      <p>Since $I\approx B$, the obvious fix is a bigger batch. It genuinely works for the weight matmuls: one read of $W_Q$ serves all $B$ sequences. But it does <strong>not</strong> work for attention, and the reason is worth stating carefully.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Weights: shared</h3><p>Bytes read stay at $2N$ while FLOPs grow as $2NB$. Intensity grows linearly with batch. This is the part batching fixes.</p></div>
+        <div class="dt-panel"><h3>KV cache: private</h3><p>Each sequence has its own cache, so both bytes and FLOPs grow with $B$. Intensity is stuck at roughly one FLOP per byte no matter how large the batch gets.</p></div>
+      </div>
+      <p>Concretely, attending one query against $S$ cached keys reads $2h_{kv}d_hS$ bytes and does about $4h\,d_hS$ FLOPs. The ratio does not contain $S$ or $B$ at all — it is a small constant near $h/h_{kv}$. Attention during decoding is <em>permanently</em> memory-bound, and at long context it becomes the dominant cost.</p>
+      <div class="dt-definition"><strong>This is the whole motivation for MQA, GQA and MLA.</strong> They do not reduce FLOPs meaningfully. They reduce the <em>bytes</em> of cache that must be streamed per token, which is the quantity that actually sets decoding speed.</div>
+
+      <h2 id="mqa-gqa">MQA and GQA</h2>
+      <p>The observation behind both: nothing forces the number of key-value heads to equal the number of query heads.</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Scheme</th><th>Key-value heads</th><th>Cache versus MHA</th><th>Quality</th></tr></thead><tbody>
+        <tr><td>MHA</td><td>$h_{kv}=h$</td><td>baseline</td><td>baseline</td></tr>
+        <tr><td>MQA</td><td>$h_{kv}=1$</td><td>$h\times$ smaller</td><td>measurable degradation; can be unstable to train</td></tr>
+        <tr><td>GQA</td><td>$1<h_{kv}<h$, typically 8</td><td>$h/h_{kv}\times$ smaller</td><td>close to MHA</td></tr>
+      </tbody></table></div>
+      <p>Under GQA the $h$ query heads are partitioned into $h_{kv}$ groups, and all heads in a group share one key and one value head. Queries stay fully expressive; only the cached tensors are shared. With $h=64$ and $h_{kv}=8$ that is an eightfold cache reduction for a small quality cost, which is why nearly every recent open-weight model uses it.</p>
+      <p>The obvious next question is whether the cache can be compressed further without giving up per-head keys and values at all. That is exactly what multi-head latent attention does, and it is the subject of the next note.</p>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Decode intensity is roughly the batch size, the ridge point is roughly 300, and the KV cache is the one tensor batching cannot amortize. Size the cache with $2Lh_{kv}d_hSB$ bytes, and treat every attention variant as an answer to the question "how do we make that number smaller?"</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Compute the KV cache for $L=32$, $h_{kv}=8$, $d_h=128$, $S=32768$, $B=16$ in BF16. <em>calculation</em></li>
+        <li>Derive $I=B$ for decoding and state the assumption that makes it approximate. <em>derivation</em></li>
+        <li>Explain why batching raises intensity for the weight matmuls but not for attention. <em>reasoning</em></li>
+        <li>Compute the minimum per-token latency for a 13B model at 3.35 TB/s and compare it with a 70B model. <em>calculation</em></li>
+        <li>At what context length does the KV cache exceed the model weights for the GQA row of the table above? <em>calculation</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="transformer-assembly-and-initialization.html"><span>Previous</span><span>&#8592; Transformer Assembly &amp; Initialization</span></a><a class="next" href="autograd-and-the-math-of-distributed-training.html"><span>Next</span><span>Autograd &amp; the Math of Distributed Training &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var bIn = D.byId('kv-batch'), sIn = D.byId('kv-ctx'), hIn = D.byId('kv-heads'), svg = D.byId('kv-svg');
+    if (!bIn || !sIn || !hIn || !svg) return;
+
+    var PEAK = 989e12, BW = 3.35e12, RIDGE = PEAK / BW;
+    var N = 70e9, LAYERS = 80, DH = 128, BYTES = 2;
+    var HEADS = [1, 8, 16, 64], BATCHES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+
+    var X0 = 70, X1 = 596, Y0 = 44, Y1 = 226;
+    var LX0 = Math.log10(0.25), LX1 = Math.log10(1e4);
+    var LY0 = Math.log10(1e12), LY1 = Math.log10(2e15);
+
+    function toX(i) { return X0 + (X1 - X0) * (Math.log10(i) - LX0) / (LX1 - LX0); }
+    function toY(f) { return Y1 - (Y1 - Y0) * (Math.log10(f) - LY0) / (LY1 - LY0); }
+    function attain(i) { return Math.min(PEAK, i * BW); }
+
+    function render() {
+      var B = BATCHES[Number(bIn.value)];
+      var S = Math.pow(2, Number(sIn.value));
+      var hkv = HEADS[Number(hIn.value)];
+      var cache = 2 * LAYERS * hkv * DH * S * B * BYTES;
+      var intensity = B;
+      var reachable = attain(intensity);
+      var latency = 2 * N / BW * 1000;
+
+      D.clear(svg);
+      D.label(svg, (X0 + X1) / 2, 24, 'roofline: attainable throughput versus arithmetic intensity',
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      for (var e = 12; e <= 15; e++) {
+        var y = toY(Math.pow(10, e));
+        D.line(svg, X0, y, X1, y, D.COLOR.line, 1);
+        D.label(svg, X0 - 8, y + 4, '1e' + e, D.COLOR.muted, 9.5, 'end');
+      }
+      [1, 10, 100, 1000].forEach(function (v) {
+        D.line(svg, toX(v), Y0, toX(v), Y1, D.COLOR.line, 1);
+        D.label(svg, toX(v), Y1 + 16, String(v), D.COLOR.muted, 9.5);
+      });
+      D.line(svg, X0, Y1, X1, Y1, D.COLOR.gray, 1.2);
+      D.label(svg, (X0 + X1) / 2, Y1 + 34, 'arithmetic intensity (FLOPs per byte)', D.COLOR.muted, 11);
+      D.label(svg, 20, (Y0 + Y1) / 2, 'FLOP/s', D.COLOR.muted, 10.5, 'middle');
+
+      var roof = '';
+      for (var k = 0; k <= 160; k++) {
+        var i = Math.pow(10, LX0 + (LX1 - LX0) * k / 160);
+        roof += (k ? 'L' : 'M') + toX(i).toFixed(1) + ' ' + toY(attain(i)).toFixed(1);
+      }
+      svg.appendChild(D.svgEl('path', { d: roof, fill: 'none', stroke: D.COLOR.ink, 'stroke-width': 2.4 }));
+      D.line(svg, toX(RIDGE), Y0, toX(RIDGE), Y1, D.COLOR.gold, 1.5, '4 3');
+      D.label(svg, toX(RIDGE), Y0 - 6, 'ridge ' + RIDGE.toFixed(0), D.COLOR.gold, 10, 'middle', 800);
+
+      D.label(svg, toX(3), toY(3 * BW) - 12, 'memory bound', D.COLOR.red, 10.5, 'middle', 700);
+      D.label(svg, toX(2000), toY(PEAK) - 12, 'compute bound', D.COLOR.green, 10.5, 'middle', 700);
+
+      svg.appendChild(D.svgEl('circle', { cx: toX(intensity), cy: toY(reachable), r: 6,
+        fill: D.COLOR.red, stroke: '#fff', 'stroke-width': 2 }));
+      D.label(svg, toX(intensity), toY(reachable) + 22, 'decode B=' + B, D.COLOR.red, 10.5, 'middle', 800);
+
+      svg.appendChild(D.svgEl('circle', { cx: toX(S), cy: toY(attain(S)), r: 6,
+        fill: D.COLOR.green, stroke: '#fff', 'stroke-width': 2 }));
+      D.label(svg, toX(S), toY(attain(S)) + 22, 'prefill S=' + (S / 1024) + 'k', D.COLOR.green, 10.5, 'middle', 800);
+
+      D.setText('kv-batch-value', String(B));
+      D.setText('kv-ctx-value', (S / 1024) + 'k');
+      D.setText('kv-heads-value', String(hkv));
+      D.setText('kv-cache', D.bytes(cache));
+      D.setText('kv-intensity', intensity + ' F/B');
+      D.setText('kv-util', (100 * reachable / PEAK).toFixed(1) + '%');
+      D.setText('kv-latency', latency.toFixed(0));
+      D.setText('kv-status', 'With ' + hkv + ' key-value heads, ' + B + ' sequence(s) of ' + (S / 1024) +
+        'k tokens need ' + D.bytes(cache) + ' of KV cache, versus ' + D.bytes(2 * N) +
+        ' for the weights themselves. Decoding at batch ' + B + ' has intensity ' + intensity +
+        ' FLOPs per byte, which is ' + (intensity >= RIDGE ? 'above' : 'below') + ' the ridge of ' +
+        RIDGE.toFixed(0) + ', so at most ' + (100 * reachable / PEAK).toFixed(1) +
+        '% of peak compute is reachable. Prefilling the same context sits at intensity ' + S +
+        ', comfortably compute bound. Note that batching moves the decode point right but does not help attention, whose own intensity stays near one.');
+    }
+
+    bIn.addEventListener('input', render);
+    sIn.addEventListener('input', render);
+    hIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
