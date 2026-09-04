@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Column-parallel and row-parallel linear layers, the conjugate pair of identity and all-reduce operators, why an MLP and an attention block each need only one all-reduce, sequence parallelism for the norms, and why tensor parallelism must stay inside a node.">
+  <title>Tensor Parallelism | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 10 &middot; Chapters 21&ndash;22</span></div>
+      <h1>Tensor Parallelism</h1>
+      <p class="post-meta">September 2026 &middot; 27 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Split the matrix, not the model.</strong> Pipeline parallelism cuts between layers; tensor parallelism cuts <em>inside</em> a single matrix multiplication. The whole design reduces to one question: after you split a matmul, is the result already correct, or is it a partial sum that must be added up?</div>
+
+      <h2 id="two-ways">Two ways to split one matmul</h2>
+      <p>Take $Y=XA$ with $X\in\mathbb R^{n\times k}$ and $A\in\mathbb R^{k\times d}$. There are exactly two axes of $A$ to cut, and they behave completely differently.</p>
+
+      <h3 id="column">Column parallel</h3>
+      <p>Split $A$ by columns, $A=[A_1\ A_2]$. Each rank holds all of $X$ and one column block:</p>
+      <div class="key-eq">$$Y=X[A_1\ A_2]=[\,XA_1\ \ XA_2\,]=[\,Y_1\ \ Y_2\,].$$</div>
+      <p>Rank $i$ computes $Y_i$, a genuine slice of the answer — not a partial sum. <strong>No forward communication.</strong> The output is left sharded along its last dimension.</p>
+
+      <h3 id="row">Row parallel</h3>
+      <p>Split $B$ by rows and $X$ by columns to match:</p>
+      <div class="key-eq">$$Y=[\,X_1\ X_2\,]\begin{bmatrix}B_1\\B_2\end{bmatrix}=X_1B_1+X_2B_2.$$</div>
+      <p>Now rank $i$ produces $X_iB_i$, which is a <strong>partial sum</strong> of full shape. The pieces must be added: one all-reduce.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Column parallel</h3><p>Input replicated, output sharded. Forward: nothing. Backward: all-reduce the input gradient, because $X$ was replicated and replication is a fan-out.</p></div>
+        <div class="dt-panel"><h3>Row parallel</h3><p>Input sharded, output replicated. Forward: all-reduce. Backward: nothing, because each rank contributed one addend.</p></div>
+      </div>
+      <div class="dt-definition"><strong>The conjugate pair.</strong> These are the first two rows of the duality table from the autograd note, wrapped as autograd functions. Megatron calls them $f$ and $\bar f$:
+      <div class="key-eq">$$f:\ \text{identity forward},\ \text{all-reduce backward};\qquad \bar f:\ \text{all-reduce forward},\ \text{identity backward}.$$</div>
+      Implement those two and every sharded layer differentiates correctly with no further thought.</div>
+
+      <h2 id="mlp">Why an MLP needs only one all-reduce</h2>
+      <p>Naively you would expect a collective after each of the two matmuls. Chaining the two layouts avoids one of them entirely.</p>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p>Make the <strong>up projection column parallel</strong>. Input is replicated, output is sharded along the hidden dimension. No communication.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p>Apply the nonlinearity <strong>on the shard</strong>. This is the crucial step: SiLU and the gating multiply are elementwise, so $\phi$ applied to a slice equals the slice of $\phi$ applied to the whole. No communication, and no approximation.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p>Make the <strong>down projection row parallel</strong>. Its input is already sharded exactly the way row-parallel wants it. One all-reduce produces the replicated output.</p>
+        </div></div>
+      </div>
+      <div class="key-eq">$$\text{MLP}=\underbrace{\bar f}_{\text{one all-reduce}}\Big(W_{\text{down}}^{(i)}\ \phi\big(W_{\text{gate}}^{(i)}x\big)\odot W_{\text{up}}^{(i)}x\Big).$$</div>
+      <div class="dt-warning"><strong>An elementwise nonlinearity is what makes this work.</strong> If the activation mixed hidden units — a softmax or a normalization across the hidden dimension — the shard would be wrong and a collective would be required in the middle. This is precisely why the normalization layers get special treatment below.</div>
+
+      <h2 id="attention">Attention splits along heads</h2>
+      <p>Attention is even more convenient, because it is <em>already</em> parallel: heads never interact until the output projection.</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Tensor</th><th>Layout</th><th>Communication</th></tr></thead><tbody>
+        <tr><td>$W_Q,W_K,W_V$</td><td>column parallel — each rank owns $h/P$ whole heads</td><td>none</td></tr>
+        <tr><td>softmax and $\text{scores}\cdot V$</td><td>entirely within a head, so entirely within a rank</td><td>none</td></tr>
+        <tr><td>$W_O$</td><td>row parallel</td><td>one all-reduce</td></tr>
+      </tbody></table></div>
+      <p>Each rank runs a complete, correct subset of the heads. Softmax normalizes over key positions, not over heads, so no cross-rank reduction is needed inside attention at all.</p>
+      <div class="dt-definition"><strong>Two all-reduces per block, forward.</strong> One at the end of attention, one at the end of the MLP. With the backward pass adding a mirrored pair, a transformer block costs four all-reduces of the activation tensor per training step.</div>
+
+      <h2 id="cost">The bandwidth bill</h2>
+      <p>Each all-reduce moves $2\frac{P-1}{P}$ times the activation tensor $(B,S,d)$ per rank. For a 70B-class model — $d=8192$, $L=80$ — with $S=4096$ and one sequence per rank in BF16, the activation is 64&nbsp;MiB and the arithmetic is brutal:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>$P$</th><th>Per all-reduce</th><th>Per block (4 collectives)</th><th>Whole model per step</th><th>On NVLink</th><th>On InfiniBand</th></tr></thead><tbody>
+        <tr><td>2</td><td>64 MiB</td><td>256 MiB</td><td>20.0 GiB</td><td>24 ms</td><td>429 ms</td></tr>
+        <tr><td>4</td><td>96 MiB</td><td>384 MiB</td><td>30.0 GiB</td><td>36 ms</td><td>644 ms</td></tr>
+        <tr><td>8</td><td>112 MiB</td><td>448 MiB</td><td>35.0 GiB</td><td>42 ms</td><td>752 ms</td></tr>
+      </tbody></table></div>
+      <div class="dt-warning"><strong>This is why tensor parallelism never crosses a node boundary.</strong> The same traffic takes 42&nbsp;ms on a 900&nbsp;GB/s intra-node fabric and 752&nbsp;ms on a 50&nbsp;GB/s network — an 18-fold penalty, paid on every step. Tensor parallel groups are sized to the number of accelerators sharing a fast interconnect, which in practice means 8.</div>
+      <p>Note also that this communication is <em>not</em> overlappable in the way DDP's gradient all-reduce is. It sits directly between two dependent matmuls: the next layer cannot start until the sum arrives. Tensor parallelism buys memory with latency you cannot hide.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="tp-p">TP degree $P$</label><input id="tp-p" type="range" min="1" max="8" step="1" value="8"><strong id="tp-p-value"></strong>
+          <label for="tp-seq">sequence $S$</label><input id="tp-seq" type="range" min="9" max="15" step="1" value="12"><strong id="tp-seq-value"></strong>
+          <label for="tp-sp">sequence parallel</label><input id="tp-sp" type="range" min="0" max="1" step="1" value="0"><strong id="tp-sp-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="tp-svg" class="dt-svg" viewBox="0 0 660 260" role="img" aria-label="Data flow through a tensor-parallel transformer block, showing which tensors are replicated and which are sharded, and where the collectives sit."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="tp-weights"></strong><span>weight memory / rank</span></div>
+          <div class="dt-metric"><strong id="tp-volume"></strong><span>TP traffic / step</span></div>
+          <div class="dt-metric"><strong id="tp-nvlink"></strong><span>ms on NVLink</span></div>
+          <div class="dt-metric"><strong id="tp-act"></strong><span>norm activation / rank</span></div>
+        </div>
+        <div class="dt-status" id="tp-status"></div>
+        <figcaption>A 70B-class model: $d=8192$, $L=80$, BF16, one sequence per rank. Toggling sequence parallelism replaces each all-reduce with a reduce-scatter and an all-gather, which moves the same bytes but shards the tensors between blocks.</figcaption>
+      </figure>
+
+      <h2 id="sequence">Sequence parallelism</h2>
+      <p>There is a gap in the scheme above. Between the two all-reduces, the tensor is <em>replicated</em> — every rank holds the identical full $(B,S,d)$ activation. The normalization layers, residual adds and dropout all operate on that replicated tensor, so each rank stores an identical copy and performs identical work. With $P=8$ that is eight duplicated copies of the largest activations in the model.</p>
+      <p>These operations are elementwise across the hidden dimension but independent across <em>sequence positions</em>, so they can be sharded along $S$ instead. The transitions then become:</p>
+      <div class="dt-flow">
+        <div class="dt-flow-node"><strong>Norm region</strong><span>sharded along sequence</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>all-gather</strong><span>assemble full sequence for the matmuls</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>reduce-scatter</strong><span>sum partials and reshard by sequence</span></div>
+      </div>
+      <div class="dt-definition"><strong>Same bytes, less memory.</strong> An all-reduce <em>is</em> a reduce-scatter plus an all-gather, so splitting it in two and doing useful work in between costs nothing extra in bandwidth. The activations in the norm regions shrink by $P$. This is one of the rare optimizations that is simply free.</div>
+
+      <h2 id="edges">The two edges of the model</h2>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Vocabulary-parallel embedding</h3><p>Shard the $V\times d$ table by vocabulary. Each rank looks up only the ids it owns and returns zeros elsewhere; one all-reduce assembles the true embedding. The table is often the single largest tensor, so this matters.</p></div>
+        <div class="dt-panel"><h3>Vocabulary-parallel cross-entropy</h3><p>The logits tensor is $(B,S,V)$ — for a 128k vocabulary it can exceed the model itself. Keep it sharded and compute the loss in place: all-reduce the per-shard maximum for numerical stability, then the sum of exponentials. Two scalars per token cross the wire instead of the whole logit tensor.</p></div>
+      </div>
+
+      <h2 id="rules">Rules of thumb</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Question</th><th>Answer</th></tr></thead><tbody>
+        <tr><td>How large should the TP group be?</td><td>The number of devices on one fast fabric, typically 8. Never larger.</td></tr>
+        <tr><td>Can $P$ exceed the head count?</td><td>No. Heads are the unit of splitting; $h$ must be divisible by $P$.</td></tr>
+        <tr><td>Should I enable sequence parallelism?</td><td>Yes. Same traffic, strictly less activation memory.</td></tr>
+        <tr><td>TP or FSDP for memory?</td><td>FSDP first — its traffic overlaps with compute. Reach for TP when a single layer's activations or weights do not fit.</td></tr>
+        <tr><td>Where does TP sit in the mesh?</td><td>Innermost, on the fastest axis. This is the ordering rule the device-mesh note formalizes.</td></tr>
+      </tbody></table></div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Column parallel shards the output and needs nothing forward; row parallel produces partial sums and needs an all-reduce. Chain them so each MLP and each attention block costs exactly one collective, split that collective in two to get sequence parallelism for free, and keep the whole group on one fast interconnect.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Show that column parallel needs no forward collective and derive its backward collective from the fan-out rule. <em>derivation</em></li>
+        <li>Explain why the nonlinearity between the two MLP matmuls needs no communication, and what would change for a softmax. <em>reasoning</em></li>
+        <li>Compute the TP traffic per step for $d=4096$, $L=32$, $S=8192$, $P=8$. <em>calculation</em></li>
+        <li>Show that sequence parallelism moves the same bytes as plain tensor parallelism. <em>derivation</em></li>
+        <li>Describe vocabulary-parallel cross-entropy and the two reductions it needs. <em>design</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="pipeline-parallelism.html"><span>Previous</span><span>&#8592; Pipeline Parallelism</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var pIn = D.byId('tp-p'), sIn = D.byId('tp-seq'), spIn = D.byId('tp-sp'), svg = D.byId('tp-svg');
+    if (!pIn || !sIn || !spIn || !svg) return;
+
+    var Dm = 8192, LAYERS = 80, BYTES = 2, N = 70e9, NVLINK = 900e9;
+
+    function render() {
+      var P = Number(pIn.value), S = Math.pow(2, Number(sIn.value)), sp = Number(spIn.value) === 1;
+      var act = S * Dm * BYTES;
+      var perAR = P === 1 ? 0 : 2 * (P - 1) / P * act;
+      var volume = perAR * 4 * LAYERS;
+      var weights = 16 * N / P;
+      var normAct = sp ? act / P : act;
+
+      D.clear(svg);
+      D.label(svg, 330, 22, 'one tensor-parallel block' + (sp ? ' with sequence parallelism' : ''),
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      var stages = sp
+        ? [
+            { n: 'norm', t: 'S/P x d', c: D.COLOR.green },
+            { n: 'all-gather', t: 'collective', c: D.COLOR.gold },
+            { n: 'QKV + attn', t: 'h/P heads', c: D.COLOR.blue },
+            { n: 'reduce-scatter', t: 'collective', c: D.COLOR.gold },
+            { n: 'norm', t: 'S/P x d', c: D.COLOR.green },
+            { n: 'all-gather', t: 'collective', c: D.COLOR.gold },
+            { n: 'MLP', t: 'd_ff/P', c: D.COLOR.blue },
+            { n: 'reduce-scatter', t: 'collective', c: D.COLOR.gold }
+          ]
+        : [
+            { n: 'norm', t: 'S x d replicated', c: D.COLOR.red },
+            { n: 'QKV + attn', t: 'h/P heads', c: D.COLOR.blue },
+            { n: 'all-reduce', t: 'collective', c: D.COLOR.gold },
+            { n: 'norm', t: 'S x d replicated', c: D.COLOR.red },
+            { n: 'MLP', t: 'd_ff/P', c: D.COLOR.blue },
+            { n: 'all-reduce', t: 'collective', c: D.COLOR.gold }
+          ];
+
+      var X0 = 24, W = 612, bw = W / stages.length;
+      stages.forEach(function (st, i) {
+        var x = X0 + i * bw;
+        D.rect(svg, x, 54, bw - 6, 56, st.c, '#fff', 6);
+        D.label(svg, x + (bw - 6) / 2, 78, st.n, '#fff', 10, 'middle', 800);
+        D.label(svg, x + (bw - 6) / 2, 94, st.t, 'rgba(255,255,255,0.85)', 8.5, 'middle', 600);
+        if (i < stages.length - 1) D.label(svg, x + bw - 3, 84, '>', D.COLOR.muted, 12, 'middle', 800);
+      });
+
+      D.label(svg, 330, 138, sp
+        ? 'activations between blocks are sharded along the sequence, so no tensor is ever fully replicated'
+        : 'activations between the collectives are replicated on all ' + P + ' ranks', D.COLOR.muted, 10.5);
+
+      var barY = 166, barW = 520, bx = 70;
+      D.label(svg, bx - 10, barY + 14, 'norm act.', D.COLOR.ink, 10.5, 'end', 700);
+      D.rect(svg, bx, barY, barW * (sp ? 1 / P : 1), 20, sp ? D.COLOR.green : D.COLOR.red, '#fff', 4);
+      D.label(svg, bx + barW * (sp ? 1 / P : 1) + 8, barY + 14, D.bytes(normAct), D.COLOR.ink, 10.5, 'start', 800);
+      D.label(svg, 330, barY + 46, 'activation memory held per rank in the normalization regions',
+        D.COLOR.muted, 10.5);
+
+      D.setText('tp-p-value', String(P));
+      D.setText('tp-seq-value', (S / 1024) + 'k');
+      D.setText('tp-sp-value', sp ? 'on' : 'off');
+      D.setText('tp-weights', D.bytes(weights));
+      D.setText('tp-volume', D.bytes(volume));
+      D.setText('tp-nvlink', (volume / NVLINK * 1000).toFixed(0));
+      D.setText('tp-act', D.bytes(normAct));
+      D.setText('tp-status', P === 1
+        ? 'With TP degree 1 there is no sharding and no collective: this is the single-device case, needing ' +
+          D.bytes(weights) + ' of model state on one rank.'
+        : 'Splitting across ' + P + ' ranks cuts weight memory to ' + D.bytes(weights) +
+          ' per rank but costs ' + D.bytes(volume) + ' of collective traffic per step, about ' +
+          (volume / NVLINK * 1000).toFixed(0) + ' ms even on a 900 GB/s intra-node fabric and roughly ' +
+          (volume / 50e9 * 1000).toFixed(0) + ' ms over a 50 GB/s network. That gap is why the TP group never spans nodes. ' +
+          (sp
+            ? 'Sequence parallelism is on, so each all-reduce is split into a reduce-scatter and an all-gather. The byte count is unchanged, but the normalization activations drop to ' +
+              D.bytes(normAct) + ' per rank.'
+            : 'Sequence parallelism is off, so all ' + P + ' ranks each hold an identical ' + D.bytes(act) +
+              ' copy of the activations around the norms. Turning it on removes that duplication for free.'));
+    }
+
+    pIn.addEventListener('input', render);
+    sIn.addEventListener('input', render);
+    spIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
