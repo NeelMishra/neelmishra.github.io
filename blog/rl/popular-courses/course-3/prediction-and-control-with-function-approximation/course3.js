@@ -1216,4 +1216,90 @@
     sigmaInput.addEventListener('input', render);
     render();
   })();
+
+  (function initAverageReward() {
+    var gammaInput = byId('avg-gamma');
+    var nInput = byId('avg-n');
+    var svg = byId('avg-svg');
+    if (!gammaInput || !nInput || !svg) return;
+
+    var LEFT = 68, RIGHT = 596, TOP = 40, BOTTOM = 208;
+    var Y_MAX = 2.3;
+
+    function toX(gamma) { return LEFT + (RIGHT - LEFT) * gamma; }
+    function toY(ratio) { return BOTTOM - (BOTTOM - TOP) * Math.min(ratio, Y_MAX) / Y_MAX; }
+
+    function format(value) {
+      if (!isFinite(value)) return 'infinite';
+      if (value >= 10000) return value.toExponential(1);
+      if (value >= 100) return value.toFixed(0);
+      return value.toFixed(2);
+    }
+
+    function render() {
+      var gamma = Number(gammaInput.value);
+      var n = Number(nInput.value);
+      var denominator = 1 - Math.pow(gamma, n);
+      var vL = denominator <= 1e-12 ? Infinity : 1 / denominator;
+      var vR = denominator <= 1e-12 ? Infinity : 2 * Math.pow(gamma, n - 1) / denominator;
+      var ratio = 2 * Math.pow(gamma, n - 1);
+      var threshold = Math.pow(2, -1 / (n - 1));
+
+      clear(svg);
+      label(svg, (LEFT + RIGHT) / 2, 24, 'how much better the right ring looks', COLOR.ink, 12.5, 'middle', 800);
+
+      for (var tick = 0; tick <= 2; tick += 0.5) {
+        var y = toY(tick);
+        line(svg, LEFT, y, RIGHT, y, COLOR.line, 1);
+        label(svg, LEFT - 10, y + 4, tick.toFixed(1), COLOR.muted, 10, 'end');
+      }
+      line(svg, LEFT, TOP - 6, LEFT, BOTTOM, COLOR.gray, 1.2);
+      line(svg, LEFT, BOTTOM, RIGHT, BOTTOM, COLOR.gray, 1.2);
+      for (var g = 0; g <= 1.0001; g += 0.25) {
+        label(svg, toX(g), BOTTOM + 18, g.toFixed(2), COLOR.muted, 10);
+        line(svg, toX(g), BOTTOM, toX(g), BOTTOM + 5, COLOR.gray, 1);
+      }
+      label(svg, (LEFT + RIGHT) / 2, BOTTOM + 38, 'discount factor', COLOR.muted, 11);
+
+      line(svg, LEFT, toY(2), RIGHT, toY(2), COLOR.green, 2.2);
+      label(svg, RIGHT + 6, toY(2) + 4, 'average reward: 2.0', COLOR.green, 10.5, 'start', 800);
+      line(svg, LEFT, toY(1), RIGHT, toY(1), COLOR.gray, 1.6, '5 4');
+      label(svg, RIGHT + 6, toY(1) + 4, 'tie', COLOR.muted, 10.5, 'start', 700);
+
+      var path = '';
+      for (var i = 0; i <= 240; i++) {
+        var gx = i / 240;
+        var value = 2 * Math.pow(gx, n - 1);
+        path += (i === 0 ? 'M' : 'L') + toX(gx).toFixed(1) + ' ' + toY(value).toFixed(1);
+      }
+      svg.appendChild(svgEl('path', {
+        d: path, fill: 'none', stroke: COLOR.blue, 'stroke-width': 2.2
+      }));
+      label(svg, toX(0.42), toY(2 * Math.pow(0.42, n - 1)) - 10, 'discounted ratio', COLOR.blue, 10.5, 'start', 800);
+
+      line(svg, toX(threshold), TOP - 6, toX(threshold), BOTTOM, COLOR.gold, 1.6, '4 3');
+      label(svg, toX(threshold), TOP - 12, 'tipping point', COLOR.gold, 10.5, 'middle', 800);
+
+      line(svg, toX(gamma), TOP - 6, toX(gamma), BOTTOM, COLOR.red, 1.4);
+      svg.appendChild(svgEl('circle', {
+        cx: toX(gamma), cy: toY(ratio), r: 5, fill: COLOR.red, stroke: '#fff', 'stroke-width': 1.6
+      }));
+
+      setText('avg-gamma-value', gamma.toFixed(3));
+      setText('avg-n-value', String(n));
+      setText('avg-vl', format(vL));
+      setText('avg-vr', format(vR));
+      setText('avg-threshold', threshold.toFixed(4));
+      setText('avg-status', (ratio > 1
+        ? 'At this discount factor the right ring wins: its value is ' + ratio.toFixed(2) + ' times the left ring\u2019s.'
+        : 'At this discount factor the left ring wins: the right ring is worth only ' + ratio.toFixed(2) +
+          ' times as much, because its reward arrives ' + (n - 1) + ' steps later.') +
+        ' The tipping point for ' + n + '-step rings is gamma = ' + threshold.toFixed(4) +
+        '. The average-reward objective always rates the right ring twice as good, at every gamma and every ring length.');
+    }
+
+    gammaInput.addEventListener('input', render);
+    nInput.addEventListener('input', render);
+    render();
+  })();
 })();
