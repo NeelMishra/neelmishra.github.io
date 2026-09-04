@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Compress the KV cache into a low-rank latent, absorb the up-projections into the query and output matrices so keys and values are never materialized, discover why RoPE breaks the trick, and fix it with a decoupled positional path.">
+  <title>Multi-head Latent Attention | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 5 &middot; Chapters 7&ndash;10</span></div>
+      <h1>Multi-head Latent Attention</h1>
+      <p class="post-meta">September 2026 &middot; 30 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>GQA shrinks the cache by sharing heads. MLA shrinks it by changing what you store.</strong> Cache a single low-rank latent vector per token instead of keys and values, and reconstruct everything else from it — or better, never reconstruct it at all, because the reconstruction matrices can be folded into the weights beside them.</div>
+
+      <h2 id="starting-point">Where we left off</h2>
+      <p>The previous note established that decoding is bandwidth-bound and that the KV cache is the one tensor batching cannot amortize. GQA attacks this by reducing $h_{kv}$, which works but costs quality: query heads are forced to share keys and values, so they lose the ability to attend on genuinely different criteria.</p>
+      <p>MLA asks a different question. Instead of <em>fewer</em> keys and values, can we store something <em>smaller</em> from which all the per-head keys and values can be recovered?</p>
+
+      <h2 id="lowrank">Step 1: a low-rank latent</h2>
+      <p>Introduce a down-projection to a latent of dimension $d_c$, much smaller than the full $h\,d_h$ that keys and values would occupy:</p>
+      <div class="key-eq">$$\mathbf c_t=W^{DKV}\mathbf h_t\in\mathbb R^{d_c},$$</div>
+      <p>and reconstruct per-head keys and values from it with two up-projections:</p>
+      <div class="key-eq">$$\mathbf k_t=W^{UK}\mathbf c_t,\qquad \mathbf v_t=W^{UV}\mathbf c_t.$$</div>
+      <div class="dt-definition"><strong>Only $\mathbf c_t$ is cached.</strong> Keys and values become derived quantities. Where MHA stores $2h\,d_h$ numbers per token per layer, MLA stores $d_c$. With $h=128$, $d_h=128$ and $d_c=512$ that is 32768 versus 512 — a 64-fold reduction before we have done anything clever.</div>
+      <p>Naively this seems to just move the cost: you saved memory but now pay two up-projections on every decode step, for every cached token. That would be a bad trade. The next step is what makes it a good one.</p>
+
+      <h2 id="absorption">Step 2: absorb the up-projections</h2>
+      <p>Look at what the attention score actually needs. For query head $i$ at position $t$ against cached position $j$:</p>
+      <div class="key-eq">$$\text{score}_{ij}=\mathbf q_{t,i}^\top\mathbf k_{j,i}=\big(W^{UQ}_i\mathbf h_t\big)^\top\big(W^{UK}_i\mathbf c_j\big).$$</div>
+      <p>Matrix multiplication is associative, so regroup:</p>
+      <div class="key-eq">$$\boxed{\mathbf q_{t,i}^\top W^{UK}_i\mathbf c_j=\Big(\underbrace{W^{UK\top}_i W^{UQ}_i}_{\text{fold once, offline}}\mathbf h_t\Big)^{\!\top}\mathbf c_j.}$$</div>
+      <div class="dt-definition"><strong>Weight absorption.</strong> $W^{UK}$ never has to be applied to the cache. Pre-multiply it into the query projection once, and the query is produced directly in <em>latent space</em>. Attention then becomes a dot product between an absorbed query and the raw cached latent. Keys are never materialized at all.</div>
+      <p>The same trick works on the output side. The attention output is $W^O\sum_j a_j\mathbf v_j=W^O W^{UV}\sum_j a_j\mathbf c_j$, so $W^{UV}$ folds into $W^O$ and values are never materialized either:</p>
+      <div class="key-eq">$$\text{out}=\big(W^OW^{UV}\big)\sum_j a_j\,\mathbf c_j.$$</div>
+      <div class="dt-flow">
+        <div class="dt-flow-node"><strong>Naive MLA</strong><span>cache $\mathbf c$, expand to $\mathbf k,\mathbf v$ every step</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Absorbed MLA</strong><span>fold $W^{UK}$ into $W^{UQ}$, $W^{UV}$ into $W^O$</span></div>
+        <div class="dt-flow-arrow">&#8594;</div>
+        <div class="dt-flow-node"><strong>Result</strong><span>attend directly against $\mathbf c$</span></div>
+      </div>
+      <div class="dt-warning"><strong>Absorption is an inference-time reassociation, not a different model.</strong> The mathematics is identical; only the order of multiplication changes. During training the unabsorbed form is usually preferred, because keeping the factors separate is what makes the projections low-rank and cheap in the first place. Absorbing produces a larger dense matrix that is only worth forming once, ahead of serving.</div>
+
+      <h2 id="rope-problem">Step 3: RoPE breaks it</h2>
+      <p>Now add rotary embeddings, and the whole construction falls apart. RoPE inserts a position-dependent rotation between the query and the key:</p>
+      <div class="key-eq">$$\text{score}_{ij}=\big(\mathbf R_t\mathbf q_{t,i}\big)^\top\big(\mathbf R_j\mathbf k_{j,i}\big)=\mathbf q_{t,i}^\top\,\mathbf R_{j-t}\,W^{UK}_i\mathbf c_j.$$</div>
+      <p>The offending object is $\mathbf R_{j-t}W^{UK}_i$. To absorb $W^{UK}$ into the query we would have to precompute this product — but it depends on the <em>relative position</em> $j-t$, which is different for every query-key pair and changes as generation proceeds.</p>
+      <div class="dt-definition"><strong>The conflict, stated plainly.</strong> Absorption needs a position-independent matrix sitting between $\mathbf q$ and $\mathbf c$. RoPE deliberately puts a position-<em>dependent</em> one there. You can have low-rank caching or you can have rotary positions applied to the compressed keys, but not both.</div>
+      <p>Three ways out present themselves, and two are bad:</p>
+      <div class="dt-three-col">
+        <div class="dt-panel"><h3>Drop RoPE</h3><p>Loses the relative-position property that makes long context work. Not acceptable.</p></div>
+        <div class="dt-panel"><h3>Give up absorption</h3><p>Expand $\mathbf k$ from $\mathbf c$ at every step. Restores the compute cost that compression was supposed to avoid.</p></div>
+        <div class="dt-panel"><h3>Split the head</h3><p>Carry position in a separate small subspace that is never compressed. This is the answer.</p></div>
+      </div>
+
+      <h2 id="decoupled">Step 4: decoupled RoPE</h2>
+      <p>Partition each head into two concatenated pieces with different jobs:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Piece</th><th>Width</th><th>Source</th><th>RoPE?</th><th>Cached as</th></tr></thead><tbody>
+        <tr><td>Content (&ldquo;nope&rdquo;)</td><td>$d_h$</td><td>up-projected from the latent $\mathbf c_t$</td><td>no</td><td>the latent $\mathbf c_t$, shared by all heads</td></tr>
+        <tr><td>Positional (&ldquo;rope&rdquo;)</td><td>$d_h^R$</td><td>a separate small projection of $\mathbf h_t$</td><td>yes</td><td>$\mathbf k^R_t$, a single vector shared by all heads</td></tr>
+      </tbody></table></div>
+      <p>Because the score is a dot product over the concatenated head, it splits cleanly into two independent terms:</p>
+      <div class="key-eq">$$\text{score}_{ij}=\underbrace{\big(W^{UK\top}_iW^{UQ}_i\mathbf h_t\big)^{\!\top}\mathbf c_j}_{\text{content: absorbed, no RoPE}}\;+\;\underbrace{\big(\mathbf R_t\mathbf q^R_{t,i}\big)^{\!\top}\big(\mathbf R_j\mathbf k^R_j\big)}_{\text{positional: RoPE, uncompressed}}.$$</div>
+      <div class="dt-definition"><strong>Each half keeps what it needs.</strong> The content half never meets a rotation, so absorption is valid. The positional half is never compressed, so RoPE applies normally. And because $\mathbf k^R$ is shared across all heads — exactly the MQA idea, applied to a $d_h^R=64$ slice rather than a full head — the extra cache is negligible.</div>
+      <p>The per-token, per-layer cache is therefore</p>
+      <div class="key-eq">$$\boxed{d_c+d_h^R}$$</div>
+      <p>and with DeepSeek's choices $d_c=512$, $d_h^R=64$ that is <strong>576 numbers</strong>, against $2\cdot128\cdot128=32768$ for full multi-head attention with the same head count.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="mla-dc">latent $d_c$</label><input id="mla-dc" type="range" min="64" max="2048" step="64" value="512"><strong id="mla-dc-value"></strong>
+          <label for="mla-rope">$d_h^R$</label><input id="mla-rope" type="range" min="0" max="128" step="16" value="64"><strong id="mla-rope-value"></strong>
+          <label for="mla-ctx">context</label><input id="mla-ctx" type="range" min="10" max="18" step="1" value="13"><strong id="mla-ctx-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="mla-svg" class="dt-svg" viewBox="0 0 660 260" role="img" aria-label="Bar chart comparing per-token KV cache for multi-head attention, grouped-query attention and multi-head latent attention."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="mla-per-token"></strong><span>MLA numbers / token / layer</span></div>
+          <div class="dt-metric"><strong id="mla-ratio"></strong><span>smaller than MHA</span></div>
+          <div class="dt-metric"><strong id="mla-gqa"></strong><span>equivalent GQA groups</span></div>
+          <div class="dt-metric"><strong id="mla-total"></strong><span>cache at this context</span></div>
+        </div>
+        <div class="dt-status" id="mla-status"></div>
+        <figcaption>128 heads of width 128, 61 layers, BF16, one sequence. &ldquo;Equivalent GQA groups&rdquo; solves $2gd_h=d_c+d_h^R$ for $g$: the number of grouped-query groups that would cost the same cache.</figcaption>
+      </figure>
+
+      <h2 id="query-lowrank">A footnote: the query is compressed too</h2>
+      <p>The queries are not cached, so compressing them saves no memory. DeepSeek compresses them anyway, through a rank-1536 bottleneck, for a different reason: it cuts the <em>activation</em> memory held for the backward pass during training, and acts as a mild structural regularizer. It has no effect on inference cost.</p>
+
+      <h2 id="ledger">The full accounting</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Scheme</th><th>Cached per token per layer</th><th>Numbers</th><th>Quality</th></tr></thead><tbody>
+        <tr><td>MHA</td><td>$2h\,d_h$</td><td>32768</td><td>baseline</td></tr>
+        <tr><td>GQA, $h_{kv}=8$</td><td>$2h_{kv}d_h$</td><td>2048</td><td>slightly below MHA</td></tr>
+        <tr><td>MQA</td><td>$2d_h$</td><td>256</td><td>noticeably below MHA</td></tr>
+        <tr><td><strong>MLA</strong></td><td>$d_c+d_h^R$</td><td><strong>576</strong></td><td>reported at or above MHA</td></tr>
+      </tbody></table></div>
+      <p>The striking part is the last column. MQA and GQA buy their savings by removing capacity — heads genuinely share keys. MLA keeps every head's key and value distinct; it merely observes that they live in a low-dimensional subspace and stores the coordinates instead of the reconstruction. Compression without sharing is why the quality cost does not appear.</p>
+      <div class="dt-warning"><strong>MLA is not free.</strong> The absorbed matrices are larger and denser than the factors they replace, so parameter count and per-step FLOPs rise. That is a deliberate trade: decoding is bandwidth-bound, so spending FLOPs to save bytes moves you along the roofline in the direction you want. On a compute-bound workload the same trade would be a loss.</div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Cache a latent instead of keys and values; fold the up-projections into the query and output matrices so neither is ever materialized; and route position through a small uncompressed subspace so the rotation never sits between the query and the cache. Roughly 57 times less cache than MHA, without heads sharing anything.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Show that $\mathbf q^\top W^{UK}\mathbf c=(W^{UK\top}\mathbf q)^\top\mathbf c$ and say which property of matrix products you used. <em>derivation</em></li>
+        <li>Explain precisely why $\mathbf R_{j-t}W^{UK}$ cannot be precomputed. <em>reasoning</em></li>
+        <li>Compute the equivalent GQA group count for $d_c=512$, $d_h^R=64$, $d_h=128$. <em>calculation</em></li>
+        <li>Why is $\mathbf k^R$ shared across heads rather than given one vector per head? <em>design</em></li>
+        <li>Argue why MLA is a good trade for decoding but a poor one for prefill. <em>analysis</em></li>
+        <li>Implement both the absorbed and unabsorbed forms and assert they agree numerically. <em>implementation</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="kv-cache-and-arithmetic-intensity.html"><span>Previous</span><span>&#8592; The KV Cache &amp; Arithmetic Intensity</span></a><a class="next" href="autograd-and-the-math-of-distributed-training.html"><span>Next</span><span>Autograd &amp; the Math of Distributed Training &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var dcIn = D.byId('mla-dc'), ropeIn = D.byId('mla-rope'), ctxIn = D.byId('mla-ctx'), svg = D.byId('mla-svg');
+    if (!dcIn || !ropeIn || !ctxIn || !svg) return;
+
+    var HEADS = 128, DH = 128, LAYERS = 61, BYTES = 2;
+
+    function render() {
+      var dc = Number(dcIn.value), drope = Number(ropeIn.value), S = Math.pow(2, Number(ctxIn.value));
+      var mha = 2 * HEADS * DH;
+      var gqa8 = 2 * 8 * DH;
+      var mqa = 2 * DH;
+      var mla = dc + drope;
+      var rows = [
+        { name: 'MHA (h_kv = 128)', value: mha, color: D.COLOR.red },
+        { name: 'GQA (h_kv = 8)', value: gqa8, color: D.COLOR.gold },
+        { name: 'MQA (h_kv = 1)', value: mqa, color: D.COLOR.blue },
+        { name: 'MLA', value: mla, color: D.COLOR.green }
+      ];
+
+      D.clear(svg);
+      D.label(svg, 330, 24, 'numbers cached per token per layer (log scale)', D.COLOR.ink, 12.5, 'middle', 800);
+      var X0 = 168, X1 = 596, top = 48, rowH = 44;
+      var maxLog = Math.log10(Math.max(mha, mla) * 1.3);
+      var minLog = Math.log10(64);
+
+      rows.forEach(function (r, i) {
+        var y = top + i * rowH;
+        var w = (X1 - X0) * Math.max(0.02, (Math.log10(Math.max(r.value, 64)) - minLog) / (maxLog - minLog));
+        D.label(svg, X0 - 10, y + 20, r.name, D.COLOR.ink, 11.5, 'end', 700);
+        D.rect(svg, X0, y, w, 28, r.color, '#fff', 5);
+        D.label(svg, X0 + w + 8, y + 19, r.value.toLocaleString(), D.COLOR.ink, 11, 'start', 800);
+      });
+
+      var y2 = top + rows.length * rowH + 12;
+      D.rect(svg, X0, y2, (X1 - X0) * dc / (dc + drope) - 2, 18, 'rgba(10,143,106,0.35)', D.COLOR.green, 4);
+      D.rect(svg, X0 + (X1 - X0) * dc / (dc + drope), y2, (X1 - X0) * drope / (dc + drope), 18,
+        'rgba(58,123,213,0.4)', D.COLOR.blue, 4);
+      D.label(svg, X0 - 10, y2 + 13, 'MLA split', D.COLOR.ink, 11.5, 'end', 700);
+      D.label(svg, X0 + (X1 - X0) * dc / (dc + drope) / 2, y2 + 13, 'latent ' + dc, D.COLOR.green, 10, 'middle', 800);
+      if (drope > 0) D.label(svg, X0 + (X1 - X0) * (dc + drope / 2) / (dc + drope), y2 + 13,
+        'rope ' + drope, D.COLOR.blue, 10, 'middle', 800);
+
+      var totalBytes = mla * LAYERS * S * BYTES;
+      var mhaBytes = mha * LAYERS * S * BYTES;
+      D.setText('mla-dc-value', String(dc));
+      D.setText('mla-rope-value', String(drope));
+      D.setText('mla-ctx-value', (S / 1024) + 'k');
+      D.setText('mla-per-token', String(mla));
+      D.setText('mla-ratio', (mha / mla).toFixed(1) + 'x');
+      D.setText('mla-gqa', (mla / (2 * DH)).toFixed(2));
+      D.setText('mla-total', D.bytes(totalBytes));
+      D.setText('mla-status', 'Caching a ' + dc + '-wide latent plus a ' + drope +
+        '-wide shared rotary key costs ' + mla + ' numbers per token per layer, ' + (mha / mla).toFixed(1) +
+        'x less than multi-head attention and equivalent to grouped-query attention with ' +
+        (mla / (2 * DH)).toFixed(2) + ' groups. Over ' + LAYERS + ' layers and ' + (S / 1024) +
+        'k tokens that is ' + D.bytes(totalBytes) + ' instead of ' + D.bytes(mhaBytes) +
+        '. Setting the rotary width to zero would make absorption trivial but would remove positional information from attention entirely.');
+    }
+
+    dcIn.addEventListener('input', render);
+    ropeIn.addEventListener('input', render);
+    ctxIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
