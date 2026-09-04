@@ -9782,7 +9782,8 @@ var BLOG_TREE = [
                     name: 'week-4',
                     label: 'Week 4 &middot; Control with Approximation',
                     children: [
-                      { title: 'Episodic Sarsa with Function Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', 'rl/ppo/index.html'] }
+                      { title: 'Episodic Sarsa with Function Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-on-mountain-car.html'] },
+                      { title: 'Episodic Sarsa on Mountain Car', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-on-mountain-car.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-3/tile-coding-with-td.html'] }
                     ]
                   }
                 ]

@@ -812,4 +812,225 @@
     actionInput.addEventListener('input', render);
     render();
   })();
+
+  (function initMountainCar() {
+    var policyInput = byId('mcar-policy');
+    var stepInput = byId('mcar-step');
+    var svg = byId('mcar-svg');
+    if (!policyInput || !stepInput || !svg) return;
+
+    var P_MIN = -1.2, P_MAX = 0.6, V_MIN = -0.07, V_MAX = 0.07, GOAL = 0.5;
+    var NP = 60, NV = 60, HOLD = 4;
+
+    function physics(p, v, a) {
+      var nv = v + 0.001 * a - 0.0025 * Math.cos(3 * p);
+      if (nv < V_MIN) nv = V_MIN;
+      if (nv > V_MAX) nv = V_MAX;
+      var np = p + nv;
+      if (np < P_MIN) { np = P_MIN; nv = 0; }
+      return [np, nv];
+    }
+
+    function cellIndex(p, v) {
+      var i = Math.floor((p - P_MIN) / (P_MAX - P_MIN) * NP);
+      var j = Math.floor((v - V_MIN) / (V_MAX - V_MIN) * NV);
+      if (i < 0) i = 0; if (i > NP - 1) i = NP - 1;
+      if (j < 0) j = 0; if (j > NV - 1) j = NV - 1;
+      return i * NV + j;
+    }
+
+    // Optimal steps-to-goal on a discretised grid, by value iteration.
+    // Each action is held for HOLD environment steps so that a transition
+    // always leaves its own cell, which the raw one-step dynamics do not.
+    var cost = (function solve() {
+      var INF = Infinity;
+      var next = new Int32Array(NP * NV * 3);
+      for (var i = 0; i < NP; i++) {
+        var p0 = P_MIN + (i + 0.5) * (P_MAX - P_MIN) / NP;
+        for (var j = 0; j < NV; j++) {
+          var v0 = V_MIN + (j + 0.5) * (V_MAX - V_MIN) / NV;
+          for (var k = 0; k < 3; k++) {
+            var p = p0, v = v0, done = false;
+            for (var h = 0; h < HOLD; h++) {
+              var s = physics(p, v, k - 1);
+              p = s[0]; v = s[1];
+              if (p >= GOAL) { done = true; break; }
+            }
+            next[(i * NV + j) * 3 + k] = done ? -1 : cellIndex(p, v);
+          }
+        }
+      }
+      var J = new Float64Array(NP * NV);
+      for (var c = 0; c < J.length; c++) J[c] = INF;
+      for (var sweep = 0; sweep < 400; sweep++) {
+        var changed = false;
+        for (var cell = 0; cell < NP * NV; cell++) {
+          var best = INF;
+          for (var a = 0; a < 3; a++) {
+            var n = next[cell * 3 + a];
+            var value = n === -1 ? HOLD : HOLD + J[n];
+            if (value < best) best = value;
+          }
+          if (best < J[cell] - 1e-9) { J[cell] = best; changed = true; }
+        }
+        if (!changed) break;
+      }
+      return J;
+    })();
+
+    var maxCost = 0;
+    for (var c = 0; c < cost.length; c++) {
+      if (isFinite(cost[c]) && cost[c] > maxCost) maxCost = cost[c];
+    }
+
+    var POLICIES = [
+      { name: 'full throttle right', act: function () { return 1; } },
+      { name: 'accelerate along the velocity', act: function (p, v) { return v >= 0 ? 1 : -1; } }
+    ];
+
+    var trajectories = POLICIES.map(function (policy) {
+      var p = -0.5, v = 0, path = [[p, v]], reached = null;
+      for (var t = 0; t < 400; t++) {
+        var s = physics(p, v, policy.act(p, v));
+        p = s[0]; v = s[1];
+        path.push([p, v]);
+        if (p >= GOAL) { reached = t + 1; break; }
+      }
+      return { path: path, reached: reached };
+    });
+
+    var HILL_X = 24, HILL_W = 268, HILL_Y = 46, HILL_H = 176;
+    var MAP_X = 372, MAP_W = 248, MAP_Y = 46, MAP_H = 176;
+
+    function hillPoint(p) {
+      var x = HILL_X + HILL_W * (p - P_MIN) / (P_MAX - P_MIN);
+      var y = HILL_Y + HILL_H * (1 - (Math.sin(3 * p) + 1) / 2);
+      return [x, y];
+    }
+
+    function mapPoint(p, v) {
+      return [
+        MAP_X + MAP_W * (p - P_MIN) / (P_MAX - P_MIN),
+        MAP_Y + MAP_H * (1 - (v - V_MIN) / (V_MAX - V_MIN))
+      ];
+    }
+
+    function heatColor(value) {
+      if (!isFinite(value)) return '#eef1f0';
+      var t = value / maxCost;
+      var r = Math.round(58 + (184 - 58) * t);
+      var g = Math.round(123 + (58 - 123) * t);
+      var b = Math.round(213 + (58 - 213) * t);
+      return 'rgb(' + r + ',' + g + ',' + b + ')';
+    }
+
+    var staticLayer = null;
+    var dynamicLayer = null;
+
+    function buildStatic(layer) {
+      label(layer, HILL_X + HILL_W / 2, 24, 'the hill', COLOR.ink, 12.5, 'middle', 800);
+      label(layer, MAP_X + MAP_W / 2, 24, 'optimal steps to the flag', COLOR.ink, 12.5, 'middle', 800);
+
+      var cellW = MAP_W / NP, cellH = MAP_H / NV;
+      for (var i = 0; i < NP; i++) {
+        for (var j = 0; j < NV; j++) {
+          layer.appendChild(svgEl('rect', {
+            x: MAP_X + i * cellW,
+            y: MAP_Y + MAP_H - (j + 1) * cellH,
+            width: cellW + 0.4,
+            height: cellH + 0.4,
+            fill: heatColor(cost[i * NV + j]),
+            opacity: 0.78
+          }));
+        }
+      }
+      layer.appendChild(svgEl('rect', {
+        x: MAP_X, y: MAP_Y, width: MAP_W, height: MAP_H,
+        fill: 'none', stroke: COLOR.line, 'stroke-width': 1
+      }));
+      label(layer, MAP_X + MAP_W / 2, MAP_Y + MAP_H + 16, 'position', COLOR.muted, 10.5);
+      label(layer, MAP_X - 8, MAP_Y + MAP_H / 2, 'velocity', COLOR.muted, 10.5, 'end');
+      label(layer, MAP_X + MAP_W / 2, MAP_Y + MAP_H + 32,
+        'blue = few steps left, red = many', COLOR.muted, 10);
+
+      var hillPath = '';
+      for (var t = 0; t <= 120; t++) {
+        var pp = P_MIN + (P_MAX - P_MIN) * t / 120;
+        var point = hillPoint(pp);
+        hillPath += (t === 0 ? 'M' : 'L') + point[0].toFixed(1) + ' ' + point[1].toFixed(1);
+      }
+      layer.appendChild(svgEl('path', {
+        d: hillPath, fill: 'none', stroke: COLOR.gray, 'stroke-width': 2, 'stroke-linecap': 'round'
+      }));
+
+      var flag = hillPoint(GOAL);
+      line(layer, flag[0], flag[1], flag[0], flag[1] - 26, COLOR.green, 2);
+      layer.appendChild(svgEl('polygon', {
+        points: flag[0] + ',' + (flag[1] - 26) + ' ' + (flag[0] + 16) + ',' + (flag[1] - 21) + ' ' + flag[0] + ',' + (flag[1] - 16),
+        fill: COLOR.green
+      }));
+      label(layer, HILL_X + HILL_W / 2, MAP_Y + MAP_H + 32, 'the flag sits at position 0.5', COLOR.muted, 10);
+    }
+
+    function render() {
+      var which = Number(policyInput.value);
+      var traj = trajectories[which];
+      var cursor = Math.min(Number(stepInput.value), traj.path.length - 1);
+      var state = traj.path[cursor];
+
+      if (!staticLayer) {
+        staticLayer = svgEl('g', {});
+        svg.appendChild(staticLayer);
+        buildStatic(staticLayer);
+        dynamicLayer = svgEl('g', {});
+        svg.appendChild(dynamicLayer);
+      }
+      clear(dynamicLayer);
+
+      var trace = '';
+      for (var s = 0; s <= cursor; s++) {
+        var hp = hillPoint(traj.path[s][0]);
+        trace += (s === 0 ? 'M' : 'L') + hp[0].toFixed(1) + ' ' + hp[1].toFixed(1);
+      }
+      dynamicLayer.appendChild(svgEl('path', {
+        d: trace, fill: 'none', stroke: COLOR.gold, 'stroke-width': 1.6, opacity: 0.75
+      }));
+
+      var car = hillPoint(state[0]);
+      dynamicLayer.appendChild(svgEl('circle', {
+        cx: car[0], cy: car[1] - 6, r: 6.5, fill: COLOR.red, stroke: '#fff', 'stroke-width': 1.8
+      }));
+
+      var mapTrace = '';
+      for (var m = 0; m <= cursor; m++) {
+        var mp = mapPoint(traj.path[m][0], traj.path[m][1]);
+        mapTrace += (m === 0 ? 'M' : 'L') + mp[0].toFixed(1) + ' ' + mp[1].toFixed(1);
+      }
+      dynamicLayer.appendChild(svgEl('path', {
+        d: mapTrace, fill: 'none', stroke: '#1a2b22', 'stroke-width': 1.8
+      }));
+      var head = mapPoint(state[0], state[1]);
+      dynamicLayer.appendChild(svgEl('circle', {
+        cx: head[0], cy: head[1], r: 5, fill: COLOR.gold, stroke: '#fff', 'stroke-width': 1.6
+      }));
+
+      var startCost = cost[cellIndex(-0.5, 0)];
+      var here = cost[cellIndex(state[0], state[1])];
+      setText('mcar-policy-value', POLICIES[which].name);
+      setText('mcar-step-value', String(cursor));
+      setText('mcar-position', state[0].toFixed(3));
+      setText('mcar-velocity', state[1].toFixed(4));
+      setText('mcar-togo', isFinite(here) ? String(Math.round(here)) : 'unreachable');
+      setText('mcar-status', traj.reached
+        ? 'Accelerating along the current velocity pumps energy into the car and reaches the flag in ' +
+          traj.reached + ' steps. The optimal policy on this grid needs about ' + Math.round(startCost) +
+          ' steps from the start state.'
+        : 'Full throttle right never reaches the flag: gravity beats the engine, so the car stalls partway up ' +
+          'and oscillates in a small basin. Every episode under this policy runs forever.');
+    }
+
+    policyInput.addEventListener('input', render);
+    stepInput.addEventListener('input', render);
+    render();
+  })();
 })();
