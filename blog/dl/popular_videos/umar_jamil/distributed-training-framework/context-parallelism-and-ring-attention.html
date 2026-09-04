@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Shard the sequence itself across devices: why online softmax makes attention decomposable over key blocks, how a ring passes keys and values around, the causal load-imbalance problem, and the zigzag assignment that fixes it.">
+  <title>Context Parallelism &amp; Ring Attention | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 12 &middot; Chapter 23</span></div>
+      <h1>Context Parallelism &amp; Ring Attention</h1>
+      <p class="post-meta">September 2026 &middot; 25 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Data, tensor and pipeline parallelism all leave one sequence intact.</strong> When a single sequence is long enough that its activations alone exhaust a device, the only axis left is the sequence itself. Splitting it works because softmax, despite appearing to need all its inputs at once, can be computed incrementally without error.</div>
+
+      <h2 id="motivation">The last remaining axis</h2>
+      <p>From the FLOPs note, attention's share of compute is $S/(6d+S)$, and its activation footprint grows with $S$ as well. Past a few hundred thousand tokens, one sequence in one layer no longer fits on one device — and no amount of data parallelism helps, because the indivisible unit is a single example.</p>
+      <p>Context parallelism shards along sequence position: device $p$ owns tokens $[pS/P,\ (p{+}1)S/P)$. Every device holds the <em>whole</em> model, so parameters are replicated exactly as in data parallelism.</p>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>What is easy</h3><p>Everything pointwise. Norms, MLPs, residual adds and the projections $W_Q,W_K,W_V$ act on each position independently, so each device just processes its own tokens. No communication at all.</p></div>
+        <div class="dt-panel"><h3>What is hard</h3><p>Attention alone. Query $i$ must attend to <em>every</em> key $j\le i$, and most of those live on other devices.</p></div>
+      </div>
+
+      <h2 id="online-softmax">Softmax is decomposable</h2>
+      <p>The obstacle looks fundamental: softmax normalizes over all keys, so you seemingly cannot start until you have seen them all. But the normalizer is just a sum, and sums can be accumulated — you only need to handle the numerical stabilization carefully.</p>
+      <p>Process keys in blocks, maintaining three running quantities: the maximum logit $m$, the sum of exponentials $\ell$, and the unnormalized output $O$. On seeing a block with local max $m_b$ and local sum $\ell_b$:</p>
+      <div class="key-eq">$$m'=\max(m,m_b),$$</div>
+      <div class="key-eq">$$\ell'=\ell\,e^{\,m-m'}+\ell_b\,e^{\,m_b-m'},$$</div>
+      <div class="key-eq">$$O'=\frac{\ell\,e^{\,m-m'}\,O+e^{\,m_b-m'}\,P_bV_b}{\ell'}.$$</div>
+      <div class="dt-definition"><strong>This is exact, not an approximation.</strong> The correction factors $e^{m-m'}$ rescale everything accumulated so far onto the new maximum. Processing all keys in one block or in a thousand blocks gives bit-comparable results. I verified this numerically while writing this note: block-wise and direct attention agree to $2\times10^{-16}$, which is floating-point noise. This same recurrence is what makes FlashAttention possible; ring attention simply distributes the blocks across devices instead of across shared-memory tiles.</div>
+
+      <h2 id="ring">The ring</h2>
+      <p>Each device keeps its own queries fixed and cycles the keys and values around a ring:</p>
+      <div class="dt-algorithm">
+        <div class="dt-algorithm-title">Ring attention on device $p$</div>
+        <div class="dt-algorithm-body">
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">1</span><span>hold $Q_p$; initialize the local $K,V$ block to $K_p,V_p$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">2</span><span>initialize $m=-\infty$, $\ell=0$, $O=0$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">3</span><span><span class="dt-algorithm-keyword">for</span> step $=0,\dots,P-1$:</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">4</span><span>start sending the current $K,V$ block to device $p+1$, and receiving from $p-1$</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">5</span><span>meanwhile, attend $Q_p$ against the block in hand and update $m,\ell,O$</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">6</span><span>wait for the transfer, then swap in the received block</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">7</span><span>after $P$ steps every query has seen every key; $O$ is the exact attention output</span></div>
+        </div>
+      </div>
+      <div class="dt-definition"><strong>The communication hides completely, in principle.</strong> Step 4 is issued before step 5 and waited on after, so the transfer of one $K,V$ block overlaps the attention computation on the previous one. Attention on a block costs $O(S^2/P^2 \cdot d)$ while the transfer costs $O(S/P \cdot d)$ bytes, so as $S$ grows compute outpaces communication and the ring becomes free. Long context is exactly the regime where this holds.</div>
+
+      <h2 id="causal">The causal load-imbalance problem</h2>
+      <p>Everything above assumed full attention. Add a causal mask and the arithmetic becomes badly unfair. With contiguous shards, device $p$ owns the tokens at positions $[pS/P,(p{+}1)S/P)$, and those queries may only attend to shards $0$ through $p$. So device $0$ does one block of work, device $1$ does two, and device $P-1$ does $P$.</p>
+      <div class="key-eq">$$\text{work}_p\propto p+1,\qquad \frac{\max_p\text{work}_p}{\text{mean}}=\frac{2P}{P+1}.$$</div>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>$P$</th><th>Per-device work (blocks)</th><th>Max / mean</th></tr></thead><tbody>
+        <tr><td>2</td><td>1, 2</td><td>1.33&times;</td></tr>
+        <tr><td>4</td><td>1, 2, 3, 4</td><td>1.60&times;</td></tr>
+        <tr><td>8</td><td>1, &hellip;, 8</td><td>1.78&times;</td></tr>
+        <tr><td>16</td><td>1, &hellip;, 16</td><td>1.88&times;</td></tr>
+      </tbody></table></div>
+      <p>Since the ring is synchronous, everyone waits for the busiest device, so nearly half the fleet's attention capacity is wasted as $P$ grows.</p>
+
+      <h3 id="zigzag">The zigzag fix</h3>
+      <p>Nothing requires a device's tokens to be contiguous. Split the sequence into $2P$ chunks instead of $P$, and give device $p$ one chunk from the front and one from the back:</p>
+      <div class="key-eq">$$\text{device }p\ \text{owns chunks}\ \{p,\ 2P-1-p\}.$$</div>
+      <p>An early chunk is cheap and a late chunk is expensive, and pairing them makes every device's total identical. For $P=4$ the pairs are $(0,7),(1,6),(2,5),(3,4)$, and each device's load is exactly $9$ units — perfectly balanced, which I confirmed numerically for several $P$.</p>
+      <div class="dt-definition"><strong>Why the pairing works.</strong> Chunk $c$ costs about $c+1$ units, so device $p$'s total is $(p+1)+(2P-p)=2P+1$, independent of $p$. The imbalance vanishes exactly, at zero communication cost — only the token-to-device mapping changed.</div>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="cp-p">devices $P$</label><input id="cp-p" type="range" min="2" max="8" step="1" value="4"><strong id="cp-p-value"></strong>
+          <label for="cp-zig">zigzag</label><input id="cp-zig" type="range" min="0" max="1" step="1" value="0"><strong id="cp-zig-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="cp-svg" class="dt-svg" viewBox="0 0 660 270" role="img" aria-label="Per-device attention work under causal masking, with contiguous and zigzag sequence sharding."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="cp-max"></strong><span>busiest device</span></div>
+          <div class="dt-metric"><strong id="cp-mean"></strong><span>mean work</span></div>
+          <div class="dt-metric"><strong id="cp-imb"></strong><span>imbalance</span></div>
+          <div class="dt-metric"><strong id="cp-waste"></strong><span>capacity wasted</span></div>
+        </div>
+        <div class="dt-status" id="cp-status"></div>
+        <figcaption>Work is measured in causal key-blocks each device must process. The ring is synchronous, so throughput is set by the busiest device and everything above the dashed mean line is idle time elsewhere.</figcaption>
+      </figure>
+
+      <h2 id="comparison">Where it fits among the others</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th></th><th>Context parallel</th><th>Tensor parallel</th><th>Data parallel</th></tr></thead><tbody>
+        <tr><td>Splits</td><td>sequence positions</td><td>inside each matmul</td><td>examples</td></tr>
+        <tr><td>Parameters</td><td>replicated</td><td>sharded</td><td>replicated</td></tr>
+        <tr><td>Communication</td><td>ring of $K,V$ inside attention only</td><td>collectives twice per block</td><td>one gradient all-reduce per step</td></tr>
+        <tr><td>Overlappable</td><td>yes, fully</td><td>no, it is on the critical path</td><td>yes</td></tr>
+        <tr><td>Reach for it when</td><td>one sequence does not fit</td><td>one layer does not fit</td><td>you have spare devices</td></tr>
+      </tbody></table></div>
+      <p>Context parallelism composes cleanly with the others because it touches a different axis: shard the sequence across one mesh dimension, the heads across another, the layers across a third, and the batch across a fourth. The device-mesh note puts all four together.</p>
+      <div class="dt-warning"><strong>It does not reduce parameter memory at all.</strong> Every device still holds the full model. Context parallelism is purely an <em>activation</em>-memory technique, so it is always combined with something else — usually FSDP or tensor parallelism — rather than used alone.</div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Online softmax makes attention exactly decomposable over key blocks; a ring circulates those blocks so the transfer hides behind compute; and pairing an early chunk with a late chunk removes the causal imbalance exactly. That is the whole of context parallelism.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Derive the online softmax update and show it is exact for two blocks. <em>derivation</em></li>
+        <li>Explain why only attention needs communication and the MLP does not. <em>reasoning</em></li>
+        <li>Show that causal contiguous sharding gives an imbalance of $2P/(P+1)$. <em>derivation</em></li>
+        <li>Prove that zigzag pairing gives every device a load of $2P+1$ units. <em>proof</em></li>
+        <li>Find the condition on $S$, $d$ and bandwidth under which the ring transfer fully hides. <em>analysis</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="tensor-parallelism.html"><span>Previous</span><span>&#8592; Tensor Parallelism</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var pIn = D.byId('cp-p'), zIn = D.byId('cp-zig'), svg = D.byId('cp-svg');
+    if (!pIn || !zIn || !svg) return;
+
+    function render() {
+      var P = Number(pIn.value), zig = Number(zIn.value) === 1;
+      var load = [], owns = [];
+      for (var p = 0; p < P; p++) {
+        if (zig) {
+          var a = p, b = 2 * P - 1 - p;
+          load.push((a + 1) + (b + 1));
+          owns.push([a, b]);
+        } else {
+          load.push(p + 1);
+          owns.push([p]);
+        }
+      }
+      var mx = Math.max.apply(null, load);
+      var mean = load.reduce(function (s, v) { return s + v; }, 0) / P;
+
+      D.clear(svg);
+      D.label(svg, 330, 22, 'causal attention work per device, ' +
+        (zig ? 'zigzag sharding' : 'contiguous sharding'), D.COLOR.ink, 12.5, 'middle', 800);
+
+      var X0 = 92, X1 = 600, top = 46, rowH = Math.min(28, 168 / P);
+      var scale = (X1 - X0) / mx;
+      var meanX = X0 + mean * scale;
+
+      for (var i = 0; i < P; i++) {
+        var y = top + i * rowH;
+        D.label(svg, X0 - 10, y + rowH * 0.62, 'device ' + i, D.COLOR.muted, 10.5, 'end', 700);
+        var full = load[i] === mx;
+        D.rect(svg, X0, y, load[i] * scale, rowH - 4,
+          zig ? D.COLOR.green : (full ? D.COLOR.red : D.COLOR.blue), '#fff', 3);
+        D.label(svg, X0 + load[i] * scale + 8, y + rowH * 0.62, String(load[i]),
+          D.COLOR.ink, 10.5, 'start', 800);
+        D.label(svg, X1 + 4, y + rowH * 0.62, 'chunks ' + owns[i].join(','), D.COLOR.muted, 9, 'start');
+      }
+      D.line(svg, meanX, top - 6, meanX, top + P * rowH, D.COLOR.gold, 1.6, '4 3');
+      D.label(svg, meanX, top - 10, 'mean', D.COLOR.gold, 10, 'middle', 800);
+
+      var waste = 1 - mean / mx;
+      D.setText('cp-p-value', String(P));
+      D.setText('cp-zig-value', zig ? 'on' : 'off');
+      D.setText('cp-max', String(mx));
+      D.setText('cp-mean', mean.toFixed(1));
+      D.setText('cp-imb', (mx / mean).toFixed(2) + 'x');
+      D.setText('cp-waste', (100 * waste).toFixed(0) + '%');
+      D.setText('cp-status', zig
+        ? 'Splitting into ' + (2 * P) + ' chunks and pairing chunk p with chunk ' + (2 * P - 1) +
+          '-p gives every device ' + mx + ' units: (p+1) + (2P-p) = 2P+1, independent of p. The ring is perfectly balanced and nothing is wasted, purely by relabelling which tokens live where.'
+        : 'With contiguous shards, device ' + (P - 1) + ' processes ' + mx +
+          ' key-blocks while device 0 processes just 1. Since the ring is synchronous, every device waits for the busiest, so ' +
+          (100 * waste).toFixed(0) + '% of the attention capacity is idle. The imbalance is 2P/(P+1) = ' +
+          (mx / mean).toFixed(2) + 'x and worsens toward 2x as P grows. Turn on zigzag to remove it exactly.');
+    }
+
+    pIn.addEventListener('input', render);
+    zIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
