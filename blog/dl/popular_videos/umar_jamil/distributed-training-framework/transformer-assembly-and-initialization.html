@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Pre-norm versus post-norm and the residual stream, RMSNorm, gated feed-forward networks, tied embeddings, and why residual-branch initialization must be scaled by depth to keep activation variance from growing linearly.">
+  <title>Transformer Assembly &amp; Weight Initialization | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 3 &middot; Chapter 5</span></div>
+      <h1>Transformer Assembly &amp; Weight Initialization</h1>
+      <p class="post-meta">September 2026 &middot; 21 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Depth changes the rules.</strong> A two-layer network tolerates almost any sane initialization. An eighty-layer residual network does not: get the residual-branch scale wrong and the activation variance grows linearly with depth, which shows up as a loss curve that will not descend and is frequently misdiagnosed as a bad learning rate.</div>
+
+      <h2 id="residual-stream">The residual stream</h2>
+      <p>The most useful way to read a modern transformer is not as a stack of layers but as a single <em>residual stream</em> that every block reads from and writes to:</p>
+      <div class="key-eq">$$\mathbf x\leftarrow\mathbf x+\text{Attn}\big(\text{Norm}(\mathbf x)\big),\qquad
+      \mathbf x\leftarrow\mathbf x+\text{FFN}\big(\text{Norm}(\mathbf x)\big).$$</div>
+      <p>Two properties matter. The stream is never transformed in place, only added to, so there is an unbroken identity path from the embedding to the final norm. And each block sees a <em>normalized</em> copy of the stream while writing an unnormalized increment back into it.</p>
+
+      <h3 id="pre-post">Pre-norm versus post-norm</h3>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Post-norm (original)</h3><div class="key-eq">$$\mathbf x\leftarrow\text{Norm}\big(\mathbf x+F(\mathbf x)\big)$$</div><p>The normalization sits <em>on</em> the residual path, so every backward pass is multiplied by the norm's Jacobian. Over dozens of layers those factors compound and the gradient reaching early layers is unreliable. Training deep post-norm stacks requires a learning-rate warmup and is still fragile.</p></div>
+        <div class="dt-panel"><h3>Pre-norm (universal today)</h3><div class="key-eq">$$\mathbf x\leftarrow\mathbf x+F\big(\text{Norm}(\mathbf x)\big)$$</div><p>The residual path is a clean identity. Differentiating gives $\partial\mathbf x_{\text{out}}/\partial\mathbf x=I+\partial F/\partial\mathbf x$, so the gradient always has an unattenuated route to every layer. This is what makes 80-layer stacks trainable without heroics.</p></div>
+      </div>
+      <p>Pre-norm has one wart: the stream itself is never normalized, so its magnitude grows with depth. That is why a final <code>Norm</code> is applied after the last block, before the output projection.</p>
+
+      <h2 id="rmsnorm">RMSNorm</h2>
+      <p>LayerNorm centres and rescales:</p>
+      <div class="key-eq">$$\text{LN}(\mathbf x)=\frac{\mathbf x-\mu}{\sqrt{\sigma^2+\epsilon}}\odot\mathbf g+\mathbf b.$$</div>
+      <p>RMSNorm drops the mean subtraction and the bias, keeping only the scale:</p>
+      <div class="key-eq">$$\boxed{\text{RMSNorm}(\mathbf x)=\frac{\mathbf x}{\sqrt{\frac1d\sum_i x_i^2+\epsilon}}\odot\mathbf g.}$$</div>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Why it is enough</h3><p>The empirical finding is that the re-centring contributes little; the benefit comes from constraining the magnitude. Removing it loses no measurable quality.</p></div>
+        <div class="dt-panel"><h3>Why it is better</h3><p>One reduction pass instead of two, no mean to store for the backward pass, and $d$ fewer parameters per norm. On a memory-bound elementwise kernel that is a real saving.</p></div>
+      </div>
+      <div class="dt-warning"><strong>Compute the norm in FP32.</strong> Summing $d$ squared values in BF16 loses precision quickly and, for large activations, can overflow. Every serious implementation upcasts, reduces, normalizes, then casts back.</div>
+
+      <h2 id="swiglu">The gated feed-forward network</h2>
+      <p>The classic FFN is $W_2\,\phi(W_1\mathbf x)$. The gated variant splits the first projection into two and uses one branch to modulate the other:</p>
+      <div class="key-eq">$$\text{SwiGLU}(\mathbf x)=W_{\text{down}}\Big(\text{SiLU}(W_{\text{gate}}\mathbf x)\odot W_{\text{up}}\mathbf x\Big),\qquad \text{SiLU}(z)=z\,\sigma(z).$$</div>
+      <p>The gate lets the layer suppress or pass each hidden unit as a function of the input, rather than applying a fixed pointwise nonlinearity. It reliably beats an ungated FFN at equal parameter count — which is why $d_{\text{ff}}$ shrinks from $4d$ to $\tfrac83 d$ when the third matrix is added, keeping the budget fixed.</p>
+
+      <h2 id="variance">Why naive initialization fails with depth</h2>
+      <p>Here is the failure mode, made quantitative. Model the residual stream as a random vector and each block's output as an independent contribution. If the stream enters a block with variance $v$ and the branch contributes variance $\sigma^2$, then because the two are roughly uncorrelated,</p>
+      <div class="key-eq">$$v_{\text{out}}=v+\sigma^2.$$</div>
+      <p>A block contains two residual additions, so an $L$-layer model performs $2L$ of them. Starting from $v_0=1$:</p>
+      <div class="key-eq">$$v_{2L}=1+2L\,\sigma^2.$$</div>
+      <div class="dt-definition"><strong>The variance grows linearly in depth.</strong> With $\sigma^2\approx1$ and $L=80$, the stream arrives at the output with variance around 161, roughly a 13-fold growth in magnitude. Every normalization then has to divide by a large factor, the effective contribution of each block shrinks, and the logits saturate before training begins.</div>
+      <p>The fix is to make each branch's contribution shrink with depth. Scale the weights of the layers that <em>write into the stream</em> — the attention output projection $W_O$ and the FFN down projection $W_{\text{down}}$ — by</p>
+      <div class="key-eq">$$\boxed{\frac{1}{\sqrt{2L}}.}$$</div>
+      <p>Then $\sigma^2\mapsto\sigma^2/2L$ and the total becomes</p>
+      <div class="key-eq">$$v_{2L}=1+2L\cdot\frac{\sigma^2}{2L}=1+\sigma^2,$$</div>
+      <p>which is independent of $L$. This is the GPT-2 initialization rule, and it is why the same recipe transfers unchanged from a 12-layer model to an 80-layer one.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="init-layers">layers $L$</label><input id="init-layers" type="range" min="4" max="96" step="2" value="32"><strong id="init-layers-value"></strong>
+          <label for="init-scaled">scaled init</label><input id="init-scaled" type="range" min="0" max="1" step="1" value="1"><strong id="init-scaled-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="init-svg" class="dt-svg" viewBox="0 0 660 280" role="img" aria-label="Residual stream variance as a function of depth, with and without scaling the residual-branch output projections by one over the square root of two L."></svg></div>
+        <div class="dt-metrics">
+          <div class="dt-metric"><strong id="init-final"></strong><span>variance at the output</span></div>
+          <div class="dt-metric"><strong id="init-growth"></strong><span>magnitude growth</span></div>
+          <div class="dt-metric"><strong id="init-scale"></strong><span>branch weight scale</span></div>
+        </div>
+        <div class="dt-status" id="init-status"></div>
+        <figcaption>Each block performs two residual additions, so the horizontal axis runs to $2L$. The unscaled curve is a straight line; the scaled one is flat by construction, at any depth.</figcaption>
+      </figure>
+
+      <h3 id="recipe">The full recipe</h3>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Tensor</th><th>Initialization</th><th>Reason</th></tr></thead><tbody>
+        <tr><td>$W_Q,W_K,W_V$</td><td>$\mathcal N(0,\sigma^2)$ with $\sigma=0.02$, or $\sigma=1/\sqrt d$</td><td>Preserve activation scale through the projection.</td></tr>
+        <tr><td>$W_O$, $W_{\text{down}}$</td><td>same, then multiplied by $1/\sqrt{2L}$</td><td>These write into the residual stream; the depth scaling keeps its variance constant.</td></tr>
+        <tr><td>$W_{\text{gate}},W_{\text{up}}$</td><td>$\mathcal N(0,\sigma^2)$</td><td>They feed the nonlinearity, not the stream.</td></tr>
+        <tr><td>RMSNorm gain $\mathbf g$</td><td>all ones</td><td>Start as an identity so the block begins as a pure pass-through.</td></tr>
+        <tr><td>Embedding table</td><td>$\mathcal N(0,\sigma^2)$</td><td>Sets $v_0\approx1$ entering the stack.</td></tr>
+        <tr><td>Biases, if present</td><td>zero</td><td>No reason to break symmetry twice.</td></tr>
+      </tbody></table></div>
+      <div class="dt-warning"><strong>Scale the right matrices.</strong> Applying $1/\sqrt{2L}$ to every weight in the model, rather than only to the two that write into the residual stream, shrinks the attention logits and the FFN pre-activations as well. The stream stays stable but the model starts far too close to a constant function.</div>
+
+      <h2 id="tying">Tied embeddings</h2>
+      <p>The input embedding maps token ids to vectors; the output head maps vectors back to logits. Reusing one matrix for both is <em>weight tying</em>:</p>
+      <div class="key-eq">$$\text{logits}=\mathbf x\,E^\top,\qquad E\in\mathbb R^{V\times d}.$$</div>
+      <p>It saves $Vd$ parameters, which for a small model with a 128k vocabulary is a large fraction of the total. It also acts as a regularizer, since a token's input and output representations are forced to agree. Large models increasingly untie the two, because $Vd$ stops being a meaningful share of the budget and the extra freedom helps slightly.</p>
+      <div class="dt-warning"><strong>Tying changes the gradient structure.</strong> A tied table receives gradients from two places — the embedding lookup and the output projection — which by the fan-out rule must be summed. Frameworks handle this automatically, but it is worth knowing when the embedding gradient looks larger than expected.</div>
+
+      <h2 id="order">The assembled block</h2>
+      <div class="dt-algorithm">
+        <div class="dt-algorithm-title">One decoder block, forward</div>
+        <div class="dt-algorithm-body">
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">1</span><span>$\mathbf h\leftarrow\text{RMSNorm}_1(\mathbf x)$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">2</span><span>$\mathbf q,\mathbf k,\mathbf v\leftarrow W_Q\mathbf h,\;W_K\mathbf h,\;W_V\mathbf h$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">3</span><span>apply RoPE to $\mathbf q$ and $\mathbf k$ only</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">4</span><span>$\mathbf a\leftarrow W_O\,\text{softmax}\!\big(\mathbf q\mathbf k^\top/\sqrt{d_h}+\text{mask}\big)\mathbf v$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">5</span><span>$\mathbf x\leftarrow\mathbf x+\mathbf a$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">6</span><span>$\mathbf h\leftarrow\text{RMSNorm}_2(\mathbf x)$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">7</span><span>$\mathbf x\leftarrow\mathbf x+W_{\text{down}}\big(\text{SiLU}(W_{\text{gate}}\mathbf h)\odot W_{\text{up}}\mathbf h\big)$</span></div>
+        </div>
+      </div>
+      <p>After $L$ of these, a final RMSNorm and the output projection produce logits. The $1/\sqrt{d_h}$ inside the softmax is the same variance argument in miniature: a dot product of two $d_h$-dimensional unit-variance vectors has variance $d_h$, and dividing by $\sqrt{d_h}$ brings the logits back to order one so the softmax does not saturate.</p>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Pre-norm gives the gradient a clean path, RMSNorm makes normalization cheap, gating makes the FFN more expressive per parameter, and scaling the two stream-writing projections by $1/\sqrt{2L}$ makes the whole recipe depth-independent. That last item is the one that silently breaks when you scale up.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Derive $v_{2L}=1+2L\sigma^2$ and state the independence assumption it relies on. <em>derivation</em></li>
+        <li>Show that scaling $W_O$ and $W_{\text{down}}$ by $1/\sqrt{2L}$ makes the output variance independent of $L$. <em>derivation</em></li>
+        <li>Explain why pre-norm keeps an unattenuated gradient path but post-norm does not. <em>reasoning</em></li>
+        <li>Count the parameters saved by tying embeddings for $V=128000$, $d=2048$, and express it as a fraction of a 1.5B model. <em>calculation</em></li>
+        <li>Explain the $1/\sqrt{d_h}$ factor using the same variance argument. <em>derivation</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="rope-and-yarn.html"><span>Previous</span><span>&#8592; RoPE from First Principles, and YaRN</span></a><a class="next" href="autograd-and-the-math-of-distributed-training.html"><span>Next</span><span>Autograd &amp; the Math of Distributed Training &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var layerIn = D.byId('init-layers'), scaledIn = D.byId('init-scaled'), svg = D.byId('init-svg');
+    if (!layerIn || !scaledIn || !svg) return;
+
+    var X0 = 66, X1 = 600, Y0 = 44, Y1 = 226;
+
+    function render() {
+      var L = Number(layerIn.value), scaled = Number(scaledIn.value) === 1;
+      var adds = 2 * L;
+      var sigma2 = scaled ? 1 / adds : 1;
+      var finalVar = 1 + adds * sigma2;
+      var yMax = Math.max(4, 1 + adds * 1);
+
+      D.clear(svg);
+      D.label(svg, (X0 + X1) / 2, 24, 'residual stream variance through ' + adds + ' residual additions',
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      function toX(i) { return X0 + (X1 - X0) * i / adds; }
+      function toY(v) { return Y1 - (Y1 - Y0) * Math.min(v, yMax) / yMax; }
+
+      for (var t = 0; t <= 4; t++) {
+        var val = yMax * t / 4, y = toY(val);
+        D.line(svg, X0, y, X1, y, D.COLOR.line, 1);
+        D.label(svg, X0 - 8, y + 4, val.toFixed(0), D.COLOR.muted, 10, 'end');
+      }
+      D.line(svg, X0, Y1, X1, Y1, D.COLOR.gray, 1.2);
+      D.label(svg, (X0 + X1) / 2, Y1 + 30, 'residual addition index', D.COLOR.muted, 11);
+      D.label(svg, X0, Y1 + 16, '0', D.COLOR.muted, 10);
+      D.label(svg, X1, Y1 + 16, String(adds), D.COLOR.muted, 10);
+      D.label(svg, 18, (Y0 + Y1) / 2, 'variance', D.COLOR.muted, 10.5, 'middle');
+
+      var unscaled = '', current = '';
+      for (var i = 0; i <= adds; i++) {
+        unscaled += (i ? 'L' : 'M') + toX(i).toFixed(1) + ' ' + toY(1 + i).toFixed(1);
+        current += (i ? 'L' : 'M') + toX(i).toFixed(1) + ' ' + toY(1 + i * sigma2).toFixed(1);
+      }
+      svg.appendChild(D.svgEl('path', { d: unscaled, fill: 'none', stroke: D.COLOR.red, 'stroke-width': 1.6, 'stroke-dasharray': '5 4' }));
+      D.label(svg, X1 - 4, toY(1 + adds) + 14, 'unscaled init', D.COLOR.red, 10.5, 'end', 700);
+      svg.appendChild(D.svgEl('path', { d: current, fill: 'none', stroke: scaled ? D.COLOR.green : D.COLOR.red, 'stroke-width': 2.6 }));
+      if (scaled) D.label(svg, X1 - 4, toY(finalVar) - 10, 'scaled by 1/sqrt(2L)', D.COLOR.green, 10.5, 'end', 700);
+
+      D.setText('init-layers-value', String(L));
+      D.setText('init-scaled-value', scaled ? 'on' : 'off');
+      D.setText('init-final', finalVar.toFixed(2));
+      D.setText('init-growth', Math.sqrt(finalVar).toFixed(2) + 'x');
+      D.setText('init-scale', scaled ? '1/' + Math.sqrt(adds).toFixed(2) : '1.00');
+      D.setText('init-status', scaled
+        ? 'With each stream-writing projection scaled by 1/sqrt(2L) = 1/' + Math.sqrt(adds).toFixed(2) +
+          ', every branch contributes variance 1/' + adds + ' and the total lands at ' + finalVar.toFixed(2) +
+          ' regardless of depth. Move the depth slider: the green curve does not change.'
+        : 'Without depth scaling each branch adds variance 1, so the stream reaches ' + finalVar.toFixed(0) +
+          ' after ' + adds + ' additions, a ' + Math.sqrt(finalVar).toFixed(1) +
+          'x growth in magnitude. Deeper models get worse linearly, which is why one recipe stops transferring across scales.');
+    }
+
+    layerIn.addEventListener('input', render);
+    scaledIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
