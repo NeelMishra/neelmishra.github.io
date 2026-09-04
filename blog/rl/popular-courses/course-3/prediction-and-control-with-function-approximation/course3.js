@@ -1109,4 +1109,111 @@
     epsInput.addEventListener('input', render);
     render();
   })();
+
+  (function initOptimismLocality() {
+    var xInput = byId('opt-x');
+    var yInput = byId('opt-y');
+    var sigmaInput = byId('opt-sigma');
+    var svg = byId('opt-svg');
+    if (!xInput || !yInput || !sigmaInput || !svg) return;
+
+    var GRID = 26;
+    var PANEL = 178;
+    var PANEL_Y = 48;
+    var PANEL_X = [22, 236, 450];
+    var TITLES = ['single always-on feature', 'tile coding', 'neural network'];
+    var TILINGS = 4;
+    var TILES_PER_DIM = 5;
+    var TILE_W = 100 / TILES_PER_DIM;
+
+    function tileId(value, tiling) {
+      return Math.floor((value + tiling / TILINGS * TILE_W) / TILE_W);
+    }
+
+    function shareFraction(ax, ay, bx, by) {
+      var shared = 0;
+      for (var t = 0; t < TILINGS; t++) {
+        if (tileId(ax, t) === tileId(bx, t) && tileId(ay, t) === tileId(by, t)) shared++;
+      }
+      return shared / TILINGS;
+    }
+
+    function influence(mode, sx, sy, ux, uy, sigma) {
+      if (mode === 0) return 1;
+      if (mode === 1) return shareFraction(sx, sy, ux, uy);
+      var dx = sx - ux, dy = sy - uy;
+      return Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+    }
+
+    function shade(value) {
+      var t = Math.max(0, Math.min(1, value));
+      var r = Math.round(244 + (184 - 244) * t);
+      var g = Math.round(247 + (58 - 247) * t);
+      var b = Math.round(245 + (58 - 245) * t);
+      return 'rgb(' + r + ',' + g + ',' + b + ')';
+    }
+
+    function render() {
+      var ux = Number(xInput.value);
+      var uy = Number(yInput.value);
+      var sigma = Number(sigmaInput.value);
+
+      clear(svg);
+      var cell = PANEL / GRID;
+      var moved = [0, 0, 0];
+
+      for (var mode = 0; mode < 3; mode++) {
+        var originX = PANEL_X[mode];
+        label(svg, originX + PANEL / 2, 26, TITLES[mode], COLOR.ink, 12, 'middle', 800);
+        for (var i = 0; i < GRID; i++) {
+          var sx = (i + 0.5) / GRID * 100;
+          for (var j = 0; j < GRID; j++) {
+            var sy = (j + 0.5) / GRID * 100;
+            var weight = influence(mode, sx, sy, ux, uy, sigma);
+            if (weight >= 0.1) moved[mode]++;
+            svg.appendChild(svgEl('rect', {
+              x: originX + i * cell,
+              y: PANEL_Y + PANEL - (j + 1) * cell,
+              width: cell + 0.3,
+              height: cell + 0.3,
+              fill: shade(weight)
+            }));
+          }
+        }
+        svg.appendChild(svgEl('rect', {
+          x: originX, y: PANEL_Y, width: PANEL, height: PANEL,
+          fill: 'none', stroke: COLOR.line, 'stroke-width': 1
+        }));
+        var markerX = originX + ux / 100 * PANEL;
+        var markerY = PANEL_Y + PANEL - uy / 100 * PANEL;
+        svg.appendChild(svgEl('circle', {
+          cx: markerX, cy: markerY, r: 5, fill: 'none', stroke: '#1a2b22', 'stroke-width': 2
+        }));
+        svg.appendChild(svgEl('circle', {
+          cx: markerX, cy: markerY, r: 1.8, fill: '#1a2b22'
+        }));
+      }
+      label(svg, PANEL_X[1] + PANEL / 2, PANEL_Y + PANEL + 20,
+        'the ringed dot is the state that was updated', COLOR.muted, 10.5);
+
+      var total = GRID * GRID;
+      var percent = function (count) { return (100 * count / total).toFixed(0) + '%'; };
+      setText('opt-x-value', String(ux));
+      setText('opt-y-value', String(uy));
+      setText('opt-sigma-value', String(sigma));
+      setText('opt-single', percent(moved[0]));
+      setText('opt-tile', percent(moved[1]));
+      setText('opt-nn', percent(moved[2]));
+      setText('opt-status', 'One update moves ' + percent(moved[0]) +
+        ' of the state space with a single always-on feature, ' + percent(moved[1]) +
+        ' with tile coding, and ' + percent(moved[2]) +
+        ' with this network reach. Only the tile-coded case leaves most of the space untouched, ' +
+        'which is what lets unvisited states stay optimistic long enough to attract the agent.');
+    }
+
+    xInput.addEventListener('input', render);
+    yInput.addEventListener('input', render);
+    sigmaInput.addEventListener('input', render);
+    render();
+  })();
 })();
