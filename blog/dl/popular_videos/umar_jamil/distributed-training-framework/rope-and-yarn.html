@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Derive rotary position embeddings from the requirement that attention scores depend only on relative position, then extend the context window with position interpolation, NTK-aware base scaling and YaRN's wavelength-dependent ramp.">
+  <title>RoPE from First Principles, and YaRN | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 2 &middot; Chapters 3&ndash;4</span></div>
+      <h1>RoPE from First Principles, and YaRN</h1>
+      <p class="post-meta">September 2026 &middot; 28 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>One requirement generates the whole design.</strong> Ask that the attention score between two tokens depend only on how far apart they are, and rotary embeddings fall out as essentially the only answer. Every long-context trick that follows is a different way of stretching the frequencies that requirement produced.</div>
+
+      <h2 id="requirement">The requirement</h2>
+      <p>Attention compares a query at position $m$ with a key at position $n$ through an inner product. We want position to enter that comparison, but we want the result to be <em>translation invariant</em>: shifting both tokens by the same amount should not change their score. Formally, we want functions $f_q,f_k$ such that</p>
+      <div class="key-eq">$$\langle f_q(\mathbf x_m,m),\,f_k(\mathbf x_n,n)\rangle=g(\mathbf x_m,\mathbf x_n,\,n-m)$$</div>
+      <p>for some $g$ depending on position only through the difference $n-m$.</p>
+      <p>Additive absolute embeddings fail this. Adding $p_m$ to the input makes the score contain cross terms in $m$ and $n$ separately, so the model must <em>learn</em> approximate translation invariance instead of being given it.</p>
+
+      <h2 id="two-d">Solving it in two dimensions</h2>
+      <p>Start with $d=2$, where a vector is a complex number. Suppose we encode position by a rotation of angle $m\theta$:</p>
+      <div class="key-eq">$$f_q(\mathbf x_m,m)=R_{m\theta}\,\mathbf q_m,\qquad
+      R_\phi=\begin{pmatrix}\cos\phi&-\sin\phi\\ \sin\phi&\cos\phi\end{pmatrix}.$$</div>
+      <p>Rotation matrices are orthogonal, so $R_\phi^\top=R_{-\phi}$ and $R_\phi R_\psi=R_{\phi+\psi}$. The inner product becomes</p>
+      <div class="key-eq">$$\big(R_{m\theta}\mathbf q\big)^\top\big(R_{n\theta}\mathbf k\big)
+      =\mathbf q^\top R_{m\theta}^\top R_{n\theta}\,\mathbf k
+      =\mathbf q^\top R_{(n-m)\theta}\,\mathbf k.$$</div>
+      <div class="dt-definition"><strong>This is the entire idea.</strong> Absolute rotations applied separately to the query and the key produce a score that depends only on the relative rotation $(n-m)\theta$. The group structure of rotations does all the work: composing them adds angles, and transposing one negates its angle.</div>
+
+      <h2 id="d-dim">Lifting to $d$ dimensions</h2>
+      <p>A single rotation angle can only encode position modulo $2\pi/\theta$. So split the head dimension into $d/2$ independent planes and give each its own frequency. With $\Theta=\{\theta_1,\dots,\theta_{d/2}\}$, the position-$m$ operator is block diagonal:</p>
+      <div class="key-eq">$$\mathbf R^d_{\Theta,m}=\begin{pmatrix}R_{m\theta_1}&&&\\&R_{m\theta_2}&&\\&&\ddots&\\&&&R_{m\theta_{d/2}}\end{pmatrix},$$</div>
+      <p>and because a block-diagonal product of rotations is still orthogonal with the same composition rule, the relative property survives intact:</p>
+      <div class="key-eq">$$\boxed{\big(\mathbf R^d_{\Theta,m}\mathbf q\big)^\top\big(\mathbf R^d_{\Theta,n}\mathbf k\big)=\mathbf q^\top\mathbf R^d_{\Theta,\,n-m}\,\mathbf k.}$$</div>
+      <p>The frequencies use a geometric schedule borrowed from sinusoidal embeddings, with base $b=10000$:</p>
+      <div class="key-eq">$$\theta_i=b^{-2(i-1)/d},\qquad i=1,\dots,d/2.$$</div>
+      <p>Each plane has a wavelength $\lambda_i=2\pi/\theta_i$, the number of positions needed for a full revolution. The first plane turns once every $2\pi\approx6.3$ tokens; the last turns once every $2\pi\,b^{(d-2)/d}$ tokens.</p>
+      <div class="dt-warning"><strong>A detail that trips people up.</strong> The slowest frequency is $b^{-(d-2)/d}$, not $b^{-1}$, because the exponent runs to $2(d/2-1)/d$ rather than to $1$. For $d=128$ that gives a longest wavelength of about 54,000 tokens rather than 63,000. It matters when you compute which dimensions YaRN will interpolate.</div>
+
+      <h2 id="implementation">Implementing it without building a matrix</h2>
+      <p>Materializing a $d\times d$ block-diagonal matrix would be absurd; it is $99\%$ zeros. Because each block acts on two coordinates, the whole operation is elementwise:</p>
+      <div class="key-eq">$$\mathbf R^d_{\Theta,m}\mathbf x=\mathbf x\odot\cos(m\boldsymbol\theta)+\text{swap}(\mathbf x)\odot\sin(m\boldsymbol\theta),$$</div>
+      <p>where $\text{swap}$ negates one member of each pair and exchanges them. Two caches of shape $(\text{max positions},d)$ holding $\cos$ and $\sin$ are precomputed once, and applying RoPE costs two multiplies and one add per element.</p>
+      <div class="dt-warning"><strong>Two incompatible pairing conventions exist.</strong> The original paper pairs <em>adjacent</em> coordinates: $(x_1,x_2),(x_3,x_4),\dots$ The implementation used by Llama and most of the HuggingFace ecosystem instead pairs coordinate $i$ with coordinate $i+d/2$, which is what the widely copied <code>rotate_half</code> function does. The two are mathematically equivalent — a fixed permutation of the head dimension maps one to the other — but weights trained under one convention produce nonsense under the other. When porting checkpoints between frameworks, this is the first thing to check.</div>
+
+      <h2 id="properties">Why the design works</h2>
+      <div class="dt-three-col">
+        <div class="dt-panel"><h3>No parameters</h3><p>RoPE adds nothing to learn. It is a fixed, invertible, norm-preserving transform, so it cannot destroy information or add optimization difficulty.</p></div>
+        <div class="dt-panel"><h3>Applied to Q and K only</h3><p>Values carry content, not position, so they are left alone. Position enters the attention weights but not the payload being mixed.</p></div>
+        <div class="dt-panel"><h3>Long-range decay</h3><p>Summing many planes whose relative phases spread out with distance makes the expected score fall off as $|n-m|$ grows, giving a mild locality prior for free.</p></div>
+      </div>
+
+      <h2 id="long-context">The long-context problem</h2>
+      <p>A model pretrained with context $L$ has only ever seen rotation angles $m\theta_i$ for $m<L$. Feed it position $m=4L$ and the high-frequency planes present phase values it has never encountered. Attention scores blow up and perplexity collapses — this is <em>extrapolation failure</em>, and it is severe rather than graceful.</p>
+      <p>Three families of fixes exist, and they differ in exactly one respect: which frequencies they are willing to distort.</p>
+
+      <h3 id="pi">Position interpolation</h3>
+      <p>The simplest fix squeezes the new range back into the old one. With scale factor $s=L'/L$, replace the position itself:</p>
+      <div class="key-eq">$$m\ \longmapsto\ \frac{m}{s},\qquad\text{equivalently}\qquad \theta_i\ \longmapsto\ \frac{\theta_i}{s}.$$</div>
+      <p>Now position $L'$ maps to angle $L$, squarely inside the trained range, and nothing extrapolates. The cost is that <em>every</em> frequency is slowed by $s$, including the fast ones that encoded fine local distinctions. Adjacent tokens become harder to tell apart, which shows up as degraded short-range performance and usually requires some fine-tuning to recover.</p>
+
+      <h3 id="ntk">NTK-aware scaling</h3>
+      <p>The opposite intuition: rather than scaling positions, change the base so that low frequencies stretch a lot and high frequencies barely move.</p>
+      <div class="key-eq">$$b'=b\cdot s^{\,d/(d-2)}.$$</div>
+      <p>Because $\theta_i=b^{-2(i-1)/d}$, raising the base multiplies each frequency by a factor that depends on $i$: nearly $1$ for $i=1$ and nearly $1/s$ for $i=d/2$. The exponent $d/(d-2)$ is chosen precisely so the slowest plane ends up stretched by the full factor $s$. This preserves local resolution far better than plain interpolation and often works with no fine-tuning at all — but it is a blunt instrument, since a single knob controls the whole spectrum.</p>
+
+      <h3 id="yarn">YaRN: interpolate by parts</h3>
+      <p>YaRN makes the choice explicit per plane. The natural question to ask of dimension $i$ is <em>how many full rotations did it complete within the training context?</em></p>
+      <div class="key-eq">$$r(i)=\frac{L}{\lambda_i}=\frac{L\,\theta_i}{2\pi}.$$</div>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Many rotations ($r$ large)</h3><p>The plane wrapped around thousands of times during pretraining, so the model has seen every phase it could ever see. Its information is genuinely relative and local. Interpolating it would destroy fine distinctions for no benefit, so <strong>leave it alone</strong>.</p></div>
+        <div class="dt-panel"><h3>Fewer than one rotation ($r$ small)</h3><p>The plane never completed a cycle, so its phase acts as an <em>absolute</em> position marker. Extending the context takes it into angles never seen. It <strong>must be interpolated</strong>.</p></div>
+      </div>
+      <p>A ramp interpolates between the two regimes, with $\alpha=1$ and $\beta=32$ for Llama-family models:</p>
+      <div class="key-eq">$$\gamma(r)=\begin{cases}0,& r<\alpha\\[2pt] 1,& r>\beta\\[2pt] \dfrac{r-\alpha}{\beta-\alpha},&\text{otherwise,}\end{cases}$$</div>
+      <div class="key-eq">$$\boxed{\theta_i'=\big(1-\gamma(r(i))\big)\frac{\theta_i}{s}+\gamma(r(i))\,\theta_i.}$$</div>
+      <div class="dt-warning"><strong>Get the direction right.</strong> $\gamma=0$ means <em>fully interpolated</em> ($\theta_i/s$) and applies to the slow, low-frequency planes. $\gamma=1$ means <em>untouched</em> ($\theta_i$) and applies to the fast, high-frequency planes. It is easy to read the formula backwards, and reversing it produces a model that is worse than plain position interpolation.</div>
+
+      <h4 id="temperature">The second half of YaRN</h4>
+      <p>Interpolation makes rotated queries and keys more similar across positions, which flattens the attention distribution. YaRN compensates by sharpening the logits with a temperature that grows logarithmically with the scale factor:</p>
+      <div class="key-eq">$$\sqrt{\tfrac1t}=0.1\ln(s)+1.$$</div>
+      <p>In implementations this factor is folded into the cached $\cos$ and $\sin$ tables, so it multiplies <em>both</em> the query and the key. The logit therefore scales by the square:</p>
+      <div class="key-eq">$$\text{logit}\ \longmapsto\ \big(0.1\ln s+1\big)^2\cdot\text{logit}.$$</div>
+      <p>At $s=8$ that is a factor of about $1.46$ — a modest but measurable sharpening, obtained for free since the tables were precomputed anyway.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="rope-method">method</label><input id="rope-method" type="range" min="0" max="2" step="1" value="2"><strong id="rope-method-value"></strong>
+          <label for="rope-scale">scale $s$</label><input id="rope-scale" type="range" min="1" max="32" step="1" value="8"><strong id="rope-scale-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="rope-svg" class="dt-svg" viewBox="0 0 660 320" role="img" aria-label="Wavelength of each rotary dimension pair before and after scaling, on a logarithmic axis, with the original and extended context lengths marked."></svg></div>
+        <div class="dt-legend">
+          <span><i class="dt-swatch gray"></i>original wavelength</span>
+          <span><i class="dt-swatch green"></i>after scaling</span>
+          <span><i class="dt-swatch blue"></i>training context $L$</span>
+          <span><i class="dt-swatch red"></i>target context $L'$</span>
+        </div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="rope-untouched"></strong><span>planes untouched</span></div>
+          <div class="dt-metric"><strong id="rope-ramp"></strong><span>planes in the ramp</span></div>
+          <div class="dt-metric"><strong id="rope-interp"></strong><span>planes fully interpolated</span></div>
+          <div class="dt-metric"><strong id="rope-temp"></strong><span>logit sharpening</span></div>
+        </div>
+        <div class="dt-status" id="rope-status"></div>
+        <figcaption>Head dimension 128, base 10000, training context $L=4096$, YaRN thresholds $\alpha=1$, $\beta=32$. The horizontal axis is the dimension-pair index; the vertical axis is wavelength in tokens on a log scale.</figcaption>
+      </figure>
+
+      <h2 id="comparison">Choosing between them</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Method</th><th>What it changes</th><th>High frequencies</th><th>Fine-tuning needed</th></tr></thead><tbody>
+        <tr><td>Extrapolation (do nothing)</td><td>nothing</td><td>see unseen phases</td><td>fails outright</td></tr>
+        <tr><td>Position interpolation</td><td>$m\mapsto m/s$</td><td>squashed by $s$</td><td>yes, to recover local acuity</td></tr>
+        <tr><td>NTK-aware</td><td>$b\mapsto b\,s^{d/(d-2)}$</td><td>almost unchanged</td><td>often none</td></tr>
+        <tr><td>YaRN</td><td>per-plane ramp plus logit temperature</td><td>untouched by construction</td><td>little; best quality per token of fine-tuning</td></tr>
+      </tbody></table></div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>RoPE is the unique clean answer to "make the score depend only on relative position", implemented as one rotation per frequency plane. Every context-extension method is a policy for which planes may be slowed down, and YaRN's policy — slow the ones that never completed a rotation, leave the rest alone — is simply the most informed one.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Prove the relative-position property from orthogonality of $R_\phi$. <em>proof</em></li>
+        <li>Compute the longest wavelength for $d=128$, $b=10000$, and explain why it is not $2\pi b$. <em>calculation</em></li>
+        <li>For $L=4096$ and $d=128$, find which dimension pairs satisfy $r(i)<1$. <em>calculation</em></li>
+        <li>Show that $\gamma=0$ yields $\theta_i/s$ and $\gamma=1$ yields $\theta_i$, and say which frequencies get which. <em>reasoning</em></li>
+        <li>Explain why folding the YaRN temperature into $\cos$ and $\sin$ squares its effect on the logits. <em>derivation</em></li>
+        <li>Implement both pairing conventions and verify they give identical attention scores under the matching permutation. <em>implementation</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="model-parameters-and-training-flops.html"><span>Previous</span><span>&#8592; Model Parameters &amp; Training FLOPs</span></a><a class="next" href="autograd-and-the-math-of-distributed-training.html"><span>Next</span><span>Autograd &amp; the Math of Distributed Training &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var methodIn = D.byId('rope-method'), scaleIn = D.byId('rope-scale'), svg = D.byId('rope-svg');
+    if (!methodIn || !scaleIn || !svg) return;
+
+    var HEAD = 128, BASE = 10000, L = 4096, ALPHA = 1, BETA = 32;
+    var NAMES = ['position interpolation', 'NTK-aware base scaling', 'YaRN (NTK by parts)'];
+    var PAIRS = HEAD / 2;
+
+    function baseTheta(i) { return Math.pow(BASE, -2 * i / HEAD); }
+
+    function scaledTheta(i, method, s) {
+      var th = baseTheta(i);
+      if (s <= 1) return th;
+      if (method === 0) return th / s;
+      if (method === 1) {
+        var b2 = BASE * Math.pow(s, HEAD / (HEAD - 2));
+        return Math.pow(b2, -2 * i / HEAD);
+      }
+      var r = L * th / (2 * Math.PI);
+      var g = r < ALPHA ? 0 : r > BETA ? 1 : (r - ALPHA) / (BETA - ALPHA);
+      return (1 - g) * th / s + g * th;
+    }
+
+    var X0 = 62, X1 = 596, Y0 = 46, Y1 = 236;
+    var LOG_MIN = Math.log10(2 * Math.PI), LOG_MAX = Math.log10(3e6);
+
+    function toX(i) { return X0 + (X1 - X0) * i / (PAIRS - 1); }
+    function toY(lam) {
+      var v = (Math.log10(lam) - LOG_MIN) / (LOG_MAX - LOG_MIN);
+      return Y1 - (Y1 - Y0) * Math.max(0, Math.min(1, v));
+    }
+
+    function render() {
+      var method = Number(methodIn.value), s = Number(scaleIn.value);
+      D.clear(svg);
+
+      D.label(svg, (X0 + X1) / 2, 24, 'wavelength of each rotary plane, ' + NAMES[method] +
+        ' at s = ' + s, D.COLOR.ink, 12.5, 'middle', 800);
+
+      [1, 2, 3, 4, 5, 6].forEach(function (e) {
+        var y = toY(Math.pow(10, e));
+        D.line(svg, X0, y, X1, y, D.COLOR.line, 1);
+        D.label(svg, X0 - 8, y + 4, '1e' + e, D.COLOR.muted, 9.5, 'end');
+      });
+      D.line(svg, X0, Y1, X1, Y1, D.COLOR.gray, 1.2);
+      D.label(svg, (X0 + X1) / 2, Y1 + 32, 'dimension pair index i  (fast, local  ->  slow, global)', D.COLOR.muted, 11);
+      D.label(svg, X0, Y1 + 16, '0', D.COLOR.muted, 10);
+      D.label(svg, X1, Y1 + 16, String(PAIRS - 1), D.COLOR.muted, 10);
+      D.label(svg, 16, (Y0 + Y1) / 2, 'wavelength', D.COLOR.muted, 10.5, 'middle');
+
+      var yL = toY(L), yL2 = toY(L * s);
+      D.line(svg, X0, yL, X1, yL, D.COLOR.blue, 1.6, '5 4');
+      D.label(svg, X1 - 2, yL - 6, 'L = ' + L, D.COLOR.blue, 10, 'end', 700);
+      if (s > 1) {
+        D.line(svg, X0, yL2, X1, yL2, D.COLOR.red, 1.6, '5 4');
+        D.label(svg, X1 - 2, yL2 - 6, 'L\u2032 = ' + (L * s), D.COLOR.red, 10, 'end', 700);
+      }
+
+      var origPath = '', newPath = '';
+      var untouched = 0, ramp = 0, interp = 0;
+      for (var i = 0; i < PAIRS; i++) {
+        var th = baseTheta(i), th2 = scaledTheta(i, method, s);
+        origPath += (i ? 'L' : 'M') + toX(i).toFixed(1) + ' ' + toY(2 * Math.PI / th).toFixed(1);
+        newPath += (i ? 'L' : 'M') + toX(i).toFixed(1) + ' ' + toY(2 * Math.PI / th2).toFixed(1);
+        var r = L * th / (2 * Math.PI);
+        if (r > BETA) untouched++; else if (r < ALPHA) interp++; else ramp++;
+      }
+      svg.appendChild(D.svgEl('path', { d: origPath, fill: 'none', stroke: D.COLOR.gray, 'stroke-width': 1.8, 'stroke-dasharray': '4 3' }));
+      svg.appendChild(D.svgEl('path', { d: newPath, fill: 'none', stroke: D.COLOR.green, 'stroke-width': 2.4 }));
+
+      if (method === 2 && s > 1) {
+        var xa = toX(untouched), xb = toX(untouched + ramp);
+        D.rect(svg, X0, Y0 - 12, xa - X0, 10, 'rgba(184,58,58,0.3)', null, 2);
+        D.rect(svg, xa, Y0 - 12, xb - xa, 10, 'rgba(201,138,43,0.35)', null, 2);
+        D.rect(svg, xb, Y0 - 12, X1 - xb, 10, 'rgba(10,143,106,0.35)', null, 2);
+        D.label(svg, (X0 + xa) / 2, Y0 - 16, 'untouched', D.COLOR.red, 9.5, 'middle', 700);
+        D.label(svg, (xa + xb) / 2, Y0 - 16, 'ramp', D.COLOR.gold, 9.5, 'middle', 700);
+        D.label(svg, (xb + X1) / 2, Y0 - 16, 'interpolated', D.COLOR.green, 9.5, 'middle', 700);
+      }
+
+      var mscale = s <= 1 ? 1 : 0.1 * Math.log(s) + 1;
+      D.setText('rope-method-value', NAMES[method].split(' ')[0]);
+      D.setText('rope-scale-value', s + 'x');
+      D.setText('rope-untouched', method === 2 ? String(untouched) : method === 1 ? 'graded' : '0');
+      D.setText('rope-ramp', method === 2 ? String(ramp) : method === 1 ? 'graded' : '0');
+      D.setText('rope-interp', method === 2 ? String(interp) : String(PAIRS));
+      D.setText('rope-temp', method === 2 && s > 1 ? (mscale * mscale).toFixed(3) + 'x' : '1.000x');
+      D.setText('rope-status', s === 1
+        ? 'At s = 1 nothing is rescaled. The dashed and solid curves coincide: this is the model as pretrained, covering wavelengths from about 6 tokens up to roughly 54000.'
+        : method === 0
+          ? 'Position interpolation divides every frequency by ' + s + ', so the whole curve shifts up by a constant factor on the log axis. The slowest plane is now safely longer than the target context, but the fastest plane has also been slowed from 6 tokens to ' + (2 * Math.PI * s).toFixed(0) + ', which is what costs local resolution.'
+          : method === 1
+            ? 'NTK-aware scaling raises the base to ' + Math.round(BASE * Math.pow(s, HEAD / (HEAD - 2))) + '. The curve pivots rather than shifting: fast planes barely move while slow planes stretch by nearly the full factor of ' + s + '. One knob, graded effect, no explicit thresholds.'
+            : 'YaRN classifies each plane by how many rotations it completed in L = ' + L + ' tokens. ' + untouched + ' fast planes completed more than ' + BETA + ' rotations and are left exactly as they were; ' + interp + ' slow planes completed fewer than ' + ALPHA + ' and are fully interpolated by ' + s + '; the remaining ' + ramp + ' are blended. The logits are then sharpened by ' + (mscale * mscale).toFixed(3) + 'x to undo the flattening that interpolation causes.');
+    }
+
+    methodIn.addEventListener('input', render);
+    scaleIn.addEventListener('input', render);
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
