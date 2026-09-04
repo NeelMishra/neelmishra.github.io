@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Treat the cluster as an n-dimensional grid of ranks, derive the rank-to-coordinate mapping, understand why the axis ordering follows communication volume, and compose data, pipeline, context and tensor parallelism into a single layout.">
+  <title>Device Meshes &amp; Combining Parallelism | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 15 &middot; Chapters 18, 25</span></div>
+      <h1>Device Meshes &amp; Combining Parallelism</h1>
+      <p class="post-meta">September 2026 &middot; 24 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>Every strategy so far splits a different axis, so they compose.</strong> A device mesh is the bookkeeping that makes composing them tractable: view the flat list of ranks as an $n$-dimensional grid, give each parallelism strategy one dimension, and read off its process group as a line through the grid.</div>
+
+      <h2 id="mesh">Ranks as coordinates</h2>
+      <p>A job launches $W$ processes numbered $0$ to $W-1$. That flat numbering is useless for reasoning. Instead, factor it:</p>
+      <div class="key-eq">$$W=D\times P\times C\times T,$$</div>
+      <p>for data, pipeline, context and tensor degrees, and give every rank a coordinate $(d,p,c,t)$. With the tensor axis varying fastest:</p>
+      <div class="key-eq">$$\boxed{\text{rank}=\big((d\cdot P+p)\cdot C+c\big)\cdot T+t.}$$</div>
+      <div class="dt-definition"><strong>A process group is a line along one axis.</strong> The tensor-parallel group of a rank is every rank sharing its $(d,p,c)$ and differing in $t$. The data-parallel group shares $(p,c,t)$ and differs in $d$. Each rank belongs to exactly one group per axis, and the collectives of different strategies act on disjoint communicators.</div>
+      <p>Concretely, for 512 devices arranged as $D{=}16$, $P{=}4$, $C{=}1$, $T{=}8$:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Group</th><th>Ranks (for rank 0)</th><th>Stride</th><th>Spans</th></tr></thead><tbody>
+        <tr><td>Tensor parallel</td><td>0&ndash;7</td><td>1, contiguous</td><td>one node</td></tr>
+        <tr><td>Pipeline parallel</td><td>0, 8, 16, 24</td><td>8</td><td>4 nodes</td></tr>
+        <tr><td>Data parallel</td><td>0, 32, 64, 96, &hellip;</td><td>32</td><td>the whole cluster</td></tr>
+      </tbody></table></div>
+      <p>That the tensor-parallel group comes out as ranks 0&ndash;7 — contiguous, and therefore co-located on one machine — is not luck. It is the direct consequence of putting $t$ last in the mapping, and it is the single most important decision in the whole layout.</p>
+
+      <h2 id="ordering">The ordering rule</h2>
+      <p>Cluster interconnects are hierarchical: devices inside a node share a fabric an order of magnitude faster than the network between nodes. The mapping above makes the innermost axis contiguous, so:</p>
+      <div class="dt-definition"><strong>Order the axes by communication intensity, chattiest innermost.</strong> The innermost axis gets the fastest links; the outermost tolerates the slowest.</div>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Position</th><th>Axis</th><th>Traffic per step</th><th>Overlappable?</th></tr></thead><tbody>
+        <tr><td>innermost</td><td><strong>Tensor</strong></td><td>very high — two collectives per block, on the critical path</td><td>no</td></tr>
+        <tr><td></td><td><strong>Context</strong></td><td>high, but only inside attention</td><td>yes, fully</td></tr>
+        <tr><td></td><td><strong>Pipeline</strong></td><td>low — point-to-point activations at stage boundaries</td><td>partly</td></tr>
+        <tr><td>outermost</td><td><strong>Data</strong></td><td>one gradient all-reduce per step</td><td>yes</td></tr>
+      </tbody></table></div>
+      <p>Tensor parallelism goes innermost because its collectives sit directly between dependent matmuls and cannot be hidden. Data parallelism goes outermost because its single all-reduce overlaps with the backward pass. Getting this backwards — data parallel inside the node, tensor parallel across nodes — is one of the most expensive misconfigurations available, and it produces a run that works correctly and is several times slower than it should be.</p>
+
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="mesh-tp">TP</label><input id="mesh-tp" type="range" min="0" max="3" step="1" value="3"><strong id="mesh-tp-value"></strong>
+          <label for="mesh-pp">PP</label><input id="mesh-pp" type="range" min="0" max="3" step="1" value="2"><strong id="mesh-pp-value"></strong>
+          <label for="mesh-dp">DP</label><input id="mesh-dp" type="range" min="0" max="4" step="1" value="2"><strong id="mesh-dp-value"></strong>
+          <label for="mesh-show">highlight</label><input id="mesh-show" type="range" min="0" max="2" step="1" value="0"><strong id="mesh-show-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="mesh-svg" class="dt-svg" viewBox="0 0 660 300" role="img" aria-label="A grid of ranks grouped into nodes, with the tensor, pipeline or data parallel group of rank zero highlighted."></svg></div>
+        <div class="dt-metrics four">
+          <div class="dt-metric"><strong id="mesh-world"></strong><span>world size</span></div>
+          <div class="dt-metric"><strong id="mesh-nodes"></strong><span>nodes of 8</span></div>
+          <div class="dt-metric"><strong id="mesh-shard"></strong><span>model state divisor</span></div>
+          <div class="dt-metric"><strong id="mesh-cross"></strong><span>TP crosses nodes?</span></div>
+        </div>
+        <div class="dt-status" id="mesh-status"></div>
+        <figcaption>Each outlined block is one 8-device node. Highlighting shows which ranks share a process group with rank 0 along the selected axis.</figcaption>
+      </figure>
+
+      <h2 id="composing">What each axis divides</h2>
+      <p>The axes divide different resources, which is exactly why combining them works:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Axis</th><th>Parameters</th><th>Optimizer state</th><th>Activations</th><th>Batch</th></tr></thead><tbody>
+        <tr><td>Data (DDP)</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&divide; $D$</td></tr>
+        <tr><td>Data (FSDP)</td><td>&divide; $D$</td><td>&divide; $D$</td><td>&mdash;</td><td>&divide; $D$</td></tr>
+        <tr><td>Pipeline</td><td>&divide; $P$</td><td>&divide; $P$</td><td>&divide; $P$ roughly</td><td>&mdash;</td></tr>
+        <tr><td>Tensor</td><td>&divide; $T$</td><td>&divide; $T$</td><td>&divide; $T$ with sequence parallelism</td><td>&mdash;</td></tr>
+        <tr><td>Context</td><td>&mdash;</td><td>&mdash;</td><td>&divide; $C$</td><td>&mdash;</td></tr>
+      </tbody></table></div>
+      <div class="dt-warning"><strong>Context parallelism divides no parameters at all</strong>, and plain DDP divides nothing but the batch. Neither is a solution to a model that does not fit; each must be paired with one of the others.</div>
+
+      <h3 id="recipe">A sizing recipe</h3>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div>
+          <p><strong>Set $T$ to fit a layer, and no larger.</strong> Bounded by the devices on one fast fabric, so at most 8. Use the smallest value that makes a single block's weights and activations fit.</p>
+        </div></div>
+        <div class="dt-step"><strong>2</strong><div>
+          <p><strong>Set $C$ from the sequence length.</strong> Only if one sequence's activations still do not fit after tensor parallelism. Zero-cost when unused, so leave it at 1 by default.</p>
+        </div></div>
+        <div class="dt-step"><strong>3</strong><div>
+          <p><strong>Set $P$ to fit the model across nodes.</strong> Pipelining is the cheapest way to cross a slow network. Keep $P$ small enough that $m\ge 9(P-1)$ microbatches remain affordable.</p>
+        </div></div>
+        <div class="dt-step"><strong>4</strong><div>
+          <p><strong>Give everything left to $D$.</strong> Data parallelism converts spare devices into throughput and is the axis that scales furthest.</p>
+        </div></div>
+      </div>
+      <p>For 512 devices and a 70B model: $T=8$ fills a node, $C=1$, $P=4$ splits the model across four nodes, leaving $D=16$. Model state is divided by $P\cdot T=32$ before FSDP does anything further along the data axis.</p>
+
+      <h2 id="pitfalls">Pitfalls</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Mistake</th><th>Symptom</th></tr></thead><tbody>
+        <tr><td>TP group spanning two nodes</td><td>Correct results, throughput several times lower than expected. Check whether $T$ divides the devices per node.</td></tr>
+        <tr><td>Global batch not divisible by $D\times m$</td><td>Ranks disagree on step count and the job hangs at a collective.</td></tr>
+        <tr><td>Loss averaged over ranks with unequal token counts</td><td>Silently wrong gradients — the trap from the autograd note.</td></tr>
+        <tr><td>Gradient clipping computed per rank</td><td>Different clip coefficients on different ranks, so replicas drift apart.</td></tr>
+        <tr><td>Checkpoint saved with one mesh, resumed with another</td><td>Shard shapes mismatch. Save in a layout-independent form.</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>Sanity check any layout in one line:</strong> $D\times P\times C\times T$ must equal the world size, and $T$ must divide the devices per node. Most layout bugs violate one of those two.</div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Factor the world size into one dimension per strategy, order them by communication intensity with tensor parallelism innermost and data parallelism outermost, and each strategy's process group becomes a line through the grid. The ordering is not a convention — it is what puts the unhideable traffic on the fastest links.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Derive the rank formula and use it to find the coordinates of rank 100 in a $16\times4\times1\times8$ mesh. <em>calculation</em></li>
+        <li>Show that the tensor-parallel group is contiguous when $t$ varies fastest. <em>derivation</em></li>
+        <li>Explain why tensor parallelism goes innermost and data parallelism outermost. <em>reasoning</em></li>
+        <li>Propose a layout for 1024 devices and a 400B model, and justify each degree. <em>design</em></li>
+        <li>Give the model-state divisor for $T=8$, $P=4$, FSDP over $D=16$. <em>calculation</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="expert-parallelism-and-all-to-all.html"><span>Previous</span><span>&#8592; Expert Parallelism &amp; All-to-All</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var tpIn = D.byId('mesh-tp'), ppIn = D.byId('mesh-pp'), dpIn = D.byId('mesh-dp'), shIn = D.byId('mesh-show');
+    var svg = D.byId('mesh-svg');
+    if (!tpIn || !ppIn || !dpIn || !shIn || !svg) return;
+
+    var VALS = [1, 2, 4, 8, 16];
+    var AXES = ['tensor parallel', 'pipeline parallel', 'data parallel'];
+    var NODE = 8;
+
+    function render() {
+      var T = VALS[Number(tpIn.value)], P = VALS[Number(ppIn.value)], Dp = VALS[Number(dpIn.value)];
+      var show = Number(shIn.value);
+      var W = T * P * Dp;
+      var nodes = Math.ceil(W / NODE);
+
+      function coord(r) { return { t: r % T, p: Math.floor(r / T) % P, d: Math.floor(r / (T * P)) }; }
+      var c0 = coord(0);
+      function inGroup(r) {
+        var c = coord(r);
+        if (show === 0) return c.p === c0.p && c.d === c0.d;
+        if (show === 1) return c.t === c0.t && c.d === c0.d;
+        return c.t === c0.t && c.p === c0.p;
+      }
+
+      D.clear(svg);
+      D.label(svg, 330, 22, 'world = TP ' + T + ' x PP ' + P + ' x DP ' + Dp + ' = ' + W + ' ranks',
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      var perRow = Math.min(nodes, 8);
+      var cell = Math.min(26, 560 / (perRow * NODE));
+      var gap = 10;
+      var startX = 30, startY = 52;
+      var rowsOfNodes = Math.ceil(nodes / perRow);
+      var rowH = cell + 30;
+
+      for (var n = 0; n < nodes; n++) {
+        var nr = Math.floor(n / perRow), nc = n % perRow;
+        var nx = startX + nc * (NODE * cell + gap);
+        var ny = startY + nr * rowH;
+        D.rect(svg, nx - 3, ny - 3, NODE * cell + 6, cell + 6, 'none', D.COLOR.line, 5);
+        D.label(svg, nx + NODE * cell / 2, ny + cell + 16, 'node ' + n, D.COLOR.muted, 8.5);
+        for (var i = 0; i < NODE; i++) {
+          var r = n * NODE + i;
+          if (r >= W) break;
+          var hit = inGroup(r);
+          D.rect(svg, nx + i * cell, ny, cell - 1.5, cell - 1.5,
+            hit ? D.COLOR.green : 'rgba(158,170,164,0.18)', '#fff', 3);
+          if (cell > 16) D.label(svg, nx + i * cell + (cell - 1.5) / 2, ny + cell / 2 + 3,
+            String(r), hit ? '#fff' : D.COLOR.muted, 8.5, 'middle', hit ? 800 : 500);
+        }
+      }
+
+      var tpCrosses = T > NODE;
+      var yInfo = startY + rowsOfNodes * rowH + 12;
+      D.label(svg, 330, yInfo, 'green = ranks sharing the ' + AXES[show] + ' group of rank 0',
+        D.COLOR.green, 10.5, 'middle', 700);
+
+      D.setText('mesh-tp-value', String(T));
+      D.setText('mesh-pp-value', String(P));
+      D.setText('mesh-dp-value', String(Dp));
+      D.setText('mesh-show-value', AXES[show].split(' ')[0]);
+      D.setText('mesh-world', String(W));
+      D.setText('mesh-nodes', String(nodes));
+      D.setText('mesh-shard', (P * T) + 'x');
+      D.setText('mesh-cross', tpCrosses ? 'YES - bad' : 'no');
+      D.setText('mesh-status', (tpCrosses
+        ? 'Warning: TP = ' + T + ' exceeds the ' + NODE +
+          ' devices in a node, so every tensor-parallel all-reduce crosses the slow network. This configuration will be correct and several times slower than it should be. Reduce TP and raise PP or DP instead. '
+        : 'TP = ' + T + ' fits within a node, so the unhideable tensor-parallel collectives stay on the fast fabric. ') +
+        'Model state is divided by PP x TP = ' + (P * T) +
+        ' before any data-parallel sharding. Because the tensor axis varies fastest, TP groups come out as contiguous rank ranges and therefore land inside a single machine, while data-parallel groups stride across the cluster where the slower link is acceptable.');
+    }
+
+    [tpIn, ppIn, dpIn, shIn].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
