@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Gradient accumulation done correctly under DDP, clipping across shards, mixed precision, AdamW and what to exclude from weight decay, warmup-cosine and warmup-stable-decay schedules, honest throughput metrics, and resharding-safe checkpoints.">
+  <title>The Training Loop, Metrics &amp; Checkpointing | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Part 16 &middot; Chapters 13, 24</span></div>
+      <h1>The Training Loop, Metrics &amp; Checkpointing</h1>
+      <p class="post-meta">September 2026 &middot; 25 min read &middot; Distributed Training from First Principles</p>
+
+      <div class="callout"><strong>The loop is where the abstractions leak.</strong> Every strategy in this series assumed a step that computes a gradient and applies it. Doing that correctly across shards — accumulating, clipping, scaling, scheduling and saving — is where the subtle, silent bugs live.</div>
+
+      <h2 id="skeleton">The skeleton</h2>
+      <div class="dt-algorithm">
+        <div class="dt-algorithm-title">One optimizer step with gradient accumulation</div>
+        <div class="dt-algorithm-body">
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">1</span><span><span class="dt-algorithm-keyword">for</span> micro-step $j=1,\dots,k$:</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">2</span><span>fetch micro-batch, forward, compute loss</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">3</span><span>scale the loss by $1/k$ <em>before</em> backward</span></div>
+          <div class="dt-algorithm-line indent"><span class="dt-algorithm-number">4</span><span>backward, with gradient sync suppressed for $j&lt;k$</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">5</span><span>all-reduce the gradients (happens implicitly on micro-step $k$)</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">6</span><span>all-reduce the squared gradient norm, then clip with the global coefficient</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">7</span><span>set the learning rate from the schedule</span></div>
+          <div class="dt-algorithm-line"><span class="dt-algorithm-number">8</span><span>optimizer step, then zero the gradients</span></div>
+        </div>
+      </div>
+      <p>Every line has a way to be subtly wrong across ranks. Taking them in turn.</p>
+
+      <h2 id="accumulation">Accumulation, correctly</h2>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Scale before, not after</h3><p>Divide each micro-batch loss by $k$ before calling backward. Scaling the accumulated gradient afterwards works mathematically but lets the buffer hold $k\times$ the intended magnitude in between, which interacts badly with FP16 loss scaling and with overflow checks.</p></div>
+        <div class="dt-panel"><h3>Suppress the sync</h3><p>DDP all-reduces on every backward by default. Across $k$ micro-steps that is $k$ times the necessary traffic. Frameworks expose a no-sync context; use it for the first $k-1$ micro-steps. Forgetting costs throughput only, never correctness.</p></div>
+      </div>
+      <div class="dt-warning"><strong>The token-weighting trap, once more.</strong> A language-model loss is a mean over <em>tokens</em>. If micro-batches contain different numbers of real tokens, dividing each by $k$ weights them equally and is therefore wrong. Accumulate the loss <em>sum</em> and the token count separately, all-reduce both, and divide at the end. With fixed-length packed sequences the issue disappears, which is one more reason packing is standard.</div>
+
+      <h2 id="clipping">Clipping is a global operation</h2>
+      <p>Gradient clipping rescales the whole gradient when its norm exceeds a threshold:</p>
+      <div class="key-eq">$$\mathbf g\leftarrow\mathbf g\cdot\min\!\left(1,\frac{\tau}{\|\mathbf g\|_2}\right).$$</div>
+      <p>The norm is over <em>all</em> parameters, which no single rank possesses under any sharded strategy. The correct procedure is to reduce first and clip second:</p>
+      <div class="dt-steps">
+        <div class="dt-step"><strong>1</strong><div><p>Each rank computes the sum of squares of the gradient shards it owns.</p></div></div>
+        <div class="dt-step"><strong>2</strong><div><p>All-reduce those scalars with sum, then take the square root. Every rank now holds the identical global norm.</p></div></div>
+        <div class="dt-step"><strong>3</strong><div><p>Apply the same coefficient locally.</p></div></div>
+      </div>
+      <div class="dt-definition"><strong>Clipping per rank is a real bug, not an approximation.</strong> Different ranks compute different coefficients, apply different updates, and replicas that were supposed to stay identical drift apart. Since the loss still decreases, this can survive an entire run undetected.</div>
+
+      <h2 id="precision">Mixed precision</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th></th><th>FP16</th><th>BF16</th></tr></thead><tbody>
+        <tr><td>Exponent bits</td><td>5</td><td>8, the same range as FP32</td></tr>
+        <tr><td>Mantissa bits</td><td>10</td><td>7</td></tr>
+        <tr><td>Underflow risk</td><td>High — small gradients flush to zero</td><td>Negligible</td></tr>
+        <tr><td>Loss scaling needed</td><td>Yes, dynamic, with skipped steps on overflow</td><td>No</td></tr>
+        <tr><td>Verdict</td><td>Legacy</td><td>Default wherever available</td></tr>
+      </tbody></table></div>
+      <p>BF16 trades precision for range, which is the right trade: gradients span many orders of magnitude but rarely need seven significant digits. Two things still stay in FP32 — the master weights, so tiny updates are not lost when added to large weights, and the reductions inside normalization and softmax, where accumulated error compounds.</p>
+
+      <h2 id="optimizer">AdamW and what to exclude</h2>
+      <p>AdamW decouples weight decay from the adaptive update, applying it directly to the parameter:</p>
+      <div class="key-eq">$$\theta\leftarrow\theta-\eta\left(\frac{\hat m}{\sqrt{\hat v}+\epsilon}+\lambda\theta\right).$$</div>
+      <div class="dt-definition"><strong>Do not decay everything.</strong> Weight decay should apply to matrices that do real linear work. Exclude normalization gains — decaying them toward zero shrinks the activations they are supposed to rescale — and biases, which carry no capacity worth regularizing. Building two parameter groups, decayed and not, is a five-line change that noticeably affects final loss.</div>
+      <p>Typical settings are $\beta_1=0.9$, $\beta_2=0.95$ — lower than the 0.999 default, because language-model gradients are noisy and a shorter second-moment window adapts faster — with $\epsilon=10^{-8}$ and $\lambda=0.1$.</p>
+
+      <h2 id="schedule">Learning-rate schedules</h2>
+      <p>Warmup exists because Adam's second-moment estimate is unreliable in the first few hundred steps: $\hat v$ is based on almost no data, so the update direction is close to noise, and a full-size step early can destabilize a run permanently. Linear warmup over 1&ndash;2% of training costs nothing and removes the risk.</p>
+      <figure class="note-figure">
+        <div class="dt-controls">
+          <label for="lr-kind">schedule</label><input id="lr-kind" type="range" min="0" max="1" step="1" value="0"><strong id="lr-kind-value"></strong>
+          <label for="lr-warm">warmup %</label><input id="lr-warm" type="range" min="0" max="10" step="1" value="2"><strong id="lr-warm-value"></strong>
+          <label for="lr-decay">decay %</label><input id="lr-decay" type="range" min="5" max="60" step="5" value="20"><strong id="lr-decay-value"></strong>
+        </div>
+        <div class="dt-scroll"><svg id="lr-svg" class="dt-svg" viewBox="0 0 660 250" role="img" aria-label="Learning rate against training step for warmup-cosine and warmup-stable-decay schedules."></svg></div>
+        <div class="dt-metrics">
+          <div class="dt-metric"><strong id="lr-peak"></strong><span>steps at peak rate</span></div>
+          <div class="dt-metric"><strong id="lr-avg"></strong><span>mean rate / peak</span></div>
+          <div class="dt-metric"><strong id="lr-final"></strong><span>final rate / peak</span></div>
+        </div>
+        <div class="dt-status" id="lr-status"></div>
+        <figcaption>Cosine must know the total step count in advance. Warmup-stable-decay does not, so a run can be extended, and a usable checkpoint can be produced at any point by branching off a short decay.</figcaption>
+      </figure>
+      <div class="dt-two-col">
+        <div class="dt-panel"><h3>Warmup then cosine</h3><p>The long-standing default. Requires committing to a total step count up front: stopping early leaves the rate high and the model under-annealed, and extending distorts the shape.</p></div>
+        <div class="dt-panel"><h3>Warmup, stable, decay</h3><p>Hold the peak rate indefinitely, then decay over the final stretch. The stable phase is open-ended, so you can decide the length later and branch a short decay to get a deployable checkpoint at any time.</p></div>
+      </div>
+
+      <h2 id="metrics">Metrics that are not lies</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Metric</th><th>How to get it wrong</th><th>How to get it right</th></tr></thead><tbody>
+        <tr><td>Training loss</td><td>Report rank 0's local loss.</td><td>All-reduce the loss sum and the token count, then divide.</td></tr>
+        <tr><td>Tokens per second</td><td>Count padding.</td><td>Count only real tokens, and use end-to-end wall time including the data loader.</td></tr>
+        <tr><td>MFU</td><td>Include recomputation as useful work.</td><td>Use $6N$ per token. Counting recomputation gives hardware FLOP utilization, which is a different, larger number — say which one you mean.</td></tr>
+        <tr><td>Step time</td><td>Time only the compute.</td><td>Include the wait on collectives; that wait is the thing you are trying to remove.</td></tr>
+        <tr><td>Gradient norm</td><td>Log the post-clip value.</td><td>Log pre-clip. It is the best early warning of instability: a spike precedes a loss spike.</td></tr>
+      </tbody></table></div>
+
+      <h2 id="checkpointing">Checkpoints that survive a resharding</h2>
+      <p>A run of any length will be interrupted. What must be saved to resume <em>exactly</em>:</p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Item</th><th>Why</th></tr></thead><tbody>
+        <tr><td>Model parameters</td><td>Obvious.</td></tr>
+        <tr><td>Optimizer state</td><td>Adam moments carry substantial history; discarding them causes a visible loss spike on resume.</td></tr>
+        <tr><td>Step count and schedule position</td><td>Otherwise the learning rate restarts from warmup.</td></tr>
+        <tr><td>Data loader position</td><td>Otherwise the run silently re-trains on data it has already seen.</td></tr>
+        <tr><td>RNG states, per rank</td><td>For bitwise reproducibility of dropout and any stochastic path.</td></tr>
+      </tbody></table></div>
+      <div class="dt-definition"><strong>Save in a layout-independent form.</strong> Writing each rank's raw shard bakes the parallelism layout into the file, so a job resumed on a different mesh cannot load it. Distributed checkpointing instead records each shard with metadata describing which slice of which logical tensor it holds, so any layout can reassemble it. Given how often you will change the mesh mid-project, this is worth doing from the start.</div>
+      <div class="dt-warning"><strong>Write asynchronously, and keep more than one.</strong> A synchronous multi-terabyte save stalls every rank. Copy to host memory, then write in the background. And never overwrite the only checkpoint in place: a crash mid-write leaves nothing to resume from.</div>
+      <div class="dt-takeaway"><strong>Takeaway</strong><p>Scale the loss before backward, suppress the sync until the last micro-step, all-reduce the norm before clipping, keep master weights in FP32, exclude norms and biases from weight decay, measure MFU against $6N$, and save checkpoints in a form that outlives the mesh you happened to use.</p></div>
+
+      <h2 id="check">Check yourself</h2>
+      <ul class="practice-list">
+        <li>Explain why the loss is scaled by $1/k$ before backward rather than after. <em>reasoning</em></li>
+        <li>Describe the correct sequence for gradient clipping under FSDP. <em>design</em></li>
+        <li>Explain why BF16 needs no loss scaling but FP16 does. <em>reasoning</em></li>
+        <li>Name two parameter categories excluded from weight decay and justify each. <em>design</em></li>
+        <li>Explain why warmup-stable-decay allows extending a run and cosine does not. <em>analysis</em></li>
+        <li>List the five items a resumable checkpoint must contain. <em>recall</em></li>
+      </ul>
+
+      <nav class="post-nav"><a class="prev" href="device-meshes-and-combining-parallelism.html"><span>Previous</span><span>&#8592; Device Meshes &amp; Combining Parallelism</span></a><a class="next" href="index.html"><span>Next</span><span>Series Overview &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script><script src="umar.js"></script>
+  <script>
+  (function () {
+    var D = window.DT; if (!D) return;
+    var kIn = D.byId('lr-kind'), wIn = D.byId('lr-warm'), dIn = D.byId('lr-decay'), svg = D.byId('lr-svg');
+    if (!kIn || !wIn || !dIn || !svg) return;
+
+    var STEPS = 1000, MIN_FRAC = 0.1;
+    var NAMES = ['warmup + cosine', 'warmup + stable + decay'];
+
+    function rate(t, kind, warm, decay) {
+      if (t < warm) return t / Math.max(1, warm);
+      if (kind === 0) {
+        var u = (t - warm) / Math.max(1, STEPS - warm);
+        return MIN_FRAC + (1 - MIN_FRAC) * 0.5 * (1 + Math.cos(Math.PI * u));
+      }
+      var start = STEPS - decay;
+      if (t < start) return 1;
+      return MIN_FRAC + (1 - MIN_FRAC) * (1 - (t - start) / Math.max(1, decay));
+    }
+
+    function render() {
+      var kind = Number(kIn.value);
+      var warm = Math.round(STEPS * Number(wIn.value) / 100);
+      var decay = Math.round(STEPS * Number(dIn.value) / 100);
+
+      var X0 = 62, X1 = 610, Y0 = 44, Y1 = 190;
+      D.clear(svg);
+      D.label(svg, (X0 + X1) / 2, 24, NAMES[kind] + ' over ' + STEPS + ' steps',
+        D.COLOR.ink, 12.5, 'middle', 800);
+
+      for (var g = 0; g <= 4; g++) {
+        var y = Y1 - (Y1 - Y0) * g / 4;
+        D.line(svg, X0, y, X1, y, D.COLOR.line, 1);
+        D.label(svg, X0 - 8, y + 4, (g / 4).toFixed(2), D.COLOR.muted, 9.5, 'end');
+      }
+      D.line(svg, X0, Y1, X1, Y1, D.COLOR.gray, 1.2);
+      D.label(svg, (X0 + X1) / 2, Y1 + 30, 'training step', D.COLOR.muted, 11);
+      D.label(svg, 18, (Y0 + Y1) / 2, 'lr / peak', D.COLOR.muted, 10.5, 'middle');
+
+      var path = '', sum = 0, atPeak = 0;
+      for (var t = 0; t <= STEPS; t++) {
+        var r = rate(t, kind, warm, decay);
+        sum += r;
+        if (r > 0.999) atPeak++;
+        var x = X0 + (X1 - X0) * t / STEPS;
+        var y2 = Y1 - (Y1 - Y0) * r;
+        path += (t ? 'L' : 'M') + x.toFixed(1) + ' ' + y2.toFixed(1);
+      }
+      svg.appendChild(D.svgEl('path', { d: path, fill: 'none', stroke: D.COLOR.green, 'stroke-width': 2.6 }));
+
+      var wx = X0 + (X1 - X0) * warm / STEPS;
+      D.line(svg, wx, Y0 - 6, wx, Y1, D.COLOR.blue, 1.4, '4 3');
+      D.label(svg, wx, Y0 - 10, 'warmup ends', D.COLOR.blue, 9.5, 'middle', 700);
+      if (kind === 1) {
+        var dx = X0 + (X1 - X0) * (STEPS - decay) / STEPS;
+        D.line(svg, dx, Y0 - 6, dx, Y1, D.COLOR.gold, 1.4, '4 3');
+        D.label(svg, dx, Y0 - 10, 'decay begins', D.COLOR.gold, 9.5, 'middle', 700);
+      }
+
+      D.setText('lr-kind-value', kind === 0 ? 'cosine' : 'WSD');
+      D.setText('lr-warm-value', warm + ' st');
+      D.setText('lr-decay-value', kind === 1 ? decay + ' st' : 'n/a');
+      D.setText('lr-peak', String(atPeak));
+      D.setText('lr-avg', (sum / (STEPS + 1)).toFixed(3));
+      D.setText('lr-final', rate(STEPS, kind, warm, decay).toFixed(3));
+      D.setText('lr-status', kind === 0
+        ? 'Cosine begins decaying the moment warmup ends, so the model spends almost no time at the peak rate and the average rate is ' +
+          (sum / (STEPS + 1)).toFixed(3) +
+          ' of peak. The shape depends on the total step count, so this schedule has to be committed to before the run starts: stopping early leaves the model under-annealed.'
+        : 'The stable phase holds the peak rate for ' + atPeak +
+          ' steps, giving an average of ' + (sum / (STEPS + 1)).toFixed(3) +
+          ' of peak, higher than cosine over the same budget. Because the stable phase is open-ended, the run can be extended at any time, and a deployable checkpoint can be produced whenever you like by branching off a short decay.');
+    }
+
+    [kIn, wIn, dIn].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
+  </script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
