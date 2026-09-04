@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Study notes for Umar Jamil's Building a Distributed Training Framework from First Principles: model FLOPs, RoPE, MLA, autograd, collectives, DDP, FSDP, pipeline, tensor, context and expert parallelism.">
+  <title>Building a Distributed Training Framework: Notes | Neel Mishra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../../../../../tree-diagrams.css"><link rel="stylesheet" href="umar.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal">
+      <a class="back-to-blog" href="../../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav"><a href="../../../../../blog.html">Deep Learning &middot; Popular Videos &middot; Umar Jamil</a><span>&middot; Overview</span></div>
+      <h1>Building a Distributed Training Framework</h1>
+      <p class="post-meta">September 2026 &middot; 12 min read &middot; Series overview and roadmap</p>
+
+      <div class="dt-source">
+        <strong>Source and attribution</strong>
+        <p>These are my own study notes, written while working through Umar Jamil's marathon walkthrough <em>Building a distributed training framework from first principles</em> (about 19.5 hours, 30 chapters). The notes are original write-ups of the underlying ideas, with my own derivations, figures and worked numbers; they are not a transcript and they contain no material copied from the video. Watch the original for the live coding, which is the part notes cannot replace: <a href="https://www.youtube.com/watch?v=XoGvCBRnwLs" rel="noopener" target="_blank">youtube.com/watch?v=XoGvCBRnwLs</a>.</p>
+      </div>
+
+      <div class="callout"><strong>What the series is really about.</strong> Training a large model on many GPUs is not one technique. It is a set of orthogonal ways to cut a computation into pieces — by example, by layer, by tensor, by sequence position, by expert — each with a different communication bill. Understanding them means understanding what has to be summed, what has to be gathered, and when.</div>
+
+      <h2 id="premise">The premise</h2>
+      <p>A single accelerator gives you a fixed amount of memory and a fixed number of FLOP/s. A modern training run needs more of both than any one device has. Every parallelism strategy is an answer to the question <em>which axis of the computation do we split, and what does that force us to communicate?</em></p>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Strategy</th><th>Split along</th><th>Replicated</th><th>Communication per step</th></tr></thead><tbody>
+        <tr><td>Data parallel (DDP)</td><td>batch</td><td>all parameters</td><td>all-reduce of the gradient</td></tr>
+        <tr><td>ZeRO / FSDP</td><td>batch, plus optimizer and parameter sharding</td><td>nothing permanently</td><td>all-gather of parameters, reduce-scatter of gradients</td></tr>
+        <tr><td>Pipeline parallel</td><td>layers</td><td>nothing</td><td>point-to-point activations at stage boundaries</td></tr>
+        <tr><td>Tensor parallel</td><td>inside each matmul</td><td>activations at block boundaries</td><td>all-reduce (or reduce-scatter and all-gather) per block</td></tr>
+        <tr><td>Context parallel</td><td>sequence positions</td><td>parameters</td><td>ring exchange of keys and values inside attention</td></tr>
+        <tr><td>Expert parallel</td><td>MoE experts</td><td>non-expert weights</td><td>all-to-all dispatch and combine</td></tr>
+      </tbody></table></div>
+      <p>Everything in these notes elaborates one row of that table, or explains a prerequisite you need before a row makes sense.</p>
+
+      <h2 id="prereq">The prerequisites are not optional</h2>
+      <p>Three ideas do most of the work throughout the series, and they are worth stating up front.</p>
+      <div class="dt-three-col">
+        <div class="dt-panel"><h3>Gradients are sums</h3><p>The loss over a batch is a sum over examples, and differentiation is linear. That single fact is what makes data parallelism correct rather than an approximation.</p></div>
+        <div class="dt-panel"><h3>Arithmetic intensity decides</h3><p>Whether a kernel is compute-bound or memory-bound follows from FLOPs per byte moved. It explains the KV cache, MLA, and why some communication can hide behind compute.</p></div>
+        <div class="dt-panel"><h3>Collectives are the vocabulary</h3><p>All-reduce, all-gather, reduce-scatter and all-to-all are the only primitives you need. Every strategy above is a choice of which one to call and where.</p></div>
+      </div>
+
+      <h2 id="roadmap">The roadmap</h2>
+      <p>The video's 30 chapters group naturally into five arcs. Each note below is self-contained, but they are ordered so that nothing depends on something later.</p>
+
+      <h3 id="arc-1">Arc 1 &middot; The model you are going to train</h3>
+      <div class="dt-roadmap">
+        <div class="dt-roadmap-item">
+          <a href="model-parameters-and-training-flops.html">Model Parameters &amp; Training FLOPs</a>
+          <p>Count every parameter in a decoder-only transformer, derive the $6ND$ training-FLOP rule from the forward and backward passes, and turn it into wall-clock estimates and model FLOP utilization.</p>
+          <span class="dt-chapters">Chapter 2</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">RoPE from First Principles, and YaRN</span><span class="dt-soon">planned</span>
+          <p>Derive rotary position embeddings from the requirement that attention scores depend only on relative position, then extend the context window with position interpolation, NTK-aware scaling and YaRN.</p>
+          <span class="dt-chapters">Chapters 3&ndash;4</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Transformer Assembly &amp; Weight Initialization</span><span class="dt-soon">planned</span>
+          <p>Pre-norm versus post-norm, RMSNorm, SwiGLU, tied embeddings, and why residual-branch initialization has to be scaled by depth.</p>
+          <span class="dt-chapters">Chapter 5</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">The KV Cache &amp; Arithmetic Intensity</span><span class="dt-soon">planned</span>
+          <p>Why autoregressive decoding is memory-bound, how to size the KV cache, the roofline model, and how MQA and GQA trade quality for bandwidth.</p>
+          <span class="dt-chapters">Chapter 6</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Multi-head Latent Attention</span><span class="dt-soon">planned</span>
+          <p>Compress the KV cache into a low-rank latent, discover why RoPE breaks the trick, fix it with a decoupled positional path, and absorb the projections into the query and output matrices.</p>
+          <span class="dt-chapters">Chapters 7&ndash;10</span>
+        </div>
+      </div>
+
+      <h3 id="arc-2">Arc 2 &middot; Why distributed training is correct</h3>
+      <div class="dt-roadmap">
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Autograd &amp; the Mathematics of Distributed Training</span><span class="dt-soon">planned</span>
+          <p>Reverse-mode differentiation as vector-Jacobian products, the two rules that govern split computation graphs (sum at forks, route at concatenations), and the proof that averaging gradients across shards is exact.</p>
+          <span class="dt-chapters">Chapters 11&ndash;12</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Distributed Communication Collectives</span><span class="dt-soon">planned</span>
+          <p>Broadcast, reduce, all-reduce, all-gather, reduce-scatter and all-to-all, with ring algorithms, bandwidth-optimal cost models, and how to predict what a collective will cost you.</p>
+          <span class="dt-chapters">Chapter 19</span>
+        </div>
+      </div>
+
+      <h3 id="arc-3">Arc 3 &middot; Splitting the batch</h3>
+      <div class="dt-roadmap">
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Data Parallelism: DDP, ZeRO and FSDP</span><span class="dt-soon">planned</span>
+          <p>Gradient bucketing and backward overlap in DDP, the memory ledger that motivates ZeRO, and how FSDP turns a replicated model into a sharded one with all-gather and reduce-scatter.</p>
+          <span class="dt-chapters">Chapters 16, 20</span>
+        </div>
+      </div>
+
+      <h3 id="arc-4">Arc 4 &middot; Splitting the model</h3>
+      <div class="dt-roadmap">
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Pipeline Parallelism from First Principles</span><span class="dt-soon">planned</span>
+          <p>Cut the model by layer, discover the bubble, fix most of it with microbatching, and work out the activation-memory bill that pipelining creates.</p>
+          <span class="dt-chapters">Chapters 14, 17</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Pipeline Schedules: GPipe, 1F1B and Zero Bubble</span><span class="dt-soon">planned</span>
+          <p>The same bubble fraction, wildly different memory. Interleaved stages, and how splitting the backward pass into input-gradient and weight-gradient halves buys you a near-zero bubble.</p>
+          <span class="dt-chapters">Chapter 15</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Tensor Parallelism</span><span class="dt-soon">planned</span>
+          <p>Column-parallel and row-parallel linear layers, the conjugate pair of identity/all-reduce operators, how to shard attention head-wise for free, and sequence parallelism for the normalization layers.</p>
+          <span class="dt-chapters">Chapters 21&ndash;22</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Context Parallelism &amp; Ring Attention</span><span class="dt-soon">planned</span>
+          <p>Shard the sequence itself. Online softmax makes attention decomposable over key blocks, a ring passes those blocks around, and causal masking creates a load-balancing problem with a neat fix.</p>
+          <span class="dt-chapters">Chapter 23</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Device Meshes &amp; Combining Parallelism</span><span class="dt-soon">planned</span>
+          <p>Treat the world as an n-dimensional grid of ranks. Which axis should be innermost, why the ordering follows communication volume, and how 3D and 4D parallelism are assembled.</p>
+          <span class="dt-chapters">Chapters 18, 25</span>
+        </div>
+      </div>
+
+      <h3 id="arc-5">Arc 5 &middot; Sparsity and the training loop</h3>
+      <div class="dt-roadmap">
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Mixture of Experts from First Principles</span><span class="dt-soon">planned</span>
+          <p>Decouple parameter count from FLOPs per token. Top-$k$ routing, the capacity factor, load-balancing losses, shared experts, and why the router is the hard part.</p>
+          <span class="dt-chapters">Chapter 26</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">Expert Parallelism &amp; All-to-All</span><span class="dt-soon">planned</span>
+          <p>Place experts on different devices, ship each token to the ranks that own its experts with an all-to-all, and combine the results on the way back. Plus tensor parallelism for MoE and the two combined.</p>
+          <span class="dt-chapters">Chapters 27&ndash;30</span>
+        </div>
+        <div class="dt-roadmap-item pending">
+          <span class="dt-pending">The Training Loop, Metrics &amp; Checkpointing</span><span class="dt-soon">planned</span>
+          <p>Gradient accumulation done correctly under DDP, clipping across shards, mixed precision, learning-rate schedules, throughput metrics that are not lies, and distributed checkpoints that survive a resharding.</p>
+          <span class="dt-chapters">Chapters 13, 24</span>
+        </div>
+      </div>
+
+      <h2 id="notation">Notation used throughout</h2>
+      <div class="dt-table-wrap"><table class="dt-table"><thead><tr><th>Symbol</th><th>Meaning</th></tr></thead><tbody>
+        <tr><td>$B$, $S$</td><td>batch size (sequences) and sequence length (tokens per sequence)</td></tr>
+        <tr><td>$d$ or $d_{\text{model}}$</td><td>model hidden size</td></tr>
+        <tr><td>$L$</td><td>number of transformer blocks</td></tr>
+        <tr><td>$h$, $d_h$</td><td>number of attention heads and per-head dimension, $d=h\,d_h$</td></tr>
+        <tr><td>$d_{\text{ff}}$</td><td>feed-forward inner dimension</td></tr>
+        <tr><td>$V$</td><td>vocabulary size</td></tr>
+        <tr><td>$N$</td><td>total non-embedding parameter count</td></tr>
+        <tr><td>$P$</td><td>number of ranks (devices) in a group</td></tr>
+        <tr><td>$\alpha$, $\beta$</td><td>link latency and inverse bandwidth in communication cost models</td></tr>
+      </tbody></table></div>
+      <div class="dt-takeaway"><strong>Start here</strong><p>If you only read two notes, read the autograd one and the collectives one. Every parallelism strategy in the rest of the series is a combination of those two ideas: what has to be summed, and which primitive sums it.</p></div>
+
+      <nav class="post-nav"><a class="prev" href="../../../../../blog.html"><span>Back</span><span>&#8592; All Posts</span></a><a class="next" href="model-parameters-and-training-flops.html"><span>Next</span><span>Model Parameters &amp; Training FLOPs &#8594;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js"></script><script src="../../../../../blog.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

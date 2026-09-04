@@ -8820,6 +8820,26 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        name: 'popular_videos',
+        label: 'Popular Videos',
+        children: [
+          {
+            name: 'umar_jamil',
+            label: 'Umar Jamil',
+            children: [
+              {
+                name: 'distributed-training-framework',
+                label: 'Distributed Training from First Principles',
+                children: [
+                  { title: 'Series Overview &amp; Roadmap', file: 'dl/popular_videos/umar_jamil/distributed-training-framework/index.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/model-parameters-and-training-flops.html', 'dl/transformers/index.html'] },
+                  { title: 'Model Parameters &amp; Training FLOPs', file: 'dl/popular_videos/umar_jamil/distributed-training-framework/model-parameters-and-training-flops.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/index.html', 'dl/transformers/index.html'] }
+                ]
+              }
+            ]
+          }
+        ]
       }
     ]
   },
