@@ -1635,10 +1635,10 @@
       var n = Number(nInput.value);
       var seed = Number(seedInput.value);
 
-      var state = (seed + 1) * 8121 + 28411;
+      var state = ((seed + 1) * 8121 + 28411) % 2147483647;
       function rand() {
-        state = (state * 1103515245 + 12345) % 2147483648;
-        return state / 2147483648;
+        state = (state * 16807) % 2147483647;
+        return state / 2147483647;
       }
       var running = [], sum = 0;
       for (var t = 0; t < n; t++) {
@@ -1919,6 +1919,222 @@
     }
 
     [actionInput, spreadInput, deltaInput].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
+
+  (function initPendulumActorCritic() {
+    var stageInput = byId('pen-stage');
+    var stepInput = byId('pen-step');
+    var svg = byId('pen-svg');
+    if (!stageInput || !stepInput || !svg) return;
+
+    var DT = 0.05, G = 4.0, TORQUE = 0.8, VMAX = 2 * Math.PI;
+    var TILINGS = 32, BINS = 8, TILE_COUNT = TILINGS * BINS * BINS;
+    var TRAIN_STEPS = 30000, ROLL_STEPS = 520, KICK_STEP = 200;
+    var A_W = 1.0 / TILINGS, A_TH = 0.1 / TILINGS, A_RBAR = 0.01;
+
+    var seed = 20260906 % 2147483647;
+    function rand() {
+      // Park-Miller: stays inside double precision, unlike a 32-bit LCG.
+      seed = (seed * 16807) % 2147483647;
+      return seed / 2147483647;
+    }
+    function wrap(b) {
+      var x = (b + Math.PI) % (2 * Math.PI);
+      if (x < 0) x += 2 * Math.PI;
+      return x - Math.PI;
+    }
+    function stepEnv(b, v, torque) {
+      var acc = 1.5 * G * Math.sin(b) + 3 * TORQUE * torque;
+      var nv = v + DT * acc;
+      if (Math.abs(nv) > VMAX) return { b: Math.PI, v: 0, r: -Math.PI, reset: true };
+      var nb = wrap(b + DT * nv);
+      return { b: nb, v: nv, r: -Math.abs(nb), reset: false };
+    }
+    var tiles = new Int32Array(TILINGS);
+    function features(b, v) {
+      var bn = (b + Math.PI) / (2 * Math.PI) * BINS;
+      var vn = (v + VMAX) / (2 * VMAX) * BINS;
+      for (var t = 0; t < TILINGS; t++) {
+        var i = Math.floor(bn + (t * 0.3) / TILINGS) % BINS;
+        if (i < 0) i += BINS;
+        var j = Math.floor(vn + (t * 0.7) / TILINGS);
+        if (j < 0) j = 0; if (j > BINS - 1) j = BINS - 1;
+        tiles[t] = t * BINS * BINS + i * BINS + j;
+      }
+      return tiles;
+    }
+
+    var w = new Float64Array(TILE_COUNT);
+    var theta = [new Float64Array(TILE_COUNT), new Float64Array(TILE_COUNT), new Float64Array(TILE_COUNT)];
+    var probs = [0, 0, 0];
+
+    function policy(idx, params) {
+      var h = [0, 0, 0], a, t;
+      for (a = 0; a < 3; a++) {
+        var sum = 0;
+        if (params) for (t = 0; t < TILINGS; t++) sum += params[a][idx[t]];
+        h[a] = sum;
+      }
+      var max = Math.max(h[0], h[1], h[2]);
+      var total = 0;
+      for (a = 0; a < 3; a++) { probs[a] = Math.exp(h[a] - max); total += probs[a]; }
+      for (a = 0; a < 3; a++) probs[a] /= total;
+      return probs;
+    }
+    function sample(p) {
+      var u = rand(), acc = 0;
+      for (var a = 0; a < 3; a++) { acc += p[a]; if (u <= acc) return a; }
+      return 2;
+    }
+
+    var curve = [];
+    var endState = { b: Math.PI, v: 0 };
+    (function train() {
+      var b = Math.PI, v = 0, rbar = 0, ewa = -Math.PI;
+      var idx = features(b, v).slice();
+      for (var t = 0; t < TRAIN_STEPS; t++) {
+        var p = policy(idx, theta);
+        var a = sample(p);
+        var out = stepEnv(b, v, a - 1);
+        var next = features(out.b, out.v).slice();
+        var vS = 0, vS2 = 0, k;
+        for (k = 0; k < TILINGS; k++) { vS += w[idx[k]]; vS2 += w[next[k]]; }
+        var delta = out.r - rbar + vS2 - vS;
+        rbar += A_RBAR * delta;
+        for (k = 0; k < TILINGS; k++) w[idx[k]] += A_W * delta;
+        for (var act = 0; act < 3; act++) {
+          var coef = A_TH * delta * ((act === a ? 1 : 0) - p[act]);
+          if (coef !== 0) {
+            var block = theta[act];
+            for (k = 0; k < TILINGS; k++) block[idx[k]] += coef;
+          }
+        }
+        ewa = 0.999 * ewa + 0.001 * out.r;
+        if (t % 100 === 0) curve.push(ewa);
+        b = out.b; v = out.v; idx = next;
+      }
+      endState.b = b; endState.v = v;
+    })();
+
+    function rollout(params, kick, rollSeed, start) {
+      seed = rollSeed % 2147483647;
+      var b = start ? start.b : Math.PI, v = start ? start.v : 0, frames = [], total = 0;
+      for (var t = 0; t < ROLL_STEPS; t++) {
+        if (kick && t === KICK_STEP) v += 3.0;
+        var idx = features(b, v);
+        var p = policy(idx, params);
+        var a = sample(p);
+        var out = stepEnv(b, v, a - 1);
+        frames.push({ b: out.b, v: out.v, a: a - 1, r: out.r, kick: kick && t === KICK_STEP });
+        total += out.r;
+        b = out.b; v = out.v;
+      }
+      return { frames: frames, mean: total / ROLL_STEPS };
+    }
+
+    var untrained = rollout(null, false, 4242, null);
+    var trained = rollout(theta, true, 5150, endState);
+    function tailMean(roll, from, to) {
+      var sum = 0;
+      for (var i = from; i < to; i++) sum += roll.frames[i].r;
+      return sum / (to - from);
+    }
+    var balanced = tailMean(trained, KICK_STEP - 60, KICK_STEP);
+    var recovered = tailMean(trained, ROLL_STEPS - 60, ROLL_STEPS);
+    var ROLLS = [untrained, trained];
+    var STAGE_NAMES = ['untrained', 'after training'];
+
+    var PIV_X = 170, PIV_Y = 150, ROD = 92;
+    var CL = 385, CR = 675, CT = 60, CB = 165;
+    var TL = 385, TR = 675, TT = 225, TB = 330;
+
+    function render() {
+      var stage = Math.min(1, Math.max(0, Number(stageInput.value)));
+      var t = Math.min(ROLL_STEPS - 1, Math.max(0, Number(stepInput.value)));
+      var roll = ROLLS[stage];
+      var frame = roll.frames[Math.min(t, roll.frames.length - 1)];
+
+      clear(svg);
+      label(svg, PIV_X, 26, 'the pendulum at step ' + t, COLOR.ink, 12.5, 'middle', 800);
+      label(svg, (CL + CR) / 2, 26, 'learning curve of the training run', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, (TL + TR) / 2, 200, 'angle during this rollout', COLOR.ink, 12.5, 'middle', 800);
+
+      line(svg, PIV_X, PIV_Y - ROD - 18, PIV_X, PIV_Y + 20, COLOR.line, 1.2, '4 4');
+      var tipX = PIV_X + ROD * Math.sin(frame.b);
+      var tipY = PIV_Y - ROD * Math.cos(frame.b);
+      var upright = Math.abs(frame.b) < 0.35;
+      line(svg, PIV_X, PIV_Y, tipX, tipY, upright ? COLOR.green : COLOR.red, 7);
+      svg.appendChild(svgEl('circle', { cx: tipX, cy: tipY, r: 9, fill: upright ? COLOR.green : COLOR.red }));
+      svg.appendChild(svgEl('circle', { cx: PIV_X, cy: PIV_Y, r: 5, fill: COLOR.ink }));
+      label(svg, PIV_X, PIV_Y - ROD - 26, 'upright', COLOR.muted, 10.5);
+      var torqueText = frame.a === 0 ? 'no torque' : (frame.a > 0 ? 'torque +1' : 'torque -1');
+      label(svg, PIV_X, PIV_Y + 62, torqueText, frame.a === 0 ? COLOR.muted : COLOR.gold, 12, 'middle', 800);
+      label(svg, PIV_X, PIV_Y + 82, 'angle ' + (frame.b * 180 / Math.PI).toFixed(0) + ' deg, reward ' + frame.r.toFixed(2),
+        COLOR.muted, 11);
+      if (frame.kick) label(svg, PIV_X, PIV_Y + 102, 'random shove applied here', COLOR.red, 11.5, 'middle', 800);
+
+      line(svg, CL, CT, CL, CB, COLOR.gray, 1.2);
+      line(svg, CL, CB, CR, CB, COLOR.gray, 1.2);
+      [0, -1, -2, -3].forEach(function (value) {
+        var y = CB + value / -3.3 * (CT - CB) * -1;
+        y = CB - (value + 3.3) / 3.3 * (CB - CT);
+        line(svg, CL, y, CR, y, COLOR.line, 1);
+        label(svg, CL - 8, y + 4, String(value), COLOR.muted, 10, 'end');
+      });
+      var path = '';
+      curve.forEach(function (value, i) {
+        var x = CL + i / (curve.length - 1) * (CR - CL);
+        var y = CB - (Math.max(value, -3.3) + 3.3) / 3.3 * (CB - CT);
+        path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+      });
+      svg.appendChild(svgEl('path', { d: path, fill: 'none', stroke: COLOR.blue, 'stroke-width': 2 }));
+      label(svg, (CL + CR) / 2, CB + 18, '0 to ' + TRAIN_STEPS + ' training steps', COLOR.muted, 10.5);
+      label(svg, CL + 6, CT + 12, 'average reward per step', COLOR.blue, 10.5, 'start', 700);
+
+      line(svg, TL, TT, TL, TB, COLOR.gray, 1.2);
+      line(svg, TL, (TT + TB) / 2, TR, (TT + TB) / 2, COLOR.line, 1.2, '4 4');
+      label(svg, TL - 8, (TT + TB) / 2 + 4, '0', COLOR.muted, 10, 'end');
+      label(svg, TL - 8, TT + 6, '+pi', COLOR.muted, 10, 'end');
+      label(svg, TL - 8, TB + 4, '-pi', COLOR.muted, 10, 'end');
+      var tracePath = '';
+      roll.frames.forEach(function (f, i) {
+        var x = TL + i / (ROLL_STEPS - 1) * (TR - TL);
+        var y = (TT + TB) / 2 - f.b / Math.PI * (TB - TT) / 2;
+        tracePath += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+      });
+      svg.appendChild(svgEl('path', { d: tracePath, fill: 'none', stroke: COLOR.gold, 'stroke-width': 1.6 }));
+      if (stage === 1) {
+        var kx = TL + KICK_STEP / (ROLL_STEPS - 1) * (TR - TL);
+        line(svg, kx, TT, kx, TB, COLOR.red, 1.2, '4 3');
+        label(svg, kx, TT - 6, 'shove', COLOR.red, 10, 'middle', 800);
+      }
+      var mx = TL + t / (ROLL_STEPS - 1) * (TR - TL);
+      line(svg, mx, TT, mx, TB, COLOR.ink, 1.2);
+      svg.appendChild(svgEl('circle', {
+        cx: mx, cy: (TT + TB) / 2 - frame.b / Math.PI * (TB - TT) / 2, r: 4.5,
+        fill: COLOR.ink, stroke: '#fff', 'stroke-width': 1.4
+      }));
+
+      setText('pen-stage-value', STAGE_NAMES[stage]);
+      setText('pen-step-value', String(t));
+      setText('pen-angle', (frame.b * 180 / Math.PI).toFixed(0) + ' deg');
+      setText('pen-action', frame.a === 0 ? '0' : (frame.a > 0 ? '+1' : '-1'));
+      setText('pen-reward', frame.r.toFixed(2));
+      setText('pen-before', untrained.mean.toFixed(2));
+      setText('pen-after', trained.mean.toFixed(2));
+      setText('pen-balanced', balanced.toFixed(2));
+      setText('pen-final', curve[curve.length - 1].toFixed(2));
+      setText('pen-status', 'This page trained the agent for ' + TRAIN_STEPS + ' steps when it loaded. ' +
+        'Averaged over a ' + ROLL_STEPS + '-step rollout, the untrained policy earns ' + untrained.mean.toFixed(2) +
+        ' per step and the trained policy earns ' + trained.mean.toFixed(2) +
+        ', where 0 would be perfectly upright at every step and about -3.14 is hanging straight down. ' +
+        'Averaged over the 60 steps before the shove at step ' + KICK_STEP + ' it earns ' + balanced.toFixed(2) +
+        ', and over the last 60 steps after it ' + recovered.toFixed(2) + ': it swings back up on its own.');
+    }
+
+    stageInput.addEventListener('input', render);
+    stepInput.addEventListener('input', render);
     render();
   })();
 })();
