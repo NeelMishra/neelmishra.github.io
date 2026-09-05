@@ -9828,7 +9828,8 @@ var BLOG_TREE = [
                     name: 'week-5',
                     label: 'Week 5 &middot; Policy Gradient',
                     children: [
-                      { title: 'Learning Policies Directly', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/learning-policies-directly.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html', 'rl/ppo/index.html'] }
+                      { title: 'Learning Policies Directly', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/learning-policies-directly.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/advantages-of-policy-parameterization.html'] },
+                      { title: 'Advantages of Policy Parameterization', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/advantages-of-policy-parameterization.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/learning-policies-directly.html', 'rl/ppo/index.html'] }
                     ]
                   }
                 ]

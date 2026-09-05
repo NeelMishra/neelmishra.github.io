@@ -1301,4 +1301,83 @@
     tempInput.addEventListener('input', render);
     render();
   })();
+
+  (function initShortCorridor() {
+    var pInput = byId('corr-p');
+    var svg = byId('corr-svg');
+    if (!pInput || !svg) return;
+
+    var LEFT = 70, RIGHT = 620, TOP = 50, BOTTOM = 270, Y_MAX = 60;
+    var P_STAR = 2 - Math.SQRT2;
+
+    function steps(p) {
+      return 2 * (2 - p) / (p * (1 - p));
+    }
+    function toX(p) { return LEFT + p * (RIGHT - LEFT); }
+    function toY(v) { return BOTTOM - Math.min(v, Y_MAX) / Y_MAX * (BOTTOM - TOP); }
+
+    function render() {
+      var p = Number(pInput.value);
+      var j = steps(p);
+      var jStar = steps(P_STAR);
+      var jEps = steps(0.95);
+
+      clear(svg);
+      label(svg, (LEFT + RIGHT) / 2, 26, 'expected steps to the goal, as a function of p', COLOR.ink, 12.5, 'middle', 800);
+
+      for (var v = 0; v <= Y_MAX; v += 20) {
+        var y = toY(v);
+        line(svg, LEFT, y, RIGHT, y, COLOR.line, 1);
+        label(svg, LEFT - 10, y + 4, String(v), COLOR.muted, 10, 'end');
+      }
+      line(svg, LEFT, TOP - 8, LEFT, BOTTOM, COLOR.gray, 1.2);
+      line(svg, LEFT, BOTTOM, RIGHT, BOTTOM, COLOR.gray, 1.2);
+      for (var g = 0; g <= 1.0001; g += 0.25) {
+        line(svg, toX(g), BOTTOM, toX(g), BOTTOM + 5, COLOR.gray, 1);
+        label(svg, toX(g), BOTTOM + 20, g.toFixed(2), COLOR.muted, 10);
+      }
+      label(svg, (LEFT + RIGHT) / 2, BOTTOM + 40, 'p = probability of choosing right in every state', COLOR.muted, 11);
+      label(svg, 24, (TOP + BOTTOM) / 2, 'steps', COLOR.muted, 11, 'middle');
+
+      var path = '';
+      var pen = 'M';
+      for (var i = 0; i <= 480; i++) {
+        var px = 0.01 + (0.99 - 0.01) * i / 480;
+        var value = steps(px);
+        if (value > Y_MAX) { pen = 'M'; continue; }
+        path += pen + toX(px).toFixed(1) + ' ' + toY(value).toFixed(1);
+        pen = 'L';
+      }
+      svg.appendChild(svgEl('path', {
+        d: path, fill: 'none', stroke: COLOR.blue, 'stroke-width': 2.2
+      }));
+      label(svg, toX(0.2), toY(steps(0.2)) - 12, 'J0(p)', COLOR.blue, 11, 'middle', 800);
+
+      line(svg, LEFT, toY(jStar), RIGHT, toY(jStar), COLOR.green, 1.4, '5 4');
+      label(svg, RIGHT - 4, toY(jStar) - 8, 'best possible: ' + jStar.toFixed(2) + ' steps', COLOR.green, 10.5, 'end', 800);
+
+      line(svg, toX(P_STAR), TOP - 8, toX(P_STAR), BOTTOM, COLOR.green, 1.3, '4 3');
+      label(svg, toX(P_STAR), TOP - 16, 'p* = 0.586', COLOR.green, 10.5, 'middle', 800);
+      line(svg, toX(0.95), TOP - 8, toX(0.95), BOTTOM, COLOR.gold, 1.3, '4 3');
+      label(svg, toX(0.95), TOP - 16, 'eps-greedy', COLOR.gold, 10.5, 'middle', 800);
+
+      line(svg, toX(p), TOP - 8, toX(p), BOTTOM, COLOR.red, 1.3);
+      svg.appendChild(svgEl('circle', {
+        cx: toX(p), cy: toY(j), r: 5.5, fill: COLOR.red, stroke: '#fff', 'stroke-width': 1.6
+      }));
+
+      setText('corr-p-value', p.toFixed(2));
+      setText('corr-value', '-' + j.toFixed(2));
+      setText('corr-steps', j.toFixed(2));
+      setText('corr-best', '-' + jStar.toFixed(2));
+      setText('corr-eps', '-' + jEps.toFixed(1));
+      setText('corr-status', 'Choosing right with probability ' + p.toFixed(2) + ' takes ' + j.toFixed(2) +
+        ' steps on average, so the start state is worth ' + (-j).toFixed(2) + '. The best stochastic policy sits at p* = ' +
+        P_STAR.toFixed(3) + ' with ' + jStar.toFixed(2) + ' steps, epsilon-greedy with epsilon = 0.1 lands at p = 0.95 and ' +
+        jEps.toFixed(1) + ' steps, and both deterministic policies at the ends of the slider never terminate at all.');
+    }
+
+    pInput.addEventListener('input', render);
+    render();
+  })();
 })();
