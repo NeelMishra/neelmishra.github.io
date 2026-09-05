@@ -1836,4 +1836,89 @@
     });
     render();
   })();
+
+  (function initSoftmaxActorFeatures() {
+    var actionInput = byId('sac-action');
+    var spreadInput = byId('sac-spread');
+    var deltaInput = byId('sac-delta');
+    var svg = byId('sac-svg');
+    if (!actionInput || !spreadInput || !deltaInput || !svg) return;
+
+    var X = [1, 0, 1, 0];
+    var BASE_H = [0.5, 0.9, -0.2];
+    var NAMES = ['a0', 'a1', 'a2'];
+    var CELL = 54, GAP = 8;
+    var GRID_X = 150, ROW_Y = [120, 190, 260];
+
+    function cell(x, y, value, stroke, fill) {
+      svg.appendChild(svgEl('rect', {
+        x: x, y: y, width: CELL, height: 34, rx: 5,
+        fill: fill, stroke: stroke, 'stroke-width': 1.3
+      }));
+      label(svg, x + CELL / 2, y + 22, value, stroke, 11.5, 'middle', 800);
+    }
+
+    function render() {
+      var taken = Number(actionInput.value);
+      var spread = Number(spreadInput.value);
+      var delta = Number(deltaInput.value);
+
+      var h = BASE_H.map(function (v) { return v * spread; });
+      var top = Math.max.apply(null, h);
+      var w = h.map(function (v) { return Math.exp(v - top); });
+      var total = w.reduce(function (a, c) { return a + c; }, 0);
+      var pi = w.map(function (v) { return v / total; });
+      var coef = pi.map(function (p, i) { return (i === taken ? 1 : 0) - p; });
+      var coefSum = coef.reduce(function (a, c) { return a + c; }, 0);
+
+      clear(svg);
+      label(svg, 350, 26, 'the eligibility vector, block by block', COLOR.ink, 12.5, 'middle', 800);
+
+      label(svg, 100, 68, 'x(s)', COLOR.ink, 12, 'end', 800);
+      X.forEach(function (v, j) {
+        var x = GRID_X + j * (CELL + GAP);
+        cell(x, 50, v.toFixed(0), v ? COLOR.green : COLOR.gray,
+          v ? COLOR.paleGreen : 'rgba(158,170,164,0.12)');
+      });
+      label(svg, GRID_X + 4 * (CELL + GAP) + 60, 72, 'two active features', COLOR.muted, 11, 'middle');
+
+      pi.forEach(function (p, i) {
+        var y = ROW_Y[i];
+        var isTaken = i === taken;
+        var stroke = isTaken ? COLOR.gold : COLOR.blue;
+        label(svg, 100, y + 22, NAMES[i] + (isTaken ? ' (taken)' : ''), stroke, 11.5, 'end', 800);
+        X.forEach(function (v, j) {
+          var value = coef[i] * v;
+          var x = GRID_X + j * (CELL + GAP);
+          var color = Math.abs(value) < 1e-9 ? COLOR.gray : (value > 0 ? COLOR.green : COLOR.red);
+          var fill = Math.abs(value) < 1e-9 ? 'rgba(158,170,164,0.10)'
+            : (value > 0 ? COLOR.paleGreen : 'rgba(184,58,58,0.12)');
+          cell(x, y, value.toFixed(2), color, fill);
+        });
+        var bx = GRID_X + 4 * (CELL + GAP) + 20;
+        label(svg, bx, y + 22, 'coefficient ' + coef[i].toFixed(2) + '   pi = ' + (p * 100).toFixed(1) + '%',
+          stroke, 11, 'start', 700);
+      });
+
+      label(svg, 350, 320, 'theta update = alpha * delta * (this vector), with delta = ' + delta.toFixed(1) +
+        ' so the taken block moves ' + (coef[taken] * delta >= 0 ? 'up' : 'down'), COLOR.muted, 11.5, 'middle', 700);
+
+      setText('sac-action-value', NAMES[taken]);
+      setText('sac-spread-value', spread.toFixed(1));
+      setText('sac-delta-value', delta.toFixed(1));
+      setText('sac-p0', (pi[0] * 100).toFixed(1) + '%');
+      setText('sac-p1', (pi[1] * 100).toFixed(1) + '%');
+      setText('sac-p2', (pi[2] * 100).toFixed(1) + '%');
+      setText('sac-coef', coef[taken].toFixed(3));
+      setText('sac-sum', (Math.abs(coefSum) < 5e-4 ? 0 : coefSum).toFixed(3));
+      setText('sac-status', 'The taken block is scaled by 1 - pi(' + NAMES[taken] + ') = ' + coef[taken].toFixed(3) +
+        ' and the other two by minus their own probabilities, ' +
+        coef.filter(function (c, i) { return i !== taken; }).map(function (c) { return c.toFixed(3); }).join(' and ') +
+        '. They sum to zero, so probability is only moved around. Inactive state features stay at zero in every block, ' +
+        'so the update is still sparse in the features even though it touches all three actions.');
+    }
+
+    [actionInput, spreadInput, deltaInput].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
 })();
