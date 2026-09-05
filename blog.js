@@ -9821,7 +9821,14 @@ var BLOG_TREE = [
                       { title: 'Episodic Sarsa on Mountain Car', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-on-mountain-car.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-with-function-approximation.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/expected-sarsa-and-q-learning-with-approximation.html'] },
                       { title: 'Expected Sarsa &amp; Q-learning with Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/expected-sarsa-and-q-learning-with-approximation.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/episodic-sarsa-on-mountain-car.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/exploration-under-function-approximation.html'] },
                       { title: 'Exploration under Function Approximation', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/exploration-under-function-approximation.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/expected-sarsa-and-q-learning-with-approximation.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html'] },
-                      { title: 'Average Reward &amp; Differential Sarsa', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/exploration-under-function-approximation.html', 'rl/ppo/index.html'] }
+                      { title: 'Average Reward &amp; Differential Sarsa', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/exploration-under-function-approximation.html', 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/learning-policies-directly.html'] }
+                    ]
+                  },
+                  {
+                    name: 'week-5',
+                    label: 'Week 5 &middot; Policy Gradient',
+                    children: [
+                      { title: 'Learning Policies Directly', file: 'rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-5/learning-policies-directly.html', links: ['rl/popular-courses/course-3/prediction-and-control-with-function-approximation/week-4/average-reward-and-differential-sarsa.html', 'rl/ppo/index.html'] }
                     ]
                   }
                 ]

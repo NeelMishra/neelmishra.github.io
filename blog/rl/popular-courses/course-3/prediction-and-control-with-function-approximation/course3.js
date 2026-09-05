@@ -1132,4 +1132,173 @@
     nInput.addEventListener('input', render);
     render();
   })();
+
+  (function initPreferenceSoftmax() {
+    var inputs = ['pref-h0', 'pref-h1', 'pref-h2'].map(byId);
+    var shiftInput = byId('pref-shift');
+    var svg = byId('pref-svg');
+    if (!svg || !shiftInput || inputs.some(function (el) { return !el; })) return;
+
+    var NAMES = ['a0', 'a1', 'a2'];
+    var LEFT_X = [100, 180, 260];
+    var RIGHT_X = [420, 500, 580];
+    var BAR_W = 46;
+    var ZERO_Y = 150;
+    var BASE_Y = 230;
+
+    function bar(x, y, w, h, fill, stroke) {
+      svg.appendChild(svgEl('rect', {
+        x: x, y: y, width: w, height: Math.max(h, 0.6), rx: 3,
+        fill: fill, stroke: stroke, 'stroke-width': 1.2
+      }));
+    }
+
+    function render() {
+      var shift = Number(shiftInput.value);
+      var prefs = inputs.map(function (el) { return Number(el.value) + shift; });
+      var top = Math.max.apply(null, prefs);
+      var weights = prefs.map(function (h) { return Math.exp(h - top); });
+      var total = weights.reduce(function (a, b) { return a + b; }, 0);
+      var probs = weights.map(function (w) { return w / total; });
+      var best = probs.indexOf(Math.max.apply(null, probs));
+      var sorted = prefs.slice().sort(function (a, b) { return b - a; });
+      var gap = sorted[0] - sorted[sorted.length - 1];
+
+      clear(svg);
+      label(svg, 180, 22, 'action preferences  h(s, a, theta)', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, 500, 22, 'policy  pi(a | s, theta)', COLOR.ink, 12.5, 'middle', 800);
+
+      line(svg, 60, ZERO_Y, 310, ZERO_Y, COLOR.gray, 1.2);
+      label(svg, 52, ZERO_Y + 4, '0', COLOR.muted, 10, 'end');
+      prefs.forEach(function (h, i) {
+        var height = Math.min(Math.abs(h) * 10, 78);
+        var y = h >= 0 ? ZERO_Y - height : ZERO_Y;
+        var fill = i === best ? COLOR.paleGreen : COLOR.paleBlue;
+        var stroke = i === best ? COLOR.green : COLOR.blue;
+        bar(LEFT_X[i] - BAR_W / 2, y, BAR_W, height, fill, stroke);
+        label(svg, LEFT_X[i], h >= 0 ? y - 6 : y + height + 14, h.toFixed(1), stroke, 11, 'middle', 800);
+        label(svg, LEFT_X[i], 248, NAMES[i], COLOR.muted, 11);
+      });
+
+      line(svg, 326, ZERO_Y, 366, ZERO_Y, COLOR.gold, 1.6);
+      svg.appendChild(svgEl('path', {
+        d: 'M366 ' + ZERO_Y + ' L358 ' + (ZERO_Y - 5) + ' L358 ' + (ZERO_Y + 5) + ' Z', fill: COLOR.gold
+      }));
+      label(svg, 346, ZERO_Y - 12, 'softmax', COLOR.gold, 11, 'middle', 800);
+
+      line(svg, 380, BASE_Y, 630, BASE_Y, COLOR.gray, 1.2);
+      label(svg, 372, BASE_Y + 4, '0', COLOR.muted, 10, 'end');
+      label(svg, 372, BASE_Y - 146, '1', COLOR.muted, 10, 'end');
+      line(svg, 380, BASE_Y - 150, 630, BASE_Y - 150, COLOR.line, 1, '4 4');
+      probs.forEach(function (p, i) {
+        var height = p * 150;
+        var fill = i === best ? COLOR.paleGreen : COLOR.paleBlue;
+        var stroke = i === best ? COLOR.green : COLOR.blue;
+        bar(RIGHT_X[i] - BAR_W / 2, BASE_Y - height, BAR_W, height, fill, stroke);
+        label(svg, RIGHT_X[i], BASE_Y - height - 6, (p * 100).toFixed(1) + '%', stroke, 11, 'middle', 800);
+        label(svg, RIGHT_X[i], 248, NAMES[i], COLOR.muted, 11);
+      });
+
+      setText('pref-h0-value', Number(inputs[0].value).toFixed(1));
+      setText('pref-h1-value', Number(inputs[1].value).toFixed(1));
+      setText('pref-h2-value', Number(inputs[2].value).toFixed(1));
+      setText('pref-shift-value', shift.toFixed(1));
+      setText('pref-p0', (probs[0] * 100).toFixed(1) + '%');
+      setText('pref-p1', (probs[1] * 100).toFixed(1) + '%');
+      setText('pref-p2', (probs[2] * 100).toFixed(1) + '%');
+      setText('pref-gap', gap.toFixed(1));
+      setText('pref-status', 'The shift c = ' + shift.toFixed(1) + ' moves every preference to ' +
+        prefs.map(function (h) { return h.toFixed(1); }).join(', ') +
+        ', yet the policy stays at ' + probs.map(function (p) { return (p * 100).toFixed(1) + '%'; }).join(', ') +
+        '. Only the differences matter, and the widest gap here is ' + gap.toFixed(1) +
+        ', which is what decides how peaked the policy is.');
+    }
+
+    inputs.concat([shiftInput]).forEach(function (el) {
+      el.addEventListener('input', render);
+    });
+    render();
+  })();
+
+  (function initSoftmaxVsEpsilon() {
+    var epsInput = byId('cmp-eps');
+    var tempInput = byId('cmp-temp');
+    var svg = byId('cmp-svg');
+    if (!epsInput || !tempInput || !svg) return;
+
+    var SCORES = [2.0, 1.9, 0.4, -2.6];
+    var NAMES = ['a0', 'a1', 'a2', 'a3'];
+    var TOP_X = [130, 260, 390, 520];
+    var EPS_X = [90, 150, 210, 270];
+    var SOFT_X = [410, 470, 530, 590];
+    var SCORE_ZERO = 105;
+    var DIST_BASE = 285;
+    var best = 0;
+    var worst = 3;
+
+    function bar(x, w, y, h, fill, stroke) {
+      svg.appendChild(svgEl('rect', {
+        x: x - w / 2, y: y, width: w, height: Math.max(h, 0.6), rx: 3,
+        fill: fill, stroke: stroke, 'stroke-width': 1.2
+      }));
+    }
+
+    function render() {
+      var eps = Number(epsInput.value);
+      var spread = Number(tempInput.value);
+      var n = SCORES.length;
+      var greedy = SCORES.map(function (q, i) {
+        return (i === best ? 1 - eps : 0) + eps / n;
+      });
+      var scaled = SCORES.map(function (q) { return q * spread; });
+      var top = Math.max.apply(null, scaled);
+      var weights = scaled.map(function (h) { return Math.exp(h - top); });
+      var total = weights.reduce(function (a, b) { return a + b; }, 0);
+      var soft = weights.map(function (w) { return w / total; });
+
+      clear(svg);
+      label(svg, 340, 20, 'the same four scores', COLOR.ink, 12.5, 'middle', 800);
+      line(svg, 60, SCORE_ZERO, 620, SCORE_ZERO, COLOR.gray, 1.2);
+      label(svg, 52, SCORE_ZERO + 4, '0', COLOR.muted, 10, 'end');
+      SCORES.forEach(function (q, i) {
+        var height = Math.abs(q) * 15;
+        var y = q >= 0 ? SCORE_ZERO - height : SCORE_ZERO;
+        var stroke = i === best ? COLOR.green : (i === worst ? COLOR.red : COLOR.blue);
+        var fill = i === best ? COLOR.paleGreen : (i === worst ? 'rgba(184,58,58,0.12)' : COLOR.paleBlue);
+        bar(TOP_X[i], 52, y, height, fill, stroke);
+        label(svg, TOP_X[i], q >= 0 ? y - 6 : y + height + 14, q.toFixed(1), stroke, 11, 'middle', 800);
+      });
+
+      label(svg, 180, 182, 'epsilon-greedy over values', COLOR.gold, 12, 'middle', 800);
+      label(svg, 500, 182, 'softmax over preferences', COLOR.green, 12, 'middle', 800);
+      [[EPS_X, greedy, COLOR.gold, 'rgba(201,138,43,0.13)'], [SOFT_X, soft, COLOR.green, COLOR.paleGreen]]
+        .forEach(function (panel) {
+          var xs = panel[0], dist = panel[1], stroke = panel[2], fill = panel[3];
+          line(svg, xs[0] - 40, DIST_BASE, xs[3] + 40, DIST_BASE, COLOR.gray, 1.2);
+          line(svg, xs[0] - 40, DIST_BASE - 95, xs[3] + 40, DIST_BASE - 95, COLOR.line, 1, '4 4');
+          dist.forEach(function (p, i) {
+            var height = p * 95;
+            bar(xs[i], 38, DIST_BASE - height, height, fill, stroke);
+            label(svg, xs[i], DIST_BASE - height - 6, (p * 100).toFixed(0) + '%', stroke, 10.5, 'middle', 800);
+            label(svg, xs[i], DIST_BASE + 14, NAMES[i], COLOR.muted, 10.5);
+          });
+        });
+
+      setText('cmp-eps-value', eps.toFixed(2));
+      setText('cmp-temp-value', spread.toFixed(1));
+      setText('cmp-runner', (greedy[1] * 100).toFixed(1) + '%');
+      setText('cmp-runner-soft', (soft[1] * 100).toFixed(1) + '%');
+      setText('cmp-worst', (greedy[worst] * 100).toFixed(1) + '%');
+      setText('cmp-worst-soft', (soft[worst] * 100).toFixed(2) + '%');
+      setText('cmp-status', 'Epsilon-greedy gives the runner-up ' + (greedy[1] * 100).toFixed(1) +
+        '% and the worst action the identical ' + (greedy[worst] * 100).toFixed(1) +
+        '%, even though one is almost as good as the best action and the other is far worse. Softmax gives them ' +
+        (soft[1] * 100).toFixed(1) + '% and ' + (soft[worst] * 100).toFixed(2) +
+        '%. Increasing the spread makes the softmax policy more deterministic without any schedule on epsilon.');
+    }
+
+    epsInput.addEventListener('input', render);
+    tempInput.addEventListener('input', render);
+    render();
+  })();
 })();
