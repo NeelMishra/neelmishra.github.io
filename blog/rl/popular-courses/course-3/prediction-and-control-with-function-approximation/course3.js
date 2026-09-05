@@ -2050,8 +2050,8 @@
     var TL = 385, TR = 675, TT = 225, TB = 330;
 
     function render() {
-      var stage = Math.min(1, Math.max(0, Number(stageInput.value)));
-      var t = Math.min(ROLL_STEPS - 1, Math.max(0, Number(stepInput.value)));
+      var stage = Math.min(1, Math.max(0, Math.round(Number(stageInput.value))));
+      var t = Math.min(ROLL_STEPS - 1, Math.max(0, Math.round(Number(stepInput.value))));
       var roll = ROLLS[stage];
       var frame = roll.frames[Math.min(t, roll.frames.length - 1)];
 
