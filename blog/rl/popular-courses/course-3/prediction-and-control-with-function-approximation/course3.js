@@ -1486,4 +1486,122 @@
     thetaInput.addEventListener('input', render);
     render();
   })();
+
+  (function initPolicyGradientTerm() {
+    var t1Input = byId('pgt-t1');
+    var t2Input = byId('pgt-t2');
+    var bInput = byId('pgt-b');
+    var svg = byId('pgt-svg');
+    if (!t1Input || !t2Input || !bInput || !svg) return;
+
+    // action order: up, down, left, right
+    var Q = [-1.3, 0.7, -0.9, 1.5];
+    var NAMES = ['up', 'down', 'left', 'right'];
+    var CX = 170, CY = 165, CELL = 60;
+    var OX = 500, OY = 185, SCALE = 46;
+
+    function arrow(x1, y1, x2, y2, color, width) {
+      line(svg, x1, y1, x2, y2, color, width);
+      var dx = x2 - x1, dy = y2 - y1, len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var ux = dx / len, uy = dy / len, hx = -uy, hy = ux, h = 6;
+      svg.appendChild(svgEl('path', {
+        d: 'M' + x2 + ' ' + y2 +
+           ' L' + (x2 - ux * 11 + hx * h) + ' ' + (y2 - uy * 11 + hy * h) +
+           ' L' + (x2 - ux * 11 - hx * h) + ' ' + (y2 - uy * 11 - hy * h) + ' Z',
+        fill: color
+      }));
+    }
+
+    function render() {
+      var t1 = Number(t1Input.value);
+      var t2 = Number(t2Input.value);
+      var b = Number(bInput.value);
+      var h = [t1, -t1, t2, -t2];
+      var top = Math.max.apply(null, h);
+      var w = h.map(function (v) { return Math.exp(v - top); });
+      var total = w.reduce(function (a, c) { return a + c; }, 0);
+      var pi = w.map(function (v) { return v / total; });
+
+      var dUD = pi[0] - pi[1];
+      var dLR = pi[2] - pi[3];
+      var g1 = [], g2 = [];
+      pi.forEach(function (p, i) {
+        var e1 = (i === 0 ? 1 : 0) - (i === 1 ? 1 : 0);
+        var e2 = (i === 2 ? 1 : 0) - (i === 3 ? 1 : 0);
+        g1.push(p * (e1 - dUD));
+        g2.push(p * (e2 - dLR));
+      });
+      var d1 = 0, d2 = 0, sum1 = 0, sum2 = 0, vs = 0;
+      pi.forEach(function (p, i) {
+        d1 += g1[i] * (Q[i] + b);
+        d2 += g2[i] * (Q[i] + b);
+        sum1 += g1[i];
+        sum2 += g2[i];
+        vs += p * Q[i];
+      });
+
+      clear(svg);
+      label(svg, 170, 26, 'one state of a gridworld', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, 520, 26, 'parameter space', COLOR.ink, 12.5, 'middle', 800);
+
+      for (var r = 0; r < 3; r++) {
+        for (var c = 0; c < 3; c++) {
+          var isGoal = (r === 2 && c === 2);
+          svg.appendChild(svgEl('rect', {
+            x: CX - 1.5 * CELL + c * CELL, y: CY - 1.5 * CELL + r * CELL,
+            width: CELL, height: CELL,
+            fill: isGoal ? 'rgba(201,138,43,0.20)' : '#fff',
+            stroke: COLOR.line, 'stroke-width': 1.2
+          }));
+        }
+      }
+      label(svg, CX + CELL, CY + CELL + 5, 'reward', COLOR.gold, 10.5, 'middle', 800);
+
+      var dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+      pi.forEach(function (p, i) {
+        var len = 18 + 62 * p;
+        var color = Q[i] >= 0 ? COLOR.green : COLOR.red;
+        arrow(CX, CY, CX + dirs[i][0] * len, CY + dirs[i][1] * len, color, 1.4 + 4 * p);
+        var lx = CX + dirs[i][0] * 108, ly = CY + dirs[i][1] * 100 + 4;
+        label(svg, lx, ly, NAMES[i] + ': q = ' + Q[i].toFixed(1) + ', ' + (p * 100).toFixed(0) + '%',
+          color, 10.5, 'middle', 700);
+      });
+      svg.appendChild(svgEl('circle', { cx: CX, cy: CY, r: 7, fill: COLOR.ink }));
+
+      line(svg, OX - 110, OY, OX + 130, OY, COLOR.gray, 1.2);
+      line(svg, OX, OY - 110, OX, OY + 110, COLOR.gray, 1.2);
+      label(svg, OX + 138, OY + 4, 'theta2', COLOR.muted, 11, 'middle');
+      label(svg, OX, OY - 120, 'theta1', COLOR.muted, 11, 'middle');
+
+      var px = OX + t2 * SCALE, py = OY - t1 * SCALE;
+      var mag = Math.sqrt(d1 * d1 + d2 * d2);
+      var scale = mag > 1e-9 ? 90 / Math.max(mag, 0.05) : 0;
+      if (mag > 1e-9) {
+        arrow(px, py, px + d2 * scale, py - d1 * scale, COLOR.red, 2.2);
+        label(svg, px + d2 * scale, py - d1 * scale - 12, 'd(s)', COLOR.red, 11, 'middle', 800);
+      }
+      svg.appendChild(svgEl('circle', { cx: px, cy: py, r: 5.5, fill: COLOR.blue, stroke: '#fff', 'stroke-width': 1.5 }));
+      label(svg, 520, 310, 'the red arrow is the ascent direction for this state', COLOR.muted, 11);
+
+      setText('pgt-t1-value', t1.toFixed(2));
+      setText('pgt-t2-value', t2.toFixed(2));
+      setText('pgt-b-value', b.toFixed(2));
+      setText('pgt-pup', (pi[0] * 100).toFixed(1) + '%');
+      setText('pgt-pdown', (pi[1] * 100).toFixed(1) + '%');
+      setText('pgt-pleft', (pi[2] * 100).toFixed(1) + '%');
+      setText('pgt-pright', (pi[3] * 100).toFixed(1) + '%');
+      setText('pgt-d1', (d1 >= 0 ? '+' : '') + d1.toFixed(3));
+      setText('pgt-d2', (d2 >= 0 ? '+' : '') + d2.toFixed(3));
+      function tidy(x) { return (Math.abs(x) < 5e-4 ? 0 : x).toFixed(3); }
+      setText('pgt-sumgrad', '(' + tidy(sum1) + ', ' + tidy(sum2) + ')');
+      setText('pgt-vs', vs.toFixed(3));
+      setText('pgt-status', 'Ascent would raise ' + (d1 > 0 ? 'up over down' : 'down over up') + ' and ' +
+        (d2 > 0 ? 'left over right' : 'right over left') + ', giving d(s) = (' + d1.toFixed(3) + ', ' + d2.toFixed(3) +
+        '). The four policy gradients sum to (' + tidy(sum1) + ', ' + tidy(sum2) +
+        '), so the baseline b = ' + b.toFixed(2) + ' multiplies zero and leaves the arrow exactly where it was.');
+    }
+
+    [t1Input, t2Input, bInput].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
 })();
