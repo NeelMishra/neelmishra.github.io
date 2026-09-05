@@ -1380,4 +1380,110 @@
     pInput.addEventListener('input', render);
     render();
   })();
+
+  (function initAverageRewardObjective() {
+    var thetaInput = byId('obj-theta');
+    var svg = byId('obj-svg');
+    if (!thetaInput || !svg) return;
+
+    var AX = 120, BX = 280, CY = 130, R = 34;
+    var LEFT = 420, RIGHT = 670, TOP = 60, BOTTOM = 250, Y_MAX = 0.85;
+
+    function toX(p) { return LEFT + p * (RIGHT - LEFT); }
+    function toY(v) { return BOTTOM - v / Y_MAX * (BOTTOM - TOP); }
+
+    function curve(d, color, width) {
+      svg.appendChild(svgEl('path', {
+        d: d, fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linecap': 'round'
+      }));
+    }
+
+    function render() {
+      var theta = Number(thetaInput.value);
+      var p = 1 / (1 + Math.exp(-theta));
+      var muA = 1 - p, muB = p;
+      var reward = 3 * p * (1 - p);
+      var dp = 3 * (1 - 2 * p);
+      var grad = dp * p * (1 - p);
+
+      clear(svg);
+      label(svg, 200, 26, 'the chain the policy induces', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, (LEFT + RIGHT) / 2, 26, 'the objective r(pi)', COLOR.ink, 12.5, 'middle', 800);
+
+      svg.appendChild(svgEl('circle', { cx: AX, cy: CY, r: R, fill: COLOR.paleGreen, stroke: COLOR.green, 'stroke-width': 1.6 }));
+      svg.appendChild(svgEl('circle', { cx: BX, cy: CY, r: R, fill: COLOR.paleBlue, stroke: COLOR.blue, 'stroke-width': 1.6 }));
+      label(svg, AX, CY + 6, 'A', COLOR.ink, 17, 'middle', 800);
+      label(svg, BX, CY + 6, 'B', COLOR.ink, 17, 'middle', 800);
+
+      curve('M148 112 Q200 58 252 112', COLOR.gold, 1 + 5 * p);
+      svg.appendChild(svgEl('path', { d: 'M252 112 L241 105 L243 117 Z', fill: COLOR.gold }));
+      label(svg, 200, 50, 'go, +1   p = ' + p.toFixed(2), COLOR.gold, 11, 'middle', 800);
+
+      curve('M252 148 Q200 202 148 148', COLOR.green, 1 + 5 * (1 - p));
+      svg.appendChild(svgEl('path', { d: 'M148 148 L159 155 L157 143 Z', fill: COLOR.green }));
+      label(svg, 200, 216, 'wait, +2   1 - p = ' + (1 - p).toFixed(2), COLOR.green, 11, 'middle', 800);
+
+      curve('M94 108 C56 78, 56 152, 94 152', COLOR.gray, 1 + 4 * (1 - p));
+      label(svg, 46, 132, 'wait, 0', COLOR.muted, 10.5, 'middle', 700);
+      curve('M306 108 C344 78, 344 152, 306 152', COLOR.gray, 1 + 4 * p);
+      label(svg, 356, 132, 'go, 0', COLOR.muted, 10.5, 'middle', 700);
+
+      var barX = 60, barW = 280, barY = 262;
+      svg.appendChild(svgEl('rect', {
+        x: barX, y: barY, width: barW * muA, height: 22, rx: 4,
+        fill: COLOR.paleGreen, stroke: COLOR.green, 'stroke-width': 1.2
+      }));
+      svg.appendChild(svgEl('rect', {
+        x: barX + barW * muA, y: barY, width: barW * muB, height: 22, rx: 4,
+        fill: COLOR.paleBlue, stroke: COLOR.blue, 'stroke-width': 1.2
+      }));
+      label(svg, barX + barW * muA / 2, barY + 16, (muA * 100).toFixed(0) + '% in A', COLOR.green, 10.5, 'middle', 800);
+      label(svg, barX + barW * muA + barW * muB / 2, barY + 16, (muB * 100).toFixed(0) + '% in B', COLOR.blue, 10.5, 'middle', 800);
+      label(svg, 200, barY + 38, 'steady-state distribution mu', COLOR.muted, 11);
+
+      for (var v = 0; v <= 0.8001; v += 0.2) {
+        var y = toY(v);
+        line(svg, LEFT, y, RIGHT, y, COLOR.line, 1);
+        label(svg, LEFT - 8, y + 4, v.toFixed(1), COLOR.muted, 10, 'end');
+      }
+      line(svg, LEFT, TOP - 6, LEFT, BOTTOM, COLOR.gray, 1.2);
+      line(svg, LEFT, BOTTOM, RIGHT, BOTTOM, COLOR.gray, 1.2);
+      for (var g = 0; g <= 1.0001; g += 0.25) {
+        line(svg, toX(g), BOTTOM, toX(g), BOTTOM + 5, COLOR.gray, 1);
+        label(svg, toX(g), BOTTOM + 20, g.toFixed(2), COLOR.muted, 10);
+      }
+      label(svg, (LEFT + RIGHT) / 2, BOTTOM + 40, 'p = probability of go', COLOR.muted, 11);
+
+      var path = '';
+      for (var i = 0; i <= 200; i++) {
+        var px = i / 200;
+        path += (i === 0 ? 'M' : 'L') + toX(px).toFixed(1) + ' ' + toY(3 * px * (1 - px)).toFixed(1);
+      }
+      curve(path, COLOR.blue, 2.2);
+
+      var span = 0.14;
+      var p1 = Math.max(0, p - span), p2 = Math.min(1, p + span);
+      line(svg, toX(p1), toY(reward + dp * (p1 - p)), toX(p2), toY(reward + dp * (p2 - p)), COLOR.red, 1.8, '5 3');
+      svg.appendChild(svgEl('circle', {
+        cx: toX(p), cy: toY(reward), r: 5.5, fill: COLOR.red, stroke: '#fff', 'stroke-width': 1.6
+      }));
+      line(svg, toX(0.5), TOP - 6, toX(0.5), BOTTOM, COLOR.green, 1.2, '4 3');
+      label(svg, toX(0.5), TOP - 12, 'best: 0.75 per step', COLOR.green, 10.5, 'middle', 800);
+
+      setText('obj-theta-value', theta.toFixed(2));
+      setText('obj-p', p.toFixed(3));
+      setText('obj-mua', muA.toFixed(3));
+      setText('obj-mub', muB.toFixed(3));
+      setText('obj-rpi', reward.toFixed(3));
+      setText('obj-grad', (grad >= 0 ? '+' : '') + grad.toFixed(3));
+      setText('obj-status', 'With theta = ' + theta.toFixed(2) + ' the policy picks go with probability ' + p.toFixed(2) +
+        ', which puts ' + (muB * 100).toFixed(0) + '% of the agent\u2019s time in B and earns ' + reward.toFixed(3) +
+        ' reward per step. The slope of the objective is ' + (grad >= 0 ? '+' : '') + grad.toFixed(3) +
+        ', so gradient ascent would push theta ' + (grad >= 0 ? 'up' : 'down') +
+        ' towards p = 0.5. Notice that the time bar moves whenever the arrows do: the distribution being averaged over is itself a function of theta.');
+    }
+
+    thetaInput.addEventListener('input', render);
+    render();
+  })();
 })();
