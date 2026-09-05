@@ -1604,4 +1604,118 @@
     [t1Input, t2Input, bInput].forEach(function (el) { el.addEventListener('input', render); });
     render();
   })();
+
+  (function initGradientSampling() {
+    var nInput = byId('est-n');
+    var seedInput = byId('est-seed');
+    var svg = byId('est-svg');
+    if (!nInput || !seedInput || !svg) return;
+
+    var Q = [-1.3, 0.7, -0.9, 1.5];
+    var NAMES = ['up', 'down', 'left', 'right'];
+    var THETA1 = 0.4, THETA2 = 0.3;
+    var H = [THETA1, -THETA1, THETA2, -THETA2];
+
+    var top = Math.max.apply(null, H);
+    var w = H.map(function (v) { return Math.exp(v - top); });
+    var total = w.reduce(function (a, c) { return a + c; }, 0);
+    var PI = w.map(function (v) { return v / total; });
+    var dUD = PI[0] - PI[1];
+    // theta1 component of grad log pi for each action
+    var SCORE = [1 - dUD, -1 - dUD, -dUD, -dUD];
+    var SAMPLE = SCORE.map(function (g, i) { return g * Q[i]; });
+    var EXACT = 0, SECOND = 0;
+    PI.forEach(function (p, i) { EXACT += p * SAMPLE[i]; SECOND += p * SAMPLE[i] * SAMPLE[i]; });
+    var SD = Math.sqrt(Math.max(SECOND - EXACT * EXACT, 0));
+
+    var BX = [95, 160, 225, 290], BW = 46, ZERO = 180;
+    var LEFT = 400, RIGHT = 675, TOP = 70, BOTTOM = 265;
+
+    function render() {
+      var n = Number(nInput.value);
+      var seed = Number(seedInput.value);
+
+      var state = (seed + 1) * 8121 + 28411;
+      function rand() {
+        state = (state * 1103515245 + 12345) % 2147483648;
+        return state / 2147483648;
+      }
+      var running = [], sum = 0;
+      for (var t = 0; t < n; t++) {
+        var u = rand(), acc = 0, pick = PI.length - 1;
+        for (var a = 0; a < PI.length; a++) {
+          acc += PI[a];
+          if (u <= acc) { pick = a; break; }
+        }
+        sum += SAMPLE[pick];
+        running.push(sum / (t + 1));
+      }
+      var mean = running.length ? running[running.length - 1] : 0;
+
+      var lo = Math.min.apply(null, SAMPLE.concat([EXACT])) - 0.4;
+      var hi = Math.max.apply(null, SAMPLE.concat([EXACT])) + 0.4;
+      function toY(v) { return BOTTOM - (v - lo) / (hi - lo) * (BOTTOM - TOP); }
+      function toX(i) { return LEFT + (n <= 1 ? 0 : i / (n - 1) * (RIGHT - LEFT)); }
+
+      clear(svg);
+      label(svg, 195, 26, 'the four possible one-sample estimates', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, (LEFT + RIGHT) / 2, 26, 'running average of the samples', COLOR.ink, 12.5, 'middle', 800);
+
+      line(svg, 60, ZERO, 330, ZERO, COLOR.gray, 1.2);
+      label(svg, 52, ZERO + 4, '0', COLOR.muted, 10, 'end');
+      var scale = 46;
+      SAMPLE.forEach(function (value, i) {
+        var height = Math.abs(value) * scale;
+        var y = value >= 0 ? ZERO - height : ZERO;
+        var color = value >= 0 ? COLOR.green : COLOR.red;
+        svg.appendChild(svgEl('rect', {
+          x: BX[i] - BW / 2, y: y, width: BW, height: Math.max(height, 0.8), rx: 3,
+          fill: value >= 0 ? COLOR.paleGreen : 'rgba(184,58,58,0.12)',
+          stroke: color, 'stroke-width': 1.2
+        }));
+        label(svg, BX[i], value >= 0 ? y - 6 : y + height + 14, value.toFixed(2), color, 10.5, 'middle', 800);
+        label(svg, BX[i], 252, NAMES[i], COLOR.muted, 10.5);
+        label(svg, BX[i], 268, 'p = ' + PI[i].toFixed(2), COLOR.muted, 10);
+      });
+      line(svg, 60, ZERO - EXACT * scale, 330, ZERO - EXACT * scale, COLOR.blue, 1.6, '5 4');
+      label(svg, 336, ZERO - EXACT * scale + 4, 'mean = ' + EXACT.toFixed(3), COLOR.blue, 10.5, 'start', 800);
+
+      line(svg, LEFT, TOP - 8, LEFT, BOTTOM, COLOR.gray, 1.2);
+      line(svg, LEFT, BOTTOM, RIGHT, BOTTOM, COLOR.gray, 1.2);
+      label(svg, (LEFT + RIGHT) / 2, BOTTOM + 34, 'samples drawn', COLOR.muted, 11);
+      for (var g = 0; g <= 1.0001; g += 0.5) {
+        label(svg, LEFT + g * (RIGHT - LEFT), BOTTOM + 16, String(Math.round(g * n)), COLOR.muted, 10);
+      }
+      line(svg, LEFT, toY(EXACT), RIGHT, toY(EXACT), COLOR.blue, 1.6, '5 4');
+      label(svg, RIGHT, toY(EXACT) - 8, 'exact', COLOR.blue, 10.5, 'end', 800);
+
+      var path = '';
+      running.forEach(function (v, i) {
+        path += (i === 0 ? 'M' : 'L') + toX(i).toFixed(1) + ' ' + toY(v).toFixed(1);
+      });
+      if (path) {
+        svg.appendChild(svgEl('path', { d: path, fill: 'none', stroke: COLOR.gold, 'stroke-width': 1.8 }));
+      }
+      svg.appendChild(svgEl('circle', {
+        cx: toX(running.length - 1), cy: toY(mean), r: 5, fill: COLOR.gold, stroke: '#fff', 'stroke-width': 1.5
+      }));
+
+      setText('est-n-value', String(n));
+      setText('est-seed-value', String(seed));
+      setText('est-exact', EXACT.toFixed(3));
+      setText('est-mean', mean.toFixed(3));
+      setText('est-sd', SD.toFixed(3));
+      setText('est-err', Math.abs(mean - EXACT).toFixed(3));
+      setText('est-status', 'A single step is one of four numbers, ' +
+        SAMPLE.map(function (v) { return v.toFixed(2); }).join(', ') +
+        ', with standard deviation ' + SD.toFixed(2) + ' around an exact value of ' + EXACT.toFixed(3) +
+        '. After ' + n + ' samples this run averages ' + mean.toFixed(3) + ', off by ' +
+        Math.abs(mean - EXACT).toFixed(3) + '. The error shrinks like one over the square root of the sample count, ' +
+        'which is why a single-step policy gradient update needs a small step size.');
+    }
+
+    nInput.addEventListener('input', render);
+    seedInput.addEventListener('input', render);
+    render();
+  })();
 })();
