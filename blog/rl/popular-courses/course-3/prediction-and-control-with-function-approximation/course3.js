@@ -2137,4 +2137,101 @@
     stepInput.addEventListener('input', render);
     render();
   })();
+
+  (function initGaussianPolicy() {
+    var muInput = byId('gau-mu');
+    var sigmaInput = byId('gau-sigma');
+    var actionInput = byId('gau-action');
+    var deltaInput = byId('gau-delta');
+    var alphaInput = byId('gau-alpha');
+    var svg = byId('gau-svg');
+    if (!muInput || !sigmaInput || !actionInput || !deltaInput || !alphaInput || !svg) return;
+
+    var LEFT = 70, RIGHT = 650, TOP = 60, BOTTOM = 250;
+    var A_MIN = -6, A_MAX = 6, D_MAX = 1.1;
+
+    function toX(a) { return LEFT + (a - A_MIN) / (A_MAX - A_MIN) * (RIGHT - LEFT); }
+    function toY(d) { return BOTTOM - Math.min(d, D_MAX) / D_MAX * (BOTTOM - TOP); }
+    function density(a, mu, sigma) {
+      return Math.exp(-((a - mu) * (a - mu)) / (2 * sigma * sigma)) / (sigma * Math.sqrt(2 * Math.PI));
+    }
+    function curvePath(mu, sigma) {
+      var path = '';
+      for (var i = 0; i <= 260; i++) {
+        var a = A_MIN + (A_MAX - A_MIN) * i / 260;
+        path += (i === 0 ? 'M' : 'L') + toX(a).toFixed(1) + ' ' + toY(density(a, mu, sigma)).toFixed(1);
+      }
+      return path;
+    }
+
+    function render() {
+      var mu = Number(muInput.value);
+      var sigma = Number(sigmaInput.value);
+      var a = Number(actionInput.value);
+      var delta = Number(deltaInput.value);
+      var alpha = Number(alphaInput.value);
+
+      var z = (a - mu) / sigma;
+      var gMu = (a - mu) / (sigma * sigma);
+      var gSigma = z * z - 1;
+      var newMu = mu + alpha * delta * gMu;
+      var newSigma = Math.exp(Math.log(sigma) + alpha * delta * gSigma);
+
+      clear(svg);
+      label(svg, (LEFT + RIGHT) / 2, 26, 'the policy over a continuous action', COLOR.ink, 12.5, 'middle', 800);
+
+      line(svg, LEFT, BOTTOM, RIGHT, BOTTOM, COLOR.gray, 1.2);
+      line(svg, LEFT, TOP - 10, LEFT, BOTTOM, COLOR.gray, 1.2);
+      for (var t = A_MIN; t <= A_MAX; t += 2) {
+        line(svg, toX(t), BOTTOM, toX(t), BOTTOM + 5, COLOR.gray, 1);
+        label(svg, toX(t), BOTTOM + 20, String(t), COLOR.muted, 10);
+      }
+      label(svg, (LEFT + RIGHT) / 2, BOTTOM + 40, 'action (for example a torque)', COLOR.muted, 11);
+      label(svg, 30, (TOP + BOTTOM) / 2, 'density', COLOR.muted, 11, 'middle');
+
+      svg.appendChild(svgEl('rect', {
+        x: toX(mu - sigma), y: TOP - 6, width: toX(mu + sigma) - toX(mu - sigma), height: BOTTOM - TOP + 6,
+        fill: 'rgba(10,143,106,0.07)'
+      }));
+      svg.appendChild(svgEl('path', { d: curvePath(mu, sigma), fill: 'none', stroke: COLOR.green, 'stroke-width': 2.2 }));
+      svg.appendChild(svgEl('path', {
+        d: curvePath(newMu, newSigma), fill: 'none', stroke: COLOR.blue, 'stroke-width': 2, 'stroke-dasharray': '6 4'
+      }));
+
+      line(svg, toX(mu), toY(density(mu, mu, sigma)), toX(mu), BOTTOM, COLOR.green, 1.4, '4 3');
+      label(svg, toX(mu), toY(density(mu, mu, sigma)) - 10, 'mu', COLOR.green, 11, 'middle', 800);
+      line(svg, toX(newMu), TOP - 6, toX(newMu), BOTTOM, COLOR.blue, 1.2, '3 3');
+      label(svg, toX(newMu), TOP - 12, 'mu after', COLOR.blue, 10.5, 'middle', 800);
+
+      var aColor = delta >= 0 ? COLOR.gold : COLOR.red;
+      line(svg, toX(a), TOP - 6, toX(a), BOTTOM, aColor, 1.8);
+      svg.appendChild(svgEl('circle', { cx: toX(a), cy: BOTTOM, r: 5.5, fill: aColor, stroke: '#fff', 'stroke-width': 1.5 }));
+      label(svg, toX(a), BOTTOM - 8, 'A = ' + a.toFixed(1), aColor, 11, 'middle', 800);
+
+      label(svg, RIGHT, TOP + 6, 'solid: before   dashed: after one update', COLOR.muted, 11, 'end', 700);
+
+      setText('gau-mu-value', mu.toFixed(1));
+      setText('gau-sigma-value', sigma.toFixed(2));
+      setText('gau-action-value', a.toFixed(1));
+      setText('gau-delta-value', delta.toFixed(1));
+      setText('gau-alpha-value', alpha.toFixed(2));
+      setText('gau-gmu', (gMu >= 0 ? '+' : '') + gMu.toFixed(2));
+      setText('gau-gsigma', (gSigma >= 0 ? '+' : '') + gSigma.toFixed(2));
+      setText('gau-newmu', newMu.toFixed(2));
+      setText('gau-newsigma', newSigma.toFixed(2));
+      setText('gau-z', z.toFixed(2));
+      setText('gau-status', 'The sampled action sits ' + Math.abs(z).toFixed(2) +
+        ' standard deviations ' + (z >= 0 ? 'above' : 'below') + ' the mean, and the TD error is ' + delta.toFixed(1) +
+        '. The mean moves from ' + mu.toFixed(2) + ' to ' + newMu.toFixed(2) + ' (' +
+        (newMu > mu ? 'towards higher actions' : (newMu < mu ? 'towards lower actions' : 'unchanged')) +
+        ') and the spread from ' + sigma.toFixed(2) + ' to ' + newSigma.toFixed(2) + ' (' +
+        (newSigma > sigma ? 'more exploration' : (newSigma < sigma ? 'less exploration' : 'unchanged')) +
+        '), because the squared deviation is ' + (z * z > 1 ? 'larger' : 'smaller') + ' than the current variance.');
+    }
+
+    [muInput, sigmaInput, actionInput, deltaInput, alphaInput].forEach(function (el) {
+      el.addEventListener('input', render);
+    });
+    render();
+  })();
 })();
