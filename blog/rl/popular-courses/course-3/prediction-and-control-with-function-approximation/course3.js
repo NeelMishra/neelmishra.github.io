@@ -1718,4 +1718,122 @@
     seedInput.addEventListener('input', render);
     render();
   })();
+
+  (function initActorCriticUpdate() {
+    var actionInput = byId('acu-action');
+    var rInput = byId('acu-r');
+    var rbarInput = byId('acu-rbar');
+    var vsInput = byId('acu-vs');
+    var vspInput = byId('acu-vsp');
+    var alphaInput = byId('acu-alpha');
+    var svg = byId('acu-svg');
+    if (!actionInput || !rInput || !rbarInput || !vsInput || !vspInput || !alphaInput || !svg) return;
+
+    var H0 = [0.4, 0.1, -0.2];
+    var NAMES = ['a0', 'a1', 'a2'];
+    var ZERO = 175, SCALE = 26;
+    var TERM_X = [70, 140, 210, 280];
+    var RESULT_X = 350;
+    var PX = [455, 535, 615], PW = 52, PBASE = 275;
+
+    function softmax(h) {
+      var top = Math.max.apply(null, h);
+      var w = h.map(function (v) { return Math.exp(v - top); });
+      var total = w.reduce(function (a, c) { return a + c; }, 0);
+      return w.map(function (v) { return v / total; });
+    }
+
+    function bar(cx, width, value, stroke, fill, dash) {
+      var height = Math.abs(value) * SCALE;
+      var y = value >= 0 ? ZERO - height : ZERO;
+      var attrs = {
+        x: cx - width / 2, y: y, width: width, height: Math.max(height, 0.8), rx: 3,
+        fill: fill, stroke: stroke, 'stroke-width': 1.3
+      };
+      if (dash) attrs['stroke-dasharray'] = dash;
+      svg.appendChild(svgEl('rect', attrs));
+      return y;
+    }
+
+    function render() {
+      var idx = Number(actionInput.value);
+      var r = Number(rInput.value);
+      var rbar = Number(rbarInput.value);
+      var vs = Number(vsInput.value);
+      var vsp = Number(vspInput.value);
+      var alpha = Number(alphaInput.value);
+
+      var delta = r - rbar + vsp - vs;
+      var before = softmax(H0);
+      var after = softmax(H0.map(function (h, i) {
+        return h + alpha * delta * ((i === idx ? 1 : 0) - before[i]);
+      }));
+
+      clear(svg);
+      label(svg, 210, 26, 'assembling the TD error', COLOR.ink, 12.5, 'middle', 800);
+      label(svg, 535, 26, 'one actor update', COLOR.ink, 12.5, 'middle', 800);
+
+      line(svg, 40, ZERO, 385, ZERO, COLOR.gray, 1.2);
+      var terms = [r, -rbar, vsp, -vs];
+      var texts = ['R', '- Rbar', "+ v(S')", '- v(S)'];
+      terms.forEach(function (value, i) {
+        var color = value >= 0 ? COLOR.green : COLOR.red;
+        var y = bar(TERM_X[i], 42, value, color, value >= 0 ? COLOR.paleGreen : 'rgba(184,58,58,0.12)');
+        label(svg, TERM_X[i], value >= 0 ? y - 6 : y + Math.abs(value) * SCALE + 14, value.toFixed(1), color, 10.5, 'middle', 800);
+        label(svg, TERM_X[i], 250, texts[i], COLOR.muted, 11, 'middle', 700);
+      });
+      line(svg, 315, ZERO - 70, 315, ZERO + 70, COLOR.line, 1.2, '4 4');
+      var dColor = delta >= 0 ? COLOR.green : COLOR.red;
+      var dy = bar(RESULT_X, 52, delta, dColor, delta >= 0 ? COLOR.paleGreen : 'rgba(184,58,58,0.12)');
+      label(svg, RESULT_X, delta >= 0 ? dy - 6 : dy + Math.abs(delta) * SCALE + 14, delta.toFixed(2), dColor, 12, 'middle', 800);
+      label(svg, RESULT_X, 250, 'delta', dColor, 12, 'middle', 800);
+      label(svg, 210, 276, delta >= 0
+        ? 'better than the critic expected, so raise this action'
+        : 'worse than the critic expected, so lower this action', dColor, 11, 'middle', 700);
+
+      line(svg, 415, PBASE, 675, PBASE, COLOR.gray, 1.2);
+      line(svg, 415, PBASE - 150, 675, PBASE - 150, COLOR.line, 1, '4 4');
+      label(svg, 408, PBASE - 146, '1', COLOR.muted, 10, 'end');
+      label(svg, 408, PBASE + 4, '0', COLOR.muted, 10, 'end');
+      before.forEach(function (p0, i) {
+        var p1 = after[i];
+        var taken = i === idx;
+        svg.appendChild(svgEl('rect', {
+          x: PX[i] - PW / 2 - 5, y: PBASE - p0 * 150, width: PW, height: Math.max(p0 * 150, 0.8), rx: 3,
+          fill: 'rgba(158,170,164,0.18)', stroke: COLOR.gray, 'stroke-width': 1, 'stroke-dasharray': '4 3'
+        }));
+        svg.appendChild(svgEl('rect', {
+          x: PX[i] - PW / 2 + 5, y: PBASE - p1 * 150, width: PW, height: Math.max(p1 * 150, 0.8), rx: 3,
+          fill: taken ? COLOR.paleGold : COLOR.paleBlue,
+          stroke: taken ? COLOR.gold : COLOR.blue, 'stroke-width': 1.4
+        }));
+        label(svg, PX[i] + 5, PBASE - p1 * 150 - 6, (p1 * 100).toFixed(1) + '%',
+          taken ? COLOR.gold : COLOR.blue, 10.5, 'middle', 800);
+        label(svg, PX[i], PBASE + 16, NAMES[i] + (taken ? '  (taken)' : ''), COLOR.muted, 10.5);
+      });
+      label(svg, 535, PBASE + 36, 'faded = before the update, solid = after', COLOR.muted, 11);
+
+      setText('acu-action-value', NAMES[idx]);
+      setText('acu-r-value', r.toFixed(1));
+      setText('acu-rbar-value', rbar.toFixed(1));
+      setText('acu-vs-value', vs.toFixed(1));
+      setText('acu-vsp-value', vsp.toFixed(1));
+      setText('acu-alpha-value', alpha.toFixed(2));
+      setText('acu-delta', (delta >= 0 ? '+' : '') + delta.toFixed(2));
+      setText('acu-before', (before[idx] * 100).toFixed(1) + '%');
+      setText('acu-after', (after[idx] * 100).toFixed(1) + '%');
+      var shift = (after[idx] - before[idx]) * 100;
+      setText('acu-shift', (shift >= 0 ? '+' : '') + shift.toFixed(1) + ' pts');
+      setText('acu-status', 'delta = ' + r.toFixed(1) + ' - ' + rbar.toFixed(1) + ' + ' + vsp.toFixed(1) +
+        ' - ' + vs.toFixed(1) + ' = ' + delta.toFixed(2) + ', so one update with step size ' + alpha.toFixed(2) +
+        ' moves pi(' + NAMES[idx] + ') from ' + (before[idx] * 100).toFixed(1) + '% to ' +
+        (after[idx] * 100).toFixed(1) + '%. The other two actions absorb exactly the opposite change, ' +
+        'because the policy gradients in a state sum to zero.');
+    }
+
+    [actionInput, rInput, rbarInput, vsInput, vspInput, alphaInput].forEach(function (el) {
+      el.addEventListener('input', render);
+    });
+    render();
+  })();
 })();
