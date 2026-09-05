@@ -8814,6 +8814,13 @@ var BLOG_TREE = [
                       { title: 'Conditional Flow Matching', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/conditional-flow-matching.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/marginal-vector-fields-continuity.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/scores-and-sde-extension.html'] },
                       { title: 'Scores &amp; the SDE Extension', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/scores-and-sde-extension.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/conditional-flow-matching.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html'] }
                     ]
+                  },
+                  {
+                    name: 'lecture-03',
+                    label: 'Lecture 3 &middot; Flow Matching &amp; Diffusion Models',
+                    children: [
+                      { title: 'Flow Matching, Score Matching &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/scores-and-sde-extension.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/conditional-flow-matching.html'] }
+                    ]
                   }
                 ]
               }
