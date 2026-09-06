@@ -71,9 +71,8 @@
   }
 
   function gaussian(x, mean, std) {
-    var safeStd = Math.max(std, 0.055);
-    var z = (x - mean) / safeStd;
-    return Math.exp(-0.5 * z * z) / (safeStd * Math.sqrt(2 * Math.PI));
+    var z = (x - mean) / std;
+    return Math.exp(-0.5 * z * z) / (std * Math.sqrt(2 * Math.PI));
   }
 
   function pathFromValues(values, mapX, mapY) {
@@ -125,7 +124,6 @@
       var t = Number(slider.value);
       var alpha = t;
       var beta = 1 - t;
-      var drawStd = Math.max(beta, 0.055);
       var min = -4;
       var max = 4;
       var left = 50;
@@ -142,13 +140,28 @@
 
       clear(svg);
       panels.forEach(function (panel, panelIndex) {
+        if (t === 1) {
+          drawAxis(svg, left, right, panel.bottom, min, max);
+          label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
+          var atoms = panel.mode === 'conditional' ? [2] : [-2, 2];
+          atoms.forEach(function (z) {
+            var mass = 1 / atoms.length;
+            var tip = panel.bottom - mass * (panel.bottom - panel.top - 20);
+            line(svg, mapX(z), panel.bottom, mapX(z), tip, COLORS.gold, 3);
+            svg.appendChild(svgEl('circle', { cx: mapX(z), cy: tip, r: 4, fill: COLORS.gold }));
+            label(svg, mapX(z), tip - 10, 'mass ' + mass, COLORS.ink, 12, 'middle', 700);
+          });
+          return;
+        }
         var samples = [];
         var peak = 0;
-        for (var i = 0; i <= 180; i++) {
-          var x = min + (max - min) * i / 180;
+        // Resolve narrow Gaussians without silently changing the chosen variance.
+        var sampleCount = Math.max(180, Math.ceil(8 * (max - min) / beta));
+        for (var i = 0; i <= sampleCount; i++) {
+          var x = min + (max - min) * i / sampleCount;
           var density = panel.mode === 'conditional'
-            ? gaussian(x, alpha * 2, drawStd)
-            : 0.5 * gaussian(x, -2 * alpha, drawStd) + 0.5 * gaussian(x, 2 * alpha, drawStd);
+            ? gaussian(x, alpha * 2, beta)
+            : 0.5 * gaussian(x, -2 * alpha, beta) + 0.5 * gaussian(x, 2 * alpha, beta);
           samples.push([x, density]);
           peak = Math.max(peak, density);
         }
@@ -184,8 +197,8 @@
       setText('path-beta-value', beta.toFixed(2));
       setText('path-status', t < 0.01
         ? 'At t = 0, every conditional is the same standard Gaussian, so their average is also p_init.'
-        : t > 0.99
-          ? 'At t = 1, each conditional collapses onto its data point; averaging the endpoints recovers p_data.'
+        : t === 1
+          ? 'At t = 1, the spikes represent probability masses: 1 at the conditional endpoint, or 1/2 at each marginal endpoint. There is no ordinary density at these atoms.'
           : 'One conditional heads toward z = +2. The marginal averages the paths for both possible data points.');
     }
 
@@ -248,14 +261,18 @@
   })();
 
   function twoPointPosterior(x, t) {
-    var beta = Math.max(1 - t, 0.055);
-    var leftLikelihood = gaussian(x, -2 * t, beta);
-    var rightLikelihood = gaussian(x, 2 * t, beta);
-    var total = leftLikelihood + rightLikelihood;
+    var beta = 1 - t;
+    // Normalize in log space so tiny likelihoods cannot produce 0 / 0.
+    var leftLog = -0.5 * Math.pow((x + 2 * t) / beta, 2);
+    var rightLog = -0.5 * Math.pow((x - 2 * t) / beta, 2);
+    var largestLog = Math.max(leftLog, rightLog);
+    var leftWeight = Math.exp(leftLog - largestLog);
+    var rightWeight = Math.exp(rightLog - largestLog);
+    var total = leftWeight + rightWeight;
     return {
       beta: beta,
-      left: leftLikelihood / total,
-      right: rightLikelihood / total
+      left: leftWeight / total,
+      right: rightWeight / total
     };
   }
 
