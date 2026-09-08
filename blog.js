@@ -8850,17 +8850,14 @@ var BLOG_TREE = [
                     name: 'lecture-01',
                     label: 'Lecture 1 &middot; Flow &amp; Diffusion Foundations',
                     children: [
-                      { title: 'Generative Modeling as Distribution Transport', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/generative-modeling-as-transport.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', 'dl/transformers/index.html'] },
-                      { title: 'Flows, Vector Fields &amp; ODEs', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/generative-modeling-as-transport.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html'] },
-                      { title: 'Euler Sampling &amp; Neural Flow Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/flows-vector-fields-odes.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html'] },
-                      { title: 'Brownian Motion, SDEs &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/euler-and-neural-flow-models.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html'] }
+                      { title: 'Introduction to Flow &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html'] }
                     ]
                   },
                   {
                     name: 'lecture-02',
                     label: 'Lecture 2 &middot; Constructing a Training Target',
                     children: [
-                      { title: 'Constructing a Training Target: Paths, Fields &amp; Scores', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/brownian-motion-sdes-diffusion.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html'] }
+                      { title: 'Constructing a Training Target: Paths, Fields &amp; Scores', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html'] }
                     ]
                   },
                   {
