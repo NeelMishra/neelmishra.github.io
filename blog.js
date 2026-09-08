@@ -8290,6 +8290,58 @@ var BLOG_TREE = [
     label: 'Machine Learning',
     children: [
       {
+        "name": "bagging-and-boosting",
+        "label": "Bagging & Boosting",
+        "children": [
+          {
+            "title": "Overview & Study Roadmap",
+            "file": "ml/bagging-and-boosting/index.html",
+            "links": [
+              "ml/bagging-and-boosting/bagging-random-forests.html"
+            ]
+          },
+          {
+            "title": "Bagging & Random Forests",
+            "file": "ml/bagging-and-boosting/bagging-random-forests.html",
+            "links": [
+              "ml/bagging-and-boosting/index.html",
+              "ml/bagging-and-boosting/adaboost.html"
+            ]
+          },
+          {
+            "title": "AdaBoost",
+            "file": "ml/bagging-and-boosting/adaboost.html",
+            "links": [
+              "ml/bagging-and-boosting/bagging-random-forests.html",
+              "ml/bagging-and-boosting/gradient-boosting.html"
+            ]
+          },
+          {
+            "title": "Gradient Boosting",
+            "file": "ml/bagging-and-boosting/gradient-boosting.html",
+            "links": [
+              "ml/bagging-and-boosting/adaboost.html",
+              "ml/bagging-and-boosting/modern-boosting.html"
+            ]
+          },
+          {
+            "title": "XGBoost, LightGBM & CatBoost",
+            "file": "ml/bagging-and-boosting/modern-boosting.html",
+            "links": [
+              "ml/bagging-and-boosting/gradient-boosting.html",
+              "ml/bagging-and-boosting/interview-guide.html"
+            ]
+          },
+          {
+            "title": "Interview Questions & Practice",
+            "file": "ml/bagging-and-boosting/interview-guide.html",
+            "links": [
+              "ml/bagging-and-boosting/modern-boosting.html"
+            ]
+          }
+        ]
+      },
+      {
         name: 'regression',
         label: 'Regression',
         children: [
