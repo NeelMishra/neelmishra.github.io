@@ -130,66 +130,55 @@
       var right = 650;
       var width = right - left;
       var panels = [
-        { top: 38, bottom: 142, title: 'Conditional: endpoint z = +2 (green)', mode: 'conditional' },
-        { top: 190, bottom: 294, title: 'Marginal: both endpoints (blue)', mode: 'marginal' }
+        { top: 55, bottom: 230, title: 'Two conditional distributions', mode: 'conditional' },
+        { top: 325, bottom: 500, title: 'Marginal: their equal-weight mixture', mode: 'marginal' }
       ];
-
-      function mapX(x) {
-        return left + (x - min) / (max - min) * width;
-      }
-
+      function mapX(x) { return left + (x - min) / (max - min) * width; }
       clear(svg);
-      panels.forEach(function (panel, panelIndex) {
-        if (t === 1) {
-          drawAxis(svg, left, right, panel.bottom, min, max);
-          label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
-          var atoms = panel.mode === 'conditional' ? [2] : [-2, 2];
-          atoms.forEach(function (z) {
-            var mass = 1 / atoms.length;
-            var tip = panel.bottom - mass * (panel.bottom - panel.top - 20);
-            line(svg, mapX(z), panel.bottom, mapX(z), tip, COLORS.gold, 3);
-            svg.appendChild(svgEl('circle', { cx: mapX(z), cy: tip, r: 4, fill: COLORS.gold }));
-            label(svg, mapX(z), tip - 10, 'mass ' + mass, COLORS.ink, 12, 'middle', 700);
-          });
-          return;
-        }
-        var samples = [];
-        var peak = 0;
-        // Resolve narrow Gaussians without silently changing the chosen variance.
-        var sampleCount = Math.max(180, Math.ceil(8 * (max - min) / beta));
-        for (var i = 0; i <= sampleCount; i++) {
-          var x = min + (max - min) * i / sampleCount;
-          var density = panel.mode === 'conditional'
-            ? gaussian(x, alpha * 2, beta)
-            : 0.5 * gaussian(x, -2 * alpha, beta) + 0.5 * gaussian(x, 2 * alpha, beta);
-          samples.push([x, density]);
-          peak = Math.max(peak, density);
-        }
-        var mapY = function (density) {
-          return panel.bottom - density / peak * (panel.bottom - panel.top - 24);
-        };
-        var areaValues = [[min, 0]].concat(samples).concat([[max, 0]]);
-        svg.appendChild(svgEl('path', {
-          d: pathFromValues(areaValues, mapX, mapY) + ' Z',
-          fill: panelIndex === 0 ? COLORS.paleGreen : COLORS.paleBlue,
-          stroke: 'none'
-        }));
-        svg.appendChild(svgEl('path', {
-          d: pathFromValues(samples, mapX, mapY),
-          fill: 'none',
-          stroke: panelIndex === 0 ? COLORS.green : COLORS.blue,
-          'stroke-width': 2.6
-        }));
-        drawAxis(svg, left, right, panel.bottom, min, max);
-        label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
+      panels.forEach(function (panel) {
+        label(svg, left, panel.top - 25, panel.title, COLORS.ink, 20, 'start', 700);
         if (panel.mode === 'conditional') {
-          line(svg, mapX(2), panel.top + 2, mapX(2), panel.bottom, COLORS.gold, 1.3, '4 4');
-          label(svg, mapX(2), panel.top + 12, 'z', COLORS.gold, 11, 'middle', 700);
-        } else {
+          label(svg, left, panel.top, 'z = −2 (orange)', COLORS.gold, 17, 'start', 700);
+          label(svg, right, panel.top, 'z = +2 (green)', COLORS.green, 17, 'end', 700);
+        }
+        if (t === 1) {
           [-2, 2].forEach(function (z) {
-            line(svg, mapX(z), panel.top + 2, mapX(z), panel.bottom, COLORS.gold, 1.1, '4 4');
+            var mass = panel.mode === 'conditional' ? 1 : 0.5;
+            var color = panel.mode === 'marginal' ? COLORS.blue : (z < 0 ? COLORS.gold : COLORS.green);
+            var tip = panel.bottom - mass * (panel.bottom - panel.top - 35);
+            line(svg, mapX(z), panel.bottom, mapX(z), tip, color, 4);
+            svg.appendChild(svgEl('circle', { cx: mapX(z), cy: tip, r: 5, fill: color }));
+            label(svg, mapX(z), tip - 12, 'mass ' + mass, color, 18, 'middle', 700);
+          });
+        } else {
+          var series = panel.mode === 'conditional'
+            ? [{ z: -2, color: COLORS.gold }, { z: 2, color: COLORS.green }]
+            : [{ z: null, color: COLORS.blue }];
+          var peak = 0;
+          var sampleCount = Math.max(180, Math.ceil(8 * (max - min) / beta));
+          series.forEach(function (curve) {
+            curve.samples = [];
+            for (var i = 0; i <= sampleCount; i++) {
+              var x = min + (max - min) * i / sampleCount;
+              var density = curve.z === null
+                ? 0.5 * gaussian(x, -2 * alpha, beta) + 0.5 * gaussian(x, 2 * alpha, beta)
+                : gaussian(x, curve.z * alpha, beta);
+              curve.samples.push([x, density]);
+              peak = Math.max(peak, density);
+            }
+          });
+          var mapY = function (density) { return panel.bottom - density / peak * (panel.bottom - panel.top - 35); };
+          series.forEach(function (curve, index) {
+            var area = [[min, 0]].concat(curve.samples).concat([[max, 0]]);
+            svg.appendChild(svgEl('path', { d: pathFromValues(area, mapX, mapY) + ' Z', fill: curve.color, opacity: 0.07, stroke: 'none' }));
+            svg.appendChild(svgEl('path', {
+              d: pathFromValues(curve.samples, mapX, mapY), fill: 'none', stroke: curve.color,
+              'stroke-width': 4, 'stroke-dasharray': t === 0 && index === 1 ? '10 8' : 'none',
+              'data-distribution': curve.z === null ? 'marginal' : 'conditional-' + curve.z
+            }));
           });
         }
+        drawAxis(svg, left, right, panel.bottom, min, max);
       });
 
       ['conditional', 'marginal'].forEach(function (name) {
@@ -198,8 +187,8 @@
       });
       var variance = (beta * beta).toFixed(4);
       setText('path-conditional-values', t === 1
-        ? 'No noise remains: probability 1 at x = +2.'
-        : 'At t = ' + t.toFixed(2) + ': mean 2t = ' + (2 * t).toFixed(2) + '; variance (1 − t)² = ' + variance + '.');
+        ? 'Each conditional has mass 1 at its own endpoint.'
+        : 'Means: ' + (-2 * t).toFixed(2) + ' and +' + (2 * t).toFixed(2) + '. Each variance: ' + variance + '.');
       setText('path-marginal-values', t === 1
         ? 'No noise remains: probability 1/2 at x = −2 and 1/2 at x = +2.'
         : 'Component means: ' + (-2 * t).toFixed(2) + ' and +' + (2 * t).toFixed(2) + '; each component variance: ' + variance + '.');
@@ -207,10 +196,10 @@
       setText('path-alpha-value', alpha.toFixed(2));
       setText('path-beta-value', beta.toFixed(2));
       setText('path-status', t < 0.01
-        ? 'At t = 0, every conditional is the same standard Gaussian, so their average is also p_init.'
+        ? 'At t = 0, the two conditionals overlap exactly (green dashes over orange). Their marginal is the same standard Gaussian.'
         : t === 1
           ? 'At t = 1, the spikes represent probability masses: 1 at the conditional endpoint, or 1/2 at each marginal endpoint. There is no ordinary density at these atoms.'
-          : 'One conditional heads toward z = +2. The marginal averages the paths for both possible data points.');
+          : 'The two conditionals each describe one endpoint. The marginal adds half of each density.');
     }
 
     slider.addEventListener('input', render);
