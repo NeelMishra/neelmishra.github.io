@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Reason about repeated full-sequence passes, exact versus approximate KV reuse, block diffusion, likelihood bounds, and fair quality–latency comparisons.">
+  <title>Efficiency and Evaluation: What to Measure | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="language-diffusion.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="language-diffusion.js"></script>
+</head>
+<body class="ld-series">
+  <header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a href="../../../../blog.html" class="active">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal ld-article">
+      <a class="back-to-blog" href="../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="index.html">Deep Learning &middot; Diffusion &amp; Flow Models &middot; Large Language Diffusion Models</a><span>&middot; Part 7 of 8</span></div>
+      <h1>Efficiency and Evaluation: What to Measure</h1>
+      <p class="post-meta">September 2026 &middot; Part 7 of 8 &middot; 7 min read</p>
+
+<div class="callout"><strong>Fewer sequential rounds are an opportunity, not a latency measurement.</strong> A diffusion pass and an autoregressive token step do different amounts of work. Evaluate a complete sampler on specified hardware at a specified quality level.</div>
+<h2 id="cost">Count the work inside a denoising pass</h2>
+<p>For a dense transformer with width $d$, total input length $N$, and a fixed number of layers, a rough full-pass cost has projection/MLP terms of order $Nd^2$ and attention terms of order $N^2d$. With $K$ denoising passes over an unchanged canvas, a simple implementation repeats that work $K$ times. The vocabulary head can also be significant when projecting many positions into a large vocabulary.</p>
+<p>An autoregressive generator does a prompt prefill, then reuses cached keys and values while processing newly generated tokens. A rough sequential cost model for $L$ response tokens after a prompt of length $P$ is</p>
+<div class="ld-eq">$$C_{\mathrm{AR}}\approx C_{\mathrm{prefill}}(P)+\sum_{j=1}^{L}\left[A d^2+B(P+j)d\right],$$</div>
+<div class="ld-eq">$$C_{\mathrm{diff}}\approx K\left[A(P+L)d^2+B(P+L)^2d\right].$$</div>
+<p>$A$ and $B$ hide layer counts and architectural constants. These formulas describe approximate operations, not wall-clock predictions. Large matrix multiplications can use hardware more efficiently than single-token steps, while memory traffic, kernel overhead, batching, and attention implementation change the outcome. <a href="../../popular_videos/umar_jamil/distributed-training-framework/kv-cache-and-arithmetic-intensity.html">The existing KV-cache and arithmetic-intensity post</a> explains why operation counts alone can be misleading.</p>
+<p>If $L=256$ and $K=32$, the decoder averages eight completed tokens per denoiser call. Reporting that number is useful. Calling it an eightfold speedup would require an actual timed comparison.</p>
+<h2 id="cache">Why stable token IDs are insufficient for exact caching</h2>
+<p>In a bidirectional transformer, a token's deeper hidden state depends on the other positions it attends to. If a masked response position changes, a fixed prompt token can receive different attention context. At a subsequent layer, the prompt token's keys and values may therefore change even though its token ID did not.</p>
+<p>Ordinary autoregressive caching is exact because the attention graph ensures earlier hidden states cannot depend on future tokens. Full bidirectional denoising lacks that guarantee. Approximate cache reuse may still be a useful speed–quality tradeoff, but it must be evaluated as such. The claim is about dependency structure, not a ban on caching every tensor: embeddings and some first-layer quantities can remain reusable.</p>
+<h2 id="blocks">Block diffusion changes the factorization</h2>
+<p>Partition a sequence into $B$ ordered blocks. An explicitly block-factorized model defines</p>
+<div class="ld-eq">$$p_\theta(x)=\prod_{b=1}^{B}p_\theta\!\left(x^{(b)}\mid x^{(&lt;b)}\right),$$</div>
+<p>where each conditional is a diffusion model over the current block. Prior blocks are visible; future blocks are unavailable; positions within the active block can attend bidirectionally. With the corresponding attention graph, previous block representations do not depend on the active block, permitting exact reuse of their keys and values.</p>
+<p><a href="https://arxiv.org/abs/2503.09573">Block Diffusion</a> studies this interpolation between autoregressive and diffusion language modeling. Its relevance is the explicit factorization and associated training/inference structure. Block size one recovers an autoregressive factorization; a single sequence-sized block gives a full-sequence diffusion factorization.</p>
+<p>By contrast, taking a fully bidirectional model and merely committing its output in blocks is a sampler restriction. If old tokens still attend to the evolving current block, the restriction alone does not establish exact cache validity. Ask both “in what order are blocks generated?” and “what can each hidden state attend to?”</p>
+<h2 id="likelihood">Three quantities often called perplexity</h2>
+<div class="ld-table-wrap"><table><thead><tr><th>Quantity</th><th>Calculation</th><th>Interpretation</th></tr></thead><tbody>
+<tr><td>Autoregressive NLL</td><td>Sum teacher-forced next-token log losses</td><td>Exact sequence NLL for that factorized model</td></tr>
+<tr><td>Diffusion negative ELBO</td><td>Bound estimated using corruption samples and required terms</td><td>Upper bound on expected NLL, before Monte Carlo noise</td></tr>
+<tr><td>External-model score</td><td>An evaluator LM scores generated text</td><td>Compatibility with the evaluator's preferences</td></tr>
+</tbody></table></div>
+<p>Perplexity exponentiates a per-token log loss. Exponentiating a valid expected NLL upper bound gives a perplexity upper bound, not an exact likelihood. A finite Monte Carlo estimate can fluctuate below the true NLL; the bound is a property of the expectation, not every sampled estimate. Changing the sampler to confidence decoding also changes the generated distribution, so a training bound is not automatically its exact likelihood.</p>
+<p>External-model perplexity may reward repetitive or generic text. Pair it with diversity and task measures. Token-based perplexity is not directly comparable across different tokenizers; use a common representation or a carefully defined byte-normalized measure when appropriate.</p>
+<h2 id="multiple-choice">Multiple-choice evaluation needs a scoring protocol</h2>
+<p>A masked model can score candidate answers by corrupting candidate tokens while keeping the question fixed and estimating a conditional denoising objective. Results depend on which tokens are masked, how many Monte Carlo draws are used, whether lengths are normalized, and how prompt/answer boundaries are formed.</p>
+<p>Scoring each candidate after independently sampling noise introduces extra comparison variance. Where valid for the estimator, using matched corruption times and mask randomness across candidates can reduce that variance. Report the estimator and seed policy so someone can reproduce which answer wins.</p>
+<h2 id="benchmark">A useful evaluation record</h2>
+<pre><code class="language-json">{
+  "checkpoint": "exact model revision",
+  "tokenizer": "exact tokenizer revision",
+  "task_split": "named held-out split",
+  "prompt_template": "versioned template",
+  "generation": {
+    "output_slots": 256,
+    "steps_per_block": 32,
+    "block_size": 256,
+    "position_policy": "independent reverse-kernel reveals",
+    "temperature": 1.0,
+    "guidance_weight": 0.0
+  },
+  "timing": {
+    "hardware": "record accelerator and memory",
+    "precision": "record dtype",
+    "batch_size": 1,
+    "warmup": "record excluded warm-up runs",
+    "synchronization": "synchronize device around measurement"
+  }
+}</code></pre>
+<p>This is an example schema, not a benchmark result. Add seeds, software versions, confidence/remasking options, cache policy, actual model-call counts, and failure-handling rules. If guidance has two branches, record both the number of invocations and the effective examples processed; batching the branches into one call does not make their arithmetic disappear.</p>
+<h2 id="latency">Measure latency in terms a user can observe</h2>
+<p>Measure time to a stable first output, time to a stable first block when applicable, and end-to-end completion latency. A tentative token at position 100 does not let a user read the unfinished prefix. Report tokens per second together with its denominator: whether it includes prompt prefill, tokenizer work, compilation, retries, and rejected completions.</p>
+<p>Sweep step counts and block sizes to plot task quality against latency. Compare methods at matched quality or show the whole curve. One unusually fast configuration that sacrifices most task success is a different operating point, not a universal improvement. Use repeated runs and uncertainty estimates appropriate to the evaluation set.</p>
+<h2 id="ablation">A diagnosis sequence that saves experiments</h2>
+<ol><li>Check prompt preservation, output validity, termination, and token alignment.</li><li>At fixed sampler settings, measure denoising quality across masking levels.</li><li>At fixed checkpoint and temperature, sweep the number of steps.</li><li>Then vary block size or position selection, one axis at a time.</li><li>Measure timing after warm-up and synchronize asynchronous accelerator work.</li><li>Inspect invalid outputs and diversity alongside average task score.</li></ol>
+<details class="ld-check"><summary>Check your understanding: A cache approximation halves latency and lowers task accuracy. Is it an improvement?</summary><p>It creates a new operating point. Compare it with other configurations at the same accuracy, or show the quality–latency curve. Whether it helps depends on the required quality and latency budget.</p></details>
+<h2 id="next">Build a case you can fully understand</h2><p>The <a href="build-a-tiny-diffusion-language-model.html">final lab</a> applies these distinctions to a small synthetic language. It separates exact sampling arithmetic, denoiser fit, and final-sequence validity without requiring an accelerator.</p>
+
+      <nav class="post-nav" aria-label="Series navigation"><a class="prev" href="conditioning-infilling-and-guidance.html"><span>Previous</span><span>&larr; Conditioning, Infilling, and Guidance</span></a><a class="next" href="build-a-tiny-diffusion-language-model.html"><span>Next</span><span>Build a Tiny Diffusion Language Model &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

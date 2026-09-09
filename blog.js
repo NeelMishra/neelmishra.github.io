@@ -8839,6 +8839,21 @@ var BLOG_TREE = [
         label: 'Diffusion &amp; Flow Models',
         children: [
           {
+            name: 'large-language-diffusion-models',
+            label: 'Large Language Diffusion Models',
+            children: [
+              {"title": "Overview & Roadmap", "file": "dl/diffusion-models/large-language-diffusion-models/index.html", "links": ["dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html", "dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html"]},
+              {"title": "1. From Continuous Paths to Token Jumps", "file": "dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "links": ["dl/diffusion-models/large-language-diffusion-models/index.html", "dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html"]},
+              {"title": "2. The Masked Diffusion Objective, Derived", "file": "dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "links": ["dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html"]},
+              {"title": "3. Sampling: Parallel Reveals, Confidence, and Remasking", "file": "dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "links": ["dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html"]},
+              {"title": "4. Discrete Flow Matching: Probability Moves, Tokens Jump", "file": "dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "links": ["dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html"]},
+              {"title": "5. LLaDA, Dream, and the Design of a Diffusion LLM", "file": "dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "links": ["dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html"]},
+              {"title": "6. Conditioning, Infilling, and Guidance", "file": "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "links": ["dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html"]},
+              {"title": "7. Efficiency and Evaluation: What to Measure", "file": "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "links": ["dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html"]},
+              {"title": "8. Build a Tiny Diffusion Language Model", "file": "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html", "links": ["dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "dl/diffusion-models/large-language-diffusion-models/index.html"]}
+            ]
+          },
+          {
             name: 'popular-courses',
             label: 'Popular Courses',
             children: [
@@ -8864,7 +8879,7 @@ var BLOG_TREE = [
                     name: 'lecture-03',
                     label: 'Lecture 3 &middot; Flow Matching &amp; Diffusion Models',
                     children: [
-                      { title: 'Flow Matching, Score Matching &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html'] }
+                      { title: 'Flow Matching, Score Matching &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', 'dl/diffusion-models/large-language-diffusion-models/index.html'] }
                     ]
                   }
                 ]
