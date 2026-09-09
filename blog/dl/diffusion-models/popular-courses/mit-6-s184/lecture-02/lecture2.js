@@ -303,47 +303,53 @@
       var peak = 0;
       for (var i = 0; i <= 180; i++) {
         var location = min + (max - min) * i / 180;
-        var dLeft = 0.5 * gaussian(location, -2 * t, posterior.beta);
-        var dRight = 0.5 * gaussian(location, 2 * t, posterior.beta);
+        var dLeft = gaussian(location, -2 * t, posterior.beta);
+        var dRight = gaussian(location, 2 * t, posterior.beta);
         valuesLeft.push([location, dLeft]);
         valuesRight.push([location, dRight]);
-        peak = Math.max(peak, dLeft + dRight);
+        peak = Math.max(peak, dLeft, dRight);
       }
       var mapY = function (density) {
         return bottom - density / peak * (bottom - top - 20);
       };
 
       clear(svg);
-      addArrowMarker(svg, 'marginal-left-arrow', COLORS.blue);
-      addArrowMarker(svg, 'marginal-right-arrow', COLORS.gold);
-      addArrowMarker(svg, 'marginal-result-arrow', COLORS.green);
+      addArrowMarker(svg, 'marginal-left-arrow', COLORS.gold);
+      addArrowMarker(svg, 'marginal-right-arrow', COLORS.green);
+      addArrowMarker(svg, 'marginal-result-arrow', COLORS.blue);
       svg.appendChild(svgEl('path', {
         d: pathFromValues(valuesLeft, mapX, mapY),
         fill: 'none',
-        stroke: COLORS.blue,
+        stroke: COLORS.gold,
         'stroke-width': 2.2
       }));
       svg.appendChild(svgEl('path', {
         d: pathFromValues(valuesRight, mapX, mapY),
         fill: 'none',
-        stroke: COLORS.gold,
+        stroke: COLORS.green,
         'stroke-width': 2.2
       }));
       drawAxis(svg, left, right, bottom, min, max);
       line(svg, mapX(x), top, mapX(x), 280, COLORS.ink, 1.4, '5 4');
-      label(svg, mapX(x), top - 7, 'observed x', COLORS.ink, 11, 'middle', 700);
+      label(svg, left, 20, 'Destination −2 (orange)', COLORS.gold, 13, 'start', 700);
+      label(svg, right, 20, 'Destination +2 (green)', COLORS.green, 13, 'end', 700);
+      label(svg, mapX(x), 198, 'inspect x', COLORS.ink, 11, 'middle', 700);
+      [-2, 2].forEach(function (z) {
+        var color = z < 0 ? COLORS.gold : COLORS.green;
+        svg.appendChild(svgEl('circle', { cx: mapX(x), cy: mapY(gaussian(x, z * t, posterior.beta)), r: z < 0 ? 5 : 3, fill: color }));
+      });
 
       var center = mapX(x);
       var velocityScale = 22;
       var clamp = function (value) {
         return Math.max(left + 3, Math.min(right - 3, value));
       };
-      arrow(svg, center, 210, clamp(center + leftVelocity * velocityScale), 210, COLORS.blue, 2.4, 'marginal-left-arrow');
-      arrow(svg, center, 240, clamp(center + rightVelocity * velocityScale), 240, COLORS.gold, 2.4, 'marginal-right-arrow');
-      arrow(svg, center, 275, clamp(center + marginalVelocity * velocityScale), 275, COLORS.green, 3.4, 'marginal-result-arrow');
-      label(svg, left, 214, 'z = -2', COLORS.blue, 10, 'start', 700);
-      label(svg, left, 244, 'z = +2', COLORS.gold, 10, 'start', 700);
-      label(svg, left, 279, 'weighted result', COLORS.green, 10, 'start', 700);
+      arrow(svg, center, 210, clamp(center + leftVelocity * velocityScale), 210, COLORS.gold, 2.4, 'marginal-left-arrow');
+      arrow(svg, center, 240, clamp(center + rightVelocity * velocityScale), 240, COLORS.green, 2.4, 'marginal-right-arrow');
+      arrow(svg, center, 275, clamp(center + marginalVelocity * velocityScale), 275, COLORS.blue, 3.4, 'marginal-result-arrow');
+      label(svg, left, 214, 'z = -2', COLORS.gold, 10, 'start', 700);
+      label(svg, left, 244, 'z = +2', COLORS.green, 10, 'start', 700);
+      label(svg, left, 279, 'combined', COLORS.blue, 10, 'start', 700);
 
       setText('marginal-time-value', t.toFixed(2));
       setText('marginal-x-value', x.toFixed(2));
@@ -354,11 +360,8 @@
       setText('marginal-left-velocity', leftVelocity.toFixed(2));
       setText('marginal-right-velocity', rightVelocity.toFixed(2));
       setText('marginal-velocity-value', marginalVelocity.toFixed(2));
-      setText('marginal-status', posterior.left > 0.8
-        ? 'This x is much more likely to have come from z = -2, so that conditional field dominates.'
-        : posterior.right > 0.8
-          ? 'This x is much more likely to have come from z = +2, so that conditional field dominates.'
-          : 'Both data points plausibly explain x, so the marginal field blends their conditional velocities.');
+      setText('marginal-cloud-state', 'At time ' + t.toFixed(2) + ', the cloud centers are ' + (-2 * t).toFixed(2) + ' and +' + (2 * t).toFixed(2) + '. Their noise width (standard deviation) is ' + posterior.beta.toFixed(2) + '.');
+      setText('marginal-status', 'At x = ' + x.toFixed(2) + ', use ' + (100 * posterior.left).toFixed(1) + '% of the orange velocity and ' + (100 * posterior.right).toFixed(1) + '% of the green velocity. The blue arrow is the combined result.');
     }
 
     timeSlider.addEventListener('input', render);
