@@ -117,9 +117,8 @@
 
   (function initProbabilityPaths() {
     var slider = byId('path-time');
-    var conditionalSvg = byId('path-svg');
-    var marginalSvg = byId('path-marginal-svg');
-    if (!slider || !conditionalSvg || !marginalSvg) return;
+    var svg = byId('path-svg');
+    if (!slider || !svg) return;
 
     function render() {
       var t = Number(slider.value);
@@ -131,19 +130,19 @@
       var right = 650;
       var width = right - left;
       var panels = [
-        { top: 18, bottom: 122, svg: conditionalSvg, mode: 'conditional' },
-        { top: 18, bottom: 122, svg: marginalSvg, mode: 'marginal' }
+        { top: 38, bottom: 142, title: 'Conditional: endpoint z = +2 (green)', mode: 'conditional' },
+        { top: 190, bottom: 294, title: 'Marginal: both endpoints (blue)', mode: 'marginal' }
       ];
 
       function mapX(x) {
         return left + (x - min) / (max - min) * width;
       }
 
+      clear(svg);
       panels.forEach(function (panel, panelIndex) {
-        var svg = panel.svg;
-        clear(svg);
         if (t === 1) {
           drawAxis(svg, left, right, panel.bottom, min, max);
+          label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
           var atoms = panel.mode === 'conditional' ? [2] : [-2, 2];
           atoms.forEach(function (z) {
             var mass = 1 / atoms.length;
@@ -182,6 +181,7 @@
           'stroke-width': 2.6
         }));
         drawAxis(svg, left, right, panel.bottom, min, max);
+        label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
         if (panel.mode === 'conditional') {
           line(svg, mapX(2), panel.top + 2, mapX(2), panel.bottom, COLORS.gold, 1.3, '4 4');
           label(svg, mapX(2), panel.top + 12, 'z', COLORS.gold, 11, 'middle', 700);
