@@ -117,8 +117,9 @@
 
   (function initProbabilityPaths() {
     var slider = byId('path-time');
-    var svg = byId('path-svg');
-    if (!slider || !svg) return;
+    var conditionalSvg = byId('path-svg');
+    var marginalSvg = byId('path-marginal-svg');
+    if (!slider || !conditionalSvg || !marginalSvg) return;
 
     function render() {
       var t = Number(slider.value);
@@ -130,19 +131,19 @@
       var right = 650;
       var width = right - left;
       var panels = [
-        { top: 38, bottom: 142, title: 'conditional path for z = +2', mode: 'conditional' },
-        { top: 190, bottom: 294, title: 'marginal path: average over z = -2 and z = +2', mode: 'marginal' }
+        { top: 18, bottom: 122, svg: conditionalSvg, mode: 'conditional' },
+        { top: 18, bottom: 122, svg: marginalSvg, mode: 'marginal' }
       ];
 
       function mapX(x) {
         return left + (x - min) / (max - min) * width;
       }
 
-      clear(svg);
       panels.forEach(function (panel, panelIndex) {
+        var svg = panel.svg;
+        clear(svg);
         if (t === 1) {
           drawAxis(svg, left, right, panel.bottom, min, max);
-          label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
           var atoms = panel.mode === 'conditional' ? [2] : [-2, 2];
           atoms.forEach(function (z) {
             var mass = 1 / atoms.length;
@@ -181,7 +182,6 @@
           'stroke-width': 2.6
         }));
         drawAxis(svg, left, right, panel.bottom, min, max);
-        label(svg, left, panel.top - 9, panel.title, COLORS.ink, 12, 'start', 700);
         if (panel.mode === 'conditional') {
           line(svg, mapX(2), panel.top + 2, mapX(2), panel.bottom, COLORS.gold, 1.3, '4 4');
           label(svg, mapX(2), panel.top + 12, 'z', COLORS.gold, 11, 'middle', 700);
@@ -192,6 +192,17 @@
         }
       });
 
+      ['conditional', 'marginal'].forEach(function (name) {
+        byId('path-' + name + '-density').hidden = t === 1;
+        byId('path-' + name + '-atom').hidden = t !== 1;
+      });
+      var variance = (beta * beta).toFixed(4);
+      setText('path-conditional-values', t === 1
+        ? 'No noise remains: probability 1 at x = +2.'
+        : 'At t = ' + t.toFixed(2) + ': mean 2t = ' + (2 * t).toFixed(2) + '; variance (1 − t)² = ' + variance + '.');
+      setText('path-marginal-values', t === 1
+        ? 'No noise remains: probability 1/2 at x = −2 and 1/2 at x = +2.'
+        : 'Component means: ' + (-2 * t).toFixed(2) + ' and +' + (2 * t).toFixed(2) + '; each component variance: ' + variance + '.');
       setText('path-time-value', t.toFixed(2));
       setText('path-alpha-value', alpha.toFixed(2));
       setText('path-beta-value', beta.toFixed(2));
