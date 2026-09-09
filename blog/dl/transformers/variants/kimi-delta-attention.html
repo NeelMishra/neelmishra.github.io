@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Derive KDA from a diagonal forget gate and a delta update, inspect noncommuting transitions, and distinguish the recurrent core from a complete KDA layer.">
+  <title>Kimi Delta Attention: Channel-Wise Memory Control | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/transformers/variants/kimi-delta-attention.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../transformers.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="../transformers.js"></script>
+</head>
+<body class="tr-series">
+  <header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a href="../../../../blog.html" class="active">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal tr-article">
+      <a class="back-to-blog" href="../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="../index.html">Deep Learning &middot; Transformers</a><span>&middot; Recurrent and hybrid models</span></div>
+      <h1>Kimi Delta Attention: Channel-Wise Memory Control</h1>
+      <p class="post-meta">Updated September 2026 &middot; 4 min read</p>
+
+<div class="callout"><strong>KDA lets different key-feature channels forget at different rates.</strong> It applies a diagonal decay to the memory, then uses the delta rule to fit the current association. The result is still a fixed-size recurrent state, with a more expressive transition than one scalar decay per head.</div>
+<h2 id="prerequisites">Change one piece of Gated DeltaNet</h2>
+<p>Keep $S_t\in\mathbb R^{d_k\times d_v}$, column keys and queries of width $d_k$, and values of width $d_v$. Replace the scalar $\alpha_t$ with a vector $\boldsymbol\alpha_t\in(0,1)^{d_k}$ and define $D_t=\operatorname{diag}(\boldsymbol\alpha_t)$.</p>
+<div class="tr-eq">$$\overline S_t=D_tS_{t-1},\qquad S_t=\overline S_t+\beta_tk_t(v_t-\overline S_t^\top k_t)^\top,\qquad o_t=S_t^\top q_t.$$</div>
+<p>This is the recurrence introduced in <a href="https://arxiv.org/abs/2510.26692">Kimi Linear</a>, expressed with the paper's key-by-value state orientation. The model architecture combines KDA with other layers; KDA is the token-mixing mechanism, not a synonym for the entire Kimi model family.</p>
+<h2 id="diagonal">What a channel-wise decay actually scales</h2>
+<p>Left-multiplication by $D_t$ scales the rows of $S$, because those rows index key features. It does not select one previous token to erase, and it does not directly scale the value-coordinate columns. Several historical associations may overlap in the affected key-feature directions.</p>
+<p>For a two-dimensional state $S=I$ and retention factors $(1,0.25)$, the decayed state becomes $\operatorname{diag}(1,0.25)$. A query along the first coordinate reads the old first value unchanged, while a query along the second sees one quarter of its old value. Scalar decay could not make those choices independently within this head.</p>
+<h2 id="dplr">Where diagonal-plus-low-rank structure appears</h2>
+<p>Expand the recurrence:</p>
+<div class="tr-eq">$$S_t=A_tS_{t-1}+B_t,\quad A_t=(I-\beta_tk_tk_t^\top)D_t=D_t-\beta_tk_t(k_t^\top D_t),\quad B_t=\beta_tk_tv_t^\top.$$</div>
+<p>$A_t$ is a diagonal matrix plus a rank-one correction. This is the specialized diagonal-plus-low-rank structure that a chunkwise algorithm can exploit. It avoids treating every per-token transition as an arbitrary dense $d_k\times d_k$ matrix.</p>
+<p>The phrase describes an algebraic structure, not a claim that every product of such transitions remains diagonal plus rank one. Products can acquire more complicated structure. Efficient implementations organize chunk computations around the actual recurrence rather than assuming the rank never grows.</p>
+<h2 id="order">The two transformations usually do not commute</h2>
+<p>With scalar decay, multiplying by $\alpha I$ commutes with the overwrite operator. With different channel rates, $(I-\beta kk^\top)D$ generally differs from $D(I-\beta kk^\top)$.</p>
+<p>Choose $k=(1,1)/\sqrt2$, $\beta=1$, and $D=\operatorname{diag}(1,0.5)$. Then</p>
+<div class="tr-eq">$$ (I-kk^\top)D=\begin{pmatrix}0.5&amp;-0.25\\-0.5&amp;0.25\end{pmatrix},\qquad D(I-kk^\top)=\begin{pmatrix}0.5&amp;-0.5\\-0.25&amp;0.25\end{pmatrix}.$$</div>
+<p>Swapping the order changes the state transition. In code, computing the prediction error from the decayed state makes the intended ordering clear. The <a href="../math-lab.html">lab</a> checks the equivalence of the expanded and update forms, and checks that this swapped example differs.</p>
+<h2 id="code">The core update in a few lines</h2>
+<pre><code class="language-python">def kda_step(state, key, value, retention, beta, query):
+    # state: [dk, dv], retention: [dk]
+    decayed = retention[:, None] * state
+    error = value - decayed.T @ key
+    updated = decayed + beta * np.outer(key, error)
+    return updated, updated.T @ query</code></pre>
+<p>For equal retention factors, this reduces to the scalar-gated update. With all factors one, it reduces to DeltaNet. Those limits are useful correctness tests because they compare independent descriptions of the same operation.</p>
+<h2 id="layer">A complete layer contains more than this state equation</h2>
+<p>The surrounding layer needs projections that generate $q,k,v$, retention factors, and the write rate; normalization conventions; a way to incorporate short-range order; and an output transformation. The Kimi Linear design uses a hardware-oriented chunkwise algorithm and a layerwise hybrid with MLA. These implementation and architecture choices are part of what was evaluated in its report.</p>
+<p>Later KDA-based models can modify gate ranges, output gates, kernels, and surrounding MLPs. The <a href="kimi-k3.html">Kimi K3 case study</a> names its specific changes rather than assuming the Kimi Linear configuration applies unchanged.</p>
+<h2 id="limits">Expressive forgetting does not create a token list</h2>
+<p>The persistent matrix still has $d_kd_v$ entries per head at fixed dimensions. Channel-wise retention improves how that limited state is managed; it does not make it equivalent to retaining every historical key and value. Arbitrary retrieval quality must be measured, and a hybrid model's full-attention layers still have growing history storage.</p>
+<details class="tr-check"><summary>Try it: Which multiplication would decay value-coordinate columns instead of key-feature rows?</summary><p>Right-multiplying a key-by-value state by a diagonal matrix of value width. That is a different gating design. Here the retention vector has key width and multiplies rows on the left.</p></details>
+<h2 id="next">See where it belongs in a stack</h2><p><a href="hybrid-attention.html">Hybrid attention</a> explains why recurrent KDA and token-addressable MLA can complement each other. Their memory costs must be added, not averaged away.</p>
+
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="gated-delta-net.html"><span>Previous</span><span>&larr; Gated DeltaNet: Forget Globally, Update Selectively</span></a><a class="next" href="hybrid-attention.html"><span>Next</span><span>Hybrid Attention: Combine Retrieval with Recurrent Memory &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

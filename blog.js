@@ -8767,69 +8767,223 @@ var BLOG_TREE = [
         ]
       },
       {
-        name: 'transformers',
-        label: 'Transformers',
-        children: [
-          { title: 'Overview', file: 'dl/transformers/index.html' },
+        "name": "transformers",
+        "label": "Transformers",
+        "children": [
           {
-            name: 'building-blocks',
-            label: 'Building Blocks',
-            children: [
-              { title: 'Overview', file: 'dl/transformers/building-blocks/index.html' },
-              { title: 'Single-Head Attention', file: 'dl/transformers/building-blocks/single-head-attention.html' },
-              { title: 'Multi-Head Attention', file: 'dl/transformers/building-blocks/multi-head-attention.html' },
-              { title: 'Feed-Forward Network', file: 'dl/transformers/building-blocks/feed-forward.html' },
-              { title: 'Transformer Block', file: 'dl/transformers/building-blocks/transformer-block.html' },
-              { title: 'Positional Encoding', file: 'dl/transformers/building-blocks/positional-encoding.html' },
-              { title: 'Layer Normalization', file: 'dl/transformers/building-blocks/layer-norm.html' },
-              { title: 'Dropout Layer', file: 'dl/transformers/building-blocks/dropout.html', links: ['dl/transformers/building-blocks/layer-norm.html', 'dl/transformers/building-blocks/embedding-layer.html'] },
-              { title: 'Embedding Layer', file: 'dl/transformers/building-blocks/embedding-layer.html' }
+            "name": "tr-reading-paths-and-labs",
+            "label": "Reading paths and labs",
+            "children": [
+              {
+                "title": "Transformers: From the First Attention Calculation to Hybrid Language Models",
+                "file": "dl/transformers/index.html"
+              },
+              {
+                "title": "Transformer Building Blocks: A Shape-First Reading Guide",
+                "file": "dl/transformers/building-blocks/index.html"
+              },
+              {
+                "title": "The Transformer Evolution Map: Compare Changes on the Right Axis",
+                "file": "dl/transformers/variants/index.html"
+              },
+              {
+                "title": "Transformer Math Lab: Test the Identities Behind the Diagrams",
+                "file": "dl/transformers/math-lab.html"
+              }
             ]
           },
           {
-            name: 'attention-variants',
-            label: 'Attention Variants',
-            children: [
-              { title: 'Self-Attention', file: 'dl/transformers/building-blocks/self-attention.html' },
-              { title: 'Softmax Attention', file: 'dl/transformers/building-blocks/softmax-attention.html' },
-              { title: 'Causal Attention', file: 'dl/transformers/building-blocks/causal-attention.html' },
-              { title: 'Cross-Attention', file: 'dl/transformers/building-blocks/cross-attention.html' },
-              { title: 'Sliding Window Attention', file: 'dl/transformers/building-blocks/sliding-window-attention.html' },
-              { title: 'Global Attention', file: 'dl/transformers/building-blocks/global-attention.html' },
-              { title: 'Linear Attention', file: 'dl/transformers/building-blocks/linear-attention.html' },
-              { title: 'Flash Attention', file: 'dl/transformers/building-blocks/flash-attention.html' },
-              { title: 'Multi-Head Attention (MHA)', file: 'dl/transformers/building-blocks/mha.html' },
-              { title: 'Multi-Query Attention (MQA)', file: 'dl/transformers/building-blocks/mqa.html' },
-              { title: 'Grouped-Query Attention (GQA)', file: 'dl/transformers/building-blocks/gqa.html' },
-              { title: 'Multi-Head Latent Attention (MLA)', file: 'dl/transformers/building-blocks/mla.html' },
-              { title: 'Interleaved Head Attention (IHA)', file: 'dl/transformers/building-blocks/iha.html' }
+            "name": "tr-foundations",
+            "label": "Foundations",
+            "children": [
+              {
+                "title": "Token Embeddings and the Vocabulary Head",
+                "file": "dl/transformers/building-blocks/embedding-layer.html"
+              },
+              {
+                "title": "Attention from First Principles: One Complete Calculation",
+                "file": "dl/transformers/building-blocks/single-head-attention.html"
+              },
+              {
+                "title": "Multi-Head Attention: Separate Reads, One Residual Update",
+                "file": "dl/transformers/building-blocks/multi-head-attention.html"
+              },
+              {
+                "title": "Causal Attention: The Information Boundary",
+                "file": "dl/transformers/building-blocks/causal-attention.html"
+              },
+              {
+                "title": "Feed-Forward Networks: Expansion, Nonlinearity, and Gates",
+                "file": "dl/transformers/building-blocks/feed-forward.html"
+              },
+              {
+                "title": "LayerNorm, RMSNorm, and Residual Scale",
+                "file": "dl/transformers/building-blocks/layer-norm.html"
+              },
+              {
+                "title": "A Transformer Block, Line by Line",
+                "file": "dl/transformers/building-blocks/transformer-block.html"
+              },
+              {
+                "title": "Dropout: What Is Random, What Is Preserved",
+                "file": "dl/transformers/building-blocks/dropout.html"
+              }
             ]
           },
           {
-            name: 'architecture',
-            label: 'Architecture',
-            children: [
-              { title: 'Encoder-Decoder Overview', file: 'dl/transformers/architecture/index.html' },
-              { title: 'Encoder Block', file: 'dl/transformers/architecture/encoder.html' },
-              { title: 'Decoder Block', file: 'dl/transformers/architecture/decoder.html' }
+            "name": "tr-position-and-architecture",
+            "label": "Position and architecture",
+            "children": [
+              {
+                "title": "Position Encodings: Order Must Enter Somewhere",
+                "file": "dl/transformers/building-blocks/positional-encoding.html"
+              },
+              {
+                "title": "RoPE: Relative Position Through Rotated Queries and Keys",
+                "file": "dl/transformers/variants/rope.html"
+              },
+              {
+                "title": "ALiBi: A Distance Bias in Attention Logits",
+                "file": "dl/transformers/variants/alibi.html"
+              },
+              {
+                "title": "Cross-Attention: Queries Read a Different Sequence",
+                "file": "dl/transformers/building-blocks/cross-attention.html"
+              }
             ]
           },
           {
-            name: 'training',
-            label: 'Training',
-            children: [
-              { title: 'Training Overview', file: 'dl/transformers/training/index.html' },
-              { title: 'Tokenization', file: 'dl/transformers/training/tokenization.html' }
+            "name": "tr-attention-and-memory",
+            "label": "Attention and memory",
+            "children": [
+              {
+                "title": "The Quadratic Problem: Prefill, Decode, and a Complexity Explorer",
+                "file": "dl/transformers/variants/complexity-and-prefill-decode.html"
+              },
+              {
+                "title": "KV Caching: Why the Prefix Can Stay Put",
+                "file": "dl/transformers/variants/kv-caching.html"
+              },
+              {
+                "title": "MHA, MQA, and GQA: Sharing the KV Cache",
+                "file": "dl/transformers/building-blocks/gqa.html"
+              },
+              {
+                "title": "Multi-Head Latent Attention: Derive the Compressed Cache",
+                "file": "dl/transformers/building-blocks/mla.html"
+              },
+              {
+                "title": "Sparse Attention: Windows, Global Tokens, and Information Paths",
+                "file": "dl/transformers/building-blocks/sliding-window-attention.html"
+              }
             ]
           },
           {
-            name: 'variants',
-            label: 'Variants',
-            children: [
-              { title: 'Landscape', file: 'dl/transformers/variants/index.html' },
-              { title: 'BERT', file: 'dl/transformers/variants/bert.html' },
-              { title: 'GPT', file: 'dl/transformers/variants/gpt.html' },
-              { title: 'Vision Transformer', file: 'dl/transformers/variants/vision.html' }
+            "name": "tr-recurrent-and-hybrid-models",
+            "label": "Recurrent and hybrid models",
+            "children": [
+              {
+                "title": "Linear Attention: From Pairwise Reads to a Recurrent State",
+                "file": "dl/transformers/building-blocks/linear-attention.html"
+              },
+              {
+                "title": "DeltaNet: Write the Error, Not Another Copy",
+                "file": "dl/transformers/variants/delta-net.html"
+              },
+              {
+                "title": "Gated DeltaNet: Forget Globally, Update Selectively",
+                "file": "dl/transformers/variants/gated-delta-net.html"
+              },
+              {
+                "title": "Kimi Delta Attention: Channel-Wise Memory Control",
+                "file": "dl/transformers/variants/kimi-delta-attention.html"
+              },
+              {
+                "title": "Hybrid Attention: Combine Retrieval with Recurrent Memory",
+                "file": "dl/transformers/variants/hybrid-attention.html"
+              }
+            ]
+          },
+          {
+            "name": "tr-architecture-and-model-families",
+            "label": "Architecture and model families",
+            "children": [
+              {
+                "title": "Transformer Architectures: Choose the Information Flow",
+                "file": "dl/transformers/architecture/index.html"
+              },
+              {
+                "title": "The Transformer Encoder: Context, Padding, and Task Heads",
+                "file": "dl/transformers/architecture/encoder.html"
+              },
+              {
+                "title": "The Transformer Decoder: From a Prefix to the Next Token",
+                "file": "dl/transformers/architecture/decoder.html"
+              },
+              {
+                "title": "GPT-2 as a Starting Point: Build the Whole Language Model",
+                "file": "dl/transformers/variants/gpt.html"
+              },
+              {
+                "title": "BERT: Learn Bidirectional Representations by Reconstructing Tokens",
+                "file": "dl/transformers/variants/bert.html"
+              },
+              {
+                "title": "Vision Transformers: Turn an Image into a Sequence of Patches",
+                "file": "dl/transformers/variants/vision.html"
+              },
+              {
+                "title": "Mixture of Experts: Conditional MLPs and the Cost of Routing",
+                "file": "dl/transformers/variants/mixture-of-experts.html"
+              },
+              {
+                "title": "Attention Residuals: Let a Layer Choose Its Sources Across Depth",
+                "file": "dl/transformers/variants/attention-residuals.html"
+              },
+              {
+                "title": "Kimi K3: Read a Modern Hybrid Model from Its Configuration",
+                "file": "dl/transformers/variants/kimi-k3.html"
+              }
+            ]
+          },
+          {
+            "name": "tr-efficient-execution",
+            "label": "Efficient execution",
+            "children": [
+              {
+                "title": "FlashAttention: Exact Softmax Without the Full Matrix",
+                "file": "dl/transformers/building-blocks/flash-attention.html"
+              },
+              {
+                "title": "FlashAttention-2 and -3: From Algebra to GPU Scheduling",
+                "file": "dl/transformers/variants/flash-attention-2.html"
+              },
+              {
+                "title": "PagedAttention: Manage the Cache Without Moving the Sequence",
+                "file": "dl/transformers/variants/paged-attention.html"
+              },
+              {
+                "title": "Ring Attention: Distributed Reads with Online Softmax",
+                "file": "dl/transformers/variants/ring-attention.html"
+              },
+              {
+                "title": "Speculative Decoding: Draft, Verify, and Correct",
+                "file": "dl/transformers/variants/speculative-decoding.html"
+              }
+            ]
+          },
+          {
+            "name": "tr-training",
+            "label": "Training",
+            "children": [
+              {
+                "title": "Tokenization: How Text Becomes the Sequence a Model Learns",
+                "file": "dl/transformers/training/tokenization.html"
+              },
+              {
+                "title": "Training a Transformer: Targets, Gradients, Batches, and Evaluation",
+                "file": "dl/transformers/training/index.html"
+              }
             ]
           }
         ]
