@@ -1,4 +1,4 @@
-/* Progressive enhancement: the authored walkthroughs also read without JavaScript. */
+/* Interactive experiments and mobile navigation for the transformer notes. */
 (function () {
   'use strict';
   var article = document.querySelector('.tr-article');
@@ -20,33 +20,6 @@
     smallScreen.addEventListener('change', arrangeExplorer);
     arrangeExplorer();
   }
-  article.querySelectorAll('[data-walkthrough]').forEach(function (figure) {
-    var scenes = figure.querySelectorAll('.tr-scene');
-    var controls = figure.querySelector('.tr-story-controls');
-    var index = 0;
-    function draw() {
-      scenes.forEach(function (scene, i) {
-        scene.classList.toggle('is-current', i === index);
-        scene.setAttribute('aria-hidden', String(i !== index));
-      });
-      controls.querySelector('[data-back]').disabled = index === 0;
-      controls.querySelector('[data-next]').disabled = index === scenes.length - 1;
-      var announcement = controls.querySelector('output');
-      announcement.textContent = 'Step ' + (index + 1) + ' of ' + scenes.length;
-      announcement.setAttribute('aria-atomic', 'true');
-      announcement.appendChild(el('span', 'tr-visually-hidden', '. ' + scenes[index].querySelector('.tr-scene-heading strong').textContent + '. ' + scenes[index].querySelector('.tr-scene-note').textContent));
-      figure.dataset.step = index + 1;
-    }
-    figure.classList.add('is-interactive');
-    // Controls stay above the changing diagram, so short steps need no empty filler.
-    figure.insertBefore(controls, figure.querySelector('.tr-story'));
-    controls.hidden = false;
-    controls.querySelector('[data-back]').onclick = function () { index = Math.max(0, index - 1); draw(); };
-    controls.querySelector('[data-next]').onclick = function () { index = Math.min(scenes.length - 1, index + 1); draw(); };
-    controls.querySelector('[data-restart]').onclick = function () { index = 0; draw(); };
-    draw();
-  });
-
   function el(tag, cls, text) {
     var node = document.createElement(tag);
     if (cls) node.className = cls;
