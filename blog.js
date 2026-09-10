@@ -10130,6 +10130,20 @@ var BLOG_TREE = [
           { title: '8. Debug PPO with Evidence: Ratios, KL, Values, and Real Evaluation', file: 'rl/ppo/diagnostics-and-experiment-design.html', links: ['rl/ppo/continuous-actions-and-vectorized-environments.html', 'rl/ppo/ppo-for-language-models.html'] },
           { title: '9. PPO for Language Models: Tokens, Rewards, and Two Different Anchors', file: 'rl/ppo/ppo-for-language-models.html', links: ['rl/ppo/diagnostics-and-experiment-design.html', 'rl/ppo/index.html'] }
         ]
+      },
+      {
+        name: 'dpo',
+        label: 'DPO',
+        children: [
+          { title: "Overview &amp; Reading Paths", file: "rl/dpo/index.html", links: ["rl/dpo/preferences-before-the-loss.html", "rl/ppo/ppo-for-language-models.html"] },
+          { title: "1. DPO Starts with a Comparison, Not a Reward Number", file: "rl/dpo/preferences-before-the-loss.html", links: ["rl/dpo/index.html", "rl/dpo/from-regularized-reward-to-dpo.html"] },
+          { title: "2. Deriving DPO: Solve for the Policy, Then Eliminate the Reward", file: "rl/dpo/from-regularized-reward-to-dpo.html", links: ["rl/dpo/preferences-before-the-loss.html", "rl/dpo/loss-gradients-and-beta.html"] },
+          { title: "3. Read the DPO Loss: Margins, Gradients, and the Two Roles of β", file: "rl/dpo/loss-gradients-and-beta.html", links: ["rl/dpo/from-regularized-reward-to-dpo.html", "rl/dpo/sequence-log-probabilities-and-implementation.html"] },
+          { title: "4. DPO in Code: Score the Right Tokens before Writing the Loss", file: "rl/dpo/sequence-log-probabilities-and-implementation.html", links: ["rl/dpo/loss-gradients-and-beta.html", "rl/dpo/data-reference-and-diagnostics.html"] },
+          { title: "5. Train DPO with Evidence: Data Coverage, Reference Choice, and Diagnostics", file: "rl/dpo/data-reference-and-diagnostics.html", links: ["rl/dpo/sequence-log-probabilities-and-implementation.html", "rl/dpo/dpo-math-and-training-lab.html"] },
+          { title: "6. A DPO Lab You Can Verify: Exact Checks and Recorded Training Runs", file: "rl/dpo/dpo-math-and-training-lab.html", links: ["rl/dpo/data-reference-and-diagnostics.html", "rl/dpo/dpo-and-ppo-what-changes.html"] },
+          { title: "7. DPO and PPO: Same Motivation, Different Learning Problems", file: "rl/dpo/dpo-and-ppo-what-changes.html", links: ["rl/dpo/dpo-math-and-training-lab.html", "rl/dpo/index.html"] }
+        ]
       }
     ]
   },
@@ -10367,7 +10381,7 @@ function flattenBlogTree(nodes, result) {
     ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
-    rl:    { label: 'Reinforcement Learning', blurb: 'Browse Popular Courses, Popular Videos, and the original PPO notes in their folders.' },
+    rl:    { label: 'Reinforcement Learning', blurb: 'Browse Popular Courses, Popular Videos, and the original PPO and DPO notes in their folders.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
   };
 
