@@ -10199,17 +10199,21 @@ function flattenBlogTree(nodes, result) {
   heading.textContent = 'Explorer';
   nav.appendChild(heading);
 
-  function buildLevel(items, container, depth) {
+  function buildLevel(items, container, depth, parentPath) {
     items.forEach(function(item) {
       if (item.children) {
         /* Folder node */
+        var directoryPath = parentPath.concat(item.name);
         var folder = document.createElement('div');
         folder.className = 'file-tree-folder';
         folder.style.paddingLeft = (depth * 12) + 'px';
 
         var btn = document.createElement('button');
         btn.className = 'file-tree-toggle';
+        btn.type = 'button';
         btn.title = item.label;
+        btn.setAttribute('aria-expanded', 'false');
+        if (directoryPath[0] === 'rl') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -10229,17 +10233,27 @@ function flattenBlogTree(nodes, result) {
         if (hasActive) {
           btn.classList.add('open');
           childContainer.classList.add('open');
+          btn.setAttribute('aria-expanded', 'true');
         }
 
         btn.addEventListener('click', function() {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
+          btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
+          if (!inBlogDir && directoryPath[0] === 'rl' && btn.classList.contains('open')) {
+            var targetHash = '#' + (directoryPath.length === 1 ? 'reinforcement-learning' : 'folder-' + directoryPath.join('--'));
+            if (window.location.hash === targetHash) {
+              window.dispatchEvent(new Event('hashchange'));
+            } else {
+              window.location.hash = targetHash;
+            }
+          }
         });
 
         folder.appendChild(btn);
         container.appendChild(folder);
         container.appendChild(childContainer);
-        buildLevel(item.children, childContainer, depth + 1);
+        buildLevel(item.children, childContainer, depth + 1, directoryPath);
       } else {
         /* File (leaf) node */
         var fileEl = document.createElement('a');
@@ -10260,7 +10274,7 @@ function flattenBlogTree(nodes, result) {
     });
   }
 
-  buildLevel(BLOG_TREE, nav, 0);
+  buildLevel(BLOG_TREE, nav, 0, []);
 })();
 
 /* Blog post: collapsible sidebar toggle */
@@ -10353,7 +10367,7 @@ function flattenBlogTree(nodes, result) {
     ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
-    rl:    { label: 'RL',    blurb: 'Reinforcement learning from the ground up: bandits, value methods, policy gradients.' },
+    rl:    { label: 'Reinforcement Learning', blurb: 'Browse Popular Courses, Popular Videos, and the original PPO notes in their folders.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
   };
 
@@ -10365,9 +10379,9 @@ function flattenBlogTree(nodes, result) {
     var segs = p.series.split(/\s*&middot;\s*|\s*·\s*/).map(function(s){ return s.trim(); }).filter(Boolean);
     var catLabel = CATEGORY_META[p.category] ? CATEGORY_META[p.category].label : (segs[0] || p.category);
     var inner = segs.slice();
-    if (inner[0] && inner[0].toLowerCase() === catLabel.toLowerCase()) inner.shift();
+    if (inner[0] && (inner[0].toLowerCase() === catLabel.toLowerCase() || inner[0].toLowerCase() === p.category.toLowerCase())) inner.shift();
     var part = '';
-    if (inner.length && /^Part\s+\d+/i.test(inner[inner.length - 1])) {
+    if (inner.length && /^(?:Part|Chapter)\s+\d+/i.test(inner[inner.length - 1])) {
       part = inner.pop();
     }
     var seriesName = inner.join(' / ') || 'Singles';
@@ -10396,6 +10410,64 @@ function flattenBlogTree(nodes, result) {
     cat.seriesMap[p.seriesName].push(p);
   });
 
+  var postByFile = {};
+  posts.forEach(function(post) { postByFile[post.file] = post; });
+
+  function makePostCard(p) {
+    var card = document.createElement('a');
+    card.className = 'blog-card';
+    card.href = p.href;
+    card.dataset.cat = p.category;
+    var partHtml = p.part ? '<span class="blog-card-part mono">' + p.part + '</span>' : '';
+    card.innerHTML =
+      '<div class="blog-card-path mono">' + p.file + '</div>' +
+      '<h3>' + p.title + '</h3>' +
+      '<p>' + p.description + '</p>' +
+      '<div class="blog-card-foot">' +
+        '<span class="blog-card-meta mono">' + p.meta + '</span>' + partHtml +
+      '</div>';
+    return card;
+  }
+
+  /* The RL index and Explorer share the same hierarchy; series breadcrumbs
+     must not turn chapters or source folders into unrelated top-level groups. */
+  function makeRLDirectory(node, parentPath) {
+    var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
+    if (!files.length) return null;
+    var path = parentPath.concat(node.name);
+    var details = document.createElement('details');
+    details.className = 'blog-section blog-directory';
+    details.id = 'folder-' + path.join('--');
+    details.dataset.directory = path.join('/');
+    var summary = document.createElement('summary');
+    summary.className = 'blog-section-header';
+    summary.innerHTML =
+      '<span class="blog-section-chevron mono" aria-hidden="true">&#9656;</span>' +
+      '<span class="blog-directory-icon" aria-hidden="true">&#128193;</span>' +
+      '<span class="blog-section-title">' + node.label + '</span>' +
+      '<span class="blog-section-count mono">' + files.length + ' posts</span>';
+    details.appendChild(summary);
+    var contents = document.createElement('div');
+    contents.className = 'blog-directory-contents';
+    var grid = null;
+    node.children.forEach(function(child) {
+      if (child.children) {
+        grid = null;
+        var folder = makeRLDirectory(child, path);
+        if (folder) contents.appendChild(folder);
+      } else if (postByFile[child.file]) {
+        if (!grid) {
+          grid = document.createElement('div');
+          grid.className = 'blog-section-grid';
+          contents.appendChild(grid);
+        }
+        grid.appendChild(makePostCard(postByFile[child.file]));
+      }
+    });
+    details.appendChild(contents);
+    return details;
+  }
+
   /* Chips: [all] [cpp · 7] [dsa · 62] ... */
   var chipsHost = document.getElementById('blog-chips');
   var statsHost = document.getElementById('blog-hero-stats');
@@ -10416,7 +10488,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -10434,6 +10506,7 @@ function flattenBlogTree(nodes, result) {
     var catSection = document.createElement('section');
     catSection.className = 'blog-category';
     catSection.dataset.cat = code;
+    if (code === 'rl') catSection.id = 'reinforcement-learning';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -10445,6 +10518,16 @@ function flattenBlogTree(nodes, result) {
       '</h2>' +
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
+
+    if (code === 'rl') {
+      var rlTree = BLOG_TREE.filter(function(node) { return node.name === 'rl'; })[0];
+      rlTree.children.forEach(function(node) {
+        var directory = makeRLDirectory(node, ['rl']);
+        if (directory) catSection.appendChild(directory);
+      });
+      frag.appendChild(catSection);
+      return;
+    }
 
     cat.seriesOrder.forEach(function(sName) {
       var series = cat.seriesMap[sName];
@@ -10464,21 +10547,7 @@ function flattenBlogTree(nodes, result) {
       var grid = document.createElement('div');
       grid.className = 'blog-section-grid';
       series.forEach(function(p) {
-        var card = document.createElement('a');
-        card.className = 'blog-card';
-        card.href = p.href;
-        card.dataset.cat = p.category;
-
-        var partHtml = p.part ? '<span class="blog-card-part mono">' + p.part + '</span>' : '';
-        card.innerHTML =
-          '<div class="blog-card-path mono">' + p.file + '</div>' +
-          '<h3>' + p.title + '</h3>' +
-          '<p>' + p.description + '</p>' +
-          '<div class="blog-card-foot">' +
-            '<span class="blog-card-meta mono">' + p.meta + '</span>' +
-            partHtml +
-          '</div>';
-        grid.appendChild(card);
+        grid.appendChild(makePostCard(p));
       });
       details.appendChild(grid);
       catSection.appendChild(details);
@@ -10516,6 +10585,36 @@ function flattenBlogTree(nodes, result) {
   });
 
   applyFilters();
+
+  function openRLDirectoryLink() {
+    var id = window.location.hash.slice(1);
+    if (id !== 'reinforcement-learning' && id.indexOf('folder-rl--') !== 0) return;
+    var target = document.getElementById(id);
+    if (!target || !root.contains(target)) return;
+    activeCats.clear();
+    activeCats.add('rl');
+    chipsHost.querySelectorAll('.blog-chip').forEach(function(chip) {
+      chip.setAttribute('aria-pressed', chip.dataset.cat === 'rl' ? 'true' : 'false');
+    });
+    applyFilters();
+    var ancestor = target;
+    while (ancestor && ancestor !== root) {
+      if (ancestor.tagName === 'DETAILS') ancestor.open = true;
+      ancestor = ancestor.parentElement;
+    }
+    var directory = target.dataset.directory || 'rl';
+    document.querySelectorAll('.file-tree-toggle[data-directory]').forEach(function(button) {
+      var path = button.dataset.directory;
+      if (directory === path || directory.indexOf(path + '/') === 0) {
+        button.classList.add('open');
+        button.setAttribute('aria-expanded', 'true');
+        button.parentElement.nextElementSibling.classList.add('open');
+      }
+    });
+    window.requestAnimationFrame(function() { target.scrollIntoView({ block: 'start' }); });
+  }
+  window.addEventListener('hashchange', openRLDirectoryLink);
+  openRLDirectoryLink();
 })();
 
 
