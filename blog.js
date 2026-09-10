@@ -10067,46 +10067,68 @@ var BLOG_TREE = [
         ]
       },
       {
-        name: 'ppo',
-        label: 'PPO for LLMs',
+        name: 'popular-videos',
+        label: 'Popular Videos',
         children: [
-          { title: 'Overview', file: 'rl/ppo/index.html', links: ['rl/ppo/rl-for-llms.html', 'rl/ppo/clipped-objective.html'] },
           {
-            name: 'ppo-setup',
-            label: 'The Setup',
+            name: 'julia-turc-ppo-for-llms-explained-intuitively',
+            label: 'Julia Turc: PPO for LLMs Explained Intuitively',
             children: [
-              { title: 'RL Framing of LLMs', file: 'rl/ppo/rl-for-llms.html', links: ['rl/ppo/index.html', 'rl/ppo/rewards-and-returns.html'] },
-              { title: 'Rewards &amp; Returns', file: 'rl/ppo/rewards-and-returns.html', links: ['rl/ppo/rl-for-llms.html', 'rl/ppo/policy-gradients.html'] },
-              { title: 'Policy Gradients', file: 'rl/ppo/policy-gradients.html', links: ['rl/ppo/rewards-and-returns.html', 'rl/ppo/value-function.html'] },
-              { title: 'The Value Function', file: 'rl/ppo/value-function.html', links: ['rl/ppo/policy-gradients.html', 'rl/ppo/advantage.html'] }
-            ]
-          },
-          {
-            name: 'ppo-advantage',
-            label: 'Advantage Estimation',
-            children: [
-              { title: 'Advantage: Q minus V', file: 'rl/ppo/advantage.html', links: ['rl/ppo/value-function.html', 'rl/ppo/gae.html'] },
-              { title: 'Bias, Variance &amp; GAE', file: 'rl/ppo/gae.html', links: ['rl/ppo/advantage.html', 'rl/ppo/importance-sampling.html'] },
-              { title: 'Importance Sampling', file: 'rl/ppo/importance-sampling.html', links: ['rl/ppo/gae.html', 'rl/ppo/clipped-objective.html'] }
-            ]
-          },
-          {
-            name: 'ppo-core',
-            label: 'PPO Itself',
-            children: [
-              { title: 'The Clipped Objective', file: 'rl/ppo/clipped-objective.html', links: ['rl/ppo/importance-sampling.html', 'rl/ppo/kl-and-reward-hacking.html'] },
-              { title: 'KL Penalties &amp; Reward Hacking', file: 'rl/ppo/kl-and-reward-hacking.html', links: ['rl/ppo/clipped-objective.html', 'rl/ppo/full-algorithm.html'] },
-              { title: 'The Full Training Loop', file: 'rl/ppo/full-algorithm.html', links: ['rl/ppo/kl-and-reward-hacking.html', 'rl/ppo/implementation.html'] }
-            ]
-          },
-          {
-            name: 'ppo-practice',
-            label: 'Practice &amp; Beyond',
-            children: [
-              { title: 'Implementation &amp; Debugging', file: 'rl/ppo/implementation.html', links: ['rl/ppo/full-algorithm.html', 'rl/ppo/beyond-ppo.html'] },
-              { title: 'GRPO, DPO &amp; Beyond', file: 'rl/ppo/beyond-ppo.html', links: ['rl/ppo/implementation.html', 'rl/ppo/index.html'] }
+              { title: 'Overview', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rl-for-llms.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/clipped-objective.html'] },
+              {
+                name: 'julia-ppo-setup',
+                label: 'The Setup',
+                children: [
+                  { title: 'RL Framing of LLMs', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rl-for-llms.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rewards-and-returns.html'] },
+                  { title: 'Rewards &amp; Returns', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rewards-and-returns.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rl-for-llms.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/policy-gradients.html'] },
+                  { title: 'Policy Gradients', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/policy-gradients.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/rewards-and-returns.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/value-function.html'] },
+                  { title: 'The Value Function', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/value-function.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/policy-gradients.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/advantage.html'] }
+                ]
+              },
+              {
+                name: 'julia-ppo-advantage',
+                label: 'Advantage Estimation',
+                children: [
+                  { title: 'Advantage: Q minus V', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/advantage.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/value-function.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/gae.html'] },
+                  { title: 'Bias, Variance &amp; GAE', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/gae.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/advantage.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/importance-sampling.html'] },
+                  { title: 'Importance Sampling', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/importance-sampling.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/gae.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/clipped-objective.html'] }
+                ]
+              },
+              {
+                name: 'julia-ppo-core',
+                label: 'PPO Itself',
+                children: [
+                  { title: 'The Clipped Objective', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/clipped-objective.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/importance-sampling.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/kl-and-reward-hacking.html'] },
+                  { title: 'KL Penalties &amp; Reward Hacking', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/kl-and-reward-hacking.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/clipped-objective.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/full-algorithm.html'] },
+                  { title: 'The Full Training Loop', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/full-algorithm.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/kl-and-reward-hacking.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/implementation.html'] }
+                ]
+              },
+              {
+                name: 'julia-ppo-practice',
+                label: 'Practice &amp; Beyond',
+                children: [
+                  { title: 'Implementation &amp; Debugging', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/implementation.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/full-algorithm.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/beyond-ppo.html'] },
+                  { title: 'GRPO, DPO &amp; Beyond', file: 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/beyond-ppo.html', links: ['rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/implementation.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html'] }
+                ]
+              }
             ]
           }
+        ]
+      },
+      {
+        name: 'ppo',
+        label: 'PPO',
+        children: [
+          { title: 'Overview &amp; Reading Paths', file: 'rl/ppo/index.html', links: ['rl/ppo/policy-improvement-and-the-ppo-contract.html', 'rl/popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html'] },
+          { title: '1. PPO Begins with a Contract: Collect, Estimate, Improve', file: 'rl/ppo/policy-improvement-and-the-ppo-contract.html', links: ['rl/ppo/index.html', 'rl/ppo/policy-gradients-and-control-variates.html'] },
+          { title: '2. Policy Gradients: Why a Log Probability Times an Advantage Works', file: 'rl/ppo/policy-gradients-and-control-variates.html', links: ['rl/ppo/policy-improvement-and-the-ppo-contract.html', 'rl/ppo/returns-values-and-gae.html'] },
+          { title: '3. Returns, Values, and GAE: Credit Assignment without Boundary Bugs', file: 'rl/ppo/returns-values-and-gae.html', links: ['rl/ppo/policy-gradients-and-control-variates.html', 'rl/ppo/from-trpo-to-the-clipped-objective.html'] },
+          { title: '4. PPO Clipping: The Four Cases, the Geometry, and the Limits', file: 'rl/ppo/from-trpo-to-the-clipped-objective.html', links: ['rl/ppo/returns-values-and-gae.html', 'rl/ppo/rollouts-minibatches-and-one-complete-update.html'] },
+          { title: '5. One Complete PPO Update: What Moves and What Stays Frozen', file: 'rl/ppo/rollouts-minibatches-and-one-complete-update.html', links: ['rl/ppo/from-trpo-to-the-clipped-objective.html', 'rl/ppo/implement-and-test-ppo.html'] },
+          { title: '6. Build and Test PPO: A Small Agent You Can Actually Inspect', file: 'rl/ppo/implement-and-test-ppo.html', links: ['rl/ppo/rollouts-minibatches-and-one-complete-update.html', 'rl/ppo/continuous-actions-and-vectorized-environments.html'] },
+          { title: '7. Continuous-Action PPO: Densities, Squashing, and Vectorized Rollouts', file: 'rl/ppo/continuous-actions-and-vectorized-environments.html', links: ['rl/ppo/implement-and-test-ppo.html', 'rl/ppo/diagnostics-and-experiment-design.html'] },
+          { title: '8. Debug PPO with Evidence: Ratios, KL, Values, and Real Evaluation', file: 'rl/ppo/diagnostics-and-experiment-design.html', links: ['rl/ppo/continuous-actions-and-vectorized-environments.html', 'rl/ppo/ppo-for-language-models.html'] },
+          { title: '9. PPO for Language Models: Tokens, Rewards, and Two Different Anchors', file: 'rl/ppo/ppo-for-language-models.html', links: ['rl/ppo/diagnostics-and-experiment-design.html', 'rl/ppo/index.html'] }
         ]
       }
     ]
