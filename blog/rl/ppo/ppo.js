@@ -1,4 +1,4 @@
-/* Progressive enhancement: every walkthrough remains readable without JavaScript. */
+/* Interactive calculations, math rendering, and mobile chapter navigation. */
 (function () {
   'use strict';
   function all(q, root) { return Array.prototype.slice.call((root || document).querySelectorAll(q)); }
@@ -17,14 +17,6 @@
   }
   function run() {
     if (window.renderMathInElement) window.renderMathInElement(document.querySelector('article'), {delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}], throwOnError: false});
-    all('[data-story]').forEach(function (root) {
-      var scenes = all('.ppo-scene', root), controls = root.querySelector('.ppo-controls'), current = 0;
-      root.classList.add('is-ready'); controls.hidden = false;
-      function paint() { scenes.forEach(function (scene, i) { scene.classList.toggle('is-current', i === current); }); controls.querySelector('output').textContent = 'Step ' + (current + 1) + ' / ' + scenes.length; controls.querySelector('[data-back]').disabled = current === 0; controls.querySelector('[data-next]').disabled = current === scenes.length - 1; }
-      controls.querySelector('[data-next]').addEventListener('click', function () { current = Math.min(current + 1, scenes.length - 1); paint(); });
-      controls.querySelector('[data-back]').addEventListener('click', function () { current = Math.max(0, current - 1); paint(); });
-      controls.querySelector('[data-reset]').addEventListener('click', function () { current = 0; paint(); }); paint();
-    });
     all('[data-demo]').forEach(function (root) {
       var kind = root.getAttribute('data-demo'), out = root.querySelector('output');
       all('.ppo-interactive', root).forEach(function (el) { el.hidden = false; });
