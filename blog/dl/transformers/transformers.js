@@ -36,22 +36,26 @@
   }
   var demos = {
     attention: function (body) {
-      body.innerHTML = '<div class="tr-controls"><label>Query x <input data-qx type="range" min="-2" max="2" step=".1" value="1"></label><label>Query y <input data-qy type="range" min="-2" max="2" step=".1" value="0"></label><label><input data-mask type="checkbox"> Hide key 3</label><button type="button" data-step>Next step</button><button type="button" data-reset>Reset</button></div><p class="tr-demo-note">Keys: (1,0), (0,1), (1,1). Values: (2,0), (0,2), (2,2). Scale: √2.</p><div class="tr-bars"></div><output class="tr-status" aria-live="polite"></output>';
-      var qx = body.querySelector('[data-qx]'), qy = body.querySelector('[data-qy]'), mask = body.querySelector('[data-mask]');
-      var rows = bars(body.querySelector('.tr-bars'), ['Key 1', 'Key 2', 'Key 3']);
-      var stage = 0;
+      // Keep the worked calculation readable before JavaScript loads. The
+      // only interaction changes the allowed positions, not the input vectors.
+      var mask = body.querySelector('[data-mask]');
+      var rows = Array.prototype.map.call(body.querySelectorAll('.tr-bar'), function (row) {
+        return { fill: row.querySelector('.tr-fill'), value: row.querySelector('.tr-bar-value') };
+      });
       function draw() {
-        var x = Number(qx.value), y = Number(qy.value);
-        var scores = [x / Math.SQRT2, y / Math.SQRT2, mask.checked ? -Infinity : (x + y) / Math.SQRT2];
-        var probs = softmax(scores), result = [2 * (probs[0] + probs[2]), 2 * (probs[1] + probs[2])];
-        setBars(rows, stage > 0 ? probs : [0, 0, 0]);
-        rows.forEach(function (row, i) { if (!stage) row.value.textContent = scores[i] === -Infinity ? 'masked' : fmt(scores[i]); });
-        body.querySelector('output').textContent = 'Step ' + (stage + 1) + '/3 · ' + ['Scaled scores', 'Normalized weights', 'Weighted values'][stage] + '\nQuery = ' + vector([x,y]) + '\n' +
-          (stage === 0 ? 'Compare each key with the query, divide by √2, then apply the mask.' : stage === 1 ? 'Weights sum to ' + fmt(probs.reduce(function (a,b) { return a+b; },0)) + '.' : 'Output = ' + vector(result) + '. Each value contributes in proportion to its bar.');
+        var scores = [1 / Math.SQRT2, 0, mask.checked ? -Infinity : 1 / Math.SQRT2];
+        var probs = softmax(scores);
+        var result = [2 * (probs[0] + probs[2]), 2 * (probs[1] + probs[2])];
+        body.querySelector('[data-scores]').textContent = 'Scores = (' + scores.map(function (s) {
+          return s === -Infinity ? '−∞ (blocked)' : fmt(s);
+        }).join(', ') + ')';
+        setBars(rows, probs);
+        body.querySelector('output').textContent = 'Output = ' + vector(result) + '\n' +
+          (mask.checked ? 'Position 3 contributes zero. Positions 1 and 2 now share all the weight.' : 'All three positions contribute.');
       }
-      body.querySelector('[data-step]').onclick = function () { stage = (stage + 1) % 3; draw(); };
-      body.querySelector('[data-reset]').onclick = function () { qx.value = 1; qy.value = 0; mask.checked = false; stage = 0; draw(); };
-      [qx,qy,mask].forEach(function (el) { el.addEventListener('input',draw); }); draw();
+      mask.addEventListener('change', draw);
+      body.querySelector('.tr-controls').hidden = false;
+      draw();
     },
     masks: function (body) {
       body.innerHTML = '<div class="tr-controls"><label>Pattern <select data-pattern><option value="causal">Full causal</option><option value="local" selected>Causal window</option><option value="global">Window + global position 4</option></select></label><label>Window (includes self) <input data-window type="range" min="1" max="8" value="3"></label></div><p class="tr-demo-note">Rows are queries 1–8; columns are keys 1–8. Green 1 = allowed, gray 0 = blocked. Global edges still obey causality.</p><div class="tr-matrix-wrap"><div class="tr-matrix" role="img" aria-label="Attention connectivity matrix"></div></div><output class="tr-status" aria-live="polite"></output>';
