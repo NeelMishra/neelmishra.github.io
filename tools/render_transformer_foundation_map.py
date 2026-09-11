@@ -3,7 +3,7 @@
 
 Run from any directory: python3 tools/render_transformer_foundation_map.py
 The checked-in HTML works without JavaScript. Only the marked map/recap regions
-and their stylesheet link are managed here; chapter prose is left intact.
+and their stylesheet/script links are managed here; chapter prose is left intact.
 """
 
 from pathlib import Path
@@ -11,7 +11,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 CHAPTER_DIR = ROOT / "blog/dl/transformers/building-blocks"
-CSS = '<link rel="stylesheet" href="../foundation-map.css?v=foundation-map-20260911">'
+CSS = '<link rel="stylesheet" href="../foundation-map.css?v=foundation-flow-20260911">'
 
 # Slug, diagram label, the component's input/output, and its place in the model.
 CHAPTERS = [
@@ -43,83 +43,100 @@ CHAPTERS = [
 
 
 def render_map(slug, label, description):
-    current_used = False
-
     def node(target, title, subtitle="", extra="", key=None):
-        nonlocal current_used
         active = slug == (key or target.removesuffix(".html"))
-        classes = "tf-map-node" + (" " + extra if extra else "")
-        current_attr = ""
-        badge = ""
-        if active:
-            classes += " is-current"
-            if not current_used:
-                current_attr = ' aria-current="page"'
-                badge = '<span class="tf-map-current-tag">You are here</span>'
-                current_used = True
+        classes = "tf-map-node " + extra + (" is-current" if active else "")
+        current = ' aria-current="page"' if active else ""
         small = f"<small>{subtitle}</small>" if subtitle else ""
-        return f'<a class="{classes}" href="{target}"{current_attr}>{badge}<strong>{title}</strong>{small}</a>'
+        return f'<a class="{classes.strip()}" href="{target}"{current}><strong>{title}</strong>{small}</a>'
 
     is_guide = slug == "index"
-    inside_block = slug not in ("index", "embedding-layer", "transformer-block")
-    embeddings = node("embedding-layer.html", "Embeddings", "Token IDs → vectors")
-    blocks = node("transformer-block.html", "Transformer blocks", "Repeat N times", "is-containing" if inside_block else "")
-    predictions = node("../training/index.html#targets", "Next-token prediction", "Final norm → head → softmax")
-    norm1 = node("layer-norm.html", "Normalize", "Prepare each vector")
-    attention = node("multi-head-attention.html", "Multi-head attention", "Join heads → project")
-    head = node("single-head-attention.html", "One head", "Q, K, V → read")
-    mask = node("causal-attention.html", "Causal mask", "No future tokens")
-    dropout1 = node("dropout.html", "Dropout", "Optional · training only", "tf-map-dropout")
-    norm2 = node("layer-norm.html", "Normalize", "Read the updated U")
-    mlp = node("feed-forward.html", "Feed-forward / MLP", "Transform each position", "tf-map-mlp")
-    dropout2 = node("dropout.html", "Dropout", "Optional · training only", "tf-map-dropout")
-    final_norm = node("layer-norm.html", "Final norm", "After all N blocks")
-    output_head = node("../variants/gpt.html#forward", "Vocabulary head", "Vectors → token scores")
-    softmax = node("../training/index.html#targets", "Softmax", "Scores → probabilities")
-    kicker = "The map for this series" if is_guide else f"Foundations · {next(i for i, c in enumerate(CHAPTERS, 1) if c[0] == slug)} of 8"
-    title = "One model, eight components to understand" if is_guide else f"You are here: {label}"
-    # Keep the first, deliberately simple lookup chapter focused. Every later
-    # chapter opens the block so its highlighted component is immediately visible.
-    expanded = "" if slug == "embedding-layer" else " open"
-    handoff = '<p class="tf-map-handoff"><strong>How to read the series.</strong> The arrows show computation order. The chapters teach one component at a time, returning to this same diagram so you can place each new idea. Begin with the embedding table; unfamiliar boxes will become clear as you go.</p>' if is_guide else ""
-    return f'''<figure class="tf-map" id="transformer-map" data-foundation="{slug}">
+    default = 0 if slug in ("index", "embedding-layer") else 3 if slug in ("single-head-attention", "causal-attention") else 2
+    kicker = "A guided look inside" if is_guide else f"Foundations · {next(i for i, c in enumerate(CHAPTERS, 1) if c[0] == slug)} of 8"
+    title = "One model. Open it one layer at a time." if is_guide else f"You are here: {label}"
+    embeddings = node("embedding-layer.html", "Embeddings", "IDs → vectors", "tf-embed")
+    blocks = node("transformer-block.html", "Transformer blocks", "Refine the vectors", "tf-block")
+    predictions = node("../training/index.html#targets", "Prediction", "Vector → token probabilities", "tf-predict")
+    norm1 = node("layer-norm.html", "Normalize", "Read a normalized view of X")
+    attention = node("multi-head-attention.html", "Causal self-attention", "Read the available context", "tf-attention")
+    norm2 = node("layer-norm.html", "Normalize", "Read a normalized view of U")
+    mlp = node("feed-forward.html", "Feed-forward / MLP", "Transform each position separately", "tf-mlp")
+    dropout = node("dropout.html", "Dropout", "Optional · training only", "tf-map-dropout")
+    final_norm = node("layer-norm.html", "Final norm", "After the last block")
+    head = node("../variants/gpt.html#forward", "Vocabulary head", "One score per token ID", "tf-predict")
+    softmax = node("../training/index.html#targets", "Softmax", "Scores → probabilities", "tf-predict")
+    one_head = node("single-head-attention.html", "One attention head", "Its own learned Q, K, V projections", "tf-attention")
+    mask = node("causal-attention.html", "Apply the causal mask", "Hide future positions before softmax", "tf-attention")
+    multi = node("multi-head-attention.html", "Join the heads → project", "One update of width d", "tf-attention")
+    controls = "".join(f'<button type="button" data-map-step="{i}" aria-controls="tf-panel-{i}" aria-pressed="false"><span>0{i+1}</span>{text}</button>' for i, text in enumerate(("The model", "The stack", "One block", "Attention")))
+    tokens = '<div class="tf-tokens" aria-label="Example input tokens: the, cat, sat"><span>the</span><span>cat</span><span>sat</span></div>'
+    return f'''<figure class="tf-map" id="transformer-map" data-foundation="{slug}" data-map-start="{default}">
   <figcaption><span class="tf-map-kicker">{kicker}</span><strong class="tf-map-title">{title}</strong><p class="tf-map-description">{description}</p></figcaption>
-  <div class="tf-map-body">
-    <nav aria-label="Transformer architecture: choose a component">
-      <ol class="tf-map-overview"><li>{embeddings}</li><li>{blocks}</li><li>{predictions}</li></ol>
-      <p class="tf-map-position">Reference model: a causal decoder with normalization before each branch. It adds <a href="positional-encoding.html">position vectors</a> after the embedding lookup. Click a component to open its chapter.</p>
-      <details class="tf-map-zoom"{expanded}><summary>Inside one transformer block <span>· expand the middle box</span></summary>
-        <div class="tf-map-stages">
-          <div class="tf-map-stage">
-            <strong class="tf-map-stage-title">1 · Read context, then add</strong>
-            <div class="tf-map-stage-input"><strong>X</strong> · vectors entering this block</div>
-            <div class="tf-map-branch"><span class="tf-map-skip">keep X</span>
-              {norm1}
-              <div class="tf-map-attention">{attention}<div class="tf-map-attention-parts">{head}{mask}</div><p class="tf-map-parts-label">Two things to study inside attention</p></div>
-              {dropout1}
-              <span class="tf-map-add" aria-label="Add the attention update to X">+</span>
-            </div>
-            <div class="tf-map-stage-output"><strong>U</strong> = X + attention update</div>
-          </div>
-          <div class="tf-map-stage">
-            <strong class="tf-map-stage-title">2 · Transform features, then add</strong>
-            <div class="tf-map-stage-input"><strong>U</strong> · the result of stage 1</div>
-            <div class="tf-map-branch"><span class="tf-map-skip">keep U</span>
-              {norm2}
-              {mlp}
-              {dropout2}
-              <span class="tf-map-add" aria-label="Add the MLP update to U">+</span>
-            </div>
-            <div class="tf-map-stage-output"><strong>Y</strong> = U + MLP update</div>
+  <div class="tf-map-overview" aria-label="The model at a glance">{embeddings}<span aria-hidden="true">→</span>{blocks}<span aria-hidden="true">→</span>{predictions}</div>
+  <div class="tf-map-controls" role="group" aria-label="Choose how far to zoom into the model" hidden>{controls}</div>
+  <div class="tf-map-panels">
+    <section class="tf-map-panel" id="tf-panel-0" aria-labelledby="tf-title-0">
+      <div class="tf-map-panel-heading"><span class="tf-map-kicker">01 · The model</span><strong id="tf-title-0">Start with a prefix. Predict what comes next.</strong><p>Suppose our tokens are “the cat sat”. A language model uses this prefix to assign a probability to each possible next token.</p></div>
+      <div class="tf-model-flow">
+        <div class="tf-model-input">{tokens}<small>Known input tokens</small></div><span class="tf-flow-arrow" aria-hidden="true">→</span>
+        <div class="tf-model-box"><strong>Transformer</strong><small>Turn the prefix into context</small></div><span class="tf-flow-arrow" aria-hidden="true">→</span>
+        <div class="tf-model-output"><span class="tf-token-next">on</span><small>One possible next token</small></div>
+      </div>
+      <p class="tf-map-caption">“on” is an illustrative continuation, not a model measurement. Choosing a token and appending it gives a new prefix: “the cat sat on”.</p>
+      <p class="tf-map-bridge"><strong>What happens inside that box?</strong> First, turn the tokens into vectors. Then pass those vectors through a stack of blocks.</p>
+    </section>
+    <section class="tf-map-panel" id="tf-panel-1" aria-labelledby="tf-title-1">
+      <div class="tf-map-panel-heading"><span class="tf-map-kicker">02 · Open the model</span><strong id="tf-title-1">The same three positions travel through every block.</strong><p>Embeddings give each token a starting vector. Position information tells the model where it sits. Each block updates the vectors before passing them onward.</p></div>
+      <div class="tf-stack-flow">
+        <div class="tf-stack-input">{tokens}<span class="tf-down" aria-hidden="true">↓</span>{embeddings}<a class="tf-position-link" href="positional-encoding.html">+ position vectors</a></div>
+        <span class="tf-down" aria-hidden="true">↓</span>
+        <div class="tf-stack-tower"><span class="tf-stack-label">N blocks · separate learned weights</span>
+          {node("transformer-block.html", "Block 1", "3 vectors in → 3 updated vectors out", "tf-block")}
+          <span class="tf-down" aria-hidden="true">↓</span>
+          {node("transformer-block.html", "Block 2", "Same structure, different weights", "tf-block")}
+          <span class="tf-stack-ellipsis" aria-label="More blocks, in sequence">⋮</span>
+          {node("transformer-block.html", "Block N", "Still one vector per input position", "tf-block")}
+        </div>
+        <span class="tf-down" aria-hidden="true">↓</span>
+        <div class="tf-stack-head">{final_norm}<span aria-hidden="true">→</span>{head}<span aria-hidden="true">→</span>{softmax}</div>
+      </div>
+      <p class="tf-map-caption">Use the last position’s distribution to choose the next token. The final norm and vocabulary head sit after the entire stack.</p>
+      <p class="tf-map-bridge"><strong>Now open just one block.</strong> Its two jobs are to exchange context across positions and transform the features at each position.</p>
+    </section>
+    <section class="tf-map-panel" id="tf-panel-2" aria-labelledby="tf-title-2">
+      <div class="tf-map-panel-heading"><span class="tf-map-kicker">03 · Open one block</span><strong id="tf-title-2">Read context. Add it. Transform features. Add again.</strong><p>Follow the arrows downward. The side paths carry the input unchanged; each + adds a learned update to it. This running set of vectors is the <em>residual stream</em>.</p></div>
+      <div class="tf-map-stages">
+        <div class="tf-map-stage">
+          <div class="tf-map-stage-note"><span class="tf-stage-number">1</span><strong>Exchange context</strong><p>The “sat” position can read “the”, “cat”, and itself. Each position receives its own contextual update.</p></div>
+          <div class="tf-map-stage-flow"><div class="tf-map-state"><strong>X</strong><small>Vectors entering the block · n × d</small></div>
+            <div class="tf-map-branch"><span class="tf-map-skip">keep X</span>{norm1}{attention}{dropout}<span class="tf-map-add" aria-label="Add X to the attention update">+</span></div>
+            <div class="tf-map-state tf-map-state-u"><strong>U = X + attention update</strong><small>Context has been added · n × d</small></div>
           </div>
         </div>
-        <p class="tf-map-caption">Read stage 1, then stage 2. Each curved skip path carries its input unchanged to the + circle. Y enters the next block as its X. The pattern repeats; each block has its own weights.</p>
-        <div class="tf-map-output">{final_norm}<span aria-hidden="true">→</span>{output_head}<span aria-hidden="true">→</span>{softmax}</div>
-        <p class="tf-map-caption">The last position’s probabilities predict the next token. Dashed dropout boxes are optional; attention-weight dropout, if used, is inside attention. Other architectures can place normalization and <a href="positional-encoding.html">position information</a> differently.</p>
-      </details>
-    </nav>
+        <div class="tf-map-stage">
+          <div class="tf-map-stage-note"><span class="tf-stage-number">2</span><strong>Transform features</strong><p>The MLP reads the updated U. It applies the same learned function to each position independently.</p></div>
+          <div class="tf-map-stage-flow"><div class="tf-map-branch"><span class="tf-map-skip">keep U</span>{norm2}{mlp}{dropout}<span class="tf-map-add" aria-label="Add U to the MLP update">+</span></div>
+            <div class="tf-map-state"><strong>Y = U + MLP update</strong><small>Updated vectors leaving the block · n × d</small></div>
+          </div>
+        </div>
+      </div>
+      <p class="tf-block-handoff"><span aria-hidden="true">↓</span> Y becomes the next block’s X.</p>
+      <p class="tf-map-caption">This is a pre-norm causal decoder: normalization precedes each branch. Dashed dropout boxes are optional and become identity operations at evaluation. The original 2017 Transformer uses post-norm.</p>
+      <p class="tf-map-bridge"><strong>There is one box still to open.</strong> Inside self-attention, several heads gather context before their outputs are joined into a single update.</p>
+    </section>
+    <section class="tf-map-panel" id="tf-panel-3" aria-labelledby="tf-title-3">
+      <div class="tf-map-panel-heading"><span class="tf-map-kicker">04 · Open attention</span><strong id="tf-title-3">Each head decides which context to read.</strong><p>Keep following “sat”. Its query scores the available keys, and the resulting weights combine their value vectors. Every head uses its own learned projections.</p></div>
+      <div class="tf-attention-flow"><div class="tf-map-state"><strong>Normalized X</strong><small>Same input to every head</small></div><span class="tf-down" aria-hidden="true">↓</span>
+        <div class="tf-head-detail">{one_head}<div class="tf-qkv"><span><strong>Q</strong><small>What to look for</small></span><span><strong>K</strong><small>What to match</small></span><span><strong>V</strong><small>What to read</small></span></div>
+          <div class="tf-head-calculation"><div class="tf-score-path"><span class="tf-down" aria-hidden="true">↓</span><div class="tf-head-operation">Score Q against K<small>QKᵀ / √dₖ</small></div><span class="tf-down" aria-hidden="true">↓</span>{mask}<span class="tf-down" aria-hidden="true">↓</span><div class="tf-head-operation">Softmax<small>Weights over context positions</small></div><span class="tf-down" aria-hidden="true">↓</span></div><div class="tf-value-path"><span>V passes through</span><span class="tf-down" aria-hidden="true">↓</span></div><div class="tf-head-operation tf-weighted-values">Weighted sum of V<small>Attention weights × values → one output per query</small></div></div>
+        </div><span class="tf-down" aria-hidden="true">↓</span>{multi}
+      </div>
+      <p class="tf-map-caption">The mask applies inside every head. Attention weights are probabilities over context positions; the vocabulary probabilities at the end of the model are over token IDs.</p>
+      <p class="tf-map-bridge"><strong>Return to the block.</strong> This attention output is added to X at the first +. The MLP then reads the updated U.</p>
+    </section>
   </div>
-{handoff}
+  <div class="tf-map-footer" hidden><button type="button" data-map-back>← Back</button><output class="tf-map-progress" aria-live="polite"></output><button type="button" data-map-next>Open the stack →</button></div>
+  <p class="tf-map-reference">Reference: a causal decoder with additive positions and pre-norm blocks. Select a component to read its chapter. <a href="../architecture/index.html">Compare encoder and decoder architectures →</a></p>
 </figure>'''
 
 
@@ -140,7 +157,11 @@ def main():
         path = CHAPTER_DIR / (slug + ".html")
         html = path.read_text()
         html = re.sub(r'[ \t]*<link rel="stylesheet" href="\.\./foundation-map\.css[^\"]*">\n?', "", html)
-        html = html.replace("</head>", "  " + CSS + "\n</head>")
+        html = re.sub(r'[ \t]*<script defer src="\.\./foundation-map\.js[^\"]*"></script>\n?', "", html)
+        # Initialize the local map before the CDN math scripts; a slow CDN must
+        # not delay the progressive explanation.
+        assets = CSS + '\n  <script defer src="../foundation-map.js?v=foundation-flow-20260911"></script>\n  '
+        html = html.replace('<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex', assets + '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex', 1)
         # Anchors preceding the first section remain with that section.
         html = replace_region(html, "MAP", render_map(slug, label, description), r'(?=<span class="tr-anchor"|<h2)')
         if recap:
