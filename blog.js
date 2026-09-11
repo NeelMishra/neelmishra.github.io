@@ -8779,7 +8779,7 @@ var BLOG_TREE = [
                 "file": "dl/transformers/index.html"
               },
               {
-                "title": "Transformer Building Blocks: A Shape-First Reading Guide",
+                "title": "Transformer Foundations: Follow the Model Diagram",
                 "file": "dl/transformers/building-blocks/index.html"
               },
               {
@@ -8797,7 +8797,7 @@ var BLOG_TREE = [
             "label": "Foundations",
             "children": [
               {
-                "title": "Token Embeddings and the Vocabulary Head",
+                "title": "Token Embeddings: Just a Table Lookup",
                 "file": "dl/transformers/building-blocks/embedding-layer.html"
               },
               {

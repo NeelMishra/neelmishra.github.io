@@ -41,6 +41,33 @@
     var cells=values.map(function (value) { var cell=el('span','tr-token',String(value));group.appendChild(cell);return cell; });
     wrap.appendChild(group);parent.appendChild(wrap);return cells;
   }
+  function tokenPicker(parent,values,label,initial,onSelect) {
+    var wrap=el('div','tr-token-strip'),group=el('div','tr-tokens'),current=initial;
+    wrap.appendChild(el('span','tr-mini-label',label));
+    group.setAttribute('role','group');group.setAttribute('aria-label',label);
+    var cells=values.map(function(value,i){
+      var button=el('button','tr-token tr-token-button',String(value));button.type='button';
+      button.setAttribute('aria-label','Position '+(i+1)+': '+value);
+      button.onclick=function(){activate(i,false);};
+      button.onkeydown=function(event){
+        var next=current;
+        if(event.key==='ArrowRight'||event.key==='ArrowDown')next=(current+1)%values.length;
+        else if(event.key==='ArrowLeft'||event.key==='ArrowUp')next=(current+values.length-1)%values.length;
+        else if(event.key==='Home')next=0;
+        else if(event.key==='End')next=values.length-1;
+        else return;
+        event.preventDefault();activate(next,true);
+      };
+      group.appendChild(button);return button;
+    });
+    function select(index){
+      current=index;
+      cells.forEach(function(button,i){button.setAttribute('aria-pressed',String(i===current));button.tabIndex=i===current?0:-1;});
+    }
+    function activate(index,focus){select(index);onSelect(index);if(focus)cells[index].focus();}
+    wrap.appendChild(group);parent.appendChild(wrap);select(initial);
+    return {cells:cells,select:select};
+  }
   function matrix(parent,rows,columns,label) {
     var wrap=el('div','tr-mini-matrix');wrap.appendChild(el('span','tr-mini-label',label));var grid=el('div','tr-matrix-grid');grid.style.setProperty('--cols',columns);
     var cells=[];for(var r=0;r<rows;r++){cells[r]=[];for(var c=0;c<columns;c++){var cell=el('span','tr-matrix-value','0');grid.appendChild(cell);cells[r].push(cell);}}
@@ -68,23 +95,32 @@
   }
   var labs={
     embedding:function(body){
-      var c=controls(body),position=labelSelect(c,'Input position',[1,2,3],1);
-      note(body,'Toy IDs [4, 1, 4]. The table below shows only the two embedding rows used here. Highlighted rows are selected by the current position.');
-      var ids=row(body,[4,1,4],'Input token IDs'),p=pair(body),table=matrix(p,2,3,'Table rows: ID 1 above, ID 4 below'),output=matrix(p,3,3,'Gathered vectors at positions 1, 2, 3');
-      var out=status(body),vectors=[[1,0,1],[0,2,-1],[1,0,1]];
-      function draw(){var i=Number(position.value)-1,lookup=i===1?0:1;ids.forEach(function(cell,j){cell.classList.toggle('is-lit',j===i);});fill(table,[[0,2,-1],[1,0,1]],function(r){return r===lookup;});fill(output,vectors,function(r){return r===i;});out.textContent='Position '+(i+1)+' contains ID '+[4,1,4][i]+'.\nSelected vector = '+vec(vectors[i])+'\nPositions 1 and 3 gather the same row; later context can change their representations.';}
-      position.oninput=draw;draw();
+      var position=0,tokenIds=[4,1,4],words=['the','sat','on','mat','cat'],vectors=[[-1,0,1],[0,2,-1],[1,1,0],[-1,1,1],[1,0,1]];
+      note(body,'Click either “cat” or “sat”. The highlighted table row supplies the vector at that sentence position.');
+      var tokens=tokenPicker(body,['cat','sat','cat'],'Select a token in “cat sat cat”',position,function(i){position=i;draw();}),area=el('div','embedding-lookup');body.appendChild(area);
+      function lookupTable(title,headers,rows){
+        var table=el('table'),head=el('thead'),header=el('tr'),tbody=el('tbody');
+        table.appendChild(el('caption','',title));headers.forEach(function(text){var th=el('th','',text);th.scope='col';header.appendChild(th);});head.appendChild(header);table.append(head,tbody);
+        var elements=rows.map(function(values){var tr=el('tr');values.forEach(function(value,i){var cell=el(i===0?'th':'td','',String(value));if(i===0)cell.scope='row';if(i===2)cell.className='embedding-vector-cell';tr.appendChild(cell);});tbody.appendChild(tr);return tr;});
+        area.appendChild(table);return elements;
+      }
+      function numbers(id){return '['+vectors[id].join(', ')+']';}
+      var table=lookupTable('The embedding table',['ID','Token','Stored vector'],words.map(function(word,id){return [id,word,numbers(id)];}));
+      var output=lookupTable('Vectors for our sentence',['Position','Token','Looked-up vector'],tokenIds.map(function(id,i){return [i+1,words[id],numbers(id)];})),out=status(body);
+      function draw(){var id=tokenIds[position];tokens.select(position);table.forEach(function(row,i){row.classList.toggle('is-current',i===id);});output.forEach(function(row,i){row.classList.toggle('is-current',i===position);});out.textContent='Position '+(position+1)+': '+words[id]+' → ID '+id+' → '+numbers(id)+'.\n'+(id===4?'Both “cat” tokens use row 4. Click the other “cat” to see the same vector at a different position.':'“sat” uses row 1. The ID tells us which row to take.');}
+      draw();
     },
     heads:function(body){
-      var c=controls(body),heads=labelSelect(c,'Number of heads',[1,2,4],2),position=labelSelect(c,'Trace token position',[1,2,3],1);
-      note(body,'These toy numbers are already-projected Q features, with B = 1, n = 3, d = 8. Changing H partitions the feature width; it does not divide tokens into groups.');
+      var c=controls(body),heads=labelSelect(c,'Number of heads',[1,2,4],2),position=0;
+      note(body,'Click a token to follow its Q features through the head split. These toy numbers are already projected, with B = 1, n = 3, d = 8. Changing H partitions the feature width; it does not divide tokens into groups.');
+      var tokens=tokenPicker(body,['Token 1','Token 2','Token 3'],'Select a token to trace',position,function(i){position=i;draw();});
       var input=matrix(body,3,8,'Q before splitting: [1, 3, 8]'),outputs=el('div','tr-pair');body.appendChild(outputs);var out=status(body);
       var values=[0,1,2].map(function(r){return [0,1,2,3,4,5,6,7].map(function(c){return r*10+c;});}),previousH=0,panels=[];
-      function draw(){var h=Number(heads.value),width=8/h,selected=Number(position.value)-1;
+      function draw(){var h=Number(heads.value),width=8/h,selected=position;tokens.select(selected);
         if(h!==previousH){outputs.replaceChildren();panels=[];for(var i=0;i<h;i++)panels.push(matrix(outputs,3,width,'Head '+(i+1)+': 3 tokens × '+width+' features'));previousH=h;}
         fill(input,values,function(r){return r===selected;});panels.forEach(function(panel,i){fill(panel,values.map(function(row){return row.slice(i*width,(i+1)*width);}),function(r){return r===selected;});});
         out.textContent='Reshape: [1, 3, '+h+', '+width+'] → transpose: [1, '+h+', 3, '+width+']\nEvery head still has all three token rows. The highlighted row follows token '+(selected+1)+' through the split.';
-      }heads.oninput=position.oninput=draw;draw();
+      }heads.oninput=draw;draw();
     },
     normalization:function(body){
       var c=controls(body),mode=labelSelect(c,'Operation',['LayerNorm','RMSNorm'],'LayerNorm'),offset=range(c,'Add to every feature',-5,5,.5,0),scale=range(c,'Positive input scale',.5,2,.25,1);
@@ -149,11 +185,12 @@
       }draft.oninput=draw;draw();
     },
     targets:function(body){
-      var c=controls(body),position=labelSelect(c,'Prediction position',[1,2,3,4],3),mode=labelSelect(c,'Loss mask',['All targets','Last two targets only'],'All targets');
-      note(body,'Inputs and targets are already shifted. A highlighted input is visible to the selected query. “Loss” marks targets included in the objective; excluding a target does not hide its input from later queries.');
-      var inputs=row(body,['BOS','the','cat','slept'],'Inputs'),targets=row(body,['the','cat','slept','EOS'],'Targets'),loss=row(body,['loss','loss','loss','loss'],'Included in the loss'),out=status(body);
-      function draw(){var at=Number(position.value)-1,mask=mode.value==='All targets'?[1,1,1,1]:[0,0,1,1];inputs.forEach(function(cell,i){cell.classList.toggle('is-lit',i<=at);});targets.forEach(function(cell,i){cell.classList.toggle('is-lit',i===at);});loss.forEach(function(cell,i){cell.textContent=mask[i]?'loss':'context only';cell.classList.toggle('is-lit',Boolean(mask[i]));});out.textContent='Input at query: '+['BOS','the','cat','slept'][at]+'\nPrediction target: '+['the','cat','slept','EOS'][at]+'\nVisible input positions: 1 through '+(at+1)+'\nThis target '+(mask[at]?'contributes to':'is excluded from')+' the loss. Valid targets in the sequence: '+mask.reduce(function(a,b){return a+b;},0)+'.';}
-      position.oninput=mode.oninput=draw;draw();
+      var c=controls(body),position=2,mode=labelSelect(c,'Loss mask',['All targets','Last two targets only'],'All targets');
+      note(body,'Click an input or target token to inspect that prediction. The filled tokens mark the selected pair; pale green inputs are its earlier visible context. Inputs and targets are already shifted. Excluding a target from the loss does not hide its input from later queries.');
+      function choose(i){position=i;draw();}
+      var inputs=tokenPicker(body,['BOS','the','cat','slept'],'Select an input token',position,choose),targets=tokenPicker(body,['the','cat','slept','EOS'],'Select a target token',position,choose),loss=row(body,['loss','loss','loss','loss'],'Included in the loss'),out=status(body);
+      function draw(){var at=position,mask=mode.value==='All targets'?[1,1,1,1]:[0,0,1,1];inputs.select(at);targets.select(at);inputs.cells.forEach(function(cell,i){cell.classList.toggle('is-lit',i<at);});loss.forEach(function(cell,i){cell.textContent=mask[i]?'loss':'context only';cell.classList.toggle('is-lit',Boolean(mask[i]));});out.textContent='Input at query: '+['BOS','the','cat','slept'][at]+'\nPrediction target: '+['the','cat','slept','EOS'][at]+'\nVisible input positions: 1 through '+(at+1)+'\nThis target '+(mask[at]?'contributes to':'is excluded from')+' the loss. Valid targets in the sequence: '+mask.reduce(function(a,b){return a+b;},0)+'.';}
+      mode.oninput=draw;draw();
     },
     bpe:function(body){
       var b=buttons(body);note(body,'Apply two explicitly chosen toy BPE rules: first l + o → lo, then lo + w → low. The full article explains how corpus frequencies determine their training order.');
