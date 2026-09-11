@@ -10144,6 +10144,17 @@ var BLOG_TREE = [
           { title: "6. A DPO Lab You Can Verify: Exact Checks and Recorded Training Runs", file: "rl/dpo/dpo-math-and-training-lab.html", links: ["rl/dpo/data-reference-and-diagnostics.html", "rl/dpo/dpo-and-ppo-what-changes.html"] },
           { title: "7. DPO and PPO: Same Motivation, Different Learning Problems", file: "rl/dpo/dpo-and-ppo-what-changes.html", links: ["rl/dpo/dpo-math-and-training-lab.html", "rl/dpo/index.html"] }
         ]
+      },
+      {
+        name: 'grpo',
+        label: 'GRPO',
+        children: [
+          { title: 'Overview &amp; Reading Paths', file: 'rl/grpo/index.html', links: ['rl/grpo/group-relative-advantages.html', 'rl/ppo/index.html'] },
+          { title: '1. Turn a Group into an Advantage', file: 'rl/grpo/group-relative-advantages.html', links: ['rl/grpo/index.html', 'rl/grpo/clipped-group-update.html'] },
+          { title: '2. Keep the PPO Guardrail', file: 'rl/grpo/clipped-group-update.html', links: ['rl/grpo/group-relative-advantages.html', 'rl/grpo/failure-modes-and-data.html'] },
+          { title: '3. When a Group Says Nothing', file: 'rl/grpo/failure-modes-and-data.html', links: ['rl/grpo/clipped-group-update.html', 'rl/grpo/grpo-in-practice.html'] },
+          { title: '4. From Equation to Experiment', file: 'rl/grpo/grpo-in-practice.html', links: ['rl/grpo/failure-modes-and-data.html', 'rl/grpo/index.html'] }
+        ]
       }
     ]
   },
@@ -10381,7 +10392,7 @@ function flattenBlogTree(nodes, result) {
     ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
-    rl:    { label: 'Reinforcement Learning', blurb: 'Browse Popular Courses, Popular Videos, and the original PPO and DPO notes in their folders.' },
+    rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
   };
 
