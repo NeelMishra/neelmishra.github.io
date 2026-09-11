@@ -8289,6 +8289,205 @@ var BLOG_TREE = [
     name: 'ml',
     label: 'Machine Learning',
     children: [
+      // APPLIED-NOTES:ml:START
+      {
+        "name": "graph-ml",
+        "label": "Graph ML for Risk Modeling",
+        "children": [
+          {
+            "title": "Graph ML for Risk Modeling: Reading Guide",
+            "file": "ml/graph-ml/index.html",
+            "links": [
+              "ml/graph-ml/build-an-application-graph.html"
+            ]
+          },
+          {
+            "title": "Graph-Based Risk Modeling: Start with the Relationships",
+            "file": "ml/graph-ml/build-an-application-graph.html",
+            "links": [
+              "ml/graph-ml/index.html",
+              "ml/graph-ml/neighborhood-evidence-and-propagation.html"
+            ]
+          },
+          {
+            "title": "From Neighborhood Evidence to a Risk Score",
+            "file": "ml/graph-ml/neighborhood-evidence-and-propagation.html",
+            "links": [
+              "ml/graph-ml/build-an-application-graph.html",
+              "ml/graph-ml/evaluate-graph-risk.html"
+            ]
+          },
+          {
+            "title": "Evaluate Graph Risk at a Fixed Precision and a Realistic Time Cutoff",
+            "file": "ml/graph-ml/evaluate-graph-risk.html",
+            "links": [
+              "ml/graph-ml/neighborhood-evidence-and-propagation.html"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "anomaly-detection",
+        "label": "Anomaly Detection",
+        "children": [
+          {
+            "title": "Anomaly Detection: Reading Guide",
+            "file": "ml/anomaly-detection/index.html",
+            "links": [
+              "ml/anomaly-detection/isolation-forest-from-partitions.html"
+            ]
+          },
+          {
+            "title": "Isolation Forest: Follow One Point Through a Forest",
+            "file": "ml/anomaly-detection/isolation-forest-from-partitions.html",
+            "links": [
+              "ml/anomaly-detection/index.html",
+              "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"
+            ]
+          },
+          {
+            "title": "Model Sparse, Heavy-Tailed Telemetry Without Flagging Every Large Customer",
+            "file": "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html",
+            "links": [
+              "ml/anomaly-detection/isolation-forest-from-partitions.html",
+              "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html"
+            ]
+          },
+          {
+            "title": "Turn Anomaly Scores into an Investigation Queue",
+            "file": "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html",
+            "links": [
+              "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "representation-learning",
+        "label": "Behavioral Embeddings",
+        "children": [
+          {
+            "title": "Behavioral Embeddings: Reading Guide",
+            "file": "ml/representation-learning/index.html",
+            "links": [
+              "ml/representation-learning/word2vec-from-activity-sequences.html"
+            ]
+          },
+          {
+            "title": "Word2Vec for User Behavior: From Sequences to Training Pairs",
+            "file": "ml/representation-learning/word2vec-from-activity-sequences.html",
+            "links": [
+              "ml/representation-learning/index.html",
+              "ml/representation-learning/evaluate-embeddings-and-dimensions.html"
+            ]
+          },
+          {
+            "title": "Evaluate Embeddings and Choose Their Dimension",
+            "file": "ml/representation-learning/evaluate-embeddings-and-dimensions.html",
+            "links": [
+              "ml/representation-learning/word2vec-from-activity-sequences.html"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "search-and-retrieval",
+        "label": "Search & Retrieval",
+        "children": [
+          {
+            "title": "Search & Retrieval: Reading Guide",
+            "file": "ml/search-and-retrieval/index.html",
+            "links": [
+              "ml/search-and-retrieval/hnsw-and-annoy-internals.html"
+            ]
+          },
+          {
+            "title": "HNSW and Annoy: Two Ways to Avoid Comparing Every Vector",
+            "file": "ml/search-and-retrieval/hnsw-and-annoy-internals.html",
+            "links": [
+              "ml/search-and-retrieval/index.html",
+              "ml/search-and-retrieval/benchmark-ann-search.html"
+            ]
+          },
+          {
+            "title": "Benchmark Vector Search: Recall, Tail Latency, Memory, and Filters",
+            "file": "ml/search-and-retrieval/benchmark-ann-search.html",
+            "links": [
+              "ml/search-and-retrieval/hnsw-and-annoy-internals.html"
+            ]
+          },
+          {
+            "name": "evaluation",
+            "label": "Evaluation",
+            "children": [
+              {
+                "title": "Search & Retrieval · Evaluation: Reading Guide",
+                "file": "ml/search-and-retrieval/evaluation/index.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html"
+                ]
+              },
+              {
+                "title": "Search Evaluation Starts with Relevance, Not a Metric",
+                "file": "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/index.html",
+                  "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html"
+                ]
+              },
+              {
+                "title": "Precision, Recall, MAP, and MRR: One Ranking, Four Questions",
+                "file": "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html",
+                  "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html"
+                ]
+              },
+              {
+                "title": "nDCG: How Much Does the Order of Useful Results Matter?",
+                "file": "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html",
+                  "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html"
+                ]
+              },
+              {
+                "title": "Evaluate Retrieval and Reranking Separately",
+                "file": "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html",
+                  "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html"
+                ]
+              },
+              {
+                "title": "Did Search Improve? Paired Tests, Bootstrap Intervals, and Slices",
+                "file": "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html",
+                  "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"
+                ]
+              },
+              {
+                "title": "Clicks Are Feedback, Not Relevance Labels",
+                "file": "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html",
+                  "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html"
+                ]
+              },
+              {
+                "title": "RAG Evaluation: Find the Evidence, Use It, and Cite It",
+                "file": "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html",
+                "links": [
+                  "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      // APPLIED-NOTES:ml:END
+
       {
         "name": "bagging-and-boosting",
         "label": "Bagging & Boosting",
@@ -8753,6 +8952,37 @@ var BLOG_TREE = [
     name: 'dl',
     label: 'Deep Learning',
     children: [
+      // APPLIED-NOTES:dl:START
+      {
+        "name": "contrastive-learning",
+        "label": "Contrastive Learning & Multimodal Retrieval",
+        "children": [
+          {
+            "title": "Contrastive Learning & Multimodal Retrieval: Reading Guide",
+            "file": "dl/contrastive-learning/index.html",
+            "links": [
+              "dl/contrastive-learning/contrastive-loss-and-clip.html"
+            ]
+          },
+          {
+            "title": "CLIP: Understand the Entire Contrastive Loss Through One Batch",
+            "file": "dl/contrastive-learning/contrastive-loss-and-clip.html",
+            "links": [
+              "dl/contrastive-learning/index.html",
+              "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html"
+            ]
+          },
+          {
+            "title": "Fine-Tune CLIP and Build a Two-Tower Retriever",
+            "file": "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html",
+            "links": [
+              "dl/contrastive-learning/contrastive-loss-and-clip.html"
+            ]
+          }
+        ]
+      },
+      // APPLIED-NOTES:dl:END
+
       {
         name: 'popular-courses',
         label: 'Popular Courses',
@@ -9004,7 +9234,12 @@ var BLOG_TREE = [
               {"title": "5. LLaDA, Dream, and the Design of a Diffusion LLM", "file": "dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "links": ["dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html"]},
               {"title": "6. Conditioning, Infilling, and Guidance", "file": "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "links": ["dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html"]},
               {"title": "7. Efficiency and Evaluation: What to Measure", "file": "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "links": ["dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html"]},
-              {"title": "8. Build a Tiny Diffusion Language Model", "file": "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html", "links": ["dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "dl/diffusion-models/large-language-diffusion-models/index.html"]}
+              {"title": "8. Build a Tiny Diffusion Language Model", "file": "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html", "links": ["dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "dl/diffusion-models/large-language-diffusion-models/index.html"]},
+
+              // APPLIED-NOTES:DIFFUSION:START
+              {"title": "Quantizing a Masked Diffusion LM: Weights, Trajectories, and Calibration", "file": "dl/diffusion-models/large-language-diffusion-models/quantization-and-calibration.html", "links": ["dl/diffusion-models/large-language-diffusion-models/speculative-refinement.html"]},
+              {"title": "Speculative Refinement: Give Diffusion a Draft, Then Evaluate the Edits", "file": "dl/diffusion-models/large-language-diffusion-models/speculative-refinement.html", "links": ["dl/diffusion-models/large-language-diffusion-models/quantization-and-calibration.html"]},
+              // APPLIED-NOTES:DIFFUSION:END
             ]
           },
           {
@@ -9083,6 +9318,73 @@ var BLOG_TREE = [
     name: 'mlops',
     label: 'MLOps',
     children: [
+      // APPLIED-NOTES:mlops:START
+      {
+        "name": "production-ml",
+        "label": "Production ML Case Studies",
+        "children": [
+          {
+            "title": "Production ML Case Studies: Reading Guide",
+            "file": "mlops/production-ml/index.html",
+            "links": [
+              "mlops/production-ml/reproducible-distributed-scoring.html"
+            ]
+          },
+          {
+            "title": "Build a Reproducible Distributed ML Scoring Pipeline",
+            "file": "mlops/production-ml/reproducible-distributed-scoring.html",
+            "links": [
+              "mlops/production-ml/index.html",
+              "mlops/production-ml/explainable-scoring-at-scale.html"
+            ]
+          },
+          {
+            "title": "Explainable Scoring at Scale: From SHAP Values to Useful Evidence",
+            "file": "mlops/production-ml/explainable-scoring-at-scale.html",
+            "links": [
+              "mlops/production-ml/reproducible-distributed-scoring.html",
+              "mlops/production-ml/migrate-an-ml-platform.html"
+            ]
+          },
+          {
+            "title": "Migrate an ML Platform Without Losing the Experiment",
+            "file": "mlops/production-ml/migrate-an-ml-platform.html",
+            "links": [
+              "mlops/production-ml/explainable-scoring-at-scale.html"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "applied-genai",
+        "label": "Applied GenAI Case Studies",
+        "children": [
+          {
+            "title": "Applied GenAI Case Studies: Reading Guide",
+            "file": "mlops/applied-genai/index.html",
+            "links": [
+              "mlops/applied-genai/personalized-shopping-assistant.html"
+            ]
+          },
+          {
+            "title": "Build and Evaluate a Personalized Shopping Assistant",
+            "file": "mlops/applied-genai/personalized-shopping-assistant.html",
+            "links": [
+              "mlops/applied-genai/index.html",
+              "mlops/applied-genai/domain-generation-and-evaluation.html"
+            ]
+          },
+          {
+            "title": "Domain Email Generation: Fine-Tuning, Serving, and a Credible Evaluation",
+            "file": "mlops/applied-genai/domain-generation-and-evaluation.html",
+            "links": [
+              "mlops/applied-genai/personalized-shopping-assistant.html"
+            ]
+          }
+        ]
+      },
+      // APPLIED-NOTES:mlops:END
+
       {
         name: 'foundations',
         label: 'Foundations',
@@ -9886,6 +10188,69 @@ var BLOG_TREE = [
     name: 'math',
     label: 'Math',
     children: [
+      // APPLIED-NOTES:math:START
+      {
+        "name": "numerical-optimization",
+        "label": "Numerical Optimization",
+        "children": [
+          {
+            "title": "Numerical Optimization: Reading Guide",
+            "file": "math/numerical-optimization/index.html",
+            "links": [
+              "math/numerical-optimization/geometry-momentum-and-adamw.html"
+            ]
+          },
+          {
+            "title": "Optimizer Geometry: From Gradient Descent to AdamW",
+            "file": "math/numerical-optimization/geometry-momentum-and-adamw.html",
+            "links": [
+              "math/numerical-optimization/index.html",
+              "math/numerical-optimization/newton-and-gauss-newton.html"
+            ]
+          },
+          {
+            "title": "Newton and Gauss–Newton: Use Curvature Without Forming an Inverse",
+            "file": "math/numerical-optimization/newton-and-gauss-newton.html",
+            "links": [
+              "math/numerical-optimization/geometry-momentum-and-adamw.html",
+              "math/numerical-optimization/minmax-gan-and-rank-one-preconditioning.html"
+            ]
+          },
+          {
+            "title": "GAN Optimization: Rotations, Fixed Points, and a Rank-One Preconditioner",
+            "file": "math/numerical-optimization/minmax-gan-and-rank-one-preconditioning.html",
+            "links": [
+              "math/numerical-optimization/newton-and-gauss-newton.html",
+              "math/numerical-optimization/angle-based-learning-rate.html"
+            ]
+          },
+          {
+            "title": "Angle-Based Step Lengths: Probe the Gradient Field",
+            "file": "math/numerical-optimization/angle-based-learning-rate.html",
+            "links": [
+              "math/numerical-optimization/minmax-gan-and-rank-one-preconditioning.html",
+              "math/numerical-optimization/muon-and-matrix-update-geometry.html"
+            ]
+          },
+          {
+            "title": "Muon: Why the Shape of a Weight Matrix Matters",
+            "file": "math/numerical-optimization/muon-and-matrix-update-geometry.html",
+            "links": [
+              "math/numerical-optimization/angle-based-learning-rate.html",
+              "math/numerical-optimization/signmuon-and-communication.html"
+            ]
+          },
+          {
+            "title": "SignMuon: Matrix Directions, Majority Votes, and the Actual Bytes Sent",
+            "file": "math/numerical-optimization/signmuon-and-communication.html",
+            "links": [
+              "math/numerical-optimization/muon-and-matrix-update-geometry.html"
+            ]
+          }
+        ]
+      },
+      // APPLIED-NOTES:math:END
+
       {
         name: 'probability-statistics',
         label: 'Probability & Statistics',
