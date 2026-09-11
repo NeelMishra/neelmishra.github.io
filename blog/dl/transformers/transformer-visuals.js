@@ -87,12 +87,6 @@
     var wrap=el('label','',label+' '),input=el('input');input.type='range';input.min=min;input.max=max;input.step=step;input.value=value;wrap.appendChild(input);controls.appendChild(wrap);return input;
   }
   function controls(body) {var group=el('div','tr-controls');body.appendChild(group);return group;}
-  function signedBars(body,count) {
-    var chart=el('div','tr-chart'),labels=el('div','tr-chart-values'),bars=[];
-    for(var i=0;i<count;i++){var column=el('div','tr-column'),bar=el('div','tr-column-fill'),value=el('span','','0');column.appendChild(bar);chart.appendChild(column);labels.appendChild(value);bars.push({bar:bar,value:value});}
-    chart.setAttribute('aria-hidden','true');body.append(chart,labels);
-    return function (values) {var extent=Math.max(2,Math.max.apply(null,values.map(Math.abs)));values.forEach(function (x,i) {bars[i].bar.style.height=(Math.abs(x)/extent*45)+'%';bars[i].bar.style.bottom=(x<0?50-Math.abs(x)/extent*45:50)+'%';bars[i].bar.classList.toggle('is-negative',x<0);bars[i].value.textContent=fmt(x);});};
-  }
   var labs={
     embedding:function(body){
       var position=0,tokenIds=[4,1,4],words=['the','sat','on','mat','cat'],vectors=[[-1,0,1],[0,2,-1],[1,1,0],[-1,1,1],[1,0,1]];
@@ -109,27 +103,6 @@
       var output=lookupTable('Vectors for our sentence',['Position','Token','Looked-up vector'],tokenIds.map(function(id,i){return [i+1,words[id],numbers(id)];})),out=status(body);
       function draw(){var id=tokenIds[position];tokens.select(position);table.forEach(function(row,i){row.classList.toggle('is-current',i===id);});output.forEach(function(row,i){row.classList.toggle('is-current',i===position);});out.textContent='Position '+(position+1)+': '+words[id]+' → ID '+id+' → '+numbers(id)+'.\n'+(id===4?'Both “cat” tokens use row 4. Click the other “cat” to see the same vector at a different position.':'“sat” uses row 1. The ID tells us which row to take.');}
       draw();
-    },
-    heads:function(body){
-      var c=controls(body),heads=labelSelect(c,'Number of heads',[1,2,4],2),position=0;
-      note(body,'Click a token to follow its Q features through the head split. These toy numbers are already projected, with B = 1, n = 3, d = 8. Changing H partitions the feature width; it does not divide tokens into groups.');
-      var tokens=tokenPicker(body,['Token 1','Token 2','Token 3'],'Select a token to trace',position,function(i){position=i;draw();});
-      var input=matrix(body,3,8,'Q before splitting: [1, 3, 8]'),outputs=el('div','tr-pair');body.appendChild(outputs);var out=status(body);
-      var values=[0,1,2].map(function(r){return [0,1,2,3,4,5,6,7].map(function(c){return r*10+c;});}),previousH=0,panels=[];
-      function draw(){var h=Number(heads.value),width=8/h,selected=position;tokens.select(selected);
-        if(h!==previousH){outputs.replaceChildren();panels=[];for(var i=0;i<h;i++)panels.push(matrix(outputs,3,width,'Head '+(i+1)+': 3 tokens × '+width+' features'));previousH=h;}
-        fill(input,values,function(r){return r===selected;});panels.forEach(function(panel,i){fill(panel,values.map(function(row){return row.slice(i*width,(i+1)*width);}),function(r){return r===selected;});});
-        out.textContent='Reshape: [1, 3, '+h+', '+width+'] → transpose: [1, '+h+', 3, '+width+']\nEvery head still has all three token rows. The highlighted row follows token '+(selected+1)+' through the split.';
-      }heads.oninput=draw;draw();
-    },
-    normalization:function(body){
-      var c=controls(body),mode=labelSelect(c,'Operation',['LayerNorm','RMSNorm'],'LayerNorm'),offset=range(c,'Add to every feature',-5,5,.5,0),scale=range(c,'Positive input scale',.5,2,.25,1);
-      note(body,'Input = scale × (1, 2, 3, 4) + offset. Both use ε = 10⁻⁵, learned scale 1, and no learned shift. The chart shows the resulting features around zero.');
-      var inputs=row(body,[1,2,3,4],'Input features'),drawBars=signedBars(body,4),out=status(body);
-      function draw(){var shift=Number(offset.value),a=Number(scale.value),xs=[1,2,3,4].map(function(x){return a*x+shift;}),mean=xs.reduce(function(x,y){return x+y;},0)/4;
-        var centered=xs.map(function(x){return mode.value==='LayerNorm'?x-mean:x;}),stat=dot(centered,centered)/4,ys=centered.map(function(x){return x/Math.sqrt(stat+1e-5);});
-        inputs.forEach(function(cell,i){cell.textContent=fmt(xs[i]);});drawBars(ys);out.textContent='Scale = '+a+' · Offset = '+shift+' · Input mean = '+fmt(mean)+'\n'+(mode.value==='LayerNorm'?'Centered variance':'Mean square')+' = '+fmt(stat)+'\nOutput = '+vec(ys)+'\nLayerNorm removes a common shift; RMSNorm does not. A small epsilon slightly affects scale invariance.';
-      }[mode,offset,scale].forEach(function(input){input.oninput=draw;});draw();
     },
     residual:function(body){
       var b=buttons(body);note(body,'This arithmetic illustration fixes the branch outputs: X = (1, 2), attention update A = (0.5, −1), and MLP update F = (−0.25, 0.5). A trained model would compute A and F from normalized inputs.');

@@ -57,6 +57,31 @@
       body.querySelector('.tr-controls').hidden = false;
       draw();
     },
+    normalization: function (body) {
+      var offset = body.querySelector('[data-offset]');
+      function setRow(selector, values, digits) {
+        body.querySelectorAll(selector + ' td').forEach(function (cell, i) {
+          cell.textContent = values[i].toFixed(digits).replace('-', '−');
+        });
+      }
+      function draw() {
+        var xs = [1, 2, 3, 4].map(function (x) { return x + (offset.checked ? 10 : 0); });
+        var mean = xs.reduce(function (a, b) { return a + b; }, 0) / xs.length;
+        var centered = xs.map(function (x) { return x - mean; });
+        var variance = centered.reduce(function (sum, x) { return sum + x * x; }, 0) / xs.length;
+        var meanSquare = xs.reduce(function (sum, x) { return sum + x * x; }, 0) / xs.length;
+        setRow('[data-norm-input]', xs, 0);
+        setRow('[data-norm-ln]', centered.map(function (x) { return x / Math.sqrt(variance + 1e-5); }), 3);
+        setRow('[data-norm-rms]', xs.map(function (x) { return x / Math.sqrt(meanSquare + 1e-5); }), 3);
+        body.querySelector('[data-norm-stats]').textContent = 'Input mean = ' + mean + ' · centered variance = ' + variance + ' · mean square = ' + meanSquare;
+        body.querySelector('output').textContent = offset.checked ?
+          'Added 10 to every input. LayerNorm’s result stays the same; RMSNorm’s result changes.' :
+          'LayerNorm centers the features around zero. RMSNorm keeps all four features positive.';
+      }
+      offset.addEventListener('change', draw);
+      body.querySelector('.tr-controls').hidden = false;
+      draw();
+    },
     masks: function (body) {
       body.innerHTML = '<div class="tr-controls"><label>Pattern <select data-pattern><option value="causal">Full causal</option><option value="local" selected>Causal window</option><option value="global">Window + global position 4</option></select></label><label>Window (includes self) <input data-window type="range" min="1" max="8" value="3"></label></div><p class="tr-demo-note">Rows are queries 1–8; columns are keys 1–8. Green 1 = allowed, gray 0 = blocked. Global edges still obey causality.</p><div class="tr-matrix-wrap"><div class="tr-matrix" role="img" aria-label="Attention connectivity matrix"></div></div><output class="tr-status" aria-live="polite"></output>';
       var grid = body.querySelector('.tr-matrix'), cells = [];
