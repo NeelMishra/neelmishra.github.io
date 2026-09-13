@@ -10492,7 +10492,7 @@ var BLOG_TREE = [
           { title: '5. One Complete PPO Update: What Moves and What Stays Frozen', file: 'rl/ppo/rollouts-minibatches-and-one-complete-update.html', links: ['rl/ppo/from-trpo-to-the-clipped-objective.html', 'rl/ppo/implement-and-test-ppo.html'] },
           { title: '6. Build and Test PPO: A Small Agent You Can Actually Inspect', file: 'rl/ppo/implement-and-test-ppo.html', links: ['rl/ppo/rollouts-minibatches-and-one-complete-update.html', 'rl/ppo/continuous-actions-and-vectorized-environments.html'] },
           { title: '7. Continuous-Action PPO: Densities, Squashing, and Vectorized Rollouts', file: 'rl/ppo/continuous-actions-and-vectorized-environments.html', links: ['rl/ppo/implement-and-test-ppo.html', 'rl/ppo/ppo-for-language-models.html'] },
-          { title: '8. PPO for Language Models: Tokens, Rewards, and Two Different Anchors', file: 'rl/ppo/ppo-for-language-models.html', links: ['rl/ppo/continuous-actions-and-vectorized-environments.html', 'rl/ppo/index.html'] }
+          { title: '8. PPO for Language Models: From Human Preferences to Token Updates', file: 'rl/ppo/ppo-for-language-models.html', links: ['rl/ppo/continuous-actions-and-vectorized-environments.html', 'rl/ppo/index.html'] }
         ]
       },
       {

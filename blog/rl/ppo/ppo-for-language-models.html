@@ -1,51 +1,123 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Apply the general algorithm to text while separating old and reference policies, handling token masks, and making the sampling distribution explicit."><title>PPO for Language Models: Tokens, Rewards, and Two Different Anchors | Neel Mishra</title>
+<meta name="description" content="Follow human comparisons into reward-model training, then connect answer scores, token advantages, and PPO updates in one complete RLHF workflow."><title>PPO for Language Models: From Human Preferences to Token Updates | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/rl/ppo/ppo-for-language-models.html">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css?v=dpo-20260910"><link rel="stylesheet" href="ppo.css?v=rl-20260911">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css?v=dpo-20260910"><link rel="stylesheet" href="ppo.css?v=rlhf-20260913">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="ppo.js?v=rl-20260911"></script>
 </head><body class="ppo-series">
 <header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
 <div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
 <article class="blog-post-content reveal ppo-article"><a class="back-to-blog" href="../../../blog.html#reinforcement-learning">← Reinforcement Learning</a><div class="post-series-nav"><a href="index.html">Reinforcement Learning · PPO</a><span> · Chapter 8 of 8</span></div>
-<h1>PPO for Language Models: Tokens, Rewards, and Two Different Anchors</h1><p class="post-meta">September 2026 · 5 min read + experiments</p><p class="ppo-lead">Apply the general algorithm to text while separating old and reference policies, handling token masks, and making the sampling distribution explicit.</p>
-<nav class="ppo-reading" aria-label="Ways to read this chapter"><a href="#start">Read the explanation</a><a href="#experiment">Try the calculation</a></nav>
-<h2 id="start">Generating a response is a sequence of actions</h2>
-<p>For a language model, the state is the prompt plus the response so far. The action is the next token. Appending it creates the next state. A complete response is an episode, often ending when the model emits an end-of-sequence token, EOS.</p>
-<p>The PPO loop is familiar: generate responses, score them, estimate advantages, and update on that fixed batch. The <a href="https://arxiv.org/abs/2203.02155">InstructGPT paper</a> gives a concrete example using a learned human-preference reward model. A verifier, such as a test runner, can supply the task score instead.</p>
-<h2 id="roles">Keep the old policy separate from the reference</h2>
-<p>PPO needs a record of the policy that generated the current batch. Language-model training often also uses a longer-lived reference to discourage excessive drift. They have different jobs:</p>
-<div class="ppo-table"><table><thead><tr><th scope="col">Role</th><th scope="col">What it measures</th><th scope="col">When it changes</th></tr></thead><tbody><tr><td>$\pi_{\mathrm{old}}$</td><td>Which policy generated this batch?</td><td>Refresh at each rollout iteration</td></tr><tr><td>$\pi_\theta$</td><td>How likely is this action under the trainable actor?</td><td>Every optimizer step</td></tr><tr><td>$\pi_{\mathrm{ref}}$</td><td>How far is behavior from a chosen reference?</td><td>Often held fixed across the run</td></tr><tr><td>$V_\phi$</td><td>What return is expected from this prefix?</td><td>Critic optimization</td></tr><tr><td>Task scorer</td><td>How good was the response under the task definition?</td><td>Fixed for a simple PPO training stage</td></tr></tbody></table></div>
-<p>The old policy is yesterday’s snapshot for this update: compare current probabilities with it for PPO clipping. The reference is the chosen starting anchor for the training stage. Many small updates can stay close to their individual snapshots while accumulating a large change from that reference.</p>
-<p>You do not necessarily need a full model copy for every role. Old sampled-token log probabilities can be stored in the batch. The critic can share features with the actor, and the task scorer can be a separate program.</p>
-<h2 id="rewards">Give the answer a score and account for reference drift</h2>
-<p>A common recipe assigns a score to the completed answer and a reference penalty along the response. At each sampled token, compare the old policy’s log probability with the reference’s log probability for that same token and prefix. Multiply the difference by a positive penalty strength, $\beta$:</p>
-<pre><code>reference_log_ratio = old_logp - ref_logp
+<h1>PPO for Language Models: From Human Preferences to Token Updates</h1><p class="post-meta">September 2026 · 12 min read + token walkthrough</p><p class="ppo-lead">Follow human comparisons into reward-model training, then connect answer scores, token advantages, and PPO updates in one complete RLHF workflow.</p>
+<nav class="ppo-reading" aria-label="Ways to read this chapter"><a href="#start">Read the explanation</a><a href="#experiment">Trace the token prefixes</a></nav>
+<h2 id="start">How does “I prefer this answer” become a training signal?</h2>
+<p>We want a language model to give answers people find useful, accurate, and easy to follow. A person can compare two answers, but PPO needs numbers it can optimize. <strong>Reinforcement learning from human feedback (RLHF)</strong> connects the two by training a model to predict human preferences, then using its scores as rewards.</p>
+<p>This chapter follows the three-stage recipe used in <a href="https://arxiv.org/abs/2203.02155">InstructGPT</a>: learn from example answers, learn a reward model from comparisons, then improve the answer-generating model with PPO. These are separate training stages, with different data and losses.</p>
+<h3 id="sft">First, start with a model that can follow instructions</h3>
+<p>In <strong>supervised fine-tuning (SFT)</strong>, the training data contains prompts paired with good demonstration answers. For each answer, ordinary next-token training increases the probability of its tokens given the prompt and preceding answer tokens. This gives PPO a useful starting policy: a model already able to respond to instructions.</p>
+<p>A demonstration says, “Here is an answer to imitate.” The next stage supplies a different kind of supervision: “Of these answers, this one is better.”</p>
+
+<h2 id="preferences">How human preferences are collected</h2>
+<ol>
+<li><strong>Select a prompt.</strong> Use questions and tasks representative of what the assistant should handle.</li>
+<li><strong>Generate candidate answers.</strong> Sample two or more responses to that same prompt. Different samples from one model can already give different answers.</li>
+<li><strong>Ask a human to compare them.</strong> Give raters a shared rubric, such as following the request, factual accuracy, and clarity. They choose the better answer or rank several answers.</li>
+<li><strong>Save the comparison.</strong> For a pair, store the prompt, the preferred answer, and the less preferred answer. A ranking can supply multiple such pairs.</li>
+</ol>
+<div class="callout"><strong>An illustrative preference record</strong>
+<p><strong>Prompt:</strong> “Explain overfitting in one sentence.”</p>
+<p><strong>Chosen:</strong> “Overfitting is when a model fits its training examples so closely that it performs poorly on new examples.”</p>
+<p><strong>Rejected:</strong> “Overfitting means perfect training accuracy guarantees perfect accuracy on new examples.”</p>
+</div>
+<p>The label records a choice between answers; the person does not have to invent reward numbers or mark every token. “Chosen” also does not mean flawless. With ambiguous comparisons, a collection process can allow ties or abstentions instead of forcing a choice. The simple loss below uses pairs with a selected winner.</p>
+<p>Good collection needs clear rating instructions and checks on disagreements. Keep some prompts and comparisons aside for evaluation. The <a href="https://arxiv.org/html/2203.02155v1">InstructGPT paper, Sections 3.2–3.5</a>, describes its prompts, raters, demonstrations, and ranked responses.</p>
+
+<h2 id="reward-model">Train a scorer to predict those choices</h2>
+<p>Let $x$ be the prompt, $y^+$ the chosen response, and $y^-$ the rejected response. The reward model $r_\psi(x,y)$ reads a prompt and a complete response and returns <strong>one real-valued score</strong>; $\psi$ denotes its trainable parameters. It can be a language-model backbone with a small output layer that produces one number.</p>
+<p>We want the chosen answer to score higher. Turn the difference between the two scores into a predicted probability $q_\psi$ that the chosen answer wins:</p>
+<div class="ppo-eq">$$q_\psi=\operatorname{sigmoid}\!\left(r_\psi(x,y^+)-r_\psi(x,y^-)\right),\qquad \operatorname{sigmoid}(z)=\frac{1}{1+e^{-z}}.$$</div>
+<p>The sigmoid converts any real number to a value between 0 and 1. Equal scores give $q_\psi=0.5$; a larger positive score difference gives a probability closer to 1. Since the human selected $y^+$, train the reward model to increase that probability by minimizing:</p>
+<div class="ppo-eq">$$\ell_{\mathrm{RM}}(\psi)=-\log q_\psi.$$</div>
+<p>This is the loss for one pair; training averages it across pairs. As $q_\psi$ approaches 1, its negative log approaches 0, so predicting the observed preference lowers the loss. This is the comparison-based reward training used in <a href="https://arxiv.org/html/2009.01325v3">Learning to Summarize from Human Feedback, Section 3.4</a>.</p>
+<p><strong>The score itself is not a probability or a human-assigned grade.</strong> It can be negative or greater than 1. The comparison loss constrains score differences: adding the same constant to both scores leaves the predicted preference unchanged.</p>
+<p>After this stage, freeze the reward model for PPO training. It can now score fresh responses automatically. Humans supplied the comparisons that taught the scorer; they do not have to review every response generated in a PPO batch.</p>
+
+<h2 id="text-as-actions">A response becomes a sequence of token actions</h2>
+<p>Write a generated response as $y=(y_0,\ldots,y_{T-1})$, where $T$ is its token count. At position $t$, the model has the prompt and all earlier response tokens. That prefix is the state; the next token is the action:</p>
+<div class="ppo-eq">$$s_t=(x,y_{&lt;t}),\qquad a_t=y_t.$$</div>
+<p>Here $y_{&lt;t}$ means “response tokens before position $t$.” The actor $\pi_\theta(a_t\mid s_t)$ gives a probability to each possible next token. Sampling one and appending it creates the next state. An end-of-sequence token, <strong>EOS</strong>, ends the response. For this explanation, a completed response is one episode.</p>
+
+<h2 id="roles">Which model does which job?</h2>
+<p>The SFT model initializes the trainable actor and a frozen reference copy. Each PPO iteration also records the actor that collected its batch, called the old policy. The reward model scores whole answers; a critic learns to predict the reward still to come from a prefix. We write $\theta$ for the actor's parameters and $\phi$ for the critic's.</p>
+<div class="ppo-table"><table class="ppo-llm-roles"><colgroup><col class="ppo-llm-role"><col class="ppo-llm-job"><col class="ppo-llm-change"></colgroup><thead><tr><th scope="col">Role</th><th scope="col">Input → output</th><th scope="col">When it changes</th></tr></thead><tbody>
+<tr><th scope="row">Actor $\pi_\theta$</th><td>Prefix → next-token probabilities</td><td>During PPO optimizer steps</td></tr>
+<tr><th scope="row">Old $\pi_{\mathrm{old}}$</th><td>Same prefix → probabilities used to collect this batch</td><td>Refresh for each new rollout batch; fixed while reusing it</td></tr>
+<tr><th scope="row">Reference $\pi_{\mathrm{ref}}$</th><td>Same prefix → SFT starting probabilities</td><td>Frozen throughout this PPO stage</td></tr>
+<tr><th scope="row">Reward $r_\psi$</th><td>Prompt + complete response → preference score</td><td>Trained on human comparisons, then frozen</td></tr>
+<tr><th scope="row">Critic $V_\phi$</th><td>Prefix → expected remaining combined reward</td><td>Trained alongside the actor</td></tr>
+</tbody></table></div>
+<p><strong>The reward model judges the finished answer; the critic forecasts its remaining return before it is finished.</strong> The critic's target includes the reward and reference penalty defined next. It is not another human-preference classifier.</p>
+<p>PPO clipping compares the current actor with the <em>old</em> policy to limit the incentive for changing this batch's action probabilities. The reference penalty compares behavior with the fixed <em>SFT reference</em> to discourage cumulative drift. Many small updates can move far from the original model even if each stays near its own old policy.</p>
+<p>These roles need not be five full model copies. Store the old sampled-token log probabilities in the batch. The critic can share a backbone with the actor or use a separate network.</p>
+
+<h2 id="rewards">Turn the answer score into rollout rewards</h2>
+<p>A learned scorer is imperfect. If the actor only maximizes its score, it may drift toward unusual answers the scorer overvalues. A reference penalty makes departure from the SFT policy costly. Let $\beta&gt;0$ control its strength.</p>
+<p>At each sampled response token, subtract the reference's log probability from the collecting policy's log probability. Call this sampled log ratio $k_t$:</p>
+<div class="ppo-eq">$$k_t=\log\pi_{\mathrm{old}}(a_t\mid s_t)-\log\pi_{\mathrm{ref}}(a_t\mid s_t).$$</div>
+<p>Call the reward assigned after token $t$ $R_t$. Give each token reward $-\beta k_t$, then add the reward model's answer score <strong>once, at the last response token</strong>:</p>
+<pre><code>answer_score = reward_model(prompt, response)  # one scalar
+reference_log_ratio = old_logp - ref_logp      # one value per response token
 reward = -beta * reference_log_ratio
 reward[last_response_token] += answer_score</code></pre>
-<p>Here the arrays cover response tokens only. The final line adds the task score once. Compute these rollout rewards before GAE and hold them fixed during the batch’s optimizer passes. With no time discount, the return is the answer score minus the sum of sampled reference penalties.</p>
-<p>A single sampled log ratio can be negative. Its average under the old policy corresponds to KL divergence from old to reference. The recipe is illustrated in <a href="https://arxiv.org/html/2203.02155v1">InstructGPT’s PPO training objective</a>. Other recipes put an explicit reference loss in the optimizer; choose one definition and avoid accidentally counting the same penalty twice.</p>
-<h2 id="tokens">Score the token from the prefix that produced it</h2>
-<p>A causal model’s output at a position predicts the next token. When re-scoring a saved response, align each prediction with that next token’s ID. The critic prediction also belongs to the prefix <em>before</em> the action. Use the figure to follow one response token at a time:</p>
+<p>The arrays contain valid response tokens only. Here <code>old_logp</code> and <code>ref_logp</code> score the same sampled token using the same prefix. Calculate and freeze these rewards before estimating advantages.</p>
+<p>Use $\gamma=1$ in this example: future rewards are not discounted. Summing the token rewards therefore gives the return for the whole response:</p>
+<div class="ppo-eq">$$G_0=\sum_{t=0}^{T-1}R_t=r_\psi(x,y)-\beta\sum_{t=0}^{T-1}k_t.$$</div>
+<p>The first term rewards a preferred answer; the second accounts for reference drift. Sequence probability is the product of next-token probabilities, so its log ratio is this sum of token log ratios. This connects the code to the sequence-level reward in <a href="https://arxiv.org/html/1909.08593v2">Fine-Tuning Language Models from Human Preferences, Section 2.2</a>.</p>
+<p>A particular $k_t$ can be negative, giving that token a bonus. Averaging $k_t$ over actions sampled from the old policy at a fixed prefix gives the nonnegative KL divergence from old to reference: a measure of how different their next-token distributions are. The nonnegative statement is about that average, not every sampled token.</p>
+
+<h2 id="credit">How does one final score teach earlier tokens?</h2>
+<p>An early token changes the prefix from which every later token is generated. Its return therefore includes later rewards, including the final answer score. The critic $V_{\mathrm{old}}(s_t)$ is its collection-time prediction of that remaining return. The advantage $\hat A_t$ estimates whether the sampled continuation did better or worse than this expectation.</p>
+<p>With $\gamma=1$, the <a href="returns-values-and-gae.html#gae">GAE calculation from Chapter 3</a> becomes:</p>
+<div class="ppo-eq">$$\delta_t=R_t+V_{\mathrm{old}}(s_{t+1})-V_{\mathrm{old}}(s_t),\qquad \hat A_t=\delta_t+\lambda\hat A_{t+1}.$$</div>
+<p>The TD error $\delta_t$ compares the observed reward plus the next prediction against the current prediction. Work backward: the next token's advantage feeds the current one, scaled by $\lambda\in[0,1]$. This is how later evidence reaches earlier decisions. For a completed response, set $V_{\mathrm{old}}(s_T)=0$ and $\hat A_T=0$ because no reward remains after the end.</p>
+<p>At $\lambda=1$, the intermediate value terms cancel, leaving $\hat A_t=G_t-V_{\mathrm{old}}(s_t)$, where $G_t$ is the sum of rewards from token $t$ onward. Smaller $\lambda$ relies more on nearby critic predictions. Either way, a token's advantage is an estimate about its continuation, not a human label saying that the token itself is good.</p>
+<p>The critic's fixed training target is $\text{target}_t=\hat A_t+V_{\mathrm{old}}(s_t)$, using the raw advantage. If you normalize advantages for the actor loss, keep that normalized copy separate from this target, as in Chapter 3.</p>
+
+<h2 id="tokens">Score each token from the prefix that produced it</h2>
+<p>During optimization, feed the saved prompt and response back through the causal model. Each position can attend to itself and earlier tokens, never later ones. The output just before a stored response token predicts that token; the critic value must also describe the prefix <em>before</em> that action.</p>
 <figure class="ppo-demo" data-demo="tokens" id="experiment"><figcaption><span class="ppo-eyebrow">Interactive experiment</span><strong>Trace the conditioning prefix for each response action</strong></figcaption><div class="ppo-interactive" hidden=""><div class="ppo-inputs"><label>Response action position<input data-position="" max="5" min="0" step="1" type="range" value="0"/></label></div><div class="ppo-tokens"><span class="ppo-token is-muted">Solve:</span><span class="ppo-token is-muted">prompt</span><span class="ppo-token">2</span><span class="ppo-token">+</span><span class="ppo-token">2</span><span class="ppo-token">=</span><span class="ppo-token">4</span><span class="ppo-token">EOS</span><span class="ppo-token is-muted">PAD</span></div></div><output aria-atomic="true" aria-live="polite">Response actions are 2, +, 2, =, 4, EOS. Prompt and PAD positions are excluded from the policy loss.</output><p class="ppo-hint">The display uses symbolic tokens for readability; real tokenizer boundaries differ. The highlighted action is predicted from all preceding non-padding tokens.</p></figure>
-<p>A loss mask is simply a keep-or-ignore flag: 1 for generated response actions, 0 for prompt and padding positions. Include EOS when it was sampled as an action. The model reads the prompt, but PPO does not train it as if the prompt tokens were actions the model chose.</p>
-<p>State how you average variable-length responses. Summing token contributions within each response and then averaging responses gives every episode its summed contribution. Averaging tokens separately inside each response gives long responses less weight per token. Both can be implemented; they are different training rules.</p>
-<h2 id="sampling">The saved probabilities must match generation</h2>
-<p>If generation uses a temperature, apply that same temperature when recording and re-computing action probabilities. Otherwise, the denominator describes a different sampler. Top-k and top-p filtering also alter the distribution and can remove actions entirely; a simple teaching implementation can avoid these filters.</p>
-<p>Before the first optimizer step, verify that current/old ratios are near 1 on valid response positions. Compare a few generation-time scores with a full scoring pass. Mismatches often reveal a token shift, attention-mask error, or inconsistent sampling setting.</p>
-<p>Also decide what the maximum-length cutoff means. If it ends the task, there is no future value; if it merely interrupts collection, apply the <a href="returns-values-and-gae.html#masks">truncation rule</a>. A configuration label alone cannot make that decision.</p>
-<h2 id="reward-quality">Check the answers, not just the training score</h2>
-<p>A model can exploit a scorer through verbosity, formatting, or verifier loopholes. Evaluate with checks independent of the training reward and inspect generated answers. Track task score, reference penalty, response length, and EOS frequency separately so a rising combined score has an explanation.</p>
-<h2 id="dpo">Continue with preference pairs</h2>
-<p><a href="../dpo/index.html">DPO</a> changes the evidence used for training: it learns from chosen/rejected answer pairs. Its series starts with one comparison and builds the loss from there. The <a href="../dpo/dpo-and-ppo-what-changes.html">DPO/PPO comparison</a> connects the workflows after those pieces are clear.</p>
+<p>A <strong>loss mask</strong> is a keep-or-ignore flag: 1 for generated response actions, 0 for prompt and padding positions. Include EOS when it was sampled. The model reads the prompt, but PPO does not treat prompt tokens as actions the actor chose. This alignment is discussed in the <a href="https://iclr-blogposts.github.io/2024/blog/the-n-implementation-details-of-rlhf-with-ppo/">RLHF implementation study</a>.</p>
+<p>Choose an averaging rule for different response lengths. Summing token contributions per response and averaging responses keeps each episode's summed contribution. Averaging within each response first reduces each token's weight in longer answers. These produce different losses.</p>
+
+<h2 id="update">What actually updates the language model?</h2>
+<p>With responses, rewards, advantages, and targets stored, apply the <a href="from-trpo-to-the-clipped-objective.html">same clipped PPO loss</a>. Here is its core for one minibatch of valid response-token positions. <code>new_logp</code> comes from the current actor, <code>new_value</code> from the current critic, and <code>advantage</code> and <code>target</code> are the frozen estimates above. <code>epsilon</code> is PPO's clip range:</p>
+<pre><code>ratio = (new_logp - old_logp).exp()
+unclipped = ratio * advantage
+clipped = ratio.clamp(1 - epsilon, 1 + epsilon) * advantage
+actor_loss = -torch.minimum(unclipped, clipped).mean()
+critic_loss = 0.5 * (new_value - target).square().mean()</code></pre>
+<p>The ratio is $\pi_\theta(a_t\mid s_t)/\pi_{\mathrm{old}}(a_t\mid s_t)$ because exponentiating a difference of logs recovers a ratio. Positive advantages encourage increasing the sampled token's probability; negative ones encourage decreasing it, with PPO clipping limiting the incentive as explained in Chapter 4. The clip range $\epsilon$ and reference strength $\beta$ have different jobs.</p>
+<p>Gradient descent on the actor loss updates $\theta$ through the current log probabilities. Gradient descent on the critic loss updates $\phi$ toward its fixed targets. The saved tokens and reward scores stay fixed; gradients do not train the reward model in this stage.</p>
+<p>Reuse the batch for a limited number of minibatch passes, then generate fresh responses with the updated actor and repeat. The new collector becomes $\pi_{\mathrm{old}}$ for that next batch. The reference and reward model remain frozen. <a href="rollouts-minibatches-and-one-complete-update.html">Chapter 5</a> supplies the full optimizer loop.</p>
+
+<h2 id="sampling">Make collection and training agree</h2>
+<p><strong>Use the same action distribution.</strong> Temperature changes how peaked the next-token probabilities are. If generation uses it, use that same temperature when saving and recomputing probabilities. Top-k and top-p filters also change the distribution; a simple teaching implementation can omit them. Define the reference probabilities consistently too.</p>
+<p><strong>Check the first ratio.</strong> Before any optimizer step, current and old actors are identical, so ratios should be near 1 on valid response tokens. A mismatch often means a token shift, attention-mask error, or inconsistent sampling setting.</p>
+<p><strong>Define what a length cutoff means.</strong> If reaching the maximum length ends the task and the capped answer is scored as complete, there is no future value to predict. If it only interrupts collection of a continuing response, bootstrap from its final prefix using the <a href="returns-values-and-gae.html#masks">truncation rule</a>. Do not carry an advantage into a different prompt after a reset.</p>
+
+<h2 id="reward-quality">Check whether people actually prefer the new answers</h2>
+<p>A higher reward-model score is evidence about the scorer, not proof of better answers. Compare old and new responses on held-out prompts, using independent human judgments or task checks. Inspect errors and track answer score, reference penalty, response length, and EOS frequency separately.</p>
+<p>The summarization study found that <a href="https://arxiv.org/html/2009.01325v3">pushing its reward model too far could reduce human preference</a>. If new behavior exposes gaps in the scorer, a broader training cycle can collect more comparisons and retrain it between PPO stages. For tasks with a reliable verifier, such as code tests, that verifier can provide the answer score instead.</p>
+<h2 id="dpo">Where DPO changes this workflow</h2>
+<p><a href="../dpo/index.html">Direct Preference Optimization (DPO)</a> also starts with chosen/rejected response pairs. Standard DPO trains the policy directly from those pairs, without separately fitting a reward model or running a PPO rollout-and-critic loop. The <a href="../dpo/dpo-and-ppo-what-changes.html">DPO/PPO comparison</a> explains how its objective makes that possible.</p>
 <h2 id="continue">A video companion is also available</h2>
-<p>For a video-led explanation, use <a href="../popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html">Julia Turc’s PPO for LLMs companion notes</a>. The general tools remain the <a href="returns-values-and-gae.html">advantage estimator</a>, the <a href="from-trpo-to-the-clipped-objective.html">clipped actor update</a>, and fresh evaluation.</p>
+<p>For a video-led walkthrough, use <a href="../popular-videos/julia-turc-ppo-for-llms-explained-intuitively/index.html">Julia Turc’s PPO for LLMs companion notes</a>. For the general algorithm behind the token updates, revisit the <a href="returns-values-and-gae.html">advantage estimator</a> and the <a href="from-trpo-to-the-clipped-objective.html">clipped actor update</a>.</p>
 <nav class="ppo-next" aria-label="Reading navigation"><a href="continuous-actions-and-vectorized-environments.html">← Chapter 7</a><a href="index.html">Roadmap →</a></nav>
 </article></div>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=ppo-eight-20260913"></script><script src="../../../blog.js?v=ppo-eight-20260913"></script><script src="../../../code-highlight.js"></script><script src="../../../anim-speed.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=ppo-rlhf-20260913"></script><script src="../../../blog.js?v=ppo-rlhf-20260913"></script><script src="../../../code-highlight.js"></script><script src="../../../anim-speed.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>
