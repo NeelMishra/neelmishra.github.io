@@ -12,28 +12,47 @@
 <header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a href="../../../blog.html" class="active">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
 <div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
 <article class="blog-post-content reveal grpo-article"><a class="back-to-blog" href="../../../blog.html#folder-rl--grpo">← Reinforcement Learning / GRPO</a><div class="post-series-nav"><a href="index.html">Reinforcement Learning · GRPO</a><span> · Chapter 4 of 4</span></div>
-<h1>From Equation to Experiment</h1><p class="post-meta">September 2026 · 6 min read + experiments</p><p class="grpo-lead">A small implementation checklist keeps the elegant group idea from turning into an opaque training run.</p>
+<h1>From Equation to Experiment</h1><p class="post-meta">September 2026 · 6 min read</p><p class="grpo-lead">Follow the group weights into a token-level loss, then inspect one update before running a larger experiment.</p>
 <nav class="grpo-reading" aria-label="Ways to read this chapter"><a href="#loop">Trace the loop</a><a href="#choice">Choose a method</a></nav>
-<h2 id="loop">Freeze the right things at the right time</h2>
-<p>For each prompt, sample $G$ completions with the rollout policy. Save their token log probabilities, masks, and the policy version that produced them. Score the completions, compute the group mean and standard deviation, and freeze those advantages for the update that follows.</p>
-<pre><code>for prompt in batch:
-    completions, old_logp = sample(policy_old, prompt, G)
-    rewards = verifier(completions)
-    advantages = (rewards - rewards.mean()) / (rewards.std() + eps)
-    loss = clipped_ratio_loss(policy, old_logp, advantages)
-    loss += reference_kl(policy, reference)
-    optimizer.step()</code></pre>
-<p>This sketch leaves out token alignment and batching on purpose. Those details are where many silent bugs live. Check that prompt tokens are excluded from response rewards, that padding does not enter the ratio, and that the old denominator is not accidentally recomputed from the current policy.</p>
-<div class="grpo-callout"><strong>Make the run explain itself.</strong><p>Log one inspected prompt with all completions, raw rewards, mean, standard deviation, normalized advantages, response lengths, ratio statistics, and reference KL. A single trace often reveals a masking or sign error faster than a day of watching a mean reward curve.</p></div>
-<h2 id="evidence">Compare runs on the same budget</h2>
-<p>GRPO can look cheaper because it avoids a critic, but it still spends compute on multiple sampled completions and verifier calls. Compare methods with the same number of prompts, sampled tokens, and evaluation checks. Report the fraction of zero-spread groups alongside held-out correctness.</p>
-<figure class="grpo-choice-map" aria-labelledby="choice-map-title"><figcaption><span class="grpo-eyebrow">Let the data choose the baseline</span><strong id="choice-map-title">Three signals, three natural starting points</strong></figcaption><div class="grpo-choice-grid"><div class="grpo-choice"><span class="grpo-choice-label">Curated pairs</span><strong>DPO</strong><small>The comparison is already labeled: chosen versus rejected.</small></div><div class="grpo-choice grpo-choice-highlight"><span class="grpo-choice-label">Several answers</span><strong>GRPO</strong><small>A same-prompt verifier score creates the contrast.</small></div><div class="grpo-choice"><span class="grpo-choice-label">Long trajectories</span><strong>PPO</strong><small>A critic can carry value information across states and time.</small></div></div><p class="grpo-caption">The choice is about the evidence you can trust and afford to collect, not a universal ranking of algorithms.</p></figure>
-<div class="grpo-table"><table><thead><tr><th scope="col">If your data looks like this…</th><th scope="col">Start here</th><th scope="col">Why</th></tr></thead><tbody><tr><td>Several sampled answers, a reliable verifier</td><td><strong>GRPO</strong></td><td>The group supplies a local baseline without a value model.</td></tr><tr><td>Long trajectories and useful state features</td><td><strong>PPO</strong></td><td>A critic can share information across states and time.</td></tr><tr><td>Curated chosen/rejected pairs already exist</td><td><strong>DPO</strong></td><td>The preference loss uses the offline comparison directly.</td></tr></tbody></table></div>
-<h2 id="choice">The three questions to ask before training</h2>
-<ol class="grpo-questions"><li><strong>Can I score answers consistently?</strong> If the verifier is noisy or easy to exploit, improve evaluation before increasing the optimizer.</li><li><strong>Will a prompt produce disagreement?</strong> Measure group spread on a held-out slice. A flat group cannot teach a relative ordering.</li><li><strong>What must stay near a reference?</strong> Choose the KL coefficient and sequence reduction deliberately, then inspect length, entropy, and KL together.</li></ol>
-<h2 id="next">You can now return to the larger map</h2>
-<p>GRPO is not a new kind of policy gradient. It is a particular answer to the baseline problem: spend samples on a same-prompt comparison, then keep PPO’s ratio guardrail and a reference anchor. With that map in mind, the <a href="../ppo/index.html">PPO series</a> explains the critic and trajectory machinery, while the <a href="../dpo/index.html">DPO series</a> explains how fixed preference pairs remove online rollouts entirely.</p>
-<details class="grpo-check"><summary>What would count as evidence that GRPO helped?</summary><p>Use a held-out evaluation tied to the task, with the same token and verifier budget across baselines. A higher training reward is only one signal; correctness, group spread, KL, response length, and failure examples complete the picture.</p></details>
+<h2 id="loop">Prepare the group weights once</h2>
+<p>Collect the same number $G$ of answers for each prompt using a frozen rollout policy. Save the generated tokens, response masks, rewards, and old token log probabilities. Keep the reference model fixed within this training stage.</p>
+<p>Arrange rewards as <code>[number_of_prompts, G]</code>. Subtract each prompt’s mean and divide by its group spread, as in <a href="group-relative-advantages.html">chapter 1</a>. Here <code>unbiased=False</code> selects the population standard deviation used in our calculator:</p>
+<pre><code>centered = rewards - rewards.mean(dim=1, keepdim=True)
+spread = rewards.std(dim=1, keepdim=True, unbiased=False)
+advantage = (centered / (spread + 1e-8)).flatten().detach()</code></pre>
+<p>Flatten the answers in that same prompt/group order. Freeze these advantages and the old log probabilities throughout the updates on this batch. Rescore the stored tokens with the current policy at each optimizer step.</p>
+<h3 id="token-arrays">Line up the token arrays</h3>
+<p>Let <code>B</code> be the total number of answers and <code>L</code> their padded token length. The arrays <code>new_logp</code>, <code>old_logp</code>, and <code>ref_logp</code> each have shape <code>[B, L]</code> and score the <em>same token given the same prefix</em>. Only <code>new_logp</code> carries gradients.</p>
+<p><code>response_mask</code> is a boolean array of that shape: true for generated response tokens, including a generated end token, and false for prompts and padding. Every retained answer needs at least one valid token. <a href="../dpo/sequence-log-probabilities-and-implementation.html#alignment">The token-alignment chapter</a> shows how to gather these next-token log probabilities.</p>
+<h3 id="reference-cost">Add the reference cost before averaging</h3>
+<p>The <a href="clipped-group-update.html">previous update chapter</a> supplied the clipped score. The extra reference cost uses the ratio <em>reference probability / current probability</em>. Call its logarithm $z$. The paper’s sampled cost is $e^z-z-1$: it is zero when the two token probabilities match and positive otherwise. See <a href="https://arxiv.org/html/2402.03300v3#S4.SS1.SSS1">DeepSeekMath, Equations 3–4 and Algorithm 1</a>.</p>
+<p>In the code, <code>eps</code> is the clipping tolerance, such as 0.2, and <code>beta</code> is the positive reference-penalty coefficient. <code>torch.expm1(z)</code> computes $e^z-1$ accurately near zero. Negate the clipped score because the optimizer minimizes a loss, then average tokens within each answer and average answers:</p>
+<pre><code>ratio = (new_logp - old_logp).exp()
+weight = advantage[:, None]  # Share one weight across an answer's tokens
+score = torch.minimum(
+    ratio * weight,
+    ratio.clamp(1 - eps, 1 + eps) * weight,
+)
+z = ref_logp - new_logp
+reference_cost = torch.expm1(z) - z
+per_token_loss = -score + beta * reference_cost
+lengths = response_mask.sum(dim=1)
+masked_loss = per_token_loss.masked_fill(~response_mask, 0)
+loss = (masked_loss.sum(dim=1) / lengths).mean()
+
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()</code></pre>
+<p>This is the loss calculation, assuming generation, scoring, and token alignment are already done. With the same $G$ for every prompt, averaging answers also gives each prompt equal weight.</p>
+<details class="grpo-check"><summary>Is the sampled reference cost exactly the KL divergence?</summary><p>Its expectation over tokens sampled from the current policy equals that policy’s KL divergence from the reference at a fixed prefix. Once the current policy changes, reused rollout tokens come from an older policy. On those samples, treat this as the paper’s sampled penalty, not an exact KL measurement.</p></details>
+<h2 id="evidence">Inspect one update before comparing runs</h2>
+<p>Before the first optimizer step, current/old ratios should be 1 on valid tokens when both scoring paths match. Inspect one prompt’s rewards and advantages, verify that padding contributes zero loss, and check that the reference model receives no gradients. A flat-reward group has no reward-based gradient, but its reference penalty may still update the policy.</p>
+<p>For comparisons, report generated tokens, verifier calls, and compute time. Hold the evaluation problems and decoding budget fixed. Track the <a href="failure-modes-and-data.html#checks">diagnostics from chapter 3</a> alongside held-out correctness; removing the critic does not remove the cost of sampling several answers.</p>
+<h2 id="choice">Choose by the evidence you can collect</h2>
+<figure aria-labelledby="choice-map-title" class="grpo-choice-map"><figcaption><span class="grpo-eyebrow">Let the data choose the baseline</span><strong id="choice-map-title">Three signals, three natural starting points</strong></figcaption><div class="grpo-choice-grid"><div class="grpo-choice"><span class="grpo-choice-label">Curated pairs</span><strong>DPO</strong><small>The comparison is already labeled: chosen versus rejected.</small></div><div class="grpo-choice grpo-choice-highlight"><span class="grpo-choice-label">Several answers</span><strong>GRPO</strong><small>A same-prompt verifier score creates the contrast.</small></div><div class="grpo-choice"><span class="grpo-choice-label">Long trajectories</span><strong>PPO</strong><small>A critic can carry value information across states and time.</small></div></div><p class="grpo-caption">The choice is about the evidence you can trust and afford to collect, not a universal ranking of algorithms.</p></figure>
+<p>These are starting points, not exclusive categories. PPO also trains language models, and DPO can use pairs collected by an earlier sampling stage. The practical question is whether you have reliable fixed comparisons, useful same-prompt scores, or a reason to learn state values.</p>
+<h2 id="next">Keep the learning signal in view</h2>
+<p>For more on critics and trajectories, return to <a href="../ppo/index.html">PPO</a>. For training directly from chosen/rejected pairs, follow <a href="../dpo/index.html">DPO</a>. When using a GRPO library, record its reward normalization, token reduction, and reference settings so you know how its objective relates to the version explained here.</p>
 <nav class="grpo-next" aria-label="Reading navigation"><a href="failure-modes-and-data.html">← Chapter 3</a><a href="index.html">Back to roadmap →</a></nav>
 </article></div>
 <script src="../../../script.js"></script><script src="../../../blog-posts.js?v=rl-grpo-20260911"></script><script src="../../../blog.js?v=rl-grpo-20260911"></script><script src="../../../code-highlight.js"></script><script src="../../../anim-speed.js"></script>
