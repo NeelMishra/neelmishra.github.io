@@ -26,10 +26,6 @@
           all('.ppo-bar', root).forEach(function (bar, i) { bar.style.width = ((i ? p : 1-p) * 100) + '%'; });
           all('[data-bar-value]', root).forEach(function (el, i) { el.textContent = ((i ? p : 1-p) * 100).toFixed(0) + '%'; });
           out.textContent = 'At p = ' + p.toFixed(2) + ', J(p) = ' + (1-p).toFixed(2) + ' × 1 + ' + p.toFixed(2) + ' × 3 = ' + (1-p).toFixed(2) + ' + ' + (3*p).toFixed(2) + ' = ' + (1+2*p).toFixed(2) + '. Gradient with respect to the right-action logit: 2p(1−p) = ' + f(2*p*(1-p)) + '.';
-        } else if (kind === 'baseline') {
-          var b = n(root, 'baseline'), p1 = .3, g0 = -p1 * (1-b), g1 = (1-p1) * (3-b), mean = .7*g0+.3*g1, variance = .7*Math.pow(g0-mean,2)+.3*Math.pow(g1-mean,2);
-          graph(root, function (x) { return .21*Math.pow(2.4-x,2); }, null, -1, 5, 0, 2.5, b);
-          out.textContent = 'Baseline b = ' + b.toFixed(1) + '. Left sample gradient = ' + f(g0) + '; right = ' + f(g1) + '. Expected gradient = ' + f(mean) + ' for every b. Variance = ' + f(variance) + '. Minimum at b = 2.4; the value baseline is 1.6.';
         } else if (kind === 'gae') {
           var lam = n(root, 'lambda')/100, boundary = selected(root, 'boundary'), delta = [1.04, 2.03, boundary === 'terminal' ? 2.3 : 5.9], a = [0,0,0], carry = 0;
           for (var i = 2; i >= 0; i--) { carry = delta[i] + .9*lam*carry; a[i] = carry; }
