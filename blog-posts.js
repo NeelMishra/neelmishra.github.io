@@ -1,5 +1,6 @@
 /* Blog metadata keyed by BLOG_TREE `file` path. Entries with draft:true stay out of the blog index. */
 var BLOG_POSTS = {
+  "ml/data-preparation/train-test-split/train-validation-test.html": {"category": "ml", "series": "Data Preparation &middot; Splitting &amp; Stratification", "title": "Train, Validation, and Test", "description": "Follow a model from fitting to selection to final evaluation, with a worked ticket-classification example and diagrams showing which data may influence each decision.", "meta": "September 2026 &middot; 8 min read"},
   "ml/data-preparation/outliers/isolation-forest.html": {"category": "ml", "series": "Machine Learning · Data Preparation and Preprocessing", "title": "Isolation Forest", "meta": "September 2026 &middot; 3 min read", "description": "Use Isolation Forest to inspect unusual training rows, choose justified data treatments, and preserve an independent evaluation set."},
   /* APPLIED-NOTES:START */
   "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html": {"category": "ml", "series": "Machine Learning · Search & Retrieval · Evaluation", "title": "Search Evaluation Starts with Relevance, Not a Metric", "description": "Build query sets and relevance judgments, handle incomplete labels, and prevent temporal and entity leakage before computing a score.", "meta": "September 2026 · 4 min read"},
