@@ -58,7 +58,7 @@
       all('.dpo-interactive',root).forEach(function(el) { el.hidden=false; });
       all('input,select',root).forEach(function(input) { input.addEventListener('input',paint);input.addEventListener('change',paint); });
       if (kind === 'lab') {
-        fetch('lab/results.json').then(function(response) { if (!response.ok) throw new Error('Results unavailable');return response.json(); }).then(function(data) { records=data;paint(); }).catch(function() { out.textContent='The recorded data could not load. The results table and downloadable JSON below remain available.'; });
+        fetch('lab/results.json').then(function(response) { if (!response.ok) throw new Error('Results unavailable');return response.json(); }).then(function(data) { records=data;paint(); }).catch(function() { out.textContent='The recorded data could not load. The recorded chart remains visible; the results JSON is linked above.'; });
       }
       paint();
     });
