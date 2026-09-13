@@ -1,5 +1,6 @@
 /* Blog metadata keyed by BLOG_TREE `file` path. Entries with draft:true stay out of the blog index. */
 var BLOG_POSTS = {
+  "ml/data-preparation/outliers/isolation-forest.html": {"category": "ml", "series": "Machine Learning · Data Preparation and Preprocessing", "title": "Isolation Forest", "meta": "September 2026 &middot; 3 min read", "description": "Use Isolation Forest to inspect unusual training rows, choose justified data treatments, and preserve an independent evaluation set."},
   /* APPLIED-NOTES:START */
   "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html": {"category": "ml", "series": "Machine Learning · Search & Retrieval · Evaluation", "title": "Search Evaluation Starts with Relevance, Not a Metric", "description": "Build query sets and relevance judgments, handle incomplete labels, and prevent temporal and entity leakage before computing a score.", "meta": "September 2026 · 4 min read"},
   "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html": {"category": "ml", "series": "Machine Learning · Search & Retrieval · Evaluation", "title": "Precision, Recall, MAP, and MRR: One Ranking, Four Questions", "description": "Compute every metric by hand, distinguish AP from precision, state AP@K conventions, and explore rankings directly.", "meta": "September 2026 · 4 min read"},
