@@ -8286,662 +8286,487 @@ var BLOG_TREE = [
     ]
   },
   {
-    name: 'ml',
-    label: 'Machine Learning',
-    children: [
-      // APPLIED-NOTES:ml:START
+    "name": "ml",
+    "label": "Machine Learning",
+    "children": [
+      {"title": "Start Here: ML Learning Map", "file": "ml/index.html", "links": ["ml/data-preparation/index.html", "ml/loss-functions/index.html"]},
       {
-        "name": "graph-ml",
-        "label": "Graph ML for Risk Modeling",
+        "name": "data-preparation",
+        "label": "Data Preparation and Preprocessing",
         "children": [
+          {"title": "Foundations", "file": "ml/data-preparation/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/index.html", "ml/data-preparation/train-test-split/index.html"]},
           {
-            "title": "Graph ML for Risk Modeling: Reading Guide",
-            "file": "ml/graph-ml/index.html",
-            "links": [
-              "ml/graph-ml/build-an-application-graph.html"
+            "name": "train-test-split",
+            "label": "Splitting & Stratification",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/train-test-split/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html", "ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "The Hold-Out Split", "file": "ml/data-preparation/train-test-split/hold-out-split.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Train, Validation, and Test", "file": "ml/data-preparation/train-test-split/train-validation-test.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Stratified Splitting", "file": "ml/data-preparation/train-test-split/stratified-splitting.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Group Splitting", "file": "ml/data-preparation/train-test-split/group-splitting.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Time-Series Splitting", "file": "ml/data-preparation/train-test-split/time-series-splitting.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Data Leakage in Splitting", "file": "ml/data-preparation/train-test-split/data-leakage-in-splitting.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Reproducibility and Random Seeds", "file": "ml/data-preparation/train-test-split/reproducibility-and-seeds.html", "links": ["ml/data-preparation/train-test-split/index.html"]},
+              {"title": "Hold-Out vs Cross-Validation", "file": "ml/data-preparation/train-test-split/holdout-vs-cross-validation.html", "links": ["ml/data-preparation/train-test-split/index.html"]}
             ]
           },
           {
-            "title": "Graph-Based Risk Modeling: Start with the Relationships",
-            "file": "ml/graph-ml/build-an-application-graph.html",
-            "links": [
-              "ml/graph-ml/index.html",
-              "ml/graph-ml/neighborhood-evidence-and-propagation.html"
+            "name": "data-cleaning",
+            "label": "Data Cleaning",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/data-cleaning/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "Duplicate Records", "file": "ml/data-preparation/data-cleaning/duplicate-records.html", "links": ["ml/data-preparation/data-cleaning/index.html"]},
+              {"title": "Data Types and Parsing", "file": "ml/data-preparation/data-cleaning/data-types-and-parsing.html", "links": ["ml/data-preparation/data-cleaning/index.html"]},
+              {"title": "Text Normalization", "file": "ml/data-preparation/data-cleaning/text-normalization.html", "links": ["ml/data-preparation/data-cleaning/index.html"]},
+              {"title": "Units and Consistency", "file": "ml/data-preparation/data-cleaning/units-and-consistency.html", "links": ["ml/data-preparation/data-cleaning/index.html"]},
+              {"title": "Errors vs Outliers", "file": "ml/data-preparation/data-cleaning/errors-vs-outliers.html", "links": ["ml/data-preparation/data-cleaning/index.html"]}
             ]
           },
           {
-            "title": "From Neighborhood Evidence to a Risk Score",
-            "file": "ml/graph-ml/neighborhood-evidence-and-propagation.html",
-            "links": [
-              "ml/graph-ml/build-an-application-graph.html",
-              "ml/graph-ml/evaluate-graph-risk.html"
+            "name": "missing-values",
+            "label": "Handling Missing Data",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/missing-values/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html", "ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Missingness Mechanisms: MCAR, MAR, MNAR", "file": "ml/data-preparation/missing-values/missingness-mechanisms.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Deletion: Listwise and Pairwise", "file": "ml/data-preparation/missing-values/deletion.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Mean, Median, and Mode Imputation", "file": "ml/data-preparation/missing-values/simple-imputation.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "KNN Imputation", "file": "ml/data-preparation/missing-values/knn-imputation.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Iterative (Model-Based) Imputation", "file": "ml/data-preparation/missing-values/iterative-imputation.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Missingness Indicators", "file": "ml/data-preparation/missing-values/missingness-indicators.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Forward and Backward Fill", "file": "ml/data-preparation/missing-values/forward-backward-fill.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Forward Fill", "file": "ml/data-preparation/missing-values/forward-fill.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Backward Fill", "file": "ml/data-preparation/missing-values/backward-fill.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Constant and Sentinel Imputation", "file": "ml/data-preparation/missing-values/constant-imputation.html", "links": ["ml/data-preparation/missing-values/index.html"]},
+              {"title": "Multiple Imputation", "file": "ml/data-preparation/missing-values/multiple-imputation.html", "links": ["ml/data-preparation/missing-values/index.html"]}
             ]
           },
           {
-            "title": "Evaluate Graph Risk at a Fixed Precision and a Realistic Time Cutoff",
-            "file": "ml/graph-ml/evaluate-graph-risk.html",
-            "links": [
-              "ml/graph-ml/neighborhood-evidence-and-propagation.html"
+            "name": "encoding-categoricals",
+            "label": "Encoding Categorical Features",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/encoding-categoricals/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html", "ml/data-preparation/missing-values/index.html"]},
+              {"title": "Label Encoding", "file": "ml/data-preparation/encoding-categoricals/label-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Ordinal Encoding", "file": "ml/data-preparation/encoding-categoricals/ordinal-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "One-Hot Encoding", "file": "ml/data-preparation/encoding-categoricals/one-hot-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Target (Mean) Encoding", "file": "ml/data-preparation/encoding-categoricals/target-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Frequency and Count Encoding", "file": "ml/data-preparation/encoding-categoricals/frequency-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Hashing and High Cardinality", "file": "ml/data-preparation/encoding-categoricals/hashing-high-cardinality.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Binary Encoding", "file": "ml/data-preparation/encoding-categoricals/binary-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Cyclical Encoding (sin/cos)", "file": "ml/data-preparation/encoding-categoricals/cyclical-encoding.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Weight of Evidence", "file": "ml/data-preparation/encoding-categoricals/weight-of-evidence.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Rare-Category Grouping", "file": "ml/data-preparation/encoding-categoricals/rare-category-grouping.html", "links": ["ml/data-preparation/encoding-categoricals/index.html"]}
+            ]
+          },
+          {
+            "name": "feature-scaling",
+            "label": "Feature Scaling",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/feature-scaling/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html", "ml/data-preparation/encoding-categoricals/index.html"]},
+              {"title": "Standardization (Z-Score)", "file": "ml/data-preparation/feature-scaling/standardization.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "Min-Max Normalization", "file": "ml/data-preparation/feature-scaling/min-max-normalization.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "Robust Scaling", "file": "ml/data-preparation/feature-scaling/robust-scaling.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "Max-Abs and Unit-Norm Scaling", "file": "ml/data-preparation/feature-scaling/max-abs-and-unit-norm.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "When Scaling Matters", "file": "ml/data-preparation/feature-scaling/when-to-scale.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "Normalization vs Standardization", "file": "ml/data-preparation/feature-scaling/normalization-vs-standardization.html", "links": ["ml/data-preparation/feature-scaling/index.html"]},
+              {"title": "Scaling Sparse Data", "file": "ml/data-preparation/feature-scaling/scaling-sparse-data.html", "links": ["ml/data-preparation/feature-scaling/index.html"]}
+            ]
+          },
+          {
+            "name": "cross-validation",
+            "label": "Cross-Validation",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/cross-validation/index.html", "links": ["from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html", "ml/data-preparation/index.html"]},
+              {"title": "K-Fold Cross-Validation", "file": "ml/data-preparation/cross-validation/k-fold.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Stratified K-Fold", "file": "ml/data-preparation/cross-validation/stratified-k-fold.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Leave-One-Out (LOOCV)", "file": "ml/data-preparation/cross-validation/leave-one-out.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Group K-Fold", "file": "ml/data-preparation/cross-validation/group-k-fold.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Time-Series Cross-Validation", "file": "ml/data-preparation/cross-validation/time-series-cv.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Nested Cross-Validation", "file": "ml/data-preparation/cross-validation/nested-cv.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Repeated K-Fold", "file": "ml/data-preparation/cross-validation/repeated-k-fold.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Shuffle-Split (Monte Carlo CV)", "file": "ml/data-preparation/cross-validation/shuffle-split.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Choosing k: Bias and Variance", "file": "ml/data-preparation/cross-validation/choosing-k.html", "links": ["ml/data-preparation/cross-validation/index.html"]},
+              {"title": "Cross-Validation for Hyperparameter Tuning", "file": "ml/data-preparation/cross-validation/cv-for-tuning.html", "links": ["ml/data-preparation/cross-validation/index.html"]}
+            ]
+          },
+          {
+            "name": "pipelines",
+            "label": "Pipelines and Reproducibility",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/pipelines/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "Preprocessing Pipelines", "file": "ml/data-preparation/pipelines/preprocessing-pipelines.html", "links": ["ml/data-preparation/pipelines/index.html"]},
+              {"title": "Column Transformer", "file": "ml/data-preparation/pipelines/column-transformer.html", "links": ["ml/data-preparation/pipelines/index.html"]},
+              {"title": "Avoiding Leakage with Pipelines", "file": "ml/data-preparation/pipelines/avoiding-leakage.html", "links": ["ml/data-preparation/pipelines/index.html"]},
+              {"title": "Saving and Serializing Transformers", "file": "ml/data-preparation/pipelines/saving-transformers.html", "links": ["ml/data-preparation/pipelines/index.html"]},
+              {"title": "Reproducibility", "file": "ml/data-preparation/pipelines/reproducibility.html", "links": ["ml/data-preparation/pipelines/index.html"]}
+            ]
+          },
+          {
+            "name": "feature-transformation",
+            "label": "Feature Transformation",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/feature-transformation/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "Skewness: What It Measures and When It Matters", "file": "ml/data-preparation/feature-transformation/skewness.html", "links": ["ml/data-preparation/feature-transformation/index.html"]},
+              {"title": "Log Transform", "file": "ml/data-preparation/feature-transformation/log-transform.html", "links": ["ml/data-preparation/feature-transformation/index.html"]},
+              {"title": "Box-Cox Transform", "file": "ml/data-preparation/feature-transformation/box-cox.html", "links": ["ml/data-preparation/feature-transformation/index.html"]},
+              {"title": "Yeo-Johnson Transform", "file": "ml/data-preparation/feature-transformation/yeo-johnson.html", "links": ["ml/data-preparation/feature-transformation/index.html"]},
+              {"title": "Quantile and Rank Transform", "file": "ml/data-preparation/feature-transformation/quantile-transform.html", "links": ["ml/data-preparation/feature-transformation/index.html"]},
+              {"title": "Power Transforms", "file": "ml/data-preparation/feature-transformation/power-transforms.html", "links": ["ml/data-preparation/feature-transformation/index.html"]}
+            ]
+          },
+          {
+            "name": "feature-engineering",
+            "label": "Feature Engineering",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/feature-engineering/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "Interaction Features", "file": "ml/data-preparation/feature-engineering/interaction-features.html", "links": ["ml/data-preparation/feature-engineering/index.html"]},
+              {"title": "Polynomial Features", "file": "ml/data-preparation/feature-engineering/polynomial-features.html", "links": ["ml/data-preparation/feature-engineering/index.html"]},
+              {"title": "Binning and Discretization", "file": "ml/data-preparation/feature-engineering/binning-discretization.html", "links": ["ml/data-preparation/feature-engineering/index.html"]},
+              {"title": "Datetime Features", "file": "ml/data-preparation/feature-engineering/datetime-features.html", "links": ["ml/data-preparation/feature-engineering/index.html"]},
+              {"title": "Aggregation and Group Features", "file": "ml/data-preparation/feature-engineering/aggregation-features.html", "links": ["ml/data-preparation/feature-engineering/index.html"]},
+              {"title": "Text Features (Bag of Words, TF-IDF)", "file": "ml/data-preparation/feature-engineering/text-features.html", "links": ["ml/data-preparation/feature-engineering/index.html"]}
+            ]
+          },
+          {
+            "name": "outliers",
+            "label": "Outlier Detection and Treatment",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/outliers/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "What Is an Outlier", "file": "ml/data-preparation/outliers/what-is-an-outlier.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "Z-Score Method", "file": "ml/data-preparation/outliers/z-score-method.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "IQR Method", "file": "ml/data-preparation/outliers/iqr-method.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "Isolation Forest", "file": "ml/data-preparation/outliers/isolation-forest.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "Local Outlier Factor", "file": "ml/data-preparation/outliers/local-outlier-factor.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "Winsorizing and Capping", "file": "ml/data-preparation/outliers/winsorizing-and-capping.html", "links": ["ml/data-preparation/outliers/index.html"]},
+              {"title": "Remove, Cap, or Keep", "file": "ml/data-preparation/outliers/remove-vs-keep.html", "links": ["ml/data-preparation/outliers/index.html"]}
+            ]
+          },
+          {
+            "name": "feature-selection",
+            "label": "Feature Selection",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/feature-selection/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "Why Select Features", "file": "ml/data-preparation/feature-selection/why-feature-selection.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Variance Threshold", "file": "ml/data-preparation/feature-selection/variance-threshold.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Correlation Filter", "file": "ml/data-preparation/feature-selection/correlation-filter.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Mutual Information", "file": "ml/data-preparation/feature-selection/mutual-information.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Chi-Square Test", "file": "ml/data-preparation/feature-selection/chi-square.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Recursive Feature Elimination", "file": "ml/data-preparation/feature-selection/recursive-feature-elimination.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "L1 (Lasso) Selection", "file": "ml/data-preparation/feature-selection/l1-regularization.html", "links": ["ml/data-preparation/feature-selection/index.html"]},
+              {"title": "Tree Feature Importance", "file": "ml/data-preparation/feature-selection/feature-importance.html", "links": ["ml/data-preparation/feature-selection/index.html"]}
+            ]
+          },
+          {
+            "name": "imbalance",
+            "label": "Class Imbalance and Resampling",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/imbalance/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "The Imbalance Problem", "file": "ml/data-preparation/imbalance/the-imbalance-problem.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "Random Oversampling", "file": "ml/data-preparation/imbalance/random-oversampling.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "Random Undersampling", "file": "ml/data-preparation/imbalance/random-undersampling.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "SMOTE", "file": "ml/data-preparation/imbalance/smote.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "ADASYN", "file": "ml/data-preparation/imbalance/adasyn.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "Class Weights", "file": "ml/data-preparation/imbalance/class-weights.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "Threshold Moving", "file": "ml/data-preparation/imbalance/threshold-moving.html", "links": ["ml/data-preparation/imbalance/index.html"]},
+              {"title": "Evaluating Under Imbalance", "file": "ml/data-preparation/imbalance/evaluating-imbalance.html", "links": ["ml/data-preparation/imbalance/index.html"]}
+            ]
+          },
+          {
+            "name": "dimensionality-reduction",
+            "label": "Dimensionality Reduction",
+            "children": [
+              {"title": "Overview", "file": "ml/data-preparation/dimensionality-reduction/index.html", "links": ["ml/data-preparation/index.html"]},
+              {"title": "The Curse of Dimensionality", "file": "ml/data-preparation/dimensionality-reduction/curse-of-dimensionality.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "Principal Component Analysis (PCA)", "file": "ml/data-preparation/dimensionality-reduction/pca.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "Kernel PCA", "file": "ml/data-preparation/dimensionality-reduction/kernel-pca.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "Linear Discriminant Analysis (LDA)", "file": "ml/data-preparation/dimensionality-reduction/lda.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "t-SNE", "file": "ml/data-preparation/dimensionality-reduction/t-sne.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "UMAP", "file": "ml/data-preparation/dimensionality-reduction/umap.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]},
+              {"title": "Autoencoders", "file": "ml/data-preparation/dimensionality-reduction/autoencoders.html", "links": ["ml/data-preparation/dimensionality-reduction/index.html"]}
             ]
           }
-        ]
+        ],
+        "learning": {"title": "Data & validation", "requires": [], "start": "ml/data-preparation/index.html", "note": "Choose a valid split; learn how preprocessing is fitted on training data. Advanced preprocessing chapters can wait."}
       },
       {
-        "name": "anomaly-detection",
-        "label": "Anomaly Detection",
+        "name": "loss-functions",
+        "label": "Loss Functions",
         "children": [
+          {"title": "Overview", "file": "ml/loss-functions/index.html", "links": ["ml/loss-functions/entropy/index.html", "ml/loss-functions/triplet-loss/index.html"]},
           {
-            "title": "Anomaly Detection: Reading Guide",
-            "file": "ml/anomaly-detection/index.html",
-            "links": [
-              "ml/anomaly-detection/isolation-forest-from-partitions.html"
+            "name": "entropy",
+            "label": "Entropy",
+            "children": [
+              {"title": "Entropy Foundations", "file": "ml/loss-functions/entropy/index.html", "links": ["ml/loss-functions/index.html", "ml/loss-functions/entropy/binary-entropy.html"]},
+              {"title": "Binary Entropy", "file": "ml/loss-functions/entropy/binary-entropy.html", "links": ["ml/loss-functions/entropy/index.html", "ml/loss-functions/entropy/cross-entropy-kl.html"]},
+              {"title": "Cross-Entropy & KL Divergence", "file": "ml/loss-functions/entropy/cross-entropy-kl.html", "links": ["ml/loss-functions/entropy/binary-entropy.html", "ml/loss-functions/entropy/information-gain.html"]},
+              {"title": "Entropy & Information Gain", "file": "ml/loss-functions/entropy/information-gain.html", "links": ["ml/loss-functions/entropy/cross-entropy-kl.html", "ml/loss-functions/entropy/maximum-entropy.html"]},
+              {"title": "Maximum Entropy & Calibration", "file": "ml/loss-functions/entropy/maximum-entropy.html", "links": ["ml/loss-functions/entropy/information-gain.html", "ml/loss-functions/index.html"]}
             ]
           },
           {
-            "title": "Isolation Forest: Follow One Point Through a Forest",
-            "file": "ml/anomaly-detection/isolation-forest-from-partitions.html",
-            "links": [
-              "ml/anomaly-detection/index.html",
-              "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"
+            "name": "kl-divergence",
+            "label": "KL Divergence",
+            "children": [
+              {"title": "Foundations", "file": "ml/loss-functions/kl-divergence/index.html", "links": ["ml/loss-functions/entropy/cross-entropy-kl.html", "ml/loss-functions/kl-divergence/forward-vs-reverse.html"]},
+              {"title": "Forward vs Reverse KL", "file": "ml/loss-functions/kl-divergence/forward-vs-reverse.html", "links": ["ml/loss-functions/kl-divergence/index.html", "ml/loss-functions/kl-divergence/kl-in-ml.html"]},
+              {"title": "KL in ML Objectives", "file": "ml/loss-functions/kl-divergence/kl-in-ml.html", "links": ["ml/loss-functions/kl-divergence/forward-vs-reverse.html", "ml/loss-functions/js-divergence/index.html"]}
             ]
           },
           {
-            "title": "Model Sparse, Heavy-Tailed Telemetry Without Flagging Every Large Customer",
-            "file": "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html",
-            "links": [
-              "ml/anomaly-detection/isolation-forest-from-partitions.html",
-              "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html"
+            "name": "js-divergence",
+            "label": "JS Divergence",
+            "children": [
+              {"title": "Foundations", "file": "ml/loss-functions/js-divergence/index.html", "links": ["ml/loss-functions/js-divergence/properties-and-uses.html"]},
+              {"title": "Properties and Uses", "file": "ml/loss-functions/js-divergence/properties-and-uses.html", "links": ["ml/loss-functions/js-divergence/index.html", "ml/loss-functions/js-divergence/gan-connection.html"]},
+              {"title": "JS Divergence and GANs", "file": "ml/loss-functions/js-divergence/gan-connection.html", "links": ["ml/loss-functions/js-divergence/properties-and-uses.html"]}
             ]
           },
           {
-            "title": "Turn Anomaly Scores into an Investigation Queue",
-            "file": "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html",
-            "links": [
-              "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"
+            "name": "earth-movers-distance",
+            "label": "Earth Mover's Distance",
+            "children": [
+              {"title": "Foundations", "file": "ml/loss-functions/earth-movers-distance/index.html", "links": ["ml/loss-functions/js-divergence/properties-and-uses.html", "ml/loss-functions/earth-movers-distance/wasserstein-1d.html"]},
+              {"title": "1D Wasserstein Distance", "file": "ml/loss-functions/earth-movers-distance/wasserstein-1d.html", "links": ["ml/loss-functions/earth-movers-distance/index.html", "ml/loss-functions/earth-movers-distance/optimal-transport-ml.html"]},
+              {"title": "Optimal Transport in ML", "file": "ml/loss-functions/earth-movers-distance/optimal-transport-ml.html", "links": ["ml/loss-functions/earth-movers-distance/wasserstein-1d.html", "ml/loss-functions/triplet-loss/index.html"]}
+            ]
+          },
+          {
+            "name": "triplet-loss",
+            "label": "Triplet Loss",
+            "children": [
+              {"title": "Foundations", "file": "ml/loss-functions/triplet-loss/index.html", "links": ["ml/loss-functions/index.html", "ml/loss-functions/triplet-loss/geometry-and-gradients.html"]},
+              {"title": "Geometry, Margin & Gradients", "file": "ml/loss-functions/triplet-loss/geometry-and-gradients.html", "links": ["ml/loss-functions/triplet-loss/index.html", "ml/loss-functions/triplet-loss/mining-and-batches.html"]},
+              {"title": "Mining & Batch Construction", "file": "ml/loss-functions/triplet-loss/mining-and-batches.html", "links": ["ml/loss-functions/triplet-loss/geometry-and-gradients.html", "ml/loss-functions/triplet-loss/training-and-evaluation.html"]},
+              {"title": "Training, Evaluation & Failures", "file": "ml/loss-functions/triplet-loss/training-and-evaluation.html", "links": ["ml/loss-functions/triplet-loss/mining-and-batches.html", "ml/loss-functions/index.html"]}
             ]
           }
-        ]
+        ],
+        "learning": {"title": "Loss & uncertainty", "requires": [], "start": "ml/loss-functions/index.html", "note": "Start with losses, entropy and cross-entropy. Return to transport and metric-learning losses when you need them."}
+      },
+      {
+        "name": "regression",
+        "label": "Regression",
+        "children": [
+          {"title": "Overview", "file": "ml/regression/index.html", "links": ["ml/regression/assumptions-linear-and-logistic.html", "ml/regression/linear/index.html"]},
+          {"title": "Assumptions: Linear vs Logistic", "file": "ml/regression/assumptions-linear-and-logistic.html", "links": ["ml/regression/index.html", "ml/regression/linear/index.html"]},
+          {
+            "name": "linear",
+            "label": "Linear Regression",
+            "children": [
+              {"title": "Overview", "file": "ml/regression/linear/index.html", "links": ["ml/regression/index.html", "ml/regression/linear/what-linear-regression-estimates.html"]},
+              {"title": "What Linear Regression Estimates", "file": "ml/regression/linear/what-linear-regression-estimates.html", "links": ["ml/regression/linear/index.html", "ml/regression/linear/ols-and-projection.html"]},
+              {"title": "OLS & Projection", "file": "ml/regression/linear/ols-and-projection.html", "links": ["ml/regression/linear/what-linear-regression-estimates.html", "ml/regression/linear/gauss-markov-and-inference.html"]},
+              {"title": "Gauss-Markov & Inference", "file": "ml/regression/linear/gauss-markov-and-inference.html", "links": ["ml/regression/linear/ols-and-projection.html", "ml/regression/linear/multicollinearity-and-fwl.html"]},
+              {"title": "Multicollinearity & FWL", "file": "ml/regression/linear/multicollinearity-and-fwl.html", "links": ["ml/regression/linear/gauss-markov-and-inference.html", "ml/regression/linear/model-specification.html"]},
+              {"title": "Model Specification", "file": "ml/regression/linear/model-specification.html", "links": ["ml/regression/linear/multicollinearity-and-fwl.html", "ml/regression/linear/numerical-solvers.html"]},
+              {"title": "Numerical Solvers", "file": "ml/regression/linear/numerical-solvers.html", "links": ["ml/regression/linear/model-specification.html", "ml/regression/linear/gradient-descent.html"]},
+              {"title": "Gradient Descent", "file": "ml/regression/linear/gradient-descent.html", "links": ["ml/regression/linear/numerical-solvers.html", "ml/regression/linear/regularization.html"]},
+              {"title": "Regularization", "file": "ml/regression/linear/regularization.html", "links": ["ml/regression/linear/gradient-descent.html", "ml/regression/linear/robust-and-quantile.html"]},
+              {"title": "Robust & Quantile Regression", "file": "ml/regression/linear/robust-and-quantile.html", "links": ["ml/regression/linear/regularization.html", "ml/regression/linear/diagnostics-and-evaluation.html"]},
+              {"title": "Diagnostics & Evaluation", "file": "ml/regression/linear/diagnostics-and-evaluation.html", "links": ["ml/regression/linear/robust-and-quantile.html", "ml/regression/linear/production-failure-modes.html"]},
+              {"title": "Production Failure Modes", "file": "ml/regression/linear/production-failure-modes.html", "links": ["ml/regression/linear/diagnostics-and-evaluation.html", "ml/regression/linear/interview-derivations.html"]},
+              {"title": "Interview Derivations", "file": "ml/regression/linear/interview-derivations.html", "links": ["ml/regression/linear/production-failure-modes.html", "ml/regression/logistic/index.html"]}
+            ]
+          },
+          {
+            "name": "logistic",
+            "label": "Logistic Regression",
+            "children": [
+              {"title": "Overview", "file": "ml/regression/logistic/index.html", "links": ["ml/regression/index.html", "ml/regression/logistic/probability-odds-and-interpretation.html"]},
+              {"title": "Probability, Odds & Interpretation", "file": "ml/regression/logistic/probability-odds-and-interpretation.html", "links": ["ml/regression/linear/what-linear-regression-estimates.html", "ml/regression/logistic/mle-and-log-loss.html"]},
+              {"title": "MLE & Log-Loss", "file": "ml/regression/logistic/mle-and-log-loss.html", "links": ["ml/regression/logistic/probability-odds-and-interpretation.html", "ml/regression/logistic/optimization-gradient-newton-irls.html"]},
+              {"title": "Gradient, Newton & IRLS", "file": "ml/regression/logistic/optimization-gradient-newton-irls.html", "links": ["ml/regression/logistic/mle-and-log-loss.html", "ml/regression/logistic/regularization-and-separation.html"]},
+              {"title": "Regularization & Separation", "file": "ml/regression/logistic/regularization-and-separation.html", "links": ["ml/regression/logistic/optimization-gradient-newton-irls.html", "ml/regression/logistic/multiclass-softmax.html"]},
+              {"title": "Multiclass & Softmax", "file": "ml/regression/logistic/multiclass-softmax.html", "links": ["ml/regression/logistic/regularization-and-separation.html", "ml/regression/logistic/thresholds-imbalance-and-costs.html"]},
+              {"title": "Thresholds, Imbalance & Costs", "file": "ml/regression/logistic/thresholds-imbalance-and-costs.html", "links": ["ml/regression/logistic/multiclass-softmax.html", "ml/regression/logistic/classification-metrics.html"]},
+              {"title": "Classification Metrics", "file": "ml/regression/logistic/classification-metrics.html", "links": ["ml/regression/logistic/thresholds-imbalance-and-costs.html", "ml/regression/logistic/calibration.html"]},
+              {"title": "Calibration", "file": "ml/regression/logistic/calibration.html", "links": ["ml/regression/logistic/classification-metrics.html", "ml/regression/logistic/diagnostics-and-production-failures.html"]},
+              {"title": "Diagnostics & Production Failures", "file": "ml/regression/logistic/diagnostics-and-production-failures.html", "links": ["ml/regression/logistic/calibration.html", "ml/regression/logistic/interview-derivations.html"]},
+              {"title": "Interview Derivations", "file": "ml/regression/logistic/interview-derivations.html", "links": ["ml/regression/logistic/diagnostics-and-production-failures.html", "from-scratch/cpp/machine-learning/regression/logistic/index.html"]}
+            ]
+          },
+          {
+            "name": "families",
+            "label": "Regression Families & Interview Guide",
+            "children": [
+              {"title": "Regression Types for Interviews", "file": "ml/regression/families/index.html", "links": ["ml/regression/index.html", "ml/regression/families/polynomial-and-basis-regression.html"]},
+              {"title": "Polynomial & Basis Regression", "file": "ml/regression/families/polynomial-and-basis-regression.html", "links": ["ml/regression/linear/model-specification.html", "ml/regression/families/splines-and-gams.html"]},
+              {"title": "Weighted & Generalized Least Squares", "file": "ml/regression/families/weighted-and-generalized-least-squares.html", "links": ["ml/regression/linear/gauss-markov-and-inference.html", "ml/regression/families/generalized-linear-models.html"]},
+              {"title": "Generalized Linear Models", "file": "ml/regression/families/generalized-linear-models.html", "links": ["ml/regression/logistic/index.html", "ml/regression/families/weighted-and-generalized-least-squares.html"]},
+              {"title": "Splines & GAMs", "file": "ml/regression/families/splines-and-gams.html", "links": ["ml/regression/families/polynomial-and-basis-regression.html", "ml/regression/families/generalized-linear-models.html"]},
+              {"title": "Bayesian Regression", "file": "ml/regression/families/bayesian-regression.html", "links": ["ml/regression/linear/regularization.html", "ml/regression/logistic/regularization-and-separation.html"]},
+              {"title": "PCR & PLS", "file": "ml/regression/families/pcr-and-pls.html", "links": ["ml/regression/linear/numerical-solvers.html", "ml/regression/linear/regularization.html"]},
+              {"title": "Censored & Survival Regression", "file": "ml/regression/families/censored-and-survival-regression.html", "links": ["ml/regression/families/generalized-linear-models.html", "ml/regression/linear/diagnostics-and-evaluation.html"]}
+            ]
+          }
+        ],
+        "learning": {"title": "Regression", "requires": ["data-preparation", "loss-functions"], "start": "ml/regression/index.html", "note": "Fit a linear baseline, then learn how logistic regression predicts probabilities."}
+      },
+      {
+        "name": "decision-trees",
+        "label": "Decision Trees",
+        "children": [
+          {
+            "name": "deep-dive",
+            "label": "Deep Dive",
+            "children": [
+              {"title": "Foundations", "file": "ml/decision-trees/deep-dive/index.html", "links": ["ml/decision-trees/handwritten-notes/index.html", "ml/decision-trees/deep-dive/impurity-and-information-gain.html"]},
+              {"title": "Impurity & Information Gain", "file": "ml/decision-trees/deep-dive/impurity-and-information-gain.html", "links": ["ml/decision-trees/deep-dive/index.html", "ml/decision-trees/deep-dive/threshold-search-edge-cases.html"]},
+              {"title": "Threshold Search & Edge Cases", "file": "ml/decision-trees/deep-dive/threshold-search-edge-cases.html", "links": ["ml/decision-trees/deep-dive/impurity-and-information-gain.html", "ml/decision-trees/deep-dive/cart-complexity-pruning.html"]},
+              {"title": "Entropy from KL Divergence", "file": "ml/decision-trees/deep-dive/entropy-from-kl.html", "links": ["ml/decision-trees/deep-dive/impurity-and-information-gain.html", "ml/decision-trees/deep-dive/cart-complexity-pruning.html"]},
+              {"title": "CART, Complexity & Pruning", "file": "ml/decision-trees/deep-dive/cart-complexity-pruning.html", "links": ["ml/decision-trees/deep-dive/entropy-from-kl.html", "ml/decision-trees/deep-dive/bagging-random-forests.html"]},
+              {"title": "Bagging & Random Forests", "file": "ml/decision-trees/deep-dive/bagging-random-forests.html", "links": ["ml/decision-trees/deep-dive/cart-complexity-pruning.html", "ml/decision-trees/deep-dive/boosting-adaboost.html"]},
+              {"title": "Boosting & AdaBoost", "file": "ml/decision-trees/deep-dive/boosting-adaboost.html", "links": ["ml/decision-trees/deep-dive/bagging-random-forests.html", "ml/gradient-boosted-machines/index.html"]}
+            ]
+          },
+          {
+            "name": "handwritten-notes",
+            "label": "Handwritten Notes",
+            "children": [
+              {"title": "Foundations", "file": "ml/decision-trees/handwritten-notes/index.html", "links": ["ml/decision-trees/handwritten-notes/entropy-information-gain.html"]},
+              {"title": "Entropy, Gini & Information Gain", "file": "ml/decision-trees/handwritten-notes/entropy-information-gain.html", "links": ["ml/decision-trees/handwritten-notes/index.html", "ml/decision-trees/handwritten-notes/entropy-from-kl.html"]},
+              {"title": "Entropy from KL Divergence", "file": "ml/decision-trees/handwritten-notes/entropy-from-kl.html", "links": ["ml/decision-trees/handwritten-notes/entropy-information-gain.html", "ml/decision-trees/handwritten-notes/cart-and-complexity.html"]},
+              {"title": "CART, Complexity & Pruning", "file": "ml/decision-trees/handwritten-notes/cart-and-complexity.html", "links": ["ml/decision-trees/handwritten-notes/entropy-from-kl.html", "ml/decision-trees/handwritten-notes/bagging-random-forests.html"]},
+              {"title": "Bagging & Random Forests", "file": "ml/decision-trees/handwritten-notes/bagging-random-forests.html", "links": ["ml/decision-trees/handwritten-notes/cart-and-complexity.html", "ml/decision-trees/handwritten-notes/boosting-adaboost.html"]},
+              {"title": "Boosting & AdaBoost", "file": "ml/decision-trees/handwritten-notes/boosting-adaboost.html", "links": ["ml/decision-trees/handwritten-notes/bagging-random-forests.html"]}
+            ]
+          }
+        ],
+        "learning": {"title": "Decision trees", "requires": ["data-preparation", "loss-functions"], "start": "ml/decision-trees/deep-dive/index.html", "note": "Learn splits, impurity and pruning before combining trees."}
+      },
+      {
+        "name": "bagging-and-boosting",
+        "label": "Bagging & Boosting",
+        "children": [
+          {"title": "Overview & Study Roadmap", "file": "ml/bagging-and-boosting/index.html", "links": ["ml/bagging-and-boosting/bagging-random-forests.html"]},
+          {"title": "Bagging & Random Forests", "file": "ml/bagging-and-boosting/bagging-random-forests.html", "links": ["ml/bagging-and-boosting/index.html", "ml/bagging-and-boosting/adaboost.html"]},
+          {"title": "AdaBoost", "file": "ml/bagging-and-boosting/adaboost.html", "links": ["ml/bagging-and-boosting/bagging-random-forests.html", "ml/bagging-and-boosting/gradient-boosting.html"]},
+          {"title": "Gradient Boosting", "file": "ml/bagging-and-boosting/gradient-boosting.html", "links": ["ml/bagging-and-boosting/adaboost.html", "ml/bagging-and-boosting/modern-boosting.html"]},
+          {"title": "XGBoost, LightGBM & CatBoost", "file": "ml/bagging-and-boosting/modern-boosting.html", "links": ["ml/bagging-and-boosting/gradient-boosting.html", "ml/bagging-and-boosting/interview-guide.html"]},
+          {"title": "Interview Questions & Practice", "file": "ml/bagging-and-boosting/interview-guide.html", "links": ["ml/bagging-and-boosting/modern-boosting.html"]}
+        ],
+        "learning": {"title": "Ensembles", "requires": ["decision-trees"], "start": "ml/bagging-and-boosting/index.html", "note": "Combine trees with bagging, then follow the sequential corrections in boosting."}
+      },
+      {
+        "name": "gradient-boosted-machines",
+        "label": "Gradient Boosted Machines",
+        "children": [
+          {"title": "Foundations", "file": "ml/gradient-boosted-machines/index.html", "links": ["ml/decision-trees/deep-dive/boosting-adaboost.html", "ml/gradient-boosted-machines/loss-functions.html"]},
+          {"title": "Loss Functions & Pseudo-Residuals", "file": "ml/gradient-boosted-machines/loss-functions.html", "links": ["ml/gradient-boosted-machines/index.html", "ml/gradient-boosted-machines/tree-base-learners.html"]},
+          {"title": "Trees as Base Learners", "file": "ml/gradient-boosted-machines/tree-base-learners.html", "links": ["ml/gradient-boosted-machines/loss-functions.html", "ml/gradient-boosted-machines/regularization.html"]},
+          {"title": "Regularization & Early Stopping", "file": "ml/gradient-boosted-machines/regularization.html", "links": ["ml/gradient-boosted-machines/tree-base-learners.html", "ml/gradient-boosted-machines/modern-gbm.html"]},
+          {"title": "Modern GBM Systems", "file": "ml/gradient-boosted-machines/modern-gbm.html", "links": ["ml/gradient-boosted-machines/regularization.html", "from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html"]}
+        ],
+        "learning": {"title": "Gradient-boosted machines", "requires": ["regression", "bagging-and-boosting"], "start": "ml/gradient-boosted-machines/index.html", "note": "Connect loss gradients to tree updates, regularization and modern boosting libraries."}
+      },
+      {
+        "name": "explainability",
+        "label": "Explainability",
+        "children": [
+          {"title": "Overview", "file": "ml/explainability/index.html", "links": ["ml/explainability/shap-lime/index.html", "from-scratch/cpp/machine-learning/explainability/index.html"]},
+          {
+            "name": "shap-lime",
+            "label": "SHAP & LIME",
+            "children": [
+              {"title": "Local Explainability", "file": "ml/explainability/shap-lime/index.html", "links": ["ml/explainability/index.html", "ml/explainability/shap-lime/lime-local-surrogates.html"]},
+              {"title": "LIME: Local Surrogates", "file": "ml/explainability/shap-lime/lime-local-surrogates.html", "links": ["ml/explainability/shap-lime/index.html", "ml/explainability/shap-lime/shapley-values.html"]},
+              {"title": "Shapley Values", "file": "ml/explainability/shap-lime/shapley-values.html", "links": ["ml/explainability/shap-lime/lime-local-surrogates.html", "ml/explainability/shap-lime/kernel-shap.html"]},
+              {"title": "Kernel SHAP", "file": "ml/explainability/shap-lime/kernel-shap.html", "links": ["ml/explainability/shap-lime/shapley-values.html", "ml/explainability/shap-lime/choosing-explainers.html"]},
+              {"title": "Choosing Explainers", "file": "ml/explainability/shap-lime/choosing-explainers.html", "links": ["ml/explainability/shap-lime/kernel-shap.html", "from-scratch/cpp/machine-learning/explainability/index.html"]}
+            ]
+          },
+          {
+            "name": "tree-shap",
+            "label": "Tree SHAP",
+            "children": [
+              {"title": "Overview", "file": "ml/explainability/tree-shap/index.html", "links": ["ml/explainability/tree-shap/path-contributions.html"]},
+              {"title": "Path Contributions", "file": "ml/explainability/tree-shap/path-contributions.html", "links": ["ml/explainability/tree-shap/index.html", "ml/explainability/tree-shap/why-tree-shap.html"]},
+              {"title": "Why Tree SHAP", "file": "ml/explainability/tree-shap/why-tree-shap.html", "links": ["ml/explainability/tree-shap/path-contributions.html", "ml/explainability/tree-shap/ensembles-and-global.html"]},
+              {"title": "Ensembles and Global Summaries", "file": "ml/explainability/tree-shap/ensembles-and-global.html", "links": ["ml/explainability/tree-shap/why-tree-shap.html", "ml/explainability/tree-shap/limitations.html"]},
+              {"title": "Limitations and Validation", "file": "ml/explainability/tree-shap/limitations.html", "links": ["ml/explainability/tree-shap/ensembles-and-global.html"]}
+            ]
+          }
+        ],
+        "learning": {"title": "Explainability", "requires": ["regression", "decision-trees"], "start": "ml/explainability/index.html", "note": "Use local linear models for LIME; learn Shapley values before TreeSHAP."}
       },
       {
         "name": "representation-learning",
         "label": "Behavioral Embeddings",
         "children": [
-          {
-            "title": "Behavioral Embeddings: Reading Guide",
-            "file": "ml/representation-learning/index.html",
-            "links": [
-              "ml/representation-learning/word2vec-from-activity-sequences.html"
-            ]
-          },
-          {
-            "title": "Word2Vec for User Behavior: From Sequences to Training Pairs",
-            "file": "ml/representation-learning/word2vec-from-activity-sequences.html",
-            "links": [
-              "ml/representation-learning/index.html",
-              "ml/representation-learning/evaluate-embeddings-and-dimensions.html"
-            ]
-          },
-          {
-            "title": "Evaluate Embeddings and Choose Their Dimension",
-            "file": "ml/representation-learning/evaluate-embeddings-and-dimensions.html",
-            "links": [
-              "ml/representation-learning/word2vec-from-activity-sequences.html"
-            ]
-          }
-        ]
+          {"title": "Behavioral Embeddings: Reading Guide", "file": "ml/representation-learning/index.html", "links": ["ml/representation-learning/word2vec-from-activity-sequences.html"]},
+          {"title": "Word2Vec for User Behavior: From Sequences to Training Pairs", "file": "ml/representation-learning/word2vec-from-activity-sequences.html", "links": ["ml/representation-learning/index.html", "ml/representation-learning/evaluate-embeddings-and-dimensions.html"]},
+          {"title": "Evaluate Embeddings and Choose Their Dimension", "file": "ml/representation-learning/evaluate-embeddings-and-dimensions.html", "links": ["ml/representation-learning/word2vec-from-activity-sequences.html"]}
+        ],
+        "learning": {"title": "Behavioral embeddings", "requires": ["data-preparation", "loss-functions"], "start": "ml/representation-learning/index.html", "note": "Review an embedding-table lookup, then learn vectors from activity sequences and evaluate them."}
       },
       {
         "name": "search-and-retrieval",
         "label": "Search & Retrieval",
         "children": [
-          {
-            "title": "Search & Retrieval: Reading Guide",
-            "file": "ml/search-and-retrieval/index.html",
-            "links": [
-              "ml/search-and-retrieval/hnsw-and-annoy-internals.html"
-            ]
-          },
-          {
-            "title": "HNSW and Annoy: Two Ways to Avoid Comparing Every Vector",
-            "file": "ml/search-and-retrieval/hnsw-and-annoy-internals.html",
-            "links": [
-              "ml/search-and-retrieval/index.html",
-              "ml/search-and-retrieval/benchmark-ann-search.html"
-            ]
-          },
-          {
-            "title": "Benchmark Vector Search: Recall, Tail Latency, Memory, and Filters",
-            "file": "ml/search-and-retrieval/benchmark-ann-search.html",
-            "links": [
-              "ml/search-and-retrieval/hnsw-and-annoy-internals.html"
-            ]
-          },
+          {"title": "Search & Retrieval: Reading Guide", "file": "ml/search-and-retrieval/index.html", "links": ["ml/search-and-retrieval/hnsw-and-annoy-internals.html"]},
+          {"title": "HNSW and Annoy: Two Ways to Avoid Comparing Every Vector", "file": "ml/search-and-retrieval/hnsw-and-annoy-internals.html", "links": ["ml/search-and-retrieval/index.html", "ml/search-and-retrieval/benchmark-ann-search.html"]},
+          {"title": "Benchmark Vector Search: Recall, Tail Latency, Memory, and Filters", "file": "ml/search-and-retrieval/benchmark-ann-search.html", "links": ["ml/search-and-retrieval/hnsw-and-annoy-internals.html"]},
           {
             "name": "evaluation",
             "label": "Evaluation",
             "children": [
-              {
-                "title": "Search & Retrieval · Evaluation: Reading Guide",
-                "file": "ml/search-and-retrieval/evaluation/index.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html"
-                ]
-              },
-              {
-                "title": "Search Evaluation Starts with Relevance, Not a Metric",
-                "file": "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/index.html",
-                  "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html"
-                ]
-              },
-              {
-                "title": "Precision, Recall, MAP, and MRR: One Ranking, Four Questions",
-                "file": "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html",
-                  "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html"
-                ]
-              },
-              {
-                "title": "nDCG: How Much Does the Order of Useful Results Matter?",
-                "file": "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html",
-                  "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html"
-                ]
-              },
-              {
-                "title": "Evaluate Retrieval and Reranking Separately",
-                "file": "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html",
-                  "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html"
-                ]
-              },
-              {
-                "title": "Did Search Improve? Paired Tests, Bootstrap Intervals, and Slices",
-                "file": "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html",
-                  "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"
-                ]
-              },
-              {
-                "title": "Clicks Are Feedback, Not Relevance Labels",
-                "file": "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html",
-                  "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html"
-                ]
-              },
-              {
-                "title": "RAG Evaluation: Find the Evidence, Use It, and Cite It",
-                "file": "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html",
-                "links": [
-                  "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"
-                ]
-              }
+              {"title": "Search & Retrieval · Evaluation: Reading Guide", "file": "ml/search-and-retrieval/evaluation/index.html", "links": ["ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html"]},
+              {"title": "Search Evaluation Starts with Relevance, Not a Metric", "file": "ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html", "links": ["ml/search-and-retrieval/evaluation/index.html", "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html"]},
+              {"title": "Precision, Recall, MAP, and MRR: One Ranking, Four Questions", "file": "ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html", "links": ["ml/search-and-retrieval/evaluation/relevance-judgments-and-test-collections.html", "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html"]},
+              {"title": "nDCG: How Much Does the Order of Useful Results Matter?", "file": "ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html", "links": ["ml/search-and-retrieval/evaluation/precision-recall-map-mrr.html", "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html"]},
+              {"title": "Evaluate Retrieval and Reranking Separately", "file": "ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html", "links": ["ml/search-and-retrieval/evaluation/ndcg-and-ranking-utility.html", "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html"]},
+              {"title": "Did Search Improve? Paired Tests, Bootstrap Intervals, and Slices", "file": "ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html", "links": ["ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html", "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"]},
+              {"title": "Clicks Are Feedback, Not Relevance Labels", "file": "ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html", "links": ["ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html", "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html"]},
+              {"title": "RAG Evaluation: Find the Evidence, Use It, and Cite It", "file": "ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html", "links": ["ml/search-and-retrieval/evaluation/online-experiments-and-click-bias.html"]}
             ]
           }
-        ]
+        ],
+        "learning": {"title": "Search & retrieval", "requires": ["representation-learning"], "start": "ml/search-and-retrieval/index.html", "note": "Use vectors for nearest-neighbor search, then study benchmarks, relevance and retrieval evaluation."}
       },
-      // APPLIED-NOTES:ml:END
-
       {
-        "name": "bagging-and-boosting",
-        "label": "Bagging & Boosting",
+        "name": "anomaly-detection",
+        "label": "Anomaly Detection",
         "children": [
-          {
-            "title": "Overview & Study Roadmap",
-            "file": "ml/bagging-and-boosting/index.html",
-            "links": [
-              "ml/bagging-and-boosting/bagging-random-forests.html"
-            ]
-          },
-          {
-            "title": "Bagging & Random Forests",
-            "file": "ml/bagging-and-boosting/bagging-random-forests.html",
-            "links": [
-              "ml/bagging-and-boosting/index.html",
-              "ml/bagging-and-boosting/adaboost.html"
-            ]
-          },
-          {
-            "title": "AdaBoost",
-            "file": "ml/bagging-and-boosting/adaboost.html",
-            "links": [
-              "ml/bagging-and-boosting/bagging-random-forests.html",
-              "ml/bagging-and-boosting/gradient-boosting.html"
-            ]
-          },
-          {
-            "title": "Gradient Boosting",
-            "file": "ml/bagging-and-boosting/gradient-boosting.html",
-            "links": [
-              "ml/bagging-and-boosting/adaboost.html",
-              "ml/bagging-and-boosting/modern-boosting.html"
-            ]
-          },
-          {
-            "title": "XGBoost, LightGBM & CatBoost",
-            "file": "ml/bagging-and-boosting/modern-boosting.html",
-            "links": [
-              "ml/bagging-and-boosting/gradient-boosting.html",
-              "ml/bagging-and-boosting/interview-guide.html"
-            ]
-          },
-          {
-            "title": "Interview Questions & Practice",
-            "file": "ml/bagging-and-boosting/interview-guide.html",
-            "links": [
-              "ml/bagging-and-boosting/modern-boosting.html"
-            ]
-          }
-        ]
+          {"title": "Anomaly Detection: Reading Guide", "file": "ml/anomaly-detection/index.html", "links": ["ml/anomaly-detection/isolation-forest-from-partitions.html"]},
+          {"title": "Isolation Forest: Follow One Point Through a Forest", "file": "ml/anomaly-detection/isolation-forest-from-partitions.html", "links": ["ml/anomaly-detection/index.html", "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"]},
+          {"title": "Model Sparse, Heavy-Tailed Telemetry Without Flagging Every Large Customer", "file": "ml/anomaly-detection/sparse-heavy-tailed-telemetry.html", "links": ["ml/anomaly-detection/isolation-forest-from-partitions.html", "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html"]},
+          {"title": "Turn Anomaly Scores into an Investigation Queue", "file": "ml/anomaly-detection/anomaly-queues-thresholds-and-explanations.html", "links": ["ml/anomaly-detection/sparse-heavy-tailed-telemetry.html"]}
+        ],
+        "learning": {"title": "Anomaly detection", "requires": ["decision-trees"], "start": "ml/anomaly-detection/index.html", "note": "Connect random tree partitions to unusualness scores, telemetry and review queues."}
       },
       {
-        name: 'regression',
-        label: 'Regression',
-        children: [
-          { title: 'Overview', file: 'ml/regression/index.html', links: ['ml/regression/assumptions-linear-and-logistic.html', 'ml/regression/linear/index.html'] },
-          { title: 'Assumptions: Linear vs Logistic', file: 'ml/regression/assumptions-linear-and-logistic.html', links: ['ml/regression/index.html', 'ml/regression/linear/index.html'] },
-          {
-            name: 'linear',
-            label: 'Linear Regression',
-            children: [
-              { title: 'Overview', file: 'ml/regression/linear/index.html', links: ['ml/regression/index.html', 'ml/regression/linear/what-linear-regression-estimates.html'] },
-              { title: 'What Linear Regression Estimates', file: 'ml/regression/linear/what-linear-regression-estimates.html', links: ['ml/regression/linear/index.html', 'ml/regression/linear/ols-and-projection.html'] },
-              { title: 'OLS & Projection', file: 'ml/regression/linear/ols-and-projection.html', links: ['ml/regression/linear/what-linear-regression-estimates.html', 'ml/regression/linear/gauss-markov-and-inference.html'] },
-              { title: 'Gauss-Markov & Inference', file: 'ml/regression/linear/gauss-markov-and-inference.html', links: ['ml/regression/linear/ols-and-projection.html', 'ml/regression/linear/multicollinearity-and-fwl.html'] },
-              { title: 'Multicollinearity & FWL', file: 'ml/regression/linear/multicollinearity-and-fwl.html', links: ['ml/regression/linear/gauss-markov-and-inference.html', 'ml/regression/linear/model-specification.html'] },
-              { title: 'Model Specification', file: 'ml/regression/linear/model-specification.html', links: ['ml/regression/linear/multicollinearity-and-fwl.html', 'ml/regression/linear/numerical-solvers.html'] },
-              { title: 'Numerical Solvers', file: 'ml/regression/linear/numerical-solvers.html', links: ['ml/regression/linear/model-specification.html', 'ml/regression/linear/gradient-descent.html'] },
-              { title: 'Gradient Descent', file: 'ml/regression/linear/gradient-descent.html', links: ['ml/regression/linear/numerical-solvers.html', 'ml/regression/linear/regularization.html'] },
-              { title: 'Regularization', file: 'ml/regression/linear/regularization.html', links: ['ml/regression/linear/gradient-descent.html', 'ml/regression/linear/robust-and-quantile.html'] },
-              { title: 'Robust & Quantile Regression', file: 'ml/regression/linear/robust-and-quantile.html', links: ['ml/regression/linear/regularization.html', 'ml/regression/linear/diagnostics-and-evaluation.html'] },
-              { title: 'Diagnostics & Evaluation', file: 'ml/regression/linear/diagnostics-and-evaluation.html', links: ['ml/regression/linear/robust-and-quantile.html', 'ml/regression/linear/production-failure-modes.html'] },
-              { title: 'Production Failure Modes', file: 'ml/regression/linear/production-failure-modes.html', links: ['ml/regression/linear/diagnostics-and-evaluation.html', 'ml/regression/linear/interview-derivations.html'] },
-              { title: 'Interview Derivations', file: 'ml/regression/linear/interview-derivations.html', links: ['ml/regression/linear/production-failure-modes.html', 'ml/regression/logistic/index.html'] }
-            ]
-          },
-          {
-            name: 'logistic',
-            label: 'Logistic Regression',
-            children: [
-              { title: 'Overview', file: 'ml/regression/logistic/index.html', links: ['ml/regression/index.html', 'ml/regression/logistic/probability-odds-and-interpretation.html'] },
-              { title: 'Probability, Odds & Interpretation', file: 'ml/regression/logistic/probability-odds-and-interpretation.html', links: ['ml/regression/linear/what-linear-regression-estimates.html', 'ml/regression/logistic/mle-and-log-loss.html'] },
-              { title: 'MLE & Log-Loss', file: 'ml/regression/logistic/mle-and-log-loss.html', links: ['ml/regression/logistic/probability-odds-and-interpretation.html', 'ml/regression/logistic/optimization-gradient-newton-irls.html'] },
-              { title: 'Gradient, Newton & IRLS', file: 'ml/regression/logistic/optimization-gradient-newton-irls.html', links: ['ml/regression/logistic/mle-and-log-loss.html', 'ml/regression/logistic/regularization-and-separation.html'] },
-              { title: 'Regularization & Separation', file: 'ml/regression/logistic/regularization-and-separation.html', links: ['ml/regression/logistic/optimization-gradient-newton-irls.html', 'ml/regression/logistic/multiclass-softmax.html'] },
-              { title: 'Multiclass & Softmax', file: 'ml/regression/logistic/multiclass-softmax.html', links: ['ml/regression/logistic/regularization-and-separation.html', 'ml/regression/logistic/thresholds-imbalance-and-costs.html'] },
-              { title: 'Thresholds, Imbalance & Costs', file: 'ml/regression/logistic/thresholds-imbalance-and-costs.html', links: ['ml/regression/logistic/multiclass-softmax.html', 'ml/regression/logistic/classification-metrics.html'] },
-              { title: 'Classification Metrics', file: 'ml/regression/logistic/classification-metrics.html', links: ['ml/regression/logistic/thresholds-imbalance-and-costs.html', 'ml/regression/logistic/calibration.html'] },
-              { title: 'Calibration', file: 'ml/regression/logistic/calibration.html', links: ['ml/regression/logistic/classification-metrics.html', 'ml/regression/logistic/diagnostics-and-production-failures.html'] },
-              { title: 'Diagnostics & Production Failures', file: 'ml/regression/logistic/diagnostics-and-production-failures.html', links: ['ml/regression/logistic/calibration.html', 'ml/regression/logistic/interview-derivations.html'] },
-              { title: 'Interview Derivations', file: 'ml/regression/logistic/interview-derivations.html', links: ['ml/regression/logistic/diagnostics-and-production-failures.html', 'from-scratch/cpp/machine-learning/regression/logistic/index.html'] }
-            ]
-          },
-          {
-            name: 'families',
-            label: 'Regression Families & Interview Guide',
-            children: [
-              { title: 'Regression Types for Interviews', file: 'ml/regression/families/index.html', links: ['ml/regression/index.html', 'ml/regression/families/polynomial-and-basis-regression.html'] },
-              { title: 'Polynomial & Basis Regression', file: 'ml/regression/families/polynomial-and-basis-regression.html', links: ['ml/regression/linear/model-specification.html', 'ml/regression/families/splines-and-gams.html'] },
-              { title: 'Weighted & Generalized Least Squares', file: 'ml/regression/families/weighted-and-generalized-least-squares.html', links: ['ml/regression/linear/gauss-markov-and-inference.html', 'ml/regression/families/generalized-linear-models.html'] },
-              { title: 'Generalized Linear Models', file: 'ml/regression/families/generalized-linear-models.html', links: ['ml/regression/logistic/index.html', 'ml/regression/families/weighted-and-generalized-least-squares.html'] },
-              { title: 'Splines & GAMs', file: 'ml/regression/families/splines-and-gams.html', links: ['ml/regression/families/polynomial-and-basis-regression.html', 'ml/regression/families/generalized-linear-models.html'] },
-              { title: 'Bayesian Regression', file: 'ml/regression/families/bayesian-regression.html', links: ['ml/regression/linear/regularization.html', 'ml/regression/logistic/regularization-and-separation.html'] },
-              { title: 'PCR & PLS', file: 'ml/regression/families/pcr-and-pls.html', links: ['ml/regression/linear/numerical-solvers.html', 'ml/regression/linear/regularization.html'] },
-              { title: 'Censored & Survival Regression', file: 'ml/regression/families/censored-and-survival-regression.html', links: ['ml/regression/families/generalized-linear-models.html', 'ml/regression/linear/diagnostics-and-evaluation.html'] }
-            ]
-          }
-        ]
+        "name": "graph-ml",
+        "label": "Graph ML for Risk Modeling",
+        "children": [
+          {"title": "Graph ML for Risk Modeling: Reading Guide", "file": "ml/graph-ml/index.html", "links": ["ml/graph-ml/build-an-application-graph.html"]},
+          {"title": "Graph-Based Risk Modeling: Start with the Relationships", "file": "ml/graph-ml/build-an-application-graph.html", "links": ["ml/graph-ml/index.html", "ml/graph-ml/neighborhood-evidence-and-propagation.html"]},
+          {"title": "From Neighborhood Evidence to a Risk Score", "file": "ml/graph-ml/neighborhood-evidence-and-propagation.html", "links": ["ml/graph-ml/build-an-application-graph.html", "ml/graph-ml/evaluate-graph-risk.html"]},
+          {"title": "Evaluate Graph Risk at a Fixed Precision and a Realistic Time Cutoff", "file": "ml/graph-ml/evaluate-graph-risk.html", "links": ["ml/graph-ml/neighborhood-evidence-and-propagation.html"]}
+        ],
+        "learning": {"title": "Graph ML", "requires": ["gradient-boosted-machines"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
-        name: 'decision-trees',
-        label: 'Decision Trees',
-        children: [
+        "name": "recommended-papers",
+        "label": "Recommended Papers",
+        "children": [
+          {"title": "Overview", "file": "ml/recommended-papers/index.html"},
           {
-            name: 'handwritten-notes',
-            label: 'Handwritten Notes',
-            children: [
-              { title: 'Foundations', file: 'ml/decision-trees/handwritten-notes/index.html', links: ['ml/decision-trees/handwritten-notes/entropy-information-gain.html'] },
-              { title: 'Entropy, Gini & Information Gain', file: 'ml/decision-trees/handwritten-notes/entropy-information-gain.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'ml/decision-trees/handwritten-notes/entropy-from-kl.html'] },
-              { title: 'Entropy from KL Divergence', file: 'ml/decision-trees/handwritten-notes/entropy-from-kl.html', links: ['ml/decision-trees/handwritten-notes/entropy-information-gain.html', 'ml/decision-trees/handwritten-notes/cart-and-complexity.html'] },
-              { title: 'CART, Complexity & Pruning', file: 'ml/decision-trees/handwritten-notes/cart-and-complexity.html', links: ['ml/decision-trees/handwritten-notes/entropy-from-kl.html', 'ml/decision-trees/handwritten-notes/bagging-random-forests.html'] },
-              { title: 'Bagging & Random Forests', file: 'ml/decision-trees/handwritten-notes/bagging-random-forests.html', links: ['ml/decision-trees/handwritten-notes/cart-and-complexity.html', 'ml/decision-trees/handwritten-notes/boosting-adaboost.html'] },
-              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/handwritten-notes/boosting-adaboost.html', links: ['ml/decision-trees/handwritten-notes/bagging-random-forests.html'] }
-            ]
-          },
-          {
-            name: 'deep-dive',
-            label: 'Deep Dive',
-            children: [
-              { title: 'Foundations', file: 'ml/decision-trees/deep-dive/index.html', links: ['ml/decision-trees/handwritten-notes/index.html', 'ml/decision-trees/deep-dive/impurity-and-information-gain.html'] },
-              { title: 'Impurity & Information Gain', file: 'ml/decision-trees/deep-dive/impurity-and-information-gain.html', links: ['ml/decision-trees/deep-dive/index.html', 'ml/decision-trees/deep-dive/threshold-search-edge-cases.html'] },
-              { title: 'Threshold Search & Edge Cases', file: 'ml/decision-trees/deep-dive/threshold-search-edge-cases.html', links: ['ml/decision-trees/deep-dive/impurity-and-information-gain.html', 'ml/decision-trees/deep-dive/cart-complexity-pruning.html'] },
-              { title: 'Entropy from KL Divergence', file: 'ml/decision-trees/deep-dive/entropy-from-kl.html', links: ['ml/decision-trees/deep-dive/impurity-and-information-gain.html', 'ml/decision-trees/deep-dive/cart-complexity-pruning.html'] },
-              { title: 'CART, Complexity & Pruning', file: 'ml/decision-trees/deep-dive/cart-complexity-pruning.html', links: ['ml/decision-trees/deep-dive/entropy-from-kl.html', 'ml/decision-trees/deep-dive/bagging-random-forests.html'] },
-              { title: 'Bagging & Random Forests', file: 'ml/decision-trees/deep-dive/bagging-random-forests.html', links: ['ml/decision-trees/deep-dive/cart-complexity-pruning.html', 'ml/decision-trees/deep-dive/boosting-adaboost.html'] },
-              { title: 'Boosting & AdaBoost', file: 'ml/decision-trees/deep-dive/boosting-adaboost.html', links: ['ml/decision-trees/deep-dive/bagging-random-forests.html', 'ml/gradient-boosted-machines/index.html'] }
-            ]
-          }
-        ]
-      },
-      {
-        name: 'gradient-boosted-machines',
-        label: 'Gradient Boosted Machines',
-        children: [
-          { title: 'Foundations', file: 'ml/gradient-boosted-machines/index.html', links: ['ml/decision-trees/deep-dive/boosting-adaboost.html', 'ml/gradient-boosted-machines/loss-functions.html'] },
-          { title: 'Loss Functions & Pseudo-Residuals', file: 'ml/gradient-boosted-machines/loss-functions.html', links: ['ml/gradient-boosted-machines/index.html', 'ml/gradient-boosted-machines/tree-base-learners.html'] },
-          { title: 'Trees as Base Learners', file: 'ml/gradient-boosted-machines/tree-base-learners.html', links: ['ml/gradient-boosted-machines/loss-functions.html', 'ml/gradient-boosted-machines/regularization.html'] },
-          { title: 'Regularization & Early Stopping', file: 'ml/gradient-boosted-machines/regularization.html', links: ['ml/gradient-boosted-machines/tree-base-learners.html', 'ml/gradient-boosted-machines/modern-gbm.html'] },
-          { title: 'Modern GBM Systems', file: 'ml/gradient-boosted-machines/modern-gbm.html', links: ['ml/gradient-boosted-machines/regularization.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html'] }
-        ]
-      },
-      {
-        name: 'loss-functions',
-        label: 'Loss Functions',
-        children: [
-          { title: 'Overview', file: 'ml/loss-functions/index.html', links: ['ml/loss-functions/entropy/index.html', 'ml/loss-functions/triplet-loss/index.html'] },
-          {
-            name: 'entropy',
-            label: 'Entropy',
-            children: [
-              { title: 'Entropy Foundations', file: 'ml/loss-functions/entropy/index.html', links: ['ml/loss-functions/index.html', 'ml/loss-functions/entropy/binary-entropy.html'] },
-              { title: 'Binary Entropy', file: 'ml/loss-functions/entropy/binary-entropy.html', links: ['ml/loss-functions/entropy/index.html', 'ml/loss-functions/entropy/cross-entropy-kl.html'] },
-              { title: 'Cross-Entropy & KL Divergence', file: 'ml/loss-functions/entropy/cross-entropy-kl.html', links: ['ml/loss-functions/entropy/binary-entropy.html', 'ml/loss-functions/entropy/information-gain.html'] },
-              { title: 'Entropy & Information Gain', file: 'ml/loss-functions/entropy/information-gain.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/entropy/maximum-entropy.html'] },
-              { title: 'Maximum Entropy & Calibration', file: 'ml/loss-functions/entropy/maximum-entropy.html', links: ['ml/loss-functions/entropy/information-gain.html', 'ml/loss-functions/index.html'] }
-            ]
-          },
-          {
-            name: 'kl-divergence',
-            label: 'KL Divergence',
-            children: [
-              { title: 'Foundations', file: 'ml/loss-functions/kl-divergence/index.html', links: ['ml/loss-functions/entropy/cross-entropy-kl.html', 'ml/loss-functions/kl-divergence/forward-vs-reverse.html'] },
-              { title: 'Forward vs Reverse KL', file: 'ml/loss-functions/kl-divergence/forward-vs-reverse.html', links: ['ml/loss-functions/kl-divergence/index.html', 'ml/loss-functions/kl-divergence/kl-in-ml.html'] },
-              { title: 'KL in ML Objectives', file: 'ml/loss-functions/kl-divergence/kl-in-ml.html', links: ['ml/loss-functions/kl-divergence/forward-vs-reverse.html', 'ml/loss-functions/js-divergence/index.html'] }
-            ]
-          },
-          {
-            name: 'js-divergence',
-            label: 'JS Divergence',
-            children: [
-              { title: 'Foundations', file: 'ml/loss-functions/js-divergence/index.html', links: ['ml/loss-functions/kl-divergence/kl-in-ml.html', 'ml/loss-functions/js-divergence/gan-connection.html'] },
-              { title: 'JS Divergence and GANs', file: 'ml/loss-functions/js-divergence/gan-connection.html', links: ['ml/loss-functions/js-divergence/index.html', 'ml/loss-functions/js-divergence/properties-and-uses.html'] },
-              { title: 'Properties and Uses', file: 'ml/loss-functions/js-divergence/properties-and-uses.html', links: ['ml/loss-functions/js-divergence/gan-connection.html', 'ml/loss-functions/earth-movers-distance/index.html'] }
-            ]
-          },
-          {
-            name: 'earth-movers-distance',
-            label: "Earth Mover's Distance",
-            children: [
-              { title: 'Foundations', file: 'ml/loss-functions/earth-movers-distance/index.html', links: ['ml/loss-functions/js-divergence/properties-and-uses.html', 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html'] },
-              { title: '1D Wasserstein Distance', file: 'ml/loss-functions/earth-movers-distance/wasserstein-1d.html', links: ['ml/loss-functions/earth-movers-distance/index.html', 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html'] },
-              { title: 'Optimal Transport in ML', file: 'ml/loss-functions/earth-movers-distance/optimal-transport-ml.html', links: ['ml/loss-functions/earth-movers-distance/wasserstein-1d.html', 'ml/loss-functions/triplet-loss/index.html'] }
-            ]
-          },
-          {
-            name: 'triplet-loss',
-            label: 'Triplet Loss',
-            children: [
-              { title: 'Foundations', file: 'ml/loss-functions/triplet-loss/index.html', links: ['ml/loss-functions/index.html', 'ml/loss-functions/triplet-loss/geometry-and-gradients.html'] },
-              { title: 'Geometry, Margin & Gradients', file: 'ml/loss-functions/triplet-loss/geometry-and-gradients.html', links: ['ml/loss-functions/triplet-loss/index.html', 'ml/loss-functions/triplet-loss/mining-and-batches.html'] },
-              { title: 'Mining & Batch Construction', file: 'ml/loss-functions/triplet-loss/mining-and-batches.html', links: ['ml/loss-functions/triplet-loss/geometry-and-gradients.html', 'ml/loss-functions/triplet-loss/training-and-evaluation.html'] },
-              { title: 'Training, Evaluation & Failures', file: 'ml/loss-functions/triplet-loss/training-and-evaluation.html', links: ['ml/loss-functions/triplet-loss/mining-and-batches.html', 'ml/loss-functions/index.html'] }
-            ]
-          }
-        ]
-      },
-      {
-        name: 'explainability',
-        label: 'Explainability',
-        children: [
-          { title: 'Overview', file: 'ml/explainability/index.html', links: ['ml/explainability/shap-lime/index.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] },
-          {
-            name: 'shap-lime',
-            label: 'SHAP & LIME',
-            children: [
-              { title: 'Local Explainability', file: 'ml/explainability/shap-lime/index.html', links: ['ml/explainability/index.html', 'ml/explainability/shap-lime/lime-local-surrogates.html'] },
-              { title: 'LIME: Local Surrogates', file: 'ml/explainability/shap-lime/lime-local-surrogates.html', links: ['ml/explainability/shap-lime/index.html', 'ml/explainability/shap-lime/shapley-values.html'] },
-              { title: 'Shapley Values', file: 'ml/explainability/shap-lime/shapley-values.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'ml/explainability/shap-lime/kernel-shap.html'] },
-              { title: 'Kernel SHAP', file: 'ml/explainability/shap-lime/kernel-shap.html', links: ['ml/explainability/shap-lime/shapley-values.html', 'ml/explainability/shap-lime/choosing-explainers.html'] },
-              { title: 'Choosing Explainers', file: 'ml/explainability/shap-lime/choosing-explainers.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'from-scratch/cpp/machine-learning/explainability/index.html'] }
-            ]
-          },
-          {
-            name: 'tree-shap',
-            label: 'Tree SHAP',
-            children: [
-              { title: 'Overview', file: 'ml/explainability/tree-shap/index.html', links: ['ml/explainability/shap-lime/choosing-explainers.html', 'ml/explainability/tree-shap/why-tree-shap.html'] },
-              { title: 'Why Tree SHAP', file: 'ml/explainability/tree-shap/why-tree-shap.html', links: ['ml/explainability/tree-shap/index.html', 'ml/explainability/tree-shap/path-contributions.html'] },
-              { title: 'Path Contributions', file: 'ml/explainability/tree-shap/path-contributions.html', links: ['ml/explainability/tree-shap/why-tree-shap.html', 'ml/explainability/tree-shap/ensembles-and-global.html'] },
-              { title: 'Ensembles and Global Summaries', file: 'ml/explainability/tree-shap/ensembles-and-global.html', links: ['ml/explainability/tree-shap/path-contributions.html', 'ml/explainability/tree-shap/limitations.html'] },
-              { title: 'Limitations and Validation', file: 'ml/explainability/tree-shap/limitations.html', links: ['ml/explainability/tree-shap/ensembles-and-global.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html'] }
-            ]
-          }
-        ]
-      },
-      {
-        name: 'data-preparation',
-        label: 'Data Preparation and Preprocessing',
-        children: [
-          { title: 'Foundations', file: 'ml/data-preparation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/index.html', 'ml/data-preparation/train-test-split/index.html'] },
-          {
-            name: 'train-test-split',
-            label: 'Splitting & Stratification',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/train-test-split/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/train-test-split.html', 'ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'The Hold-Out Split', file: 'ml/data-preparation/train-test-split/hold-out-split.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Train, Validation, and Test', file: 'ml/data-preparation/train-test-split/train-validation-test.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Stratified Splitting', file: 'ml/data-preparation/train-test-split/stratified-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Group Splitting', file: 'ml/data-preparation/train-test-split/group-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Time-Series Splitting', file: 'ml/data-preparation/train-test-split/time-series-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Data Leakage in Splitting', file: 'ml/data-preparation/train-test-split/data-leakage-in-splitting.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Reproducibility and Random Seeds', file: 'ml/data-preparation/train-test-split/reproducibility-and-seeds.html', links: ['ml/data-preparation/train-test-split/index.html'] },
-              { title: 'Hold-Out vs Cross-Validation', file: 'ml/data-preparation/train-test-split/holdout-vs-cross-validation.html', links: ['ml/data-preparation/train-test-split/index.html'] }
-            ]
-          },
-          {
-            name: 'feature-scaling',
-            label: 'Feature Scaling',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/feature-scaling/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/feature-scaling.html', 'ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Standardization (Z-Score)', file: 'ml/data-preparation/feature-scaling/standardization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'Min-Max Normalization', file: 'ml/data-preparation/feature-scaling/min-max-normalization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'Robust Scaling', file: 'ml/data-preparation/feature-scaling/robust-scaling.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'Max-Abs and Unit-Norm Scaling', file: 'ml/data-preparation/feature-scaling/max-abs-and-unit-norm.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'When Scaling Matters', file: 'ml/data-preparation/feature-scaling/when-to-scale.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'Normalization vs Standardization', file: 'ml/data-preparation/feature-scaling/normalization-vs-standardization.html', links: ['ml/data-preparation/feature-scaling/index.html'] },
-              { title: 'Scaling Sparse Data', file: 'ml/data-preparation/feature-scaling/scaling-sparse-data.html', links: ['ml/data-preparation/feature-scaling/index.html'] }
-            ]
-          },
-          {
-            name: 'encoding-categoricals',
-            label: 'Encoding Categorical Features',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/encoding-categoricals/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/encoding-categoricals.html', 'ml/data-preparation/missing-values/index.html'] },
-              { title: 'Label Encoding', file: 'ml/data-preparation/encoding-categoricals/label-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Ordinal Encoding', file: 'ml/data-preparation/encoding-categoricals/ordinal-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'One-Hot Encoding', file: 'ml/data-preparation/encoding-categoricals/one-hot-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Target (Mean) Encoding', file: 'ml/data-preparation/encoding-categoricals/target-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Frequency and Count Encoding', file: 'ml/data-preparation/encoding-categoricals/frequency-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Hashing and High Cardinality', file: 'ml/data-preparation/encoding-categoricals/hashing-high-cardinality.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Binary Encoding', file: 'ml/data-preparation/encoding-categoricals/binary-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Cyclical Encoding (sin/cos)', file: 'ml/data-preparation/encoding-categoricals/cyclical-encoding.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Weight of Evidence', file: 'ml/data-preparation/encoding-categoricals/weight-of-evidence.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] },
-              { title: 'Rare-Category Grouping', file: 'ml/data-preparation/encoding-categoricals/rare-category-grouping.html', links: ['ml/data-preparation/encoding-categoricals/index.html'] }
-            ]
-          },
-          {
-            name: 'missing-values',
-            label: 'Handling Missing Data',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/missing-values/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/missing-values.html', 'ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Missingness Mechanisms: MCAR, MAR, MNAR', file: 'ml/data-preparation/missing-values/missingness-mechanisms.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Deletion: Listwise and Pairwise', file: 'ml/data-preparation/missing-values/deletion.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Mean, Median, and Mode Imputation', file: 'ml/data-preparation/missing-values/simple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'KNN Imputation', file: 'ml/data-preparation/missing-values/knn-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Iterative (Model-Based) Imputation', file: 'ml/data-preparation/missing-values/iterative-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Missingness Indicators', file: 'ml/data-preparation/missing-values/missingness-indicators.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Forward and Backward Fill', file: 'ml/data-preparation/missing-values/forward-backward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Forward Fill', file: 'ml/data-preparation/missing-values/forward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Backward Fill', file: 'ml/data-preparation/missing-values/backward-fill.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Constant and Sentinel Imputation', file: 'ml/data-preparation/missing-values/constant-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] },
-              { title: 'Multiple Imputation', file: 'ml/data-preparation/missing-values/multiple-imputation.html', links: ['ml/data-preparation/missing-values/index.html'] }
-            ]
-          },
-          {
-            name: 'cross-validation',
-            label: 'Cross-Validation',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/cross-validation/index.html', links: ['from-scratch/cpp/machine-learning/data-preprocessing/k-fold-cross-validation.html', 'ml/data-preparation/index.html'] },
-              { title: 'K-Fold Cross-Validation', file: 'ml/data-preparation/cross-validation/k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Stratified K-Fold', file: 'ml/data-preparation/cross-validation/stratified-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Leave-One-Out (LOOCV)', file: 'ml/data-preparation/cross-validation/leave-one-out.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Group K-Fold', file: 'ml/data-preparation/cross-validation/group-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Time-Series Cross-Validation', file: 'ml/data-preparation/cross-validation/time-series-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Nested Cross-Validation', file: 'ml/data-preparation/cross-validation/nested-cv.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Repeated K-Fold', file: 'ml/data-preparation/cross-validation/repeated-k-fold.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Shuffle-Split (Monte Carlo CV)', file: 'ml/data-preparation/cross-validation/shuffle-split.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Choosing k: Bias and Variance', file: 'ml/data-preparation/cross-validation/choosing-k.html', links: ['ml/data-preparation/cross-validation/index.html'] },
-              { title: 'Cross-Validation for Hyperparameter Tuning', file: 'ml/data-preparation/cross-validation/cv-for-tuning.html', links: ['ml/data-preparation/cross-validation/index.html'] }
-            ]
-          },
-          {
-            name: 'data-cleaning',
-            label: 'Data Cleaning',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/data-cleaning/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Duplicate Records', file: 'ml/data-preparation/data-cleaning/duplicate-records.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
-              { title: 'Data Types and Parsing', file: 'ml/data-preparation/data-cleaning/data-types-and-parsing.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
-              { title: 'Text Normalization', file: 'ml/data-preparation/data-cleaning/text-normalization.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
-              { title: 'Units and Consistency', file: 'ml/data-preparation/data-cleaning/units-and-consistency.html', links: ['ml/data-preparation/data-cleaning/index.html'] },
-              { title: 'Errors vs Outliers', file: 'ml/data-preparation/data-cleaning/errors-vs-outliers.html', links: ['ml/data-preparation/data-cleaning/index.html'] }
-            ]
-          },
-          {
-            name: 'outliers',
-            label: 'Outlier Detection and Treatment',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/outliers/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'What Is an Outlier', file: 'ml/data-preparation/outliers/what-is-an-outlier.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'Z-Score Method', file: 'ml/data-preparation/outliers/z-score-method.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'IQR Method', file: 'ml/data-preparation/outliers/iqr-method.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'Isolation Forest', file: 'ml/data-preparation/outliers/isolation-forest.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'Local Outlier Factor', file: 'ml/data-preparation/outliers/local-outlier-factor.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'Winsorizing and Capping', file: 'ml/data-preparation/outliers/winsorizing-and-capping.html', links: ['ml/data-preparation/outliers/index.html'] },
-              { title: 'Remove, Cap, or Keep', file: 'ml/data-preparation/outliers/remove-vs-keep.html', links: ['ml/data-preparation/outliers/index.html'] }
-            ]
-          },
-          {
-            name: 'feature-transformation',
-            label: 'Feature Transformation',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/feature-transformation/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Skewness: What It Measures and When It Matters', file: 'ml/data-preparation/feature-transformation/skewness.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
-              { title: 'Log Transform', file: 'ml/data-preparation/feature-transformation/log-transform.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
-              { title: 'Box-Cox Transform', file: 'ml/data-preparation/feature-transformation/box-cox.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
-              { title: 'Yeo-Johnson Transform', file: 'ml/data-preparation/feature-transformation/yeo-johnson.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
-              { title: 'Quantile and Rank Transform', file: 'ml/data-preparation/feature-transformation/quantile-transform.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
-              { title: 'Power Transforms', file: 'ml/data-preparation/feature-transformation/power-transforms.html', links: ['ml/data-preparation/feature-transformation/index.html'] }
-            ]
-          },
-          {
-            name: 'feature-engineering',
-            label: 'Feature Engineering',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/feature-engineering/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Interaction Features', file: 'ml/data-preparation/feature-engineering/interaction-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
-              { title: 'Polynomial Features', file: 'ml/data-preparation/feature-engineering/polynomial-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
-              { title: 'Binning and Discretization', file: 'ml/data-preparation/feature-engineering/binning-discretization.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
-              { title: 'Datetime Features', file: 'ml/data-preparation/feature-engineering/datetime-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
-              { title: 'Aggregation and Group Features', file: 'ml/data-preparation/feature-engineering/aggregation-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] },
-              { title: 'Text Features (Bag of Words, TF-IDF)', file: 'ml/data-preparation/feature-engineering/text-features.html', links: ['ml/data-preparation/feature-engineering/index.html'] }
-            ]
-          },
-          {
-            name: 'feature-selection',
-            label: 'Feature Selection',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/feature-selection/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Why Select Features', file: 'ml/data-preparation/feature-selection/why-feature-selection.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Variance Threshold', file: 'ml/data-preparation/feature-selection/variance-threshold.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Correlation Filter', file: 'ml/data-preparation/feature-selection/correlation-filter.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Mutual Information', file: 'ml/data-preparation/feature-selection/mutual-information.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Chi-Square Test', file: 'ml/data-preparation/feature-selection/chi-square.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Recursive Feature Elimination', file: 'ml/data-preparation/feature-selection/recursive-feature-elimination.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'L1 (Lasso) Selection', file: 'ml/data-preparation/feature-selection/l1-regularization.html', links: ['ml/data-preparation/feature-selection/index.html'] },
-              { title: 'Tree Feature Importance', file: 'ml/data-preparation/feature-selection/feature-importance.html', links: ['ml/data-preparation/feature-selection/index.html'] }
-            ]
-          },
-          {
-            name: 'imbalance',
-            label: 'Class Imbalance and Resampling',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/imbalance/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'The Imbalance Problem', file: 'ml/data-preparation/imbalance/the-imbalance-problem.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'Random Oversampling', file: 'ml/data-preparation/imbalance/random-oversampling.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'Random Undersampling', file: 'ml/data-preparation/imbalance/random-undersampling.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'SMOTE', file: 'ml/data-preparation/imbalance/smote.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'ADASYN', file: 'ml/data-preparation/imbalance/adasyn.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'Class Weights', file: 'ml/data-preparation/imbalance/class-weights.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'Threshold Moving', file: 'ml/data-preparation/imbalance/threshold-moving.html', links: ['ml/data-preparation/imbalance/index.html'] },
-              { title: 'Evaluating Under Imbalance', file: 'ml/data-preparation/imbalance/evaluating-imbalance.html', links: ['ml/data-preparation/imbalance/index.html'] }
-            ]
-          },
-          {
-            name: 'dimensionality-reduction',
-            label: 'Dimensionality Reduction',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/dimensionality-reduction/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'The Curse of Dimensionality', file: 'ml/data-preparation/dimensionality-reduction/curse-of-dimensionality.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 'Principal Component Analysis (PCA)', file: 'ml/data-preparation/dimensionality-reduction/pca.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 'Kernel PCA', file: 'ml/data-preparation/dimensionality-reduction/kernel-pca.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 'Linear Discriminant Analysis (LDA)', file: 'ml/data-preparation/dimensionality-reduction/lda.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 't-SNE', file: 'ml/data-preparation/dimensionality-reduction/t-sne.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 'UMAP', file: 'ml/data-preparation/dimensionality-reduction/umap.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] },
-              { title: 'Autoencoders', file: 'ml/data-preparation/dimensionality-reduction/autoencoders.html', links: ['ml/data-preparation/dimensionality-reduction/index.html'] }
-            ]
-          },
-          {
-            name: 'pipelines',
-            label: 'Pipelines and Reproducibility',
-            children: [
-              { title: 'Overview', file: 'ml/data-preparation/pipelines/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Preprocessing Pipelines', file: 'ml/data-preparation/pipelines/preprocessing-pipelines.html', links: ['ml/data-preparation/pipelines/index.html'] },
-              { title: 'Column Transformer', file: 'ml/data-preparation/pipelines/column-transformer.html', links: ['ml/data-preparation/pipelines/index.html'] },
-              { title: 'Avoiding Leakage with Pipelines', file: 'ml/data-preparation/pipelines/avoiding-leakage.html', links: ['ml/data-preparation/pipelines/index.html'] },
-              { title: 'Saving and Serializing Transformers', file: 'ml/data-preparation/pipelines/saving-transformers.html', links: ['ml/data-preparation/pipelines/index.html'] },
-              { title: 'Reproducibility', file: 'ml/data-preparation/pipelines/reproducibility.html', links: ['ml/data-preparation/pipelines/index.html'] }
-            ]
-          }
-        ]
-      },
-      {
-        name: 'recommended-papers',
-        label: 'Recommended Papers',
-        children: [
-          { title: 'Overview', file: 'ml/recommended-papers/index.html' },
-          {
-            name: 'nlp',
-            label: 'NLP',
-            children: [
-              { title: 'Overview', file: 'ml/recommended-papers/nlp/index.html' },
-              { title: 'Entropy of English', file: 'ml/recommended-papers/nlp/shannon-1950-entropy.html' },
-              { title: 'First Neural Language Model', file: 'ml/recommended-papers/nlp/bengio-2003-neural-lm.html' },
-              { title: 'Seq2Seq', file: 'ml/recommended-papers/nlp/sutskever-2014-seq2seq.html' },
-              { title: 'Attention Mechanism', file: 'ml/recommended-papers/nlp/bahdanau-2015-attention.html' },
-              { title: 'BPE for NMT', file: 'ml/recommended-papers/nlp/sennrich-2016-bpe.html' },
-              { title: 'The Transformer', file: 'ml/recommended-papers/nlp/vaswani-2017-transformer.html' },
-              { title: 'ELMo', file: 'ml/recommended-papers/nlp/peters-2018-elmo.html' },
-              { title: 'BERT', file: 'ml/recommended-papers/nlp/devlin-2019-bert.html' },
-              { title: 'GPT-2', file: 'ml/recommended-papers/nlp/radford-2019-gpt2.html' },
-              { title: 'GPT-3', file: 'ml/recommended-papers/nlp/brown-2020-gpt3.html' },
-              { title: 'Scaling Laws', file: 'ml/recommended-papers/nlp/kaplan-2020-scaling-laws.html' },
-              { title: 'Chinchilla', file: 'ml/recommended-papers/nlp/hoffmann-2022-chinchilla.html' }
+            "name": "nlp",
+            "label": "NLP",
+            "children": [
+              {"title": "Overview", "file": "ml/recommended-papers/nlp/index.html"},
+              {"title": "Entropy of English", "file": "ml/recommended-papers/nlp/shannon-1950-entropy.html"},
+              {"title": "First Neural Language Model", "file": "ml/recommended-papers/nlp/bengio-2003-neural-lm.html"},
+              {"title": "Seq2Seq", "file": "ml/recommended-papers/nlp/sutskever-2014-seq2seq.html"},
+              {"title": "Attention Mechanism", "file": "ml/recommended-papers/nlp/bahdanau-2015-attention.html"},
+              {"title": "BPE for NMT", "file": "ml/recommended-papers/nlp/sennrich-2016-bpe.html"},
+              {"title": "The Transformer", "file": "ml/recommended-papers/nlp/vaswani-2017-transformer.html"},
+              {"title": "ELMo", "file": "ml/recommended-papers/nlp/peters-2018-elmo.html"},
+              {"title": "BERT", "file": "ml/recommended-papers/nlp/devlin-2019-bert.html"},
+              {"title": "GPT-2", "file": "ml/recommended-papers/nlp/radford-2019-gpt2.html"},
+              {"title": "GPT-3", "file": "ml/recommended-papers/nlp/brown-2020-gpt3.html"},
+              {"title": "Scaling Laws", "file": "ml/recommended-papers/nlp/kaplan-2020-scaling-laws.html"},
+              {"title": "Chinchilla", "file": "ml/recommended-papers/nlp/hoffmann-2022-chinchilla.html"}
             ]
           }
         ]
@@ -10602,7 +10427,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -10629,8 +10454,9 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && directoryPath[0] === 'rl' && btn.classList.contains('open')) {
-            var targetHash = '#' + (directoryPath.length === 1 ? 'reinforcement-learning' : 'folder-' + directoryPath.join('--'));
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml') && btn.classList.contains('open')) {
+            var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' : 'machine-learning';
+            var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
             } else {
@@ -10753,7 +10579,7 @@ function flattenBlogTree(nodes, result) {
     math:  { label: 'Math',  blurb: 'Probability, statistics, and pure-math foundations with worked-out proofs.' },
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
-    ml:    { label: 'ML',    blurb: 'Decision trees, ensembles, and machine-learning foundations.' },
+    ml:    { label: 'ML',    blurb: 'Follow the prerequisite map: data and loss foundations, model families, then applications.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
@@ -10818,9 +10644,9 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* The RL index and Explorer share the same hierarchy; series breadcrumbs
-     must not turn chapters or source folders into unrelated top-level groups. */
-  function makeRLDirectory(node, parentPath) {
+  /* ML and RL use the Explorer's hierarchy and reading order. Metadata insertion
+     order and chapter breadcrumbs must not create competing navigation paths. */
+  function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
     if (!files.length) return null;
     var path = parentPath.concat(node.name);
@@ -10842,7 +10668,7 @@ function flattenBlogTree(nodes, result) {
     node.children.forEach(function(child) {
       if (child.children) {
         grid = null;
-        var folder = makeRLDirectory(child, path);
+        var folder = makeBlogDirectory(child, path);
         if (folder) contents.appendChild(folder);
       } else if (postByFile[child.file]) {
         if (!grid) {
@@ -10896,6 +10722,7 @@ function flattenBlogTree(nodes, result) {
     catSection.className = 'blog-category';
     catSection.dataset.cat = code;
     if (code === 'rl') catSection.id = 'reinforcement-learning';
+    if (code === 'ml') catSection.id = 'machine-learning';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -10908,11 +10735,18 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl') {
-      var rlTree = BLOG_TREE.filter(function(node) { return node.name === 'rl'; })[0];
-      rlTree.children.forEach(function(node) {
-        var directory = makeRLDirectory(node, ['rl']);
-        if (directory) catSection.appendChild(directory);
+    if (code === 'rl' || code === 'ml') {
+      var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
+      categoryTree.children.forEach(function(node) {
+        if (node.children) {
+          var directory = makeBlogDirectory(node, [code]);
+          if (directory) catSection.appendChild(directory);
+        } else if (postByFile[node.file]) {
+          var grid = document.createElement('div');
+          grid.className = 'blog-section-grid';
+          grid.appendChild(makePostCard(postByFile[node.file]));
+          catSection.appendChild(grid);
+        }
       });
       frag.appendChild(catSection);
       return;
@@ -10975,15 +10809,17 @@ function flattenBlogTree(nodes, result) {
 
   applyFilters();
 
-  function openRLDirectoryLink() {
+  function openBlogDirectoryLink() {
     var id = window.location.hash.slice(1);
-    if (id !== 'reinforcement-learning' && id.indexOf('folder-rl--') !== 0) return;
+    var code = id === 'reinforcement-learning' || id.indexOf('folder-rl--') === 0 ? 'rl' :
+      id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' : '';
+    if (!code) return;
     var target = document.getElementById(id);
     if (!target || !root.contains(target)) return;
     activeCats.clear();
-    activeCats.add('rl');
+    activeCats.add(code);
     chipsHost.querySelectorAll('.blog-chip').forEach(function(chip) {
-      chip.setAttribute('aria-pressed', chip.dataset.cat === 'rl' ? 'true' : 'false');
+      chip.setAttribute('aria-pressed', chip.dataset.cat === code ? 'true' : 'false');
     });
     applyFilters();
     var ancestor = target;
@@ -10991,7 +10827,7 @@ function flattenBlogTree(nodes, result) {
       if (ancestor.tagName === 'DETAILS') ancestor.open = true;
       ancestor = ancestor.parentElement;
     }
-    var directory = target.dataset.directory || 'rl';
+    var directory = target.dataset.directory || code;
     document.querySelectorAll('.file-tree-toggle[data-directory]').forEach(function(button) {
       var path = button.dataset.directory;
       if (directory === path || directory.indexOf(path + '/') === 0) {
@@ -11002,8 +10838,8 @@ function flattenBlogTree(nodes, result) {
     });
     window.requestAnimationFrame(function() { target.scrollIntoView({ block: 'start' }); });
   }
-  window.addEventListener('hashchange', openRLDirectoryLink);
-  openRLDirectoryLink();
+  window.addEventListener('hashchange', openBlogDirectoryLink);
+  openBlogDirectoryLink();
 })();
 
 
