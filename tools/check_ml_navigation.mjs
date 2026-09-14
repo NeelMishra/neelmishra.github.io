@@ -72,6 +72,11 @@ function checkSequence(folder, names) {
     assert(context.BLOG_POSTS[file].series.includes(`Part ${i + 1}`), `Wrong metadata part number: ${file}`);
   });
 }
+checkSequence('ml/explainability/shap-lime', ['lime-local-surrogates', 'shapley-values', 'kernel-shap', 'index', 'choosing-explainers']);
+const explainabilityGuide = fs.readFileSync(path.join(root, 'blog/ml/explainability/index.html'), 'utf8');
+assert(explainabilityGuide.includes('class="next" href="shap-lime/lime-local-surrogates.html"'), 'Start explainability with the LIME lesson, before the comparison');
+const limeLesson = fs.readFileSync(path.join(root, 'blog/ml/explainability/shap-lime/lime-local-surrogates.html'), 'utf8');
+assert(limeLesson.includes('class="prev" href="../index.html"'), 'The first lesson should return to the parent guide, not the later comparison');
 checkSequence('ml/explainability/tree-shap', ['index', 'path-contributions', 'why-tree-shap', 'ensembles-and-global', 'limitations']);
 checkSequence('ml/loss-functions/js-divergence', ['index', 'properties-and-uses', 'gan-connection']);
 

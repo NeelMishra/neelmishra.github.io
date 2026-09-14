@@ -8663,16 +8663,16 @@ var BLOG_TREE = [
         "name": "explainability",
         "label": "Explainability",
         "children": [
-          {"title": "Overview", "file": "ml/explainability/index.html", "links": ["ml/explainability/shap-lime/index.html", "from-scratch/cpp/machine-learning/explainability/index.html"]},
+          {"title": "Overview", "file": "ml/explainability/index.html", "links": ["ml/explainability/shap-lime/lime-local-surrogates.html", "from-scratch/cpp/machine-learning/explainability/index.html"]},
           {
             "name": "shap-lime",
             "label": "SHAP & LIME",
             "children": [
-              {"title": "Local Explainability", "file": "ml/explainability/shap-lime/index.html", "links": ["ml/explainability/index.html", "ml/explainability/shap-lime/lime-local-surrogates.html"]},
-              {"title": "LIME: Local Surrogates", "file": "ml/explainability/shap-lime/lime-local-surrogates.html", "links": ["ml/explainability/shap-lime/index.html", "ml/explainability/shap-lime/shapley-values.html"]},
+              {"title": "LIME: Local Surrogates", "file": "ml/explainability/shap-lime/lime-local-surrogates.html", "links": ["ml/explainability/index.html", "ml/explainability/shap-lime/shapley-values.html"]},
               {"title": "Shapley Values", "file": "ml/explainability/shap-lime/shapley-values.html", "links": ["ml/explainability/shap-lime/lime-local-surrogates.html", "ml/explainability/shap-lime/kernel-shap.html"]},
-              {"title": "Kernel SHAP", "file": "ml/explainability/shap-lime/kernel-shap.html", "links": ["ml/explainability/shap-lime/shapley-values.html", "ml/explainability/shap-lime/choosing-explainers.html"]},
-              {"title": "Choosing Explainers", "file": "ml/explainability/shap-lime/choosing-explainers.html", "links": ["ml/explainability/shap-lime/kernel-shap.html", "from-scratch/cpp/machine-learning/explainability/index.html"]}
+              {"title": "Kernel SHAP", "file": "ml/explainability/shap-lime/kernel-shap.html", "links": ["ml/explainability/shap-lime/shapley-values.html", "ml/explainability/shap-lime/index.html"]},
+              {"title": "Local Explainability: Comparing LIME and SHAP", "file": "ml/explainability/shap-lime/index.html", "links": ["ml/explainability/shap-lime/kernel-shap.html", "ml/explainability/shap-lime/choosing-explainers.html"]},
+              {"title": "Choosing Explainers", "file": "ml/explainability/shap-lime/choosing-explainers.html", "links": ["ml/explainability/shap-lime/index.html", "ml/explainability/tree-shap/index.html"]}
             ]
           },
           {
