@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 
 def model(x):
-    """Constructed score; x is measured in hours. Sine's argument is dimensionless."""
+    """Constructed score; x is session duration in hours. Sine's argument is dimensionless."""
     return 2.2 + 0.55*x + 0.55*np.sin(1.1*x)
 
 
