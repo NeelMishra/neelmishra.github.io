@@ -8841,7 +8841,7 @@ var BLOG_TREE = [
             label: 'Feature Transformation',
             children: [
               { title: 'Overview', file: 'ml/data-preparation/feature-transformation/index.html', links: ['ml/data-preparation/index.html'] },
-              { title: 'Skewness and Why It Hurts', file: 'ml/data-preparation/feature-transformation/skewness.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
+              { title: 'Skewness: What It Measures and When It Matters', file: 'ml/data-preparation/feature-transformation/skewness.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
               { title: 'Log Transform', file: 'ml/data-preparation/feature-transformation/log-transform.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
               { title: 'Box-Cox Transform', file: 'ml/data-preparation/feature-transformation/box-cox.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
               { title: 'Yeo-Johnson Transform', file: 'ml/data-preparation/feature-transformation/yeo-johnson.html', links: ['ml/data-preparation/feature-transformation/index.html'] },
