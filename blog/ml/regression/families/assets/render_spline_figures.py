@@ -18,7 +18,7 @@ args = parser.parse_args()
 HERE = Path(__file__).resolve().parent
 INK, MUTED, BLUE, ORANGE = '#182536', '#536475', '#176b93', '#b44a24'
 plt.rcParams.update({
-    'font.family': 'DejaVu Sans', 'font.size': 15,
+    'font.family': ['DejaVu Sans', 'Arial', 'sans-serif'], 'font.size': 15,
     'text.color': INK, 'axes.labelcolor': INK, 'xtick.color': MUTED,
     'ytick.color': MUTED, 'axes.edgecolor': '#b7c3cd',
     'axes.spines.top': False, 'axes.spines.right': False,
