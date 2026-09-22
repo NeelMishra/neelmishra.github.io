@@ -279,6 +279,169 @@ const setRange = (page, selector, value) => page.locator(selector).evaluate((inp
       assert.equal(await page.locator('#interpretability-probe-after').innerText(), '88.08%');
       assert.equal(await page.locator('#interpretability-model-after').innerText(), '62.25%');
     }
+    if (published.some(ch => ch.id === '11')) {
+      await page.goto(series + 'information-retrieval-and-rag.html');
+      assert(await page.locator('#retrieval-controls').isVisible());
+      // Independently tabulated corpus counts: solar, battery, accumulator.
+      // The article deliberately uses ln(N/df)*tf/(tf+k1*A), without (k1+1).
+      const counts = [[2, 1, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 3, 0], [0, 0, 0]];
+      const lengths = [6, 4, 4, 5, 5, 4], dfs = [2, 3, 1], relevant = new Set(['D1', 'D3', 'D4']);
+      const zeroWeightRankings = [];
+      for (const [k1, b, expand, cutoff] of [
+        [1.2, .75, false, 1], [1.2, .75, false, 4], [1.2, .75, false, 5],
+        [0, 0, false, 5], [0, 1, false, 5], [3, 0, false, 4],
+        [3, 1, true, 5], [1.2, .75, true, 1], [1.2, .75, true, 2], [1.2, .75, true, 5]
+      ]) {
+        await setRange(page, '#retrieval-k1', k1);
+        await setRange(page, '#retrieval-b', b);
+        await setRange(page, '#retrieval-cutoff', cutoff);
+        await page.locator('#retrieval-expansion').setChecked(expand);
+        const termCount = expand ? 3 : 2;
+        const expected = counts.map((frequencies, i) => {
+          const parts = frequencies.slice(0, termCount).map((frequency, j) => frequency
+            ? Math.log(6 / dfs[j]) / (1 + k1 * (1 - b + b * lengths[i] / (28 / 6)) / frequency) : 0);
+          return { id: 'D' + (i + 1), parts, score: parts.reduce((a, v) => a + v, 0) };
+        }).filter(row => row.score > 0).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+        const observed = await page.locator('#retrieval-ranking tr').evaluateAll(rows => rows.map(row => [...row.cells].map(cell => cell.textContent)));
+        assert.equal(observed.length, expand ? 5 : 4);
+        observed.forEach((row, i) => {
+          assert.equal(row[0], `${i + 1}. ${expected[i].id}`);
+          near(Number(row[1]), expected[i].score, .000051);
+          const parts = [...row[2].matchAll(/: ([\d.]+)/g)].map(match => Number(match[1]));
+          assert.equal(parts.length, termCount);
+          parts.forEach((value, j) => near(value, expected[i].parts[j], .000051));
+          assert.equal(row[3], relevant.has(expected[i].id) ? 'Yes' : 'No');
+          assert.equal(row[4], i < cutoff ? 'Returned' : 'Below cutoff');
+        });
+        const selected = expected.slice(0, cutoff);
+        const hitRanks = selected.flatMap((row, i) => relevant.has(row.id) ? [i + 1] : []);
+        const ap = hitRanks.reduce((sum, rank, i) => sum + (i + 1) / rank, 0) / 3;
+        const result = await page.locator('#retrieval-result').innerText();
+        assert(result.includes(`Returned ${selected.length} of up to ${cutoff} requested passages: ${selected.map(row => row.id).join(', ')}.`));
+        const metrics = result.match(/Precision among returned = \d+\/\d+ = (\d+\.\d+)%; recall = \d+\/3 = (\d+\.\d+)%; AP through cutoff \d+ = (\d+\.\d+)/);
+        assert(metrics, result);
+        near(Number(metrics[1]), 100 * hitRanks.length / selected.length, .051);
+        near(Number(metrics[2]), 100 * hitRanks.length / 3, .051);
+        near(Number(metrics[3]), ap, .000051);
+        if (!expand) assert(!observed.some(row => row[0].includes('D4')), 'Length/frequency tuning cannot add a nonmatching lexical candidate');
+        if (!k1) zeroWeightRankings.push(observed);
+      }
+      assert.deepEqual(zeroWeightRankings[0], zeroWeightRankings[1], 'At k1=0 the length parameter must not affect scores');
+      await page.locator('#retrieval-reset').click();
+      assert.equal(await page.locator('#retrieval-k1').inputValue(), '1.2');
+      assert.equal(await page.locator('#retrieval-b').inputValue(), '0.75');
+      assert.equal(await page.locator('#retrieval-cutoff').inputValue(), '4');
+      assert(!(await page.locator('#retrieval-expansion').isChecked()));
+      assert.match(await page.locator('#retrieval-result').innerText(), /AP through cutoff 4 = 0.5000/);
+    }
+    if (published.some(ch => ch.id === '13')) {
+      await page.goto(series + 'machine-translation.html');
+      assert(await page.locator('#translation-controls').isVisible());
+      // In this fully specified tree, the global maximum is one of these two
+      // complete paths. A width-1 search first commits to the larger root edge.
+      for (const percent of [10, 35, 40, 45, 50, 80]) for (const width of [1, 2, 3]) {
+        const pA = percent / 100, pThe = .95 - pA;
+        const greedyIsA = pA > pThe;
+        const exactIsA = .8 * pA > .45 * pThe;
+        const greedyProbability = greedyIsA ? .8 * pA : .45 * pThe;
+        const exactProbability = Math.max(.8 * pA, .45 * pThe);
+        const bestIsA = width === 1 ? greedyIsA : exactIsA;
+        const expectedProbability = width === 1 ? greedyProbability : exactProbability;
+        await page.locator('#translation-width').selectOption(String(width));
+        await setRange(page, '#translation-probability', percent);
+        const result = await page.locator('#translation-result').innerText();
+        const observed = result.match(/Beam width (\d+) returns (.*?) with probability (\d+\.\d+) \(log probability (-?\d+\.\d+)\).*Exhaustive best: (.*?), probability (\d+\.\d+)\. Probability gap: (\d+\.\d+)\. Greedy returns (.*?), probability (\d+\.\d+)/);
+        assert(observed, result);
+        assert.equal(Number(observed[1]), width);
+        assert.equal(observed[2], (bestIsA ? 'a' : 'the') + ' cat EOS');
+        near(Number(observed[3]), expectedProbability);
+        near(Number(observed[4]), Math.log(expectedProbability));
+        assert.equal(observed[5], (exactIsA ? 'a' : 'the') + ' cat EOS');
+        near(Number(observed[6]), exactProbability);
+        near(Number(observed[7]), exactProbability - expectedProbability);
+        assert.equal(observed[8], (greedyIsA ? 'a' : 'the') + ' cat EOS');
+        near(Number(observed[9]), greedyProbability);
+        const trace = await page.locator('#translation-trace tbody tr').evaluateAll(rows => rows.map(row => [...row.cells].map(cell => cell.textContent)));
+        for (const [pathText, conditional, probability] of trace) {
+          const tokens = pathText.split(' ');
+          assert(!tokens.slice(0, -1).includes('EOS'), 'A completed path must never be extended');
+          const rootProbability = tokens[0] === 'the' ? pThe : tokens[0] === 'a' ? pA : .05;
+          const second = tokens[0] === 'the' ? { cat: .45, dog: .35, EOS: .2 } : { cat: .8, dog: .15, EOS: .05 };
+          const expected = rootProbability * (tokens.length >= 2 ? second[tokens[1]] : 1);
+          near(Number(probability), expected);
+          near(Number(conditional), tokens.length === 1 ? rootProbability : tokens.length === 2 ? second[tokens[1]] : 1, .0051);
+        }
+        if (width === 3) assert.match(await page.locator('#translation-trace h4').nth(1).innerText(), /2 available beam slots/, 'Saved initial EOS consumes a beam slot');
+      }
+      await page.locator('#translation-reset').click();
+      assert.equal(await page.locator('#translation-width').inputValue(), '2');
+      assert.equal(await page.locator('#translation-probability').inputValue(), '40');
+      await page.locator('#translation-probability').focus();
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await page.locator('#translation-probability').inputValue(), '45');
+    }
+    if (published.some(ch => ch.id === '14')) {
+      await page.goto(series + 'rnns-and-lstms.html');
+      assert(await page.locator('#recurrent-steps').isEnabled());
+      // Finite differences provide an independent check of the displayed
+      // sensitivities; the LSTM state itself also has a closed-form solution.
+      const forward = (initial, n, u) => { let h = initial; for (let i = 0; i < n; i++) h = Math.tanh(u * h); return h; };
+      for (const [n, u, f] of [[1, 0, .5], [40, 0, 1], [1, .8, .95], [10, .8, .95], [40, .8, .95], [10, 1, .5], [40, 1.5, .99], [40, .05, .5], [10, 1.5, 1]]) {
+        await setRange(page, '#recurrent-steps', n);
+        await setRange(page, '#recurrent-weight', u);
+        await setRange(page, '#recurrent-forget', f);
+        const epsilon = 1e-5;
+        const h = forward(.5, n, u), dh = (forward(.5 + epsilon, n, u) - forward(.5 - epsilon, n, u)) / (2 * epsilon);
+        const dc = Math.pow(f, n), c = .5 * dc;
+        const exposed = initial => .8 * Math.tanh(initial * dc);
+        const expected = [h, dh, c, dc, exposed(.5), (exposed(.5 + epsilon) - exposed(.5 - epsilon)) / (2 * epsilon)];
+        const ids = ['rnn-state', 'rnn-gradient', 'cell-state', 'cell-gradient', 'hidden-state', 'hidden-gradient'];
+        const actual = await Promise.all(ids.map(id => page.locator('#recurrent-' + id).innerText().then(Number)));
+        actual.forEach((value, i) => near(value, expected[i], Math.max(.00000051, Math.abs(expected[i]) * .000051)));
+        assert.equal(await page.locator('#recurrent-trajectory tr').count(), n + 1);
+        assert.equal(await page.locator('#recurrent-limit').isVisible(), f === 1);
+        if (!u) assert.deepEqual(actual.slice(0, 2), [0, 0]);
+        if (f === 1) assert.deepEqual(actual.slice(2, 4), [.5, 1]);
+      }
+      await page.locator('#recurrent-reset').click();
+      assert.equal(await page.locator('#recurrent-steps').inputValue(), '10');
+      assert.equal(await page.locator('#recurrent-weight').inputValue(), '0.8');
+      assert.equal(await page.locator('#recurrent-forget').inputValue(), '0.95');
+      await page.locator('#recurrent-steps').focus();
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await page.locator('#recurrent-steps').inputValue(), '11');
+    }
+    if (published.some(ch => ch.id === '15')) {
+      await page.goto(series + 'phonetics-and-speech-features.html');
+      assert(await page.locator('#speech-controls').isVisible());
+      for (const rate of [8000, 16000]) for (const frequency of [500, 3750, 4000, 4250, 6000, 7500]) {
+        await page.locator('#speech-rate').selectOption(String(rate));
+        await setRange(page, '#speech-frequency', frequency);
+        // Nearest sampling-frequency multiple is an independent alias formula.
+        const folded = Math.abs(frequency - rate * Math.round(frequency / rate));
+        const result = await page.locator('#speech-result').innerText();
+        assert(result.includes(`folded frequency ${folded.toLocaleString('en-US')} Hz.`));
+        assert(result.includes(`Nyquist limit ${(rate / 2).toLocaleString('en-US')} Hz;`));
+        assert(result.includes(frequency > rate / 2 ? 'Aliasing:' : frequency === rate / 2 ? 'Exactly at the Nyquist boundary:' : 'This tone lies below the Nyquist limit.'));
+        const original = await page.locator('#speech-dots-original circle').evaluateAll(nodes => nodes.map(n => [+n.getAttribute('cx'), +n.getAttribute('cy')]));
+        const alias = await page.locator('#speech-dots-alias circle').evaluateAll(nodes => nodes.map(n => [+n.getAttribute('cx'), +n.getAttribute('cy')]));
+        assert.equal(original.length, rate / 1000 + 1);
+        assert.equal(alias.length, original.length);
+        original.forEach(([x, y], n) => {
+          near(x, 70 + 590 * n * 1000 / rate);
+          near(x, alias[n][0]);
+          near((116 - y) / 43, Math.cos(2 * Math.PI * frequency * n / rate));
+          near((286 - alias[n][1]) / 43, Math.cos(2 * Math.PI * folded * n / rate));
+          near(116 - y, 286 - alias[n][1]);
+        });
+      }
+      await page.locator('#speech-reset').click();
+      assert.equal(await page.locator('#speech-frequency').inputValue(), '6000');
+      assert.equal(await page.locator('#speech-rate').inputValue(), '8000');
+      await page.locator('#speech-frequency').focus();
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await page.locator('#speech-frequency').inputValue(), '6250');
+    }
     const noJS = await browser.newPage({javaScriptEnabled: false, viewport: {width: 390, height: 844}});
     await noJS.goto(series + 'introduction.html');
     assert(await noJS.locator('#intro-temp').isDisabled());
@@ -315,6 +478,26 @@ const setRange = (page, selector, value) => page.locator(selector).evaluate((inp
       assert.match(await noJS.locator('#posttraining-lab-result').innerText(), /preference probability 55.50%; loss 0.5888/);
       assert.match(await noJS.locator('noscript').innerText(), /Controls require JavaScript/);
       assert(await noJS.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No-JS post-training overflow');
+    }
+    for (const [id, article, controls, result, expected] of [
+      ['11', 'information-retrieval-and-rag.html', '#retrieval-controls', '#retrieval-result', /AP through cutoff 4 = 0.5000/],
+      ['13', 'machine-translation.html', '#translation-controls', '#translation-result', /a cat EOS with probability 0.320000/],
+      ['15', 'phonetics-and-speech-features.html', '#speech-controls', '#speech-result', /folded frequency 2,000 Hz/]
+    ]) if (published.some(ch => ch.id === id)) {
+      await noJS.goto(series + article);
+      assert(await noJS.locator(controls).isHidden());
+      assert.match(await noJS.locator(result).innerText(), expected);
+      assert(await noJS.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No-JS overflow: ' + article);
+      if (id === '13') assert(await noJS.locator('#translation-trace').isHidden());
+      if (id === '15') assert(await noJS.locator('#speech-plot-region').isHidden());
+    }
+    if (published.some(ch => ch.id === '14')) {
+      await noJS.goto(series + 'rnns-and-lstms.html');
+      for (const id of ['steps', 'weight', 'forget', 'reset']) assert(await noJS.locator('#recurrent-' + id).isDisabled());
+      assert(await noJS.locator('#recurrent-trajectory-details').isHidden());
+      assert.match(await noJS.locator('#recurrent-result').innerText(), /RNN sensitivity to its initial hidden state is 0.072631/);
+      assert.equal(await noJS.locator('#recurrent-cell-state').innerText(), '0.299368');
+      assert(await noJS.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No-JS recurrent lab overflow');
     }
     await noJS.close();
     assert.deepEqual(errors, [], 'Uncaught browser errors');
