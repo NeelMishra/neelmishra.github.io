@@ -8746,6 +8746,31 @@ var BLOG_TREE = [
         "learning": {"title": "Graph ML", "requires": ["gradient-boosted-machines"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
+        "name": "nlp",
+        "label": "NLP",
+        "children": [
+          {"title": "NLP: Reading Guide", "file": "ml/nlp/index.html", "links": ["ml/nlp/popular-textbooks/index.html"]},
+          {
+            "name": "popular-textbooks",
+            "label": "Popular Textbooks",
+            "children": [
+              {"title": "Popular NLP Textbooks", "file": "ml/nlp/popular-textbooks/index.html", "links": ["ml/nlp/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/index.html"]},
+              {
+                "name": "speech-and-language-processing",
+                "label": "Speech and Language Processing",
+                "children": [
+                  {"title": "Visual Reading Guide", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/index.html", "links": ["ml/nlp/popular-textbooks/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html"]},
+                  {"title": "01 · Language Models: From Next-Token Prediction to Useful Systems", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html"]},
+                  {"title": "02 · Words and Tokens", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html", "ml/nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html"]},
+                  {"title": "03 · N-gram Language Models", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html"]}
+                ]
+              }
+            ]
+          }
+        ],
+        "learning": {"title": "NLP", "requires": ["data-preparation", "loss-functions"], "start": "ml/nlp/index.html", "note": "Start with language tasks and tokens, then connect conditional probability and log-loss to language modeling. Follow the textbook companion in chapter order."}
+      },
+      {
         "name": "recommended-papers",
         "label": "Recommended Papers",
         "children": [
@@ -10521,8 +10546,11 @@ function flattenBlogTree(nodes, result) {
     btn.title = collapsed ? 'Expand explorer' : 'Collapse explorer';
   }
 
-  var initial = false;
-  try { initial = localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) {}
+  var initial = layout.hasAttribute('data-mobile-sidebar') && window.matchMedia('(max-width: 900px)').matches;
+  try {
+    var saved = localStorage.getItem(STORAGE_KEY);
+    if (saved !== null) initial = saved === '1';
+  } catch (e) {}
   apply(initial);
 
   btn.addEventListener('click', function () {
