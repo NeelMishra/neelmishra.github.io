@@ -91,6 +91,8 @@ fig.savefig(HERE/'survival-timeline-km.svg', metadata={
     'Description':'Five machines with failures at months 2, 4, 6 and censoring at months 3, 7. Survival drops only at failures, reaching 4/15.',
     'Creator':'render_survival_figure.py', 'Date':None,
 })
+svg = HERE / 'survival-timeline-km.svg'
+svg.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines()) + '\n')
 if args.preview_dir:
     args.preview_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.preview_dir/'survival-timeline-km.png', dpi=150)

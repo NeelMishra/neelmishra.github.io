@@ -32,6 +32,8 @@ def save(fig, name, description):
         'Title': name.replace('-', ' ').title(), 'Description': description,
         'Date': None, 'Creator': 'render_spline_figures.py',
     })
+    svg = HERE / f'{name}.svg'
+    svg.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines()) + '\n')
     if args.preview_dir:
         args.preview_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(args.preview_dir / f'{name}.png', dpi=150)
