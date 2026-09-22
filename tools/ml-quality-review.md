@@ -1,8 +1,8 @@
 # ML blog quality review — in progress
 
-Updated 2026-09-22; inventory snapshot `2a23050`. The objective covers every published ML blog except loss-function articles. This is a working review record, not a claim that the collection is complete. Reconcile it with the current repository before resuming: other workstreams are adding NLP textbook chapters.
+Updated 2026-09-22; inventory snapshot `563f8af`. The objective covers every published ML blog except loss-function articles. This is a working review record, not a claim that the collection is complete. Reconcile it with the current repository before resuming: other workstreams are adding NLP textbook chapters.
 
-At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**, and **1 legacy redirect**. New articles need their own review. 96 articles below have passed individual review, including 38 improved articles and 58 already sound articles; a successful navigation check or the presence of a figure does not establish editorial quality.
+At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**, and **1 legacy redirect**. New articles need their own review. 106 articles below have passed individual review, including 42 improved articles and 64 already sound articles; a successful navigation check or the presence of a figure does not establish editorial quality.
 
 ## Acceptance evidence
 
@@ -15,8 +15,8 @@ At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**
 ## What remains
 
 - Expand the remaining recommended-paper stubs, then revise both paper-reading indexes and their broad historical claims.
-- The seven regression-family articles now have verified examples and figures. A complete overview/linear review identified the specific mathematical, provenance and figure corrections below; apply them individually, then review logistic chapters.
-- The seven deep-dive tree chapters now pass; improve the six handwritten companions while retaining their scans; the six bagging/boosting articles and four non-loss GBM chapters now have individual acceptance evidence.
+- The seven regression-family articles now have verified examples and figures. A complete overview/linear review identified specific mathematical, provenance and figure corrections below; gradient descent now passes. Apply the remaining corrections individually, then review logistic chapters.
+- The seven deep-dive tree chapters now pass; the foundations companion now passes, and five handwritten companions still need improvement while retaining their scans; the six bagging/boosting articles and four non-loss GBM chapters now have individual acceptance evidence.
 - Complete individual reviews of the existing remaining data-preparation, decision-tree, explainability, retrieval, graph, and representation-learning articles. Previous sampling found strong recent work, but sampling is not exhaustive verification.
 - Review newly added NLP textbook pages once each addition is complete. Do not accidentally commit an in-progress registry independently of its pages.
 
@@ -96,13 +96,13 @@ At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**
 | [data-preparation/feature-selection/recursive-feature-elimination.html](../blog/ml/data-preparation/feature-selection/recursive-feature-elimination.html) | Pending | Individual content, example and visual review outstanding. |
 | [data-preparation/feature-selection/variance-threshold.html](../blog/ml/data-preparation/feature-selection/variance-threshold.html) | Pending | Individual content, example and visual review outstanding. |
 | [data-preparation/feature-selection/why-feature-selection.html](../blog/ml/data-preparation/feature-selection/why-feature-selection.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/box-cox.html](../blog/ml/data-preparation/feature-transformation/box-cox.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/index.html](../blog/ml/data-preparation/feature-transformation/index.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/log-transform.html](../blog/ml/data-preparation/feature-transformation/log-transform.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/power-transforms.html](../blog/ml/data-preparation/feature-transformation/power-transforms.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/quantile-transform.html](../blog/ml/data-preparation/feature-transformation/quantile-transform.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/skewness.html](../blog/ml/data-preparation/feature-transformation/skewness.html) | Pending | Individual content, example and visual review outstanding. |
-| [data-preparation/feature-transformation/yeo-johnson.html](../blog/ml/data-preparation/feature-transformation/yeo-johnson.html) | Pending | Individual content, example and visual review outstanding. |
+| [data-preparation/feature-transformation/box-cox.html](../blog/ml/data-preparation/feature-transformation/box-cox.html) | Reviewed | Likelihood optimum −0.22306787 agrees with SciPy within 9.6e−9; 13 states/code/inverse support verified; annotation clear of curve, 14.92px labels at320 and deterministic generator. |
+| [data-preparation/feature-transformation/index.html](../blog/ml/data-preparation/feature-transformation/index.html) | Reviewed | Fixed formulas versus fitted quantities and validation choices agree with examples; both workflow figures and all local links checked at1440/390/320 and no-JS. |
+| [data-preparation/feature-transformation/log-transform.html](../blog/ml/data-preparation/feature-transformation/log-transform.html) | Reviewed | Ratio geometry/domains/unit dependence verified; arithmetic mean5 versus exponentiated log mean3; all100 settings, plotted curve and code boundary guards pass. |
+| [data-preparation/feature-transformation/power-transforms.html](../blog/ml/data-preparation/feature-transformation/power-transforms.html) | Reviewed | Order reversal, zero-power collapse, sign loss and inverse domains reproduced; all5 settings plus Python/C++ boundary checks; both figures readable at three widths. |
+| [data-preparation/feature-transformation/quantile-transform.html](../blog/ml/data-preparation/feature-transformation/quantile-transform.html) | Reviewed | Interpolated position0.625 versus empirical CDF0.6 and normal score0.3186 reproduced; all211 settings, ties/clipping/code boundaries; marginal versus joint normality clear. |
+| [data-preparation/feature-transformation/skewness.html](../blog/ml/data-preparation/feature-transformation/skewness.html) | Reviewed | Mean3.8, moments7.76/22.464, coefficients1.039189/1.549131 and affine/constant cases verified; both zero-skewness histograms and all16 settings checked. |
+| [data-preparation/feature-transformation/yeo-johnson.html](../blog/ml/data-preparation/feature-transformation/yeo-johnson.html) | Reviewed | Both branches/special cases and inverse ranges verified; fitted λ0.437414257, all9 settings and three plotted curves pass; standardization distinction clear. |
 | [data-preparation/imbalance/adasyn.html](../blog/ml/data-preparation/imbalance/adasyn.html) | Pending | Individual content, example and visual review outstanding. |
 | [data-preparation/imbalance/class-weights.html](../blog/ml/data-preparation/imbalance/class-weights.html) | Pending | Individual content, example and visual review outstanding. |
 | [data-preparation/imbalance/evaluating-imbalance.html](../blog/ml/data-preparation/imbalance/evaluating-imbalance.html) | Pending | Individual content, example and visual review outstanding. |
@@ -160,7 +160,7 @@ At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**
 | [decision-trees/handwritten-notes/cart-and-complexity.html](../blog/ml/decision-trees/handwritten-notes/cart-and-complexity.html) | Pending | Individual content, example and visual review outstanding. |
 | [decision-trees/handwritten-notes/entropy-from-kl.html](../blog/ml/decision-trees/handwritten-notes/entropy-from-kl.html) | Pending | Individual content, example and visual review outstanding. |
 | [decision-trees/handwritten-notes/entropy-information-gain.html](../blog/ml/decision-trees/handwritten-notes/entropy-information-gain.html) | Pending | Individual content, example and visual review outstanding. |
-| [decision-trees/handwritten-notes/index.html](../blog/ml/decision-trees/handwritten-notes/index.html) | Pending | Individual content, example and visual review outstanding. |
+| [decision-trees/handwritten-notes/index.html](../blog/ml/decision-trees/handwritten-notes/index.html) | Reviewed | Original scan unchanged; deterministic (7,2) route, four conditional regions and equality cases; 120 states at three widths, ≥14px labels and complete no-JS figures. |
 | [explainability/index.html](../blog/ml/explainability/index.html) | Pending | Individual content, example and visual review outstanding. |
 | [explainability/shap-lime/choosing-explainers.html](../blog/ml/explainability/shap-lime/choosing-explainers.html) | Pending | Individual content, example and visual review outstanding. |
 | [explainability/shap-lime/index.html](../blog/ml/explainability/shap-lime/index.html) | Pending | Individual content, example and visual review outstanding. |
@@ -206,7 +206,7 @@ At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**
 | [recommended-papers/nlp/hoffmann-2022-chinchilla.html](../blog/ml/recommended-papers/nlp/hoffmann-2022-chinchilla.html) | Needs expansion | Published scaffold; replace placeholders with a complete explanation, evidence and useful figures. |
 | [recommended-papers/nlp/index.html](../blog/ml/recommended-papers/nlp/index.html) | Pending | Individual content, example and visual review outstanding. |
 | [recommended-papers/nlp/kaplan-2020-scaling-laws.html](../blog/ml/recommended-papers/nlp/kaplan-2020-scaling-laws.html) | Needs expansion | Published scaffold; replace placeholders with a complete explanation, evidence and useful figures. |
-| [recommended-papers/nlp/peters-2018-elmo.html](../blog/ml/recommended-papers/nlp/peters-2018-elmo.html) | Needs expansion | Published scaffold; replace placeholders with a complete explanation, evidence and useful figures. |
+| [recommended-papers/nlp/peters-2018-elmo.html](../blog/ml/recommended-papers/nlp/peters-2018-elmo.html) | Reviewed | Original NAACL tables and implementation checked; invented two-context mixture, all8 states/32 gradients independently reproduced; Python/JS504 values agree within2.3e−16, mobile and no-JS pass. |
 | [recommended-papers/nlp/radford-2019-gpt2.html](../blog/ml/recommended-papers/nlp/radford-2019-gpt2.html) | Needs expansion | Published scaffold; replace placeholders with a complete explanation, evidence and useful figures. |
 | [recommended-papers/nlp/sennrich-2016-bpe.html](../blog/ml/recommended-papers/nlp/sennrich-2016-bpe.html) | Reviewed | Weighted merge counts; four saved-rule traces; seven states; no-JS and 320px. |
 | [recommended-papers/nlp/shannon-1950-entropy.html](../blog/ml/recommended-papers/nlp/shannon-1950-entropy.html) | Needs expansion | Published scaffold; replace placeholders with a complete explanation, evidence and useful figures. |
@@ -224,7 +224,7 @@ At this snapshot: **234 non-loss articles**, **20 excluded loss-function pages**
 | [regression/index.html](../blog/ml/regression/index.html) | Pending | Individual content, example and visual review outstanding. |
 | [regression/linear/diagnostics-and-evaluation.html](../blog/ml/regression/linear/diagnostics-and-evaluation.html) | Needs improvement | PRESS/Cook arithmetic passes; supply train/test R² dataset/baseline; define p including intercept; remove generic bootstrap-validity claim; diagnostic plots/mobile/noJS. |
 | [regression/linear/gauss-markov-and-inference.html](../blog/ml/regression/linear/gauss-markov-and-inference.html) | Needs improvement | Central proof and interval numbers verified; name/link six-row dataset, show leverage/df, state future-error assumptions and distinguish constructed samples from coverage simulation. |
-| [regression/linear/gradient-descent.html](../blog/ml/regression/linear/gradient-descent.html) | Needs improvement | Read-only audit confirms contours reflected by reversed SVG y axis; disclose objective and first update, rank-deficient qualification, readable controls/figures/noJS. |
+| [regression/linear/gradient-descent.html](../blog/ml/regression/linear/gradient-descent.html) | Reviewed | Five-row objective and first update reproduced; corrected equal-scale contours, 21 updates at three widths, objective history and static fallback; contour error ≤4.44e−7, labels ≥15.55px. |
 | [regression/linear/index.html](../blog/ml/regression/linear/index.html) | Needs improvement | Verified six-row fit; lifecycle info box obscures SST/SSR bars; both animations need readable responsive figures and static fallbacks. |
 | [regression/linear/interview-derivations.html](../blog/ml/regression/linear/interview-derivations.html) | Needs improvement | Sample shrinkage .0576 mislabeled population bias; clarify penalized intercept, signed t under c<0, nonconstant-y R² and dependency graph; mobile/noJS/control fixes. |
 | [regression/linear/model-specification.html](../blog/ml/regression/linear/model-specification.html) | Needs improvement | Orphaned seven/ten-row RSS and R² claims need actual data; specify finite/population OVB delta and log retransformation example; mobile/noJS/source fixes. |
