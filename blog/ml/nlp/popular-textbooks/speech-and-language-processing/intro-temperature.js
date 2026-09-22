@@ -19,5 +19,7 @@
   }
   control.addEventListener('input', draw);
   document.getElementById('intro-temp-reset').addEventListener('click', () => { control.value = '1'; draw(); });
+  control.disabled = false;
+  document.getElementById('intro-temp-reset').disabled = false;
   draw();
 }());

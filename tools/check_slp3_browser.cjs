@@ -79,7 +79,63 @@ const near = (actual, expected, tolerance = 0.000001) => assert(Math.abs(actual 
         near(await page.locator('#ngram-distribution meter').evaluateAll(nodes => nodes.reduce((sum, n) => sum + n.value, 0)), 1);
       }
     }
+    if (published.some(ch => ch.id === '4')) {
+      await page.goto(series + 'logistic-regression.html');
+      assert.match(await page.locator('#logistic-lab-result').innerText(), /TP 3, FP 1, FN 1, TN 3/);
+      for (const [threshold, expected] of [['0.75', /TP 1, FP 1, FN 3, TN 3/], ['0.3', /TP 4, FP 2, FN 0, TN 2/], ['1', /Precision undefined/]]) {
+        await page.locator('#logistic-threshold').fill(threshold);
+        assert.match(await page.locator('#logistic-lab-result').innerText(), expected);
+      }
+      await page.locator('#logistic-threshold-reset').click();
+      assert.match(await page.locator('#logistic-lab-result').innerText(), /F1 75.0%/);
+    }
+    if (published.some(ch => ch.id === '5')) {
+      await page.goto(series + 'embeddings.html');
+      await page.locator('#embeddings-scale').fill('2');
+      assert.match(await page.locator('#embeddings-result').innerText(), /Dot product = 48;.*cosine = 0.960/);
+      await page.locator('#embeddings-candidate').selectOption('engine');
+      assert.match(await page.locator('#embeddings-result').innerText(), /Dot product = 8;.*cosine = 0.194/);
+      await page.locator('#embeddings-scale').fill('0.25');
+      assert.match(await page.locator('#embeddings-result').innerText(), /Dot product = 1;.*cosine = 0.194/);
+    }
+    if (published.some(ch => ch.id === '6')) {
+      await page.goto(series + 'neural-networks.html');
+      assert.match(await page.locator('#neural-result').innerText(), /p = 0.673510, loss = 0.395252/);
+      // Independently differentiate the scalar loss with central differences.
+      function loss(p, target) {
+        const h = [Math.max(0, p[0] + 2 * p[1] + p[2]), Math.max(0, p[3] + 2 * p[4] + p[5])];
+        const logit = p[6] * h[0] + p[7] * h[1] + p[8];
+        return Math.max(logit, 0) - target * logit + Math.log1p(Math.exp(-Math.abs(logit)));
+      }
+      for (const bias of ['0.1', '1']) for (const target of ['0', '1']) {
+        await page.locator('#neural-bias').fill(bias);
+        await page.locator('#neural-target').selectOption(target);
+        const rows = await page.locator('#neural-gradients tr').evaluateAll(nodes => nodes.map(row => [...row.querySelectorAll('td')].map(cell => Number(cell.textContent))));
+        assert.equal(rows.length, 9);
+        const parameters = rows.map(row => row[0]);
+        rows.forEach((row, i) => {
+          const plus = parameters.slice(), minus = parameters.slice(), epsilon = 0.000001;
+          plus[i] += epsilon; minus[i] -= epsilon;
+          near(row[1], (loss(plus, +target) - loss(minus, +target)) / (2 * epsilon), 0.000001);
+        });
+      }
+      await page.locator('#neural-rate').fill('0');
+      const rows = await page.locator('#neural-gradients tr').evaluateAll(nodes => nodes.map(row => [...row.querySelectorAll('td')].map(cell => Number(cell.textContent))));
+      rows.forEach(row => near(row[0], row[2]));
+      await page.locator('#neural-reset').click();
+      assert.match(await page.locator('#neural-result').innerText(), /p = 0.673510, loss = 0.395252/);
+    }
+    const noJS = await browser.newPage({javaScriptEnabled: false, viewport: {width: 390, height: 844}});
+    await noJS.goto(series + 'introduction.html');
+    assert(await noJS.locator('#intro-temp').isDisabled());
+    assert(await noJS.locator('#intro-temp-reset').isDisabled());
+    if (published.some(ch => ch.id === '4')) {
+      await noJS.goto(series + 'logistic-regression.html');
+      assert(await noJS.locator('#logistic-threshold').isDisabled());
+      assert(await noJS.locator('#logistic-threshold-reset').isDisabled());
+    }
+    await noJS.close();
     assert.deepEqual(errors, [], 'Uncaught browser errors');
-    console.log(`SLP checks passed: ${published.length} published chapters, ${files.length} pages at three viewport widths, local links, navigation, mobile preferences, temperature and smoothing calculations.`);
+    console.log(`SLP checks passed: ${published.length} published chapters, ${files.length} pages at three viewport widths, local links, navigation, mobile preferences, all published interactive calculations.`);
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
