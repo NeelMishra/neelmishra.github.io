@@ -10049,6 +10049,47 @@ var BLOG_TREE = [
     name: 'math',
     label: 'Math',
     children: [
+      {
+        "name": "popular-courses",
+        "label": "Popular Courses",
+        "children": [
+          {
+            "title": "Popular Courses in Mathematics",
+            "file": "math/popular-courses/index.html",
+            "links": [
+              "math/popular-courses/mit-matrix-calculus/index.html"
+            ]
+          },
+          {
+            "name": "mit-matrix-calculus",
+            "label": "MIT Matrix Calculus",
+            "children": [
+              {
+                "title": "MIT Matrix Calculus: Course Guide",
+                "file": "math/popular-courses/mit-matrix-calculus/index.html",
+                "links": [
+                  "math/popular-courses/index.html",
+                  "math/popular-courses/mit-matrix-calculus/lecture-01/introduction-and-motivation.html"
+                ]
+              },
+              {
+                "name": "lecture-01",
+                "label": "Lecture 1",
+                "children": [
+                  {
+                    "title": "Lecture 1, Part 1: Introduction and Motivation",
+                    "file": "math/popular-courses/mit-matrix-calculus/lecture-01/introduction-and-motivation.html",
+                    "links": [
+                      "math/popular-courses/mit-matrix-calculus/index.html",
+                      "math/numerical-optimization/geometry-momentum-and-adamw.html"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
       // APPLIED-NOTES:math:START
       {
         "name": "numerical-optimization",
