@@ -8728,26 +8728,50 @@ var BLOG_TREE = [
             ]
           },
           {
-            "title": "Gradient Boosting: From Residuals to Logits",
+            "title": "Gradient Boosting: Fit the Remaining Error",
             "file": "ml/boosting/gradient-boosting.html",
             "links": [
               "ml/boosting/adaboost.html",
+              "ml/boosting/classification-losses.html"
+            ]
+          },
+          {
+            "title": "Classification & Losses: From Scores to Probabilities",
+            "file": "ml/boosting/classification-losses.html",
+            "links": [
+              "ml/boosting/gradient-boosting.html",
               "ml/boosting/modern-boosting.html"
             ]
           },
           {
-            "title": "XGBoost, LightGBM & CatBoost",
+            "title": "Newton Boosting & XGBoost: Leaves, Gains & Constraints",
             "file": "ml/boosting/modern-boosting.html",
             "links": [
-              "ml/boosting/gradient-boosting.html",
+              "ml/boosting/classification-losses.html",
+              "ml/boosting/library-systems.html"
+            ]
+          },
+          {
+            "title": "XGBoost, LightGBM & CatBoost: How the Systems Differ",
+            "file": "ml/boosting/library-systems.html",
+            "links": [
+              "ml/boosting/modern-boosting.html",
+              "ml/boosting/regularization.html"
+            ]
+          },
+          {
+            "title": "Regularization, Early Stopping & Model Selection",
+            "file": "ml/boosting/regularization.html",
+            "links": [
+              "ml/boosting/library-systems.html",
               "ml/boosting/interview-guide.html"
             ]
           },
           {
-            "title": "Bagging & Boosting: Interview Practice",
+            "title": "Boosting: Interview Derivations, Coding & Case Studies",
             "file": "ml/boosting/interview-guide.html",
             "links": [
-              "ml/boosting/modern-boosting.html"
+              "ml/boosting/regularization.html"
             ]
           }
         ],
