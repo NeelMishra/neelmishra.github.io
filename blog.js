@@ -8668,10 +8668,34 @@ var BLOG_TREE = [
             ]
           },
           {
-            "title": "Bagging & Random Forests",
+            "title": "Bootstrap Aggregation: Sampling, Averaging & Variance",
             "file": "ml/bagging/bootstrap-aggregation.html",
             "links": [
-              "ml/bagging/index.html"
+              "ml/bagging/index.html",
+              "ml/bagging/random-forests.html"
+            ]
+          },
+          {
+            "title": "Random Forests: Diversity, Capacity & Practical Tuning",
+            "file": "ml/bagging/random-forests.html",
+            "links": [
+              "ml/bagging/bootstrap-aggregation.html",
+              "ml/bagging/evaluation.html"
+            ]
+          },
+          {
+            "title": "Out-of-Bag Evaluation, Leakage & Interpretation",
+            "file": "ml/bagging/evaluation.html",
+            "links": [
+              "ml/bagging/random-forests.html",
+              "ml/bagging/interview-guide.html"
+            ]
+          },
+          {
+            "title": "Bagging & Random Forests: Interview Workshop",
+            "file": "ml/bagging/interview-guide.html",
+            "links": [
+              "ml/bagging/evaluation.html"
             ]
           }
         ],
