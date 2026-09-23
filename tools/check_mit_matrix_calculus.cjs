@@ -104,6 +104,6 @@ const url = file => `${base}/blog/${file}`;
     assert(await fallback.locator('noscript').isVisible());
     assert(await fallback.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No-JS overflow');
     await nojs.close();
-    console.log('MIT matrix calculus passed: 3 registered pages; desktop/390/320px layouts; 196 math expressions; 6 figures; all 10 lab states; keyboard/reset; no-JS fallback; index and local links.');
+    console.log('MIT matrix calculus passed: 3 registered pages; desktop/390/320px layouts; math rendering; 6 figures; all 10 lab states; keyboard/reset; no-JS fallback; index and local links.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
