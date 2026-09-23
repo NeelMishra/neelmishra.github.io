@@ -8636,16 +8636,106 @@ var BLOG_TREE = [
       },
       {
         "name": "bagging-and-boosting",
-        "label": "Bagging & Boosting",
+        "label": "Ensemble Roadmap",
         "children": [
-          {"title": "Overview & Study Roadmap", "file": "ml/bagging-and-boosting/index.html", "links": ["ml/bagging-and-boosting/bagging-random-forests.html"]},
-          {"title": "Bagging & Random Forests", "file": "ml/bagging-and-boosting/bagging-random-forests.html", "links": ["ml/bagging-and-boosting/index.html", "ml/bagging-and-boosting/adaboost.html"]},
-          {"title": "AdaBoost", "file": "ml/bagging-and-boosting/adaboost.html", "links": ["ml/bagging-and-boosting/bagging-random-forests.html", "ml/bagging-and-boosting/gradient-boosting.html"]},
-          {"title": "Gradient Boosting", "file": "ml/bagging-and-boosting/gradient-boosting.html", "links": ["ml/bagging-and-boosting/adaboost.html", "ml/bagging-and-boosting/modern-boosting.html"]},
-          {"title": "XGBoost, LightGBM & CatBoost", "file": "ml/bagging-and-boosting/modern-boosting.html", "links": ["ml/bagging-and-boosting/gradient-boosting.html", "ml/bagging-and-boosting/interview-guide.html"]},
-          {"title": "Interview Questions & Practice", "file": "ml/bagging-and-boosting/interview-guide.html", "links": ["ml/bagging-and-boosting/modern-boosting.html"]}
+          {
+            "title": "Bagging & Boosting: Start Here",
+            "file": "ml/bagging-and-boosting/index.html",
+            "links": [
+              "ml/bagging/index.html",
+              "ml/boosting/index.html"
+            ]
+          }
         ],
-        "learning": {"title": "Ensembles", "requires": ["decision-trees"], "start": "ml/bagging-and-boosting/index.html", "note": "Combine trees with bagging, then follow the sequential corrections in boosting."}
+        "learning": {
+          "title": "Ensemble roadmap",
+          "requires": [
+            "decision-trees"
+          ],
+          "start": "ml/bagging-and-boosting/index.html",
+          "note": "Choose a route through the separate bagging and boosting curricula."
+        }
+      },
+      {
+        "name": "bagging",
+        "label": "Bagging",
+        "children": [
+          {
+            "title": "Bagging: From One Unstable Tree to a Forest",
+            "file": "ml/bagging/index.html",
+            "links": [
+              "ml/bagging/bootstrap-aggregation.html"
+            ]
+          },
+          {
+            "title": "Bagging & Random Forests",
+            "file": "ml/bagging/bootstrap-aggregation.html",
+            "links": [
+              "ml/bagging/index.html"
+            ]
+          }
+        ],
+        "learning": {
+          "title": "Bagging",
+          "requires": [
+            "bagging-and-boosting"
+          ],
+          "start": "ml/bagging/index.html",
+          "note": "Resample rows, average trees, and evaluate forests."
+        }
+      },
+      {
+        "name": "boosting",
+        "label": "Boosting",
+        "children": [
+          {
+            "title": "Boosting: Build a Model One Correction at a Time",
+            "file": "ml/boosting/index.html",
+            "links": [
+              "ml/boosting/adaboost.html"
+            ]
+          },
+          {
+            "title": "AdaBoost: Weights, Votes & the Proof",
+            "file": "ml/boosting/adaboost.html",
+            "links": [
+              "ml/boosting/index.html",
+              "ml/boosting/gradient-boosting.html"
+            ]
+          },
+          {
+            "title": "Gradient Boosting: From Residuals to Logits",
+            "file": "ml/boosting/gradient-boosting.html",
+            "links": [
+              "ml/boosting/adaboost.html",
+              "ml/boosting/modern-boosting.html"
+            ]
+          },
+          {
+            "title": "XGBoost, LightGBM & CatBoost",
+            "file": "ml/boosting/modern-boosting.html",
+            "links": [
+              "ml/boosting/gradient-boosting.html",
+              "ml/boosting/interview-guide.html"
+            ]
+          },
+          {
+            "title": "Bagging & Boosting: Interview Practice",
+            "file": "ml/boosting/interview-guide.html",
+            "links": [
+              "ml/boosting/modern-boosting.html"
+            ]
+          }
+        ],
+        "learning": {
+          "title": "Boosting",
+          "requires": [
+            "bagging",
+            "regression"
+          ],
+          "start": "ml/boosting/index.html",
+          "note": "Build weighted votes, residual corrections, and modern boosted trees."
+        }
       },
       {
         "name": "gradient-boosted-machines",
@@ -8657,7 +8747,7 @@ var BLOG_TREE = [
           {"title": "Regularization & Early Stopping", "file": "ml/gradient-boosted-machines/regularization.html", "links": ["ml/gradient-boosted-machines/tree-base-learners.html", "ml/gradient-boosted-machines/modern-gbm.html"]},
           {"title": "Modern GBM Systems", "file": "ml/gradient-boosted-machines/modern-gbm.html", "links": ["ml/gradient-boosted-machines/regularization.html", "from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html"]}
         ],
-        "learning": {"title": "Gradient-boosted machines", "requires": ["regression", "bagging-and-boosting"], "start": "ml/gradient-boosted-machines/index.html", "note": "Connect loss gradients to tree updates, regularization and modern boosting libraries."}
+        "learning": {"title": "Gradient-boosted machines", "requires": ["regression", "boosting"], "start": "ml/gradient-boosted-machines/index.html", "note": "Connect loss gradients to tree updates, regularization and modern boosting libraries."}
       },
       {
         "name": "explainability",
