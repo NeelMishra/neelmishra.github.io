@@ -104,7 +104,7 @@ const pageURL=file=>`${base}/blog/ml/${file}`;
   }
   // Removed Deep Dive chapters now lead to the dedicated series and migrated labs.
   const movedTreeChapters=[
-   ['bagging-random-forests','bag-anim','bagging/bootstrap-aggregation','bag-anim'],
+   ['bagging-random-forests','bag-anim','bagging/bootstrap-aggregation','bootstrap'],
    ['bagging-random-forests','bagging','bagging/bootstrap-aggregation','bootstrap'],
    ['bagging-random-forests','forests','bagging/random-forests',''],
    ['bagging-random-forests','oob','bagging/evaluation','oob'],
