@@ -51,7 +51,7 @@ const pageURL=file=>`${base}/blog/ml/${file}`;
     assert.equal(await page.locator('.katex-error').count(),0,file);
     const html=fs.readFileSync(path.join(root,'blog/ml',file),'utf8');
     if(/\$[^$]+\$/.test(html.slice(html.indexOf('<h1>'),html.indexOf('</article>'))))assert(await page.locator('.katex').count()>0,`${file}: math did not load`);
-    for(const img of await page.locator('article img').all()){await img.scrollIntoViewIfNeeded();await img.evaluate(i=>i.decode());}
+    for(const img of await page.locator('article img').all()){if(await img.isVisible())await img.scrollIntoViewIfNeeded();await img.evaluate(i=>i.decode());}
     const ids=await page.locator('article [id]').evaluateAll(ns=>ns.map(n=>n.id));
     assert.equal(new Set(ids).size,ids.length,`${file}: duplicate IDs`);
     const urls=await page.locator('article [href],article [src]').evaluateAll(ns=>ns.map(n=>n.getAttribute('href')||n.getAttribute('src')));
@@ -102,6 +102,24 @@ const pageURL=file=>`${base}/blog/ml/${file}`;
    await page.goto(pageURL(`bagging-and-boosting/${old}.html`)+`?from=bookmark#${hash}`);
    assert(page.url().endsWith(`${newFile}.html?from=bookmark#${hash}`));assert.equal(await page.locator(`#${hash}`).count(),1);
   }
+  // Removed Deep Dive chapters now lead to the dedicated series and migrated labs.
+  const movedTreeChapters=[
+   ['bagging-random-forests','bag-anim','bagging/bootstrap-aggregation','bag-anim'],
+   ['bagging-random-forests','bagging','bagging/bootstrap-aggregation','bootstrap'],
+   ['bagging-random-forests','forests','bagging/random-forests',''],
+   ['bagging-random-forests','oob','bagging/evaluation','oob'],
+   ['bagging-random-forests','numbers','bagging/random-forests','tuning'],
+   ['boosting-adaboost','ada-anim','boosting/adaboost','ada-anim'],
+   ['boosting-adaboost','stump-versus-ensemble','boosting/adaboost','stump-versus-ensemble'],
+   ['boosting-adaboost','weak','boosting/adaboost','fit'],
+   ['boosting-adaboost','why','boosting/adaboost','proof'],
+   ['boosting-adaboost','gradient','boosting/gradient-boosting','']
+  ];
+  for(const [old,hash,newFile,newHash] of movedTreeChapters){
+   await page.goto(pageURL(`decision-trees/deep-dive/${old}.html`)+`?from=bookmark#${hash}`);
+   assert(page.url().endsWith(`${newFile}.html?from=bookmark${newHash?'#'+newHash:''}`));
+   if(newHash)assert(await page.locator(`#${newHash}`).isVisible(),`${old}#${hash}: target hidden`);
+  }
   await page.goto(`${base}/blog.html`,{waitUntil:'networkidle'});
   for(const file of files)assert(await page.locator(`a[href="blog/ml/${file}"]`).count()>0,`${file}: missing blog index entry`);
   const nojs=await browser.newContext({javaScriptEnabled:false,viewport:{width:320,height:1000}});const q=await nojs.newPage();
@@ -111,6 +129,6 @@ const pageURL=file=>`${base}/blog/ml/${file}`;
    if(file==='boosting/gradient-boosting.html'){assert(await q.locator('#boost-next').isDisabled());assert((await q.locator('#boost-status').innerText()).includes('3.25'));if(shots)await q.locator('#residual-lab').screenshot({path:path.join(shots,'residual-lab-nojs-320.png')});}
   }
   await nojs.close();assert.deepEqual(errors,[]);
-  console.log('PASS: 13 ordered chapters + roadmap, all links/math/images, 5 OOB rows, 21 independently checked boosting states, keyboard/reset/reduced motion, 5 legacy redirects, blog index, and no-JS fallbacks.');
+  console.log('PASS: 13 ordered chapters + roadmap, all links/math/images, 5 OOB rows, 21 independently checked boosting states, keyboard/reset/reduced motion, 5 legacy redirects, 10 Deep Dive bookmark routes, blog index, and no-JS fallbacks.');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -8613,9 +8613,7 @@ var BLOG_TREE = [
               {"title": "Foundations", "file": "ml/decision-trees/deep-dive/index.html", "links": ["ml/decision-trees/handwritten-notes/index.html", "ml/decision-trees/deep-dive/impurity-and-information-gain.html"]},
               {"title": "Impurity & Information Gain", "file": "ml/decision-trees/deep-dive/impurity-and-information-gain.html", "links": ["ml/decision-trees/deep-dive/index.html", "ml/decision-trees/deep-dive/threshold-search-edge-cases.html"]},
               {"title": "Threshold Search & Edge Cases", "file": "ml/decision-trees/deep-dive/threshold-search-edge-cases.html", "links": ["ml/decision-trees/deep-dive/impurity-and-information-gain.html", "ml/decision-trees/deep-dive/cart-complexity-pruning.html"]},
-              {"title": "CART, Complexity & Pruning", "file": "ml/decision-trees/deep-dive/cart-complexity-pruning.html", "links": ["ml/decision-trees/deep-dive/threshold-search-edge-cases.html", "ml/decision-trees/deep-dive/bagging-random-forests.html"]},
-              {"title": "Bagging & Random Forests", "file": "ml/decision-trees/deep-dive/bagging-random-forests.html", "links": ["ml/decision-trees/deep-dive/cart-complexity-pruning.html", "ml/decision-trees/deep-dive/boosting-adaboost.html"]},
-              {"title": "Boosting & AdaBoost", "file": "ml/decision-trees/deep-dive/boosting-adaboost.html", "links": ["ml/decision-trees/deep-dive/bagging-random-forests.html", "ml/gradient-boosted-machines/index.html"]}
+              {"title": "CART, Complexity & Pruning", "file": "ml/decision-trees/deep-dive/cart-complexity-pruning.html", "links": ["ml/bagging/index.html", "ml/boosting/index.html"]}
             ]
           },
           {
@@ -8788,7 +8786,7 @@ var BLOG_TREE = [
         "name": "gradient-boosted-machines",
         "label": "Gradient Boosted Machines",
         "children": [
-          {"title": "Foundations", "file": "ml/gradient-boosted-machines/index.html", "links": ["ml/decision-trees/deep-dive/boosting-adaboost.html", "ml/gradient-boosted-machines/loss-functions.html"]},
+          {"title": "Foundations", "file": "ml/gradient-boosted-machines/index.html", "links": ["ml/boosting/gradient-boosting.html", "ml/gradient-boosted-machines/loss-functions.html"]},
           {"title": "Loss Functions & Pseudo-Residuals", "file": "ml/gradient-boosted-machines/loss-functions.html", "links": ["ml/gradient-boosted-machines/index.html", "ml/gradient-boosted-machines/tree-base-learners.html"]},
           {"title": "Trees as Base Learners", "file": "ml/gradient-boosted-machines/tree-base-learners.html", "links": ["ml/gradient-boosted-machines/loss-functions.html", "ml/gradient-boosted-machines/regularization.html"]},
           {"title": "Regularization & Early Stopping", "file": "ml/gradient-boosted-machines/regularization.html", "links": ["ml/gradient-boosted-machines/tree-base-learners.html", "ml/gradient-boosted-machines/modern-gbm.html"]},
