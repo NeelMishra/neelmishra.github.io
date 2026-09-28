@@ -90,5 +90,6 @@ for ax in axs:
     ax.set(xlabel='Drug dosage',xticks=[0,10,15,20,25,30,35,40])
     ax.legend(fontsize=10,loc='upper center',ncol=2,frameon=False)
     ax.grid(alpha=.12);ax.set_axisbelow(True)
+axs[1].legend(fontsize=10,loc='upper left',ncol=1,frameon=False)
 save(fig,'regression-two-rounds',XGB_OUT)
 print('Three figures generated; worked-round arithmetic checked.')
