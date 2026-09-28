@@ -38,5 +38,16 @@
     }
     return {g:g.slice(),delta:d,den:den,num:num,m:s.m.slice(),v:s.v.slice(),u:s.u.slice()};
   };
+  M.transpose=function(a){return [a[0],a[2],a[1],a[3]];};
+  M.mul=function(a,b){return [a[0]*b[0]+a[1]*b[2],a[0]*b[1]+a[1]*b[3],a[2]*b[0]+a[3]*b[2],a[2]*b[1]+a[3]*b[3]];};
+  M.scale=function(a,c){return a.map(function(v){return c*v;});};
+  M.add=function(a,b){return a.map(function(v,i){return v+b[i];});};
+  M.norm=function(a){return Math.sqrt(a.reduce(function(s,v){return s+v*v;},0));};
+  M.rot=function(theta){var c=Math.cos(theta),s=Math.sin(theta);return [c,-s,s,c];};
+  M.eigh=function(a){var off=(a[1]+a[2])/2,phi=.5*Math.atan2(2*off,a[0]-a[3]),r=Math.hypot((a[0]-a[3])/2,off),mid=(a[0]+a[3])/2;return {values:[mid+r,mid-r],q:M.rot(phi)};};
+  M.power=function(a,p,floor){var e=M.eigh(a),v=e.values.map(function(x){return x<=0&&floor===0?0:Math.pow(Math.max(x,floor),p);});return M.mul(M.mul(e.q,[v[0],0,0,v[1]]),M.transpose(e.q));};
+  M.singular=function(a){return M.eigh(M.mul(M.transpose(a),a)).values.map(function(x){return Math.sqrt(Math.max(0,x));});};
+  M.fromSVD=function(s1,s2,left,right){return M.mul(M.mul(M.rot(left),[s1,0,0,s2]),M.transpose(M.rot(right)));};
+  M.polar=function(a){var e=M.eigh(M.mul(M.transpose(a),a)),v=e.values.map(function(x){return x>Math.max(1e-28,e.values[0]*1e-12)?1/Math.sqrt(x):0;});return M.mul(a,M.mul(M.mul(e.q,[v[0],0,0,v[1]]),M.transpose(e.q)));};
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);

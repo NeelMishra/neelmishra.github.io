@@ -20,3 +20,4 @@ s=M.state();for(let i=0;i<10;i++)M.step('rmsprop',s,[1,1],{lr:.1,rho:.9,eps:1e-8
 s=M.state();let ap={lr:.1,b1:.9,b2:.999,correct:1,eps:0,decay:0};let a1=M.step('adam',s,[2,20],ap);close(a1.delta[0],-.1);close(a1.delta[1],-.1);let a2=M.step('adam',s,[-2,-20],ap);close(a2.delta[0],.0052631578947368);
 s=M.state();let ua=M.step('adam',s,[2,2],{...ap,correct:0});close(ua.delta[0],-.1*.1/Math.sqrt(.001));
 s=M.state();s.w=[2,2];let decay=M.step('adam',s,[0,0],{...ap,eps:1e-8,decay:.1});close(s.w[0],1.98);
+let a=M.fromSVD(4,1,.4,-.2),q=M.polar(a),qtq=M.mul(M.transpose(q),q);[1,0,0,1].forEach((v,i)=>close(qtq[i],v));let sv=M.singular(a);close(sv[0],4);close(sv[1],1);let pr=M.polar([4,0,0,0]);assert.deepEqual(pr,[1,0,0,0]);close(M.norm(M.add(M.polar(M.scale(a,10)),M.scale(q,-1))),0,1e-9);
