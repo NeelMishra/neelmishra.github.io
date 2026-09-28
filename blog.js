@@ -287,7 +287,7 @@ var BLOG_TREE = [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', links: ['ml/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html'] },
                   { title: 'Regression GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html'] },
                   { title: 'Binary Classification GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html'] },
-                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/gradient-boosted-machines/modern-gbm.html'] }
+                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/boosting/modern-boosting.html'] }
                 ]
               },
               {
@@ -8785,15 +8785,56 @@ var BLOG_TREE = [
       },
       {
         "name": "gradient-boosted-machines",
-        "label": "Gradient Boosted Machines",
+        "label": "Gradient Boosting · StatQuest",
         "children": [
-          {"title": "Foundations", "file": "ml/gradient-boosted-machines/index.html", "links": ["ml/boosting/gradient-boosting.html", "ml/gradient-boosted-machines/loss-functions.html"]},
-          {"title": "Loss Functions & Pseudo-Residuals", "file": "ml/gradient-boosted-machines/loss-functions.html", "links": ["ml/gradient-boosted-machines/index.html", "ml/gradient-boosted-machines/tree-base-learners.html"]},
-          {"title": "Trees as Base Learners", "file": "ml/gradient-boosted-machines/tree-base-learners.html", "links": ["ml/gradient-boosted-machines/loss-functions.html", "ml/gradient-boosted-machines/regularization.html"]},
-          {"title": "Regularization & Early Stopping", "file": "ml/gradient-boosted-machines/regularization.html", "links": ["ml/gradient-boosted-machines/tree-base-learners.html", "ml/gradient-boosted-machines/modern-gbm.html"]},
-          {"title": "Modern GBM Systems", "file": "ml/gradient-boosted-machines/modern-gbm.html", "links": ["ml/gradient-boosted-machines/regularization.html", "from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html"]}
+          {
+            "title": "Series overview",
+            "file": "ml/gradient-boosted-machines/index.html",
+            "links": [
+              "ml/gradient-boosted-machines/regression-main-ideas.html"
+            ]
+          },
+          {
+            "title": "1 · Regression: Main Ideas",
+            "file": "ml/gradient-boosted-machines/regression-main-ideas.html",
+            "links": [
+              "ml/gradient-boosted-machines/index.html",
+              "ml/gradient-boosted-machines/regression-details.html"
+            ]
+          },
+          {
+            "title": "2 · Regression: The Derivation",
+            "file": "ml/gradient-boosted-machines/regression-details.html",
+            "links": [
+              "ml/gradient-boosted-machines/index.html",
+              "ml/gradient-boosted-machines/classification-main-ideas.html"
+            ]
+          },
+          {
+            "title": "3 · Classification: Main Ideas",
+            "file": "ml/gradient-boosted-machines/classification-main-ideas.html",
+            "links": [
+              "ml/gradient-boosted-machines/index.html",
+              "ml/gradient-boosted-machines/classification-details.html"
+            ]
+          },
+          {
+            "title": "4 · Classification: The Derivation",
+            "file": "ml/gradient-boosted-machines/classification-details.html",
+            "links": [
+              "ml/gradient-boosted-machines/index.html"
+            ]
+          }
         ],
-        "learning": {"title": "Gradient-boosted machines", "requires": ["regression", "boosting"], "start": "ml/gradient-boosted-machines/index.html", "note": "Connect loss gradients to tree updates, regularization and modern boosting libraries."}
+        "learning": {
+          "title": "Gradient boosting · StatQuest",
+          "requires": [
+            "regression",
+            "boosting"
+          ],
+          "start": "ml/gradient-boosted-machines/index.html",
+          "note": "Follow all four StatQuest lectures: regression and classification, intuition and derivation."
+        }
       },
       {
         "name": "explainability",
