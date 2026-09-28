@@ -32,3 +32,14 @@ let rot45=M.rot(Math.PI/4);let local=M.mv(M.transpose(rot45),[3,1]),returned=M.m
 s=M.state();let lp={lr:.1,b1:.9,b2:.99,decay:0};let li1=M.step('lion',s,[2,2],lp);close(s.m[0],.02);close(li1.delta[0],-.1);let li2=M.step('lion',s,[-.1,-.1],lp);close(li2.num[0],.008);close(s.m[0],.0188);close(li2.delta[0],-.1);let li3=M.step('lion',s,[-.3,-.3],lp);close(li3.num[0],-.01308);close(s.m[0],.015612);close(li3.delta[0],.1);
 s=M.state();s.w=[2,2];M.step('lion',s,[0,0],{...lp,decay:.1});close(s.w[0],1.98);
 console.log('All first-order and matrix optimizer checks passed.');
+// Matrix trajectory updates stay inside the plotted first-row family.
+for(const kind of ['muon','shampoo','soap']){
+ let state=M.state(),h=M.hessian(20,25*Math.PI/180),initial=M.loss(state.w,h);
+ let p={lr:kind==='shampoo'?.25:.08,beta:.95,nesterov:1,nsSteps:5,damping:kind==='soap'?1e-6:.01,frequency:kind==='soap'?5:1,rho:.95,b1:.9,b2:.99,calibration:M.mv(h,state.w)};
+ for(let t=0;t<150;t++){let step=M.step(kind,state,M.mv(h,state.w),p);close(step.direction[2],0);close(step.direction[3],0);assert.ok(Number.isFinite(M.loss(state.w,h)));}
+ assert.ok(M.loss(state.w,h)<initial/10,kind+' should reduce this controlled objective');
+}
+let zeroMuon=M.state(),zeroStep=M.step('muon',zeroMuon,[0,0],{lr:.1,beta:.95,nesterov:1,nsSteps:5});assert.deepEqual(zeroMuon.w,[3,2]);
+// Independently reconstruct the first rank-one Muon step through its scalar map.
+let mu=M.state(),mp={lr:.1,beta:.9,nesterov:0,nsSteps:5};let result=M.step('muon',mu,[3,4],mp),sing=.5/(.5+1e-7);for(let i=0;i<5;i++)sing=3.4445*sing-4.775*sing**3+2.0315*sing**5;close(result.delta[0],-.1*sing*.6);close(result.delta[1],-.1*sing*.8);
+console.log('Matrix trajectory checks passed.');

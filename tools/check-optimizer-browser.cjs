@@ -24,8 +24,8 @@ const fs=require('node:fs');
   }
   const ns=page.locator('[data-matrix="schulz"]');
   if(await ns.count()){
-   await ns.getByRole('button',{name:'Run 5 iterations',exact:true}).click();assert.equal(await ns.getAttribute('data-step'),'5');
-   await ns.getByLabel('Polynomial',{exact:true}).selectOption('0');for(let i=0;i<4;i++)await ns.getByRole('button',{name:'Run 5 iterations',exact:true}).click();assert.ok(Number(await ns.getAttribute('data-error'))<1e-7);
+   await ns.getByRole('button',{name:'Play to selected iteration',exact:true}).click();await page.waitForTimeout(550);await ns.getByRole('button',{name:'Pause',exact:true}).click();let paused=await ns.getAttribute('data-step');await page.waitForTimeout(450);assert.equal(await ns.getAttribute('data-step'),paused);await ns.getByRole('button',{name:'Run to selected iteration',exact:true}).click();assert.equal(await ns.getAttribute('data-step'),'5');
+   await ns.getByLabel('Polynomial',{exact:true}).selectOption('0');await ns.getByLabel('Iteration budget',{exact:true}).fill('20');await ns.getByLabel('Iteration budget',{exact:true}).blur();await ns.getByRole('button',{name:'Run to selected iteration',exact:true}).click();assert.ok(Number(await ns.getAttribute('data-error'))<1e-7);
    await ns.getByRole('button',{name:'Reset',exact:true}).click();await ns.scrollIntoViewIfNeeded();await page.screenshot({path:artifacts+'/'+slug+'-desktop.png'});
   }
   const sh=page.locator('[data-matrix="shampoo"]');

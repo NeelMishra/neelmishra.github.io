@@ -17,7 +17,12 @@
     if(kind==='adadelta'){p.lr=1;p.eps=.001;p.batch=0;}
     if(kind==='adam'){p.lr=.07;p.batch=4;p.eps=1e-8;}
     if(kind==='lion'){p.lr=.04;p.batch=4;p.b2=.99;}
+    if(kind==='muon'){p.lr=.08;p.batch=0;p.beta=.95;p.nesterov=1;p.nsSteps=5;}
+    if(kind==='shampoo'){p.lr=.25;p.batch=0;p.damping=.01;p.frequency=1;}
+    if(kind==='soap'){p.lr=.08;p.batch=0;p.rho=.95;p.b1=.9;p.b2=.99;p.damping=.000001;p.frequency=5;}
     var controls=el('div','opt-controls',null,root);
+    if(kind==='muon'){number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});select(controls,'NS iterations per update',[[1,'1'],[3,'3'],[5,'5'],[10,'10']],p.nsSteps,function(v){p.nsSteps=v;reset();});select(controls,'Nesterov mixture',[[1,'On'],[0,'Off']],1,function(v){p.nesterov=v;reset();});}
+    if(kind==='shampoo'||kind==='soap')select(controls,kind==='soap'?'Basis refresh interval':'Root refresh interval',[[1,'Every step'],[5,'Every 5 steps'],[10,'Every 10 steps']],p.frequency,function(v){p.frequency=v;reset();});
     if(kind==='adam'){number(controls,'First-moment β₁',0,.99,.05,p.b1,function(v){p.b1=v;reset();});number(controls,'Second-moment β₂',0,.9999,.001,p.b2,function(v){p.b2=v;reset();});select(controls,'Bias correction',[[1,'On · Adam'],[0,'Off · ablation']],1,function(v){p.correct=v;reset();});}
     if(kind==='lion'){number(controls,'Current mixture β₁',0,.99,.05,p.b1,function(v){p.b1=v;reset();});number(controls,'Stored memory β₂',0,.999,.01,p.b2,function(v){p.b2=v;reset();});number(controls,'Weight decay λ',0,.5,.01,p.decay,function(v){p.decay=v;reset();});}
     if(kind==='momentum')number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});
@@ -27,11 +32,11 @@
     select(controls,'Curvature ratio κ',[[1,'1 · circular'],[5,'5'],[20,'20 · narrow'],[50,'50 · very narrow']],p.k,function(v){p.k=v;reset();});
     number(controls,'Rotation (degrees)',0,90,5,p.angle,function(v){p.angle=v;reset();});
     number(controls,'Sampling seed',1,999,1,p.seed,function(v){p.seed=v;reset();});
-    var actions=el('div','opt-actions',null,root),step=button(actions,'Step →',advance),play=button(actions,'Play 100 steps',function(){if(runner){stop();return;}var count=Math.min(100,150-s.t),tasks=[];for(var i=0;i<count;i++)tasks.push(advance);play.textContent='Pause';runner=window.animRunner(tasks,120,function(){runner=null;play.textContent='Play 100 steps';});}),resetButton=button(actions,'Reset',reset);
+    var actions=el('div','opt-actions',null,root),step=button(actions,'Step →',advance),play=button(actions,'Play 100 steps',function(){if(runner){stop();return;}var count=Math.min(100,150-s.t),tasks=[];for(var i=0;i<count;i++)tasks.push(advance);play.textContent='Pause';runner=window.animRunner(tasks,120,function(){runner=null;play.textContent='Play 100 steps';});}),resetButton=button(actions,'Reset',reset);button(actions,'Run 10 steps',function(){stop();for(var i=0;i<10;i++)advance();});
     var plots=el('div','opt-plots',null,root),plane=svg(plots,'Parameter trajectory on the full-loss contours. Exact coordinates appear below.',400,330),curve=svg(plots,'Excess full loss versus update step. Vertical axis is log10(1 + loss).',400,330),out=el('output','opt-status','',root),stats=el('div','opt-readout',null,root);out.setAttribute('aria-live','polite');out.setAttribute('aria-atomic','true');
     el('p','','Changing a control resets the run. Eight quadratic examples; sampled rows are drawn independently with replacement. The orange dot is the current parameter. Plot bounds expand to include the trajectory.',root);
     function stop(){if(runner)runner.cancel();runner=null;play.textContent='Play 100 steps';}
-    function reset(){stop();s=M.state();random=M.rng(p.seed);h=M.hessian(p.k,p.angle*Math.PI/180);trail=[s.w.slice()];losses=[M.loss(s.w,h)];last=null;stopped=false;draw();}
+    function reset(){stop();s=M.state();random=M.rng(p.seed);h=M.hessian(p.k,p.angle*Math.PI/180);p.calibration=M.mv(h,s.w);trail=[s.w.slice()];losses=[M.loss(s.w,h)];last=null;stopped=false;draw();}
     function advance(){if(stopped||s.t>=150){stop();return;}var g=M.gradient(s.w,h,p.batch,random,p.spread);last=M.step(kind,s,g,p);trail.push(s.w.slice());losses.push(M.loss(s.w,h));if(!Number.isFinite(losses[losses.length-1])||losses[losses.length-1]>1e10){stopped=true;stop();}draw();}
     function draw(){
       plane.textContent='';curve.textContent='';var bound=Math.max(4,Math.max.apply(null,trail.map(function(w){return Math.max(Math.abs(w[0]),Math.abs(w[1]));}))*1.1),scale=130/bound;
@@ -49,6 +54,9 @@
       if(kind==='adadelta')rows.push(['RMS gradient (denominator)',last?vec(last.den):'—'],['Previous RMS update (numerator)',last?vec(last.num):'—'],['Squared-gradient state v',vec(s.v)],['Squared-update state u',vec(s.u)]);
       if(kind==='adam')rows.push(['Raw first moment m',vec(s.m)],['Raw second moment v',vec(s.v)],['Used first moment',last?vec(last.num):'—'],['Used RMS + ε',last?vec(last.den):'—']);
       if(kind==='lion')rows.push(['Mixture c used for sign',last?vec(last.num):'—'],['Stored momentum after update',vec(s.m)],['Sign direction',last?vec(last.num.map(Math.sign)):'—'],['Decay coefficient λ',fmt(p.decay)]);
+      if(kind==='muon')rows.push(['Matrix momentum, active row',vec(s.m)],['Update singular values',last?vec(last.extra.singular):'—'],['NS iterations within each update',String(p.nsSteps)]);
+      if(kind==='shampoo')rows.push(['Column-history eigenvalues',last?vec(last.extra.eigen):'—'],['Roots last refreshed at step',last?String(last.extra.refreshed):'—']);
+      if(kind==='soap')rows.push(['Current gradient in learned basis',last?vec(last.extra.projected):'—'],['Second moments used this step',last?vec(last.extra.second):'—'],['Basis last refreshed after step',last?String(last.extra.refreshed):'0']);
       read(stats,rows);
       step.disabled=play.disabled=stopped||s.t>=150;
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);

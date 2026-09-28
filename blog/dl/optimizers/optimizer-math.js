@@ -15,6 +15,7 @@
   M.state = function(){return {w:[3,2],m:[0,0],v:[0,0],u:[0,0],t:0};};
   M.step = function(kind,s,g,p){
     var d=[0,0],den=[1,1],num=[1,1];s.t++;
+    if(kind==='muon'||kind==='shampoo'||kind==='soap')return M.matrixTrajectoryStep(kind,s,g,p);
     for(var i=0;i<2;i++){
       if(kind==='sgd')d[i]=-p.lr*g[i];
       else if(kind==='momentum'){s.m[i]=p.beta*s.m[i]+g[i];d[i]=-p.lr*s.m[i];}
@@ -63,6 +64,31 @@
   M.soapFixedStep=function(s,g,left,right,b1,b2,eps){var h=M.mul(M.mul(M.transpose(left),g),right);s.t++;
     var u=h.map(function(v,i){s.m[i]=b1*s.m[i]+(1-b1)*v;s.v[i]=b2*s.v[i]+(1-b2)*v*v;return (s.m[i]/(1-Math.pow(b1,s.t)))/(Math.sqrt(s.v[i]/(1-Math.pow(b2,s.t)))+eps);});
     return {projected:h,adapted:u,direction:M.mul(M.mul(left,u),M.transpose(right))};
+  };
+  M.qr2=function(a){var n=Math.hypot(a[0],a[2]);if(n<1e-30)return [1,0,0,1];var x=a[0]/n,y=a[2]/n,dot=x*a[1]+y*a[3],u=a[1]-dot*x,v=a[3]-dot*y,n2=Math.hypot(u,v);return n2>1e-20?[x,u/n2,y,v/n2]:[x,-y,y,x];};
+  M.soapRowState=function(g,rho,damping){var r=[(1-rho)*g[0]*g[0]+damping,(1-rho)*g[0]*g[1],(1-rho)*g[0]*g[1],(1-rho)*g[1]*g[1]+damping];return {r:r,q:M.eigh(r).q,v:[0,0],refreshed:0};};
+  M.matrixTrajectoryStep=function(kind,s,g,p){
+    var grad=[g[0],g[1],0,0],direction,extra={};
+    if(kind==='muon'){
+      s.matrixMomentum=M.add(M.scale(s.matrixMomentum||[0,0,0,0],p.beta),M.scale(grad,1-p.beta));
+      var candidate=p.nesterov?M.add(M.scale(grad,1-p.beta),M.scale(s.matrixMomentum,p.beta)):s.matrixMomentum.slice();
+      direction=M.scale(candidate,1/(M.norm(candidate)+1e-7));for(var k=0;k<p.nsSteps;k++)direction=M.ns(direction,true);
+      s.m=s.matrixMomentum.slice(0,2);extra.singular=M.singular(direction);
+    }else if(kind==='shampoo'){
+      if(!s.shampoo)s.shampoo=M.shampooState(p.damping);
+      direction=M.shampooStep(s.shampoo,grad,p.frequency).direction;extra.eigen=M.eigh(s.shampoo.r).values;extra.refreshed=s.shampoo.refreshed;
+    }else{
+      if(!s.soap)s.soap=M.soapRowState(p.calibration||g,p.rho,p.damping);
+      var state=s.soap,q=state.q,h=[g[0]*q[0]+g[1]*q[2],g[0]*q[1]+g[1]*q[3]],u=[];
+      for(var j=0;j<2;j++){s.m[j]=p.b1*s.m[j]+(1-p.b1)*g[j];state.v[j]=p.b2*state.v[j]+(1-p.b2)*h[j]*h[j];}
+      var mp=[s.m[0]*q[0]+s.m[1]*q[2],s.m[0]*q[1]+s.m[1]*q[3]];
+      for(var j=0;j<2;j++)u[j]=(mp[j]/(1-Math.pow(p.b1,s.t)))/(Math.sqrt(state.v[j]/(1-Math.pow(p.b2,s.t)))+1e-8);
+      direction=[u[0]*q[0]+u[1]*q[1],u[0]*q[2]+u[1]*q[3],0,0];extra.projected=h;extra.second=state.v.slice();extra.basis=q.slice();
+      state.r=M.add(M.scale(state.r,p.rho),M.scale([g[0]*g[0],g[0]*g[1],g[0]*g[1],g[1]*g[1]],1-p.rho));
+      if(s.t%p.frequency===0){var estimates=M.mul(M.mul(M.transpose(q),state.r),q);if(estimates[3]>estimates[0]){q=[q[1],q[0],q[3],q[2]];state.v.reverse();}state.q=M.qr2(M.mul(state.r,q));state.refreshed=s.t;}
+      extra.refreshed=state.refreshed;
+    }
+    var delta=[-p.lr*direction[0],-p.lr*direction[1]];s.w[0]+=delta[0];s.w[1]+=delta[1];return {g:g.slice(),delta:delta,direction:direction,m:s.m.slice(),extra:extra};
   };
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);
