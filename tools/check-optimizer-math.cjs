@@ -17,3 +17,6 @@ s=M.state();let ad=M.step('adadelta',s,[2,2],{lr:1,rho:.9,eps:1e-6});close(s.v[0
 let ad2=M.state();M.step('adadelta',ad2,[2,2],{lr:2,rho:.9,eps:1e-6});close(ad2.u[0],s.u[0]);close(ad2.w[0]-3,2*(s.w[0]-3));
 s=M.state();let rms=M.step('rmsprop',s,[2,20],{lr:.1,rho:.9,eps:0});close(rms.delta[0],rms.delta[1]);close(rms.delta[0],-.1/Math.sqrt(.1));
 s=M.state();for(let i=0;i<10;i++)M.step('rmsprop',s,[1,1],{lr:.1,rho:.9,eps:1e-8});close(s.v[0],1-.9**10);M.step('rmsprop',s,[10,10],{lr:.1,rho:.9,eps:1e-8});close(s.v[0],.9*(1-.9**10)+10);
+s=M.state();let ap={lr:.1,b1:.9,b2:.999,correct:1,eps:0,decay:0};let a1=M.step('adam',s,[2,20],ap);close(a1.delta[0],-.1);close(a1.delta[1],-.1);let a2=M.step('adam',s,[-2,-20],ap);close(a2.delta[0],.0052631578947368);
+s=M.state();let ua=M.step('adam',s,[2,2],{...ap,correct:0});close(ua.delta[0],-.1*.1/Math.sqrt(.001));
+s=M.state();s.w=[2,2];let decay=M.step('adam',s,[0,0],{...ap,eps:1e-8,decay:.1});close(s.w[0],1.98);

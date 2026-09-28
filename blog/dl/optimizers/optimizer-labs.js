@@ -15,7 +15,9 @@
     var kind=root.dataset.optimizer,p={lr:.04,k:20,angle:25,batch:1,spread:.35,seed:7,beta:.9,rho:.95,eps:1e-6,b1:.9,b2:.999,correct:1,decay:0},s,random,h,trail,losses,last,runner=null,stopped=false;
     if(kind==='momentum'){p.lr=.03;p.batch=0;}
     if(kind==='adadelta'){p.lr=1;p.eps=.001;p.batch=0;}
+    if(kind==='adam'){p.lr=.07;p.batch=4;p.eps=1e-8;}
     var controls=el('div','opt-controls',null,root);
+    if(kind==='adam'){number(controls,'First-moment β₁',0,.99,.05,p.b1,function(v){p.b1=v;reset();});number(controls,'Second-moment β₂',0,.9999,.001,p.b2,function(v){p.b2=v;reset();});select(controls,'Bias correction',[[1,'On · Adam'],[0,'Off · ablation']],1,function(v){p.correct=v;reset();});}
     if(kind==='momentum')number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});
     if(kind==='adadelta'){number(controls,'Decay ρ',0,.999,.05,p.rho,function(v){p.rho=v;reset();});select(controls,'Epsilon ε',[[1e-8,'10⁻⁸'],[1e-6,'10⁻⁶'],[.001,'10⁻³ (demo default)'],[.01,'10⁻²']],p.eps,function(v){p.eps=v;reset();});}
     number(controls,kind==='adadelta'?'Step multiplier η':'Learning rate η',.000001,2,.01,p.lr,function(v){p.lr=v;reset();});
@@ -43,6 +45,7 @@
       var rows=[['Parameter w',vec(s.w)],['Last gradient g',last?vec(last.g):'—'],['Last displacement Δw',last?vec(last.delta):'—'],['Full loss above minimum',fmt(losses[losses.length-1])]];
       if(kind==='momentum')rows.push(['Buffer b',vec(s.m)],['Buffer multiplier β',fmt(p.beta)]);
       if(kind==='adadelta')rows.push(['RMS gradient (denominator)',last?vec(last.den):'—'],['Previous RMS update (numerator)',last?vec(last.num):'—'],['Squared-gradient state v',vec(s.v)],['Squared-update state u',vec(s.u)]);
+      if(kind==='adam')rows.push(['Raw first moment m',vec(s.m)],['Raw second moment v',vec(s.v)],['Used first moment',last?vec(last.num):'—'],['Used RMS + ε',last?vec(last.den):'—']);
       read(stats,rows);
       step.disabled=play.disabled=stopped||s.t>=150;
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);

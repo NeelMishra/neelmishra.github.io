@@ -27,6 +27,12 @@
       else if(kind==='rmsprop'){
         s.v[i]=p.rho*s.v[i]+(1-p.rho)*g[i]*g[i];den[i]=Math.sqrt(s.v[i])+p.eps;d[i]=-p.lr*g[i]/den[i];
       }
+      else if(kind==='adam'){
+        s.m[i]=p.b1*s.m[i]+(1-p.b1)*g[i];s.v[i]=p.b2*s.v[i]+(1-p.b2)*g[i]*g[i];
+        num[i]=s.m[i]/(p.correct?1-Math.pow(p.b1,s.t):1);
+        den[i]=Math.sqrt(s.v[i]/(p.correct?1-Math.pow(p.b2,s.t):1))+p.eps;
+        d[i]=-p.lr*(num[i]/den[i]+p.decay*s.w[i]);
+      }
       else throw new Error('Unknown optimizer '+kind);
       s.w[i]+=d[i];
     }
