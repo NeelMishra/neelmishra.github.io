@@ -12,3 +12,4 @@ for(const mode of ['activation','connection']){const a=M.dropoutSamples(.5,mode,
 assert.equal(M.structuredMask('block',.25,1).flat().filter(x=>!x).length,32);
 const branch=M.structuredMask('branch',.5,4).flat();assert.ok(branch.every(x=>x===branch[0]));
 M.structuredMask('channel',.5,7).forEach(a=>assert.ok(a.every(x=>x===a[0])));
+close(M.cutmix(.75,4,4).lambda,.75);close(M.cutmix(.75,0,4).lambda,.875);close(M.cutmix(1,4,4).lambda,1);close(M.cutmix(0,4,4).lambda,0);
