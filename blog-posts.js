@@ -3,6 +3,7 @@ var BLOG_POSTS = {
   /* TRAINING-SERIES:START */
   "dl/regularization/l1-l2-elastic-net.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "L1, L2, and Elastic Net: What the Penalty Actually Does", "description": "Derive shrinkage and sparsity, inspect the exact solutions, and distinguish a penalty from its optimization algorithm.", "meta": "September 2026 · Deep Learning"},
   "dl/regularization/weight-decay-and-norm-constraints.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "Weight Decay and Norm Constraints: Control the Right Quantity", "description": "Separate L2 from AdamW, project max-norm constraints, and understand what spectral normalization bounds.", "meta": "September 2026 · Deep Learning"},
+  "dl/regularization/dropout-and-dropconnect.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "Dropout and DropConnect: Learn with Randomly Missing Paths", "description": "Derive inverted dropout’s mean and variance, inspect masks, and understand the train–evaluation distinction.", "meta": "September 2026 · Deep Learning"},
   "dl/regularization/index.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "Regularization in Deep Learning: Reading Guide", "description": "A connected guide with derivations, worked examples, original figures, and interactive experiments.", "meta": "September 2026 · Deep Learning"},
   /* TRAINING-SERIES:END */
   /* OPTIMIZER-SERIES:START */

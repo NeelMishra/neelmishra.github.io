@@ -7,3 +7,5 @@ console.log('Training-foundation numerical checks passed.');
 assert.deepEqual(M.projectBall([3,4],2),[1.2000000000000002,1.6]);
 assert.deepEqual(M.projectBall([0,0],2),[0,0]);
 close(M.decayPath(.2,.1,1)[1][1],1.996);close(M.decayPath(.2,.1,1)[1][2],1.96);
+const noDrop=M.dropoutSamples(0,'activation',1,20);noDrop.forEach(a=>assert.deepEqual(a.y,[3.5,1]));
+for(const mode of ['activation','connection']){const a=M.dropoutSamples(.5,mode,7,80000),m=[M.mean(a.map(x=>x.y[0])),M.mean(a.map(x=>x.y[1]))],cov=M.mean(a.map(x=>(x.y[0]-m[0])*(x.y[1]-m[1])));close(m[0],3.5,.035);close(m[1],1,.035);close(cov,mode==='activation'?1.25:0,.07);}

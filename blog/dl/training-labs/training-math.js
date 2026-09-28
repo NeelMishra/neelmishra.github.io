@@ -7,4 +7,5 @@ M.mean=function(a){return a.reduce(function(s,x){return s+x;},0)/a.length;};
 M.variance=function(a){var m=M.mean(a);return M.mean(a.map(function(x){return (x-m)*(x-m);}));};
 M.projectBall=function(z,c){var n=Math.hypot.apply(null,z),a=n>c?c/n:1;return z.map(function(x){return a*x;});};
 M.decayPath=function(lambda,p,steps){var a=2,b=2,out=[[0,a,b]];for(var i=1;i<=steps;i++){a*=1-.1*lambda*p;b*=1-.1*lambda;out.push([i,a,b]);}return out;};
+M.dropoutSamples=function(p,mode,seed,n){var r=M.rng(seed),q=1-p,terms=[[1,1,.5,1],[.5,2,-.5,-1]],out=[];for(var k=0;k<n;k++){var shared=terms[0].map(function(){return r()<q?1:0;}),masks=terms.map(function(){return mode==='activation'?shared:shared.map(function(){return r()<q?1:0;});});out.push({mask:masks,y:terms.map(function(row,i){return row.reduce(function(sum,x,j){return sum+x*masks[i][j]/q;},0);})});}return out;};
 root.TrainingMath=M;})(typeof window==='undefined'?globalThis:window);
