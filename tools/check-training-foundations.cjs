@@ -18,3 +18,4 @@ for(const t of [1,2,8]){const z=[2,.5,-1],q=M.softmax([3,2,-2],t),p=M.softmax(z,
 const early=M.earlyData(.35);assert.ok(early.best[0]>0&&early.best[0]<2000);for(let i=1;i<early.path.length;i++)assert.ok(early.path[i][1]<=early.path[i-1][1]+1e-12);
 // Verify the analytic path against one direct gradient step on the actual design matrix.
 const b=Array.from({length:16},(_,k)=>M.mean(early.train.map(([x,y])=>y*(k?Math.sqrt(2)*Math.cos(k*Math.PI*x):1)/(k+1))));early.coefficients(1).forEach((a,k)=>close(a,.8*b[k]/(k+1),1e-12));
+for(const x of [-.8,.4,1]){close(M.noiseLoss(x,2,0).exact,Math.pow(Math.sin(2*x)-.4,2));const r=M.rng(82);let sum=0;for(let i=0;i<100000;i++)sum+=Math.pow(Math.sin(2*(x+.2*M.normal(r)))-.4,2);close(sum/100000,M.noiseLoss(x,2,.2).exact,.006);}
