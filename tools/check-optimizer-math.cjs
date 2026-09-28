@@ -15,3 +15,5 @@ s=M.state();M.step('momentum',s,[1,4],{lr:.1,beta:.9});M.step('momentum',s,[1,-4
 let plain=M.state(),moment=M.state();for(let i=0;i<10;i++){M.step('sgd',plain,[i,-i],{lr:.03});M.step('momentum',moment,[i,-i],{lr:.03,beta:0});}assert.deepEqual(plain.w,moment.w);
 s=M.state();let ad=M.step('adadelta',s,[2,2],{lr:1,rho:.9,eps:1e-6});close(s.v[0],.4);close(ad.delta[0],-.002/Math.sqrt(.400001));close(s.u[0],.1*ad.delta[0]**2);
 let ad2=M.state();M.step('adadelta',ad2,[2,2],{lr:2,rho:.9,eps:1e-6});close(ad2.u[0],s.u[0]);close(ad2.w[0]-3,2*(s.w[0]-3));
+s=M.state();let rms=M.step('rmsprop',s,[2,20],{lr:.1,rho:.9,eps:0});close(rms.delta[0],rms.delta[1]);close(rms.delta[0],-.1/Math.sqrt(.1));
+s=M.state();for(let i=0;i<10;i++)M.step('rmsprop',s,[1,1],{lr:.1,rho:.9,eps:1e-8});close(s.v[0],1-.9**10);M.step('rmsprop',s,[10,10],{lr:.1,rho:.9,eps:1e-8});close(s.v[0],.9*(1-.9**10)+10);

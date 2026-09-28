@@ -24,6 +24,9 @@
         var raw=-num[i]*g[i]/den[i];
         s.u[i]=p.rho*s.u[i]+(1-p.rho)*raw*raw;d[i]=p.lr*raw;
       }
+      else if(kind==='rmsprop'){
+        s.v[i]=p.rho*s.v[i]+(1-p.rho)*g[i]*g[i];den[i]=Math.sqrt(s.v[i])+p.eps;d[i]=-p.lr*g[i]/den[i];
+      }
       else throw new Error('Unknown optimizer '+kind);
       s.w[i]+=d[i];
     }

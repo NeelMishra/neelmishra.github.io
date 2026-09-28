@@ -48,6 +48,24 @@
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);
     } reset();
   }
+  function stream(root){
+    var kind=root.dataset.stream,p={lr:.1,rho:.9,eps:1e-8,b1:.9,b2:.999,correct:1,decay:0},mode=0,s,history,last;
+    var controls=el('div','opt-controls',null,root);
+    select(controls,'Gradient sequence',[[0,'One spike at step 11'],[1,'Sign reversal after step 10'],[2,'Constant gradient']],0,function(v){mode=v;reset();});
+    number(controls,'Decay ρ',0,.999,.05,p.rho,function(v){p.rho=v;reset();});
+    var actions=el('div','opt-actions',null,root),step=button(actions,'Step →',advance);button(actions,'Run 40 steps',function(){while(s.t<40)advance();});button(actions,'Reset',reset);
+    var chart=svg(root,'Supplied gradient magnitude and running RMS versus step. The readout gives exact current values.',760,310);chart.classList.add('opt-wide-svg');var stats=el('div','opt-readout',null,root),out=el('output','opt-status','',root);out.setAttribute('aria-live','polite');
+    function reset(){s=M.state();history=[];last=null;draw();}
+    function advance(){if(s.t>=40)return;var t=s.t+1,g=mode===0?(t===11?10:1):mode===1?(t>10?-1:1):1;last=M.step(kind,s,[g,g],p);history.push([g,Math.sqrt(s.v[0]),last.delta[0]]);draw();}
+    function draw(){chart.textContent='';var max=mode===0?11:1.2;
+      [0,.5,1].forEach(function(q){var y=250-190*q;shape(chart,'line',{x1:50,y1:y,x2:710,y2:y,stroke:'#cbd9d1'});shape(chart,'text',{x:42,y:y+4,'text-anchor':'end','font-size':13,fill:'#173d35'},fmt(max*q));});
+      [0,10,20,30,40].forEach(function(t){shape(chart,'text',{x:50+660*t/40,y:278,'text-anchor':'middle','font-size':13,fill:'#173d35'},t);});
+      ['#b66929','#137b68'].forEach(function(color,j){shape(chart,'path',{d:path(history.map(function(row,i){return [50+660*(i+1)/40,250-190*Math.abs(row[j])/max];})),fill:'none',stroke:color,'stroke-width':3});});
+      shape(chart,'text',{x:30,y:28,'font-size':16,fill:'#173d35'},'Orange: |gradient|     Green: running RMS √v     Horizontal axis: step');
+      read(stats,[['Step',String(s.t)],['Signed gradient',last?fmt(last.g[0]):'—'],['Squared-gradient memory v',fmt(s.v[0])],['RMS denominator',last?fmt(last.den[0]):'—'],['Displacement (η = 0.1)',last?fmt(last.delta[0]):'—']]);out.textContent=s.t?'Step '+s.t+': the update uses the current signed gradient divided by its running RMS. '+(s.t===11&&mode===0?'The spike enters the denominator immediately.':''):'A supplied gradient sequence isolates the optimizer’s memory; this is not a training run.';step.disabled=s.t>=40;root.dataset.step=s.t;root.dataset.loss=s.w[0];
+    }reset();
+  }
   document.querySelectorAll('[data-optimizer]').forEach(firstOrder);
+  document.querySelectorAll('[data-stream]').forEach(stream);
   window.OptimizerLabUI={el:el,shape:shape,svg:svg,button:button,select:select,number:number,fmt:fmt,vec:vec,read:read,path:path};
 })();
