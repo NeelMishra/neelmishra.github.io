@@ -55,5 +55,10 @@
     if(s.t===1||(s.t-1)%frequency===0){s.left=M.power(s.l,-.25,0);s.right=M.power(s.r,-.25,0);s.refreshed=s.t;}
     return {direction:M.mul(M.mul(s.left,g),s.right),diagonal:g.map(function(v,i){return v/Math.sqrt(s.v[i]);})};
   };
+  M.soapState=function(){return {m:[0,0,0,0],v:[0,0,0,0],t:0};};
+  M.soapFixedStep=function(s,g,left,right,b1,b2,eps){var h=M.mul(M.mul(M.transpose(left),g),right);s.t++;
+    var u=h.map(function(v,i){s.m[i]=b1*s.m[i]+(1-b1)*v;s.v[i]=b2*s.v[i]+(1-b2)*v*v;return (s.m[i]/(1-Math.pow(b1,s.t)))/(Math.sqrt(s.v[i]/(1-Math.pow(b2,s.t)))+eps);});
+    return {projected:h,adapted:u,direction:M.mul(M.mul(left,u),M.transpose(right))};
+  };
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);

@@ -26,3 +26,6 @@ let arbitrary=M.fromSVD(.8,.2,.4,-.3),ns=M.ns(arbitrary,true),expected=M.fromSVD
 for(let i=0;i<20;i++)nx=M.ns(nx,false);close(nx[3],1);assert.deepEqual(M.ns([0,0,0,0],true),[0,0,0,0]);
 let sh=M.shampooState(0),sh1=M.shampooStep(sh,[4,0,0,1],1);[1,0,0,1].forEach((v,i)=>close(sh1.direction[i],v));let sh2=M.shampooStep(sh,[4,0,0,1],1);close(sh2.direction[0],1/Math.sqrt(2));close(sh2.direction[3],1/Math.sqrt(2));
 let rowG=[1,2,3,4];assert.deepEqual(M.mul(rowG,M.transpose(rowG)),[5,11,11,25]);assert.deepEqual(M.mul(M.transpose(rowG),rowG),[10,14,14,20]);let rotated=M.mul(M.rot(.5),rowG),column=M.mul(M.transpose(rotated),rotated);[10,14,14,20].forEach((v,i)=>close(column[i],v));
+let so=M.soapState(),normal=M.soapState(),identity=[1,0,0,1];for(let i=0;i<5;i++){let g=[3,i===4?-1:1,1,.5];assert.deepEqual(M.soapFixedStep(so,g,identity,identity,.9,.99,1e-8),M.soapFixedStep(normal,g,identity,identity,.9,.99,1e-8));}
+let gmat=[3,1,1,.5],ql=M.rot(.4),qr=M.rot(-.2),projected=M.mul(M.mul(M.transpose(ql),gmat),qr),back=M.mul(M.mul(ql,projected),M.transpose(qr));close(M.norm(projected),M.norm(gmat));close(M.norm(M.add(back,M.scale(gmat,-1))),0,1e-10);
+let rot45=M.rot(Math.PI/4);let local=M.mv(M.transpose(rot45),[3,1]),returned=M.mv(rot45,local.map(Math.sign));close(returned[0],Math.sqrt(2));close(returned[1],0);
