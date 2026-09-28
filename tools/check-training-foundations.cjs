@@ -32,3 +32,5 @@ const q=M.orthogonalize([[1,2,3],[2,-1,4],[3,1,-2]]);q.forEach((row,i)=>q.forEac
 const sv=M.singularValues([[1,1],[0,1]]);close(sv[0],(Math.sqrt(5)+1)/2,1e-12);close(sv[1],(Math.sqrt(5)-1)/2,1e-12);
 const on=M.network({sizes:Array(11).fill(16),activation:'linear',orthogonal:true});M.singularValues(M.jacobian(on,'linear')).forEach(x=>close(x,1,1e-10));
 const ln=M.network({sizes:Array(8).fill(16),activation:'relu',orthogonal:true,lsuv:true,gain:Math.sqrt(2)});ln.forward.slice(1).forEach(s=>close(s.variance,1,.011));
+const residualZero=M.residualNetwork(10,0,51);residualZero.forward.forEach(s=>close(s.second,residualZero.forward[0].second,1e-12));residualZero.backward.forEach(s=>close(s.second,residualZero.backward[10].second,1e-12));
+const residualScaled=M.residualNetwork(40,1/Math.sqrt(40),51);assert.ok(residualScaled.forward[40].second/residualScaled.forward[0].second<5);
