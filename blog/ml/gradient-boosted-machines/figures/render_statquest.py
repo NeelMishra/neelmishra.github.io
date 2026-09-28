@@ -21,7 +21,8 @@ plt.rcParams.update({'font.family':'DejaVu Sans','font.size':12,'text.color':INK
 def save(fig, name):
     dest = OUT / (name+'.svg')
     fig.savefig(dest, bbox_inches='tight', pad_inches=.2)
-    dest.write_text(dest.read_text().replace("'DejaVu Sans'", "'DejaVu Sans', Arial, sans-serif"))
+    svg = dest.read_text().replace("'DejaVu Sans'", "'DejaVu Sans', Arial, sans-serif")
+    dest.write_text('\n'.join(line.rstrip() for line in svg.splitlines()) + '\n')
     plt.close(fig)
 
 def plot():
