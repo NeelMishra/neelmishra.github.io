@@ -17,6 +17,7 @@
     var d=[0,0],den=[1,1];s.t++;
     for(var i=0;i<2;i++){
       if(kind==='sgd')d[i]=-p.lr*g[i];
+      else if(kind==='momentum'){s.m[i]=p.beta*s.m[i]+g[i];d[i]=-p.lr*s.m[i];}
       else throw new Error('Unknown optimizer '+kind);
       s.w[i]+=d[i];
     }

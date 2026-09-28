@@ -13,7 +13,9 @@
   function path(points){return points.map(function(p,i){return (i?'L':'M')+p[0].toFixed(2)+','+p[1].toFixed(2);}).join(' ');}
   function firstOrder(root){
     var kind=root.dataset.optimizer,p={lr:.04,k:20,angle:25,batch:1,spread:.35,seed:7,beta:.9,rho:.95,eps:1e-6,b1:.9,b2:.999,correct:1,decay:0},s,random,h,trail,losses,last,runner=null,stopped=false;
+    if(kind==='momentum'){p.lr=.03;p.batch=0;}
     var controls=el('div','opt-controls',null,root);
+    if(kind==='momentum')number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});
     number(controls,'Learning rate η',.000001,2,.01,p.lr,function(v){p.lr=v;reset();});
     select(controls,'Gradient batch',[[1,'1 sampled row'],[4,'4 sampled rows'],[16,'16 sampled rows'],[0,'Full dataset (exact)']],p.batch,function(v){p.batch=v;reset();});
     select(controls,'Curvature ratio κ',[[1,'1 · circular'],[5,'5'],[20,'20 · narrow'],[50,'50 · very narrow']],p.k,function(v){p.k=v;reset();});
@@ -36,7 +38,9 @@
       [0,.5,1].forEach(function(q){var y=275-230*q;shape(curve,'line',{x1:50,y1:y,x2:370,y2:y,stroke:'#d3ded7'});shape(curve,'text',{x:42,y:y+4,'text-anchor':'end',fill:'#173d35','font-size':11},(q*max).toFixed(1));});
       shape(curve,'path',{d:path(pts),fill:'none',stroke:'#137b68','stroke-width':2.5});[0,50,100,150].forEach(function(t){shape(curve,'text',{x:50+320*t/150,y:297,'text-anchor':'middle',fill:'#173d35','font-size':12},t);});shape(curve,'text',{x:15,y:20,fill:'#173d35','font-size':13},'log₁₀(1 + excess full loss)');shape(curve,'text',{x:330,y:320,fill:'#173d35','font-size':12},'Step');
       out.textContent='Step '+s.t+' / 150. '+(stopped?'Stopped: excess loss exceeded 10¹⁰; this setting diverges.':s.t===150?'Run complete. Reset to replay.':p.batch?'A sampled update can increase full loss.':'Full gradient: no sampling noise.')+' Current excess full loss: '+fmt(losses[losses.length-1])+'.';
-      read(stats,[['Parameter w',vec(s.w)],['Last gradient g',last?vec(last.g):'—'],['Last displacement Δw',last?vec(last.delta):'—'],['Full loss above minimum',fmt(losses[losses.length-1])]]);
+      var rows=[['Parameter w',vec(s.w)],['Last gradient g',last?vec(last.g):'—'],['Last displacement Δw',last?vec(last.delta):'—'],['Full loss above minimum',fmt(losses[losses.length-1])]];
+      if(kind==='momentum')rows.push(['Buffer b',vec(s.m)],['Buffer multiplier β',fmt(p.beta)]);
+      read(stats,rows);
       step.disabled=play.disabled=stopped||s.t>=150;
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);
     } reset();
