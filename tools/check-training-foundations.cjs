@@ -28,3 +28,7 @@ const zeroNet=M.network({sizes:[4,4,4],gain:0});close(zeroNet.forward[2].second,
 for(const mode of ['fanin','xavier','fanout']){const n=M.network({sizes:[64,128],mode:mode,batch:256,seed:17}),v=mode==='fanin'?1/64:mode==='fanout'?1/128:2/192;close(n.forward[1].second/n.forward[0].second,64*v,.05);close(n.backward[0].second/n.backward[1].second,128*v,.07);}
 const rr=M.rng(37),draws=Array.from({length:200000},()=>Math.sqrt(2)*M.normal(rr)),relu=draws.map(x=>Math.max(0,x));close(M.mean(relu),1/Math.sqrt(Math.PI),.005);close(M.mean(relu.map(x=>x*x)),1,.012);close(M.variance(relu),1-1/Math.PI,.012);
 for(const a of [0,.2,1])close(M.mean(draws.map(x=>Math.pow(M.activate(x,'leaky',a),2))),1+a*a,.02);
+const q=M.orthogonalize([[1,2,3],[2,-1,4],[3,1,-2]]);q.forEach((row,i)=>q.forEach((other,j)=>close(row.reduce((s,x,k)=>s+x*other[k],0),i===j?1:0,1e-12)));
+const sv=M.singularValues([[1,1],[0,1]]);close(sv[0],(Math.sqrt(5)+1)/2,1e-12);close(sv[1],(Math.sqrt(5)-1)/2,1e-12);
+const on=M.network({sizes:Array(11).fill(16),activation:'linear',orthogonal:true});M.singularValues(M.jacobian(on,'linear')).forEach(x=>close(x,1,1e-10));
+const ln=M.network({sizes:Array(8).fill(16),activation:'relu',orthogonal:true,lsuv:true,gain:Math.sqrt(2)});ln.forward.slice(1).forEach(s=>close(s.variance,1,.011));
