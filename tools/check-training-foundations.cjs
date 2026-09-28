@@ -3,7 +3,7 @@ function close(a,b,tol=1e-9){assert.ok(Math.abs(a-b)<tol,`${a} != ${b}`);}
 close(M.soft(2,.6),1.4);close(M.soft(.4,.6),0);close(M.elastic(2,.6,.5),14/15);
 // Verify the exact minimizer against nearby candidates, including the nonsmooth origin.
 for(const z of [-2,-.4,0,.4,2]){const w=M.elastic(z,.6,.5),f=x=>.5*(x-z)**2+.6*Math.abs(x)+.25*x*x;for(let x=-3;x<=3;x+=.013)assert.ok(f(w)<=f(x)+1e-12);}
-console.log('Training-foundation numerical checks passed.');
+
 assert.deepEqual(M.projectBall([3,4],2),[1.2000000000000002,1.6]);
 assert.deepEqual(M.projectBall([0,0],2),[0,0]);
 close(M.decayPath(.2,.1,1)[1][1],1.996);close(M.decayPath(.2,.1,1)[1][2],1.96);
@@ -34,3 +34,6 @@ const on=M.network({sizes:Array(11).fill(16),activation:'linear',orthogonal:true
 const ln=M.network({sizes:Array(8).fill(16),activation:'relu',orthogonal:true,lsuv:true,gain:Math.sqrt(2)});ln.forward.slice(1).forEach(s=>close(s.variance,1,.011));
 const residualZero=M.residualNetwork(10,0,51);residualZero.forward.forEach(s=>close(s.second,residualZero.forward[0].second,1e-12));residualZero.backward.forEach(s=>close(s.second,residualZero.backward[10].second,1e-12));
 const residualScaled=M.residualNetwork(40,1/Math.sqrt(40),51);assert.ok(residualScaled.forward[40].second/residualScaled.forward[0].second<5);
+
+const rankOne=M.singularValues([[1,2],[2,4]]);close(rankOne[0],5,1e-12);close(rankOne[1],0,1e-12);
+console.log('Training-foundation numerical checks passed.');
