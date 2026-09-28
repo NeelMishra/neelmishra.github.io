@@ -21,3 +21,6 @@ s=M.state();let ap={lr:.1,b1:.9,b2:.999,correct:1,eps:0,decay:0};let a1=M.step('
 s=M.state();let ua=M.step('adam',s,[2,2],{...ap,correct:0});close(ua.delta[0],-.1*.1/Math.sqrt(.001));
 s=M.state();s.w=[2,2];let decay=M.step('adam',s,[0,0],{...ap,eps:1e-8,decay:.1});close(s.w[0],1.98);
 let a=M.fromSVD(4,1,.4,-.2),q=M.polar(a),qtq=M.mul(M.transpose(q),q);[1,0,0,1].forEach((v,i)=>close(qtq[i],v));let sv=M.singular(a);close(sv[0],4);close(sv[1],1);let pr=M.polar([4,0,0,0]);assert.deepEqual(pr,[1,0,0,0]);close(M.norm(M.add(M.polar(M.scale(a,10)),M.scale(q,-1))),0,1e-9);
+let nx=[1,0,0,.1];let nc=M.ns(nx,false),nq=M.ns(nx,true);close(nc[0],1);close(nc[3],.1495);close(nq[0],.701);close(nq[3],.339695315);
+let arbitrary=M.fromSVD(.8,.2,.4,-.3),ns=M.ns(arbitrary,true),expected=M.fromSVD(3.4445*.8-4.775*.8**3+2.0315*.8**5,3.4445*.2-4.775*.2**3+2.0315*.2**5,.4,-.3);close(M.norm(M.add(ns,M.scale(expected,-1))),0,1e-10);
+for(let i=0;i<20;i++)nx=M.ns(nx,false);close(nx[3],1);assert.deepEqual(M.ns([0,0,0,0],true),[0,0,0,0]);

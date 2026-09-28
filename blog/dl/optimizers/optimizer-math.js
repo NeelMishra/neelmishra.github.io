@@ -49,5 +49,6 @@
   M.singular=function(a){return M.eigh(M.mul(M.transpose(a),a)).values.map(function(x){return Math.sqrt(Math.max(0,x));});};
   M.fromSVD=function(s1,s2,left,right){return M.mul(M.mul(M.rot(left),[s1,0,0,s2]),M.transpose(M.rot(right)));};
   M.polar=function(a){var e=M.eigh(M.mul(M.transpose(a),a)),v=e.values.map(function(x){return x>Math.max(1e-28,e.values[0]*1e-12)?1/Math.sqrt(x):0;});return M.mul(a,M.mul(M.mul(e.q,[v[0],0,0,v[1]]),M.transpose(e.q)));};
+  M.ns=function(x,quintic){var a=M.mul(x,M.transpose(x));return quintic?M.add(M.scale(x,3.4445),M.mul(M.add(M.scale(a,-4.775),M.scale(M.mul(a,a),2.0315)),x)):M.add(M.scale(x,1.5),M.scale(M.mul(a,x),-.5));};
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);
