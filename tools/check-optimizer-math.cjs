@@ -29,3 +29,6 @@ let rowG=[1,2,3,4];assert.deepEqual(M.mul(rowG,M.transpose(rowG)),[5,11,11,25]);
 let so=M.soapState(),normal=M.soapState(),identity=[1,0,0,1];for(let i=0;i<5;i++){let g=[3,i===4?-1:1,1,.5];assert.deepEqual(M.soapFixedStep(so,g,identity,identity,.9,.99,1e-8),M.soapFixedStep(normal,g,identity,identity,.9,.99,1e-8));}
 let gmat=[3,1,1,.5],ql=M.rot(.4),qr=M.rot(-.2),projected=M.mul(M.mul(M.transpose(ql),gmat),qr),back=M.mul(M.mul(ql,projected),M.transpose(qr));close(M.norm(projected),M.norm(gmat));close(M.norm(M.add(back,M.scale(gmat,-1))),0,1e-10);
 let rot45=M.rot(Math.PI/4);let local=M.mv(M.transpose(rot45),[3,1]),returned=M.mv(rot45,local.map(Math.sign));close(returned[0],Math.sqrt(2));close(returned[1],0);
+s=M.state();let lp={lr:.1,b1:.9,b2:.99,decay:0};let li1=M.step('lion',s,[2,2],lp);close(s.m[0],.02);close(li1.delta[0],-.1);let li2=M.step('lion',s,[-.1,-.1],lp);close(li2.num[0],.008);close(s.m[0],.0188);close(li2.delta[0],-.1);let li3=M.step('lion',s,[-.3,-.3],lp);close(li3.num[0],-.01308);close(s.m[0],.015612);close(li3.delta[0],.1);
+s=M.state();s.w=[2,2];M.step('lion',s,[0,0],{...lp,decay:.1});close(s.w[0],1.98);
+console.log('All first-order and matrix optimizer checks passed.');

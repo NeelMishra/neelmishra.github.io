@@ -16,8 +16,10 @@
     if(kind==='momentum'){p.lr=.03;p.batch=0;}
     if(kind==='adadelta'){p.lr=1;p.eps=.001;p.batch=0;}
     if(kind==='adam'){p.lr=.07;p.batch=4;p.eps=1e-8;}
+    if(kind==='lion'){p.lr=.04;p.batch=4;p.b2=.99;}
     var controls=el('div','opt-controls',null,root);
     if(kind==='adam'){number(controls,'First-moment β₁',0,.99,.05,p.b1,function(v){p.b1=v;reset();});number(controls,'Second-moment β₂',0,.9999,.001,p.b2,function(v){p.b2=v;reset();});select(controls,'Bias correction',[[1,'On · Adam'],[0,'Off · ablation']],1,function(v){p.correct=v;reset();});}
+    if(kind==='lion'){number(controls,'Current mixture β₁',0,.99,.05,p.b1,function(v){p.b1=v;reset();});number(controls,'Stored memory β₂',0,.999,.01,p.b2,function(v){p.b2=v;reset();});number(controls,'Weight decay λ',0,.5,.01,p.decay,function(v){p.decay=v;reset();});}
     if(kind==='momentum')number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});
     if(kind==='adadelta'){number(controls,'Decay ρ',0,.999,.05,p.rho,function(v){p.rho=v;reset();});select(controls,'Epsilon ε',[[1e-8,'10⁻⁸'],[1e-6,'10⁻⁶'],[.001,'10⁻³ (demo default)'],[.01,'10⁻²']],p.eps,function(v){p.eps=v;reset();});}
     number(controls,kind==='adadelta'?'Step multiplier η':'Learning rate η',.000001,2,.01,p.lr,function(v){p.lr=v;reset();});
@@ -46,6 +48,7 @@
       if(kind==='momentum')rows.push(['Buffer b',vec(s.m)],['Buffer multiplier β',fmt(p.beta)]);
       if(kind==='adadelta')rows.push(['RMS gradient (denominator)',last?vec(last.den):'—'],['Previous RMS update (numerator)',last?vec(last.num):'—'],['Squared-gradient state v',vec(s.v)],['Squared-update state u',vec(s.u)]);
       if(kind==='adam')rows.push(['Raw first moment m',vec(s.m)],['Raw second moment v',vec(s.v)],['Used first moment',last?vec(last.num):'—'],['Used RMS + ε',last?vec(last.den):'—']);
+      if(kind==='lion')rows.push(['Mixture c used for sign',last?vec(last.num):'—'],['Stored momentum after update',vec(s.m)],['Sign direction',last?vec(last.num.map(Math.sign)):'—'],['Decay coefficient λ',fmt(p.decay)]);
       read(stats,rows);
       step.disabled=play.disabled=stopped||s.t>=150;
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);
@@ -57,7 +60,8 @@
     select(controls,'Gradient sequence',[[0,'One spike at step 11'],[1,'Sign reversal after step 10'],[2,'Constant gradient']],0,function(v){mode=v;reset();});
     number(controls,'Decay ρ',0,.999,.05,p.rho,function(v){p.rho=v;reset();});
     var actions=el('div','opt-actions',null,root),step=button(actions,'Step →',advance);button(actions,'Run 40 steps',function(){while(s.t<40)advance();});button(actions,'Reset',reset);
-    var chart=svg(root,'Supplied gradient magnitude and running RMS versus step. The readout gives exact current values.',760,310);chart.classList.add('opt-wide-svg');var stats=el('div','opt-readout',null,root),out=el('output','opt-status','',root);out.setAttribute('aria-live','polite');
+    var chartPan=el('div','opt-chart-pan',null,root);chartPan.tabIndex=0;chartPan.setAttribute('role','region');chartPan.setAttribute('aria-label','Scrollable gradient history chart');el('span','opt-scroll-hint','Scroll the chart horizontally to see the full timeline.',root);
+    var chart=svg(chartPan,'Supplied gradient magnitude and running RMS versus step. The readout gives exact current values.',760,310);chart.classList.add('opt-wide-svg');var stats=el('div','opt-readout',null,root),out=el('output','opt-status','',root);out.setAttribute('aria-live','polite');
     function reset(){s=M.state();history=[];last=null;draw();}
     function advance(){if(s.t>=40)return;var t=s.t+1,g=mode===0?(t===11?10:1):mode===1?(t>10?-1:1):1;last=M.step(kind,s,[g,g],p);history.push([g,Math.sqrt(s.v[0]),last.delta[0]]);draw();}
     function draw(){chart.textContent='';var max=mode===0?11:1.2;
