@@ -8948,6 +8948,9 @@ var BLOG_TREE = [
     name: 'dl',
     label: 'Deep Learning',
     children: [
+      // OPTIMIZER-SERIES:START
+      {"name": "optimizers", "label": "Optimizers in Deep Learning", "children": [{"title": "Optimizers in Deep Learning: From SGD to Matrix Geometry", "file": "dl/optimizers/index.html", "links": ["dl/optimizers/sgd.html"]}, {"title": "SGD: Learning from Noisy Gradients", "file": "dl/optimizers/sgd.html", "links": ["dl/optimizers/index.html"]}]},
+      // OPTIMIZER-SERIES:END
       // APPLIED-NOTES:dl:START
       {
         "name": "contrastive-learning",

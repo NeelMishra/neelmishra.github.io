@@ -1,5 +1,9 @@
 /* Blog metadata keyed by BLOG_TREE `file` path. Entries with draft:true stay out of the blog index. */
 var BLOG_POSTS = {
+  /* OPTIMIZER-SERIES:START */
+  "dl/optimizers/index.html": {"category": "dl", "series": "Optimizers in Deep Learning", "title": "Optimizers in Deep Learning: From SGD to Matrix Geometry", "description": "Ten detailed chapters with worked updates, original figures, and interactive experiments.", "meta": "Deep Learning · Optimizers"},
+  "dl/optimizers/sgd.html": {"category": "dl", "series": "Optimizers in Deep Learning", "title": "SGD: Learning from Noisy Gradients", "description": "Derive the mini-batch update, see where sampling noise comes from, and explore learning-rate stability.", "meta": "Deep Learning · Optimizers"},
+  /* OPTIMIZER-SERIES:END */
   "ml/boosting/regularization.html": {"category": "ml", "series": "Machine Learning &middot; Boosting &middot; Part 7", "title": "Regularization, Early Stopping &amp; Model Selection", "description": "Work an explicit early-stopping trace, connect learning rate to fitted paths, and build a defensible tuning and deployment workflow.", "meta": "September 2026 &middot; 11 min read"},
   "ml/boosting/library-systems.html": {"category": "ml", "series": "Machine Learning &middot; Boosting &middot; Part 6", "title": "XGBoost, LightGBM &amp; CatBoost: How the Systems Differ", "description": "Connect histograms, leaf-wise growth, GOSS, ordered category statistics, ordered boosting, and symmetric trees to concrete examples.", "meta": "September 2026 &middot; 10 min read"},
   "ml/boosting/classification-losses.html": {"category": "ml", "series": "Machine Learning &middot; Boosting &middot; Part 4", "title": "Classification &amp; Losses: From Scores to Probabilities", "description": "Derive binary log-loss gradients, work first-order and Newton updates, and connect absolute, quantile, count, and multiclass losses to their corrections.", "meta": "September 2026 &middot; 11 min read"},
