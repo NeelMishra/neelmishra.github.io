@@ -5,4 +5,6 @@ M.rng=function(seed){var s=seed>>>0;return function(){s=(Math.imul(s,1664525)+10
 M.normal=function(r){return Math.sqrt(-2*Math.log(r()))*Math.cos(2*Math.PI*r());};
 M.mean=function(a){return a.reduce(function(s,x){return s+x;},0)/a.length;};
 M.variance=function(a){var m=M.mean(a);return M.mean(a.map(function(x){return (x-m)*(x-m);}));};
+M.projectBall=function(z,c){var n=Math.hypot.apply(null,z),a=n>c?c/n:1;return z.map(function(x){return a*x;});};
+M.decayPath=function(lambda,p,steps){var a=2,b=2,out=[[0,a,b]];for(var i=1;i<=steps;i++){a*=1-.1*lambda*p;b*=1-.1*lambda;out.push([i,a,b]);}return out;};
 root.TrainingMath=M;})(typeof window==='undefined'?globalThis:window);
