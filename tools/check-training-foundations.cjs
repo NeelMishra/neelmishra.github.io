@@ -26,3 +26,5 @@ function probeInput(offset){let batch=net.h[0].map(r=>r.slice());batch[0][1]+=of
 close(net.grads[0][0][1],(probeInput(h)-probeInput(-h))/(2*h),1e-9);
 const zeroNet=M.network({sizes:[4,4,4],gain:0});close(zeroNet.forward[2].second,0);close(zeroNet.backward[0].second,0);
 for(const mode of ['fanin','xavier','fanout']){const n=M.network({sizes:[64,128],mode:mode,batch:256,seed:17}),v=mode==='fanin'?1/64:mode==='fanout'?1/128:2/192;close(n.forward[1].second/n.forward[0].second,64*v,.05);close(n.backward[0].second/n.backward[1].second,128*v,.07);}
+const rr=M.rng(37),draws=Array.from({length:200000},()=>Math.sqrt(2)*M.normal(rr)),relu=draws.map(x=>Math.max(0,x));close(M.mean(relu),1/Math.sqrt(Math.PI),.005);close(M.mean(relu.map(x=>x*x)),1,.012);close(M.variance(relu),1-1/Math.PI,.012);
+for(const a of [0,.2,1])close(M.mean(draws.map(x=>Math.pow(M.activate(x,'leaky',a),2))),1+a*a,.02);
