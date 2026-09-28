@@ -8949,7 +8949,7 @@ var BLOG_TREE = [
     label: 'Deep Learning',
     children: [
       // OPTIMIZER-SERIES:START
-      {"name": "optimizers", "label": "Optimizers in Deep Learning", "children": [{"title": "Optimizers in Deep Learning: From SGD to Matrix Geometry", "file": "dl/optimizers/index.html", "links": ["dl/optimizers/sgd.html"]}, {"title": "SGD: Learning from Noisy Gradients", "file": "dl/optimizers/sgd.html", "links": ["dl/optimizers/index.html"]}, {"title": "SGD with Momentum: Remembering a Direction", "file": "dl/optimizers/momentum.html", "links": ["dl/optimizers/index.html"]}]},
+      {"name": "optimizers", "label": "Optimizers in Deep Learning", "children": [{"title": "Optimizers in Deep Learning: From SGD to Matrix Geometry", "file": "dl/optimizers/index.html", "links": ["dl/optimizers/sgd.html"]}, {"title": "SGD: Learning from Noisy Gradients", "file": "dl/optimizers/sgd.html", "links": ["dl/optimizers/index.html"]}, {"title": "SGD with Momentum: Remembering a Direction", "file": "dl/optimizers/momentum.html", "links": ["dl/optimizers/index.html"]}, {"title": "Adadelta: Learning an Update Scale", "file": "dl/optimizers/adadelta.html", "links": ["dl/optimizers/index.html"]}]},
       // OPTIMIZER-SERIES:END
       // APPLIED-NOTES:dl:START
       {

@@ -14,14 +14,20 @@
   };
   M.state = function(){return {w:[3,2],m:[0,0],v:[0,0],u:[0,0],t:0};};
   M.step = function(kind,s,g,p){
-    var d=[0,0],den=[1,1];s.t++;
+    var d=[0,0],den=[1,1],num=[1,1];s.t++;
     for(var i=0;i<2;i++){
       if(kind==='sgd')d[i]=-p.lr*g[i];
       else if(kind==='momentum'){s.m[i]=p.beta*s.m[i]+g[i];d[i]=-p.lr*s.m[i];}
+      else if(kind==='adadelta'){
+        s.v[i]=p.rho*s.v[i]+(1-p.rho)*g[i]*g[i];
+        den[i]=Math.sqrt(s.v[i]+p.eps);num[i]=Math.sqrt(s.u[i]+p.eps);
+        var raw=-num[i]*g[i]/den[i];
+        s.u[i]=p.rho*s.u[i]+(1-p.rho)*raw*raw;d[i]=p.lr*raw;
+      }
       else throw new Error('Unknown optimizer '+kind);
       s.w[i]+=d[i];
     }
-    return {g:g.slice(),delta:d,den:den,m:s.m.slice(),v:s.v.slice(),u:s.u.slice()};
+    return {g:g.slice(),delta:d,den:den,num:num,m:s.m.slice(),v:s.v.slice(),u:s.u.slice()};
   };
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);

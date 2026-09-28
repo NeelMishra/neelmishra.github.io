@@ -14,9 +14,11 @@
   function firstOrder(root){
     var kind=root.dataset.optimizer,p={lr:.04,k:20,angle:25,batch:1,spread:.35,seed:7,beta:.9,rho:.95,eps:1e-6,b1:.9,b2:.999,correct:1,decay:0},s,random,h,trail,losses,last,runner=null,stopped=false;
     if(kind==='momentum'){p.lr=.03;p.batch=0;}
+    if(kind==='adadelta'){p.lr=1;p.eps=.001;p.batch=0;}
     var controls=el('div','opt-controls',null,root);
     if(kind==='momentum')number(controls,'Momentum β',0,.99,.05,p.beta,function(v){p.beta=v;reset();});
-    number(controls,'Learning rate η',.000001,2,.01,p.lr,function(v){p.lr=v;reset();});
+    if(kind==='adadelta'){number(controls,'Decay ρ',0,.999,.05,p.rho,function(v){p.rho=v;reset();});select(controls,'Epsilon ε',[[1e-8,'10⁻⁸'],[1e-6,'10⁻⁶'],[.001,'10⁻³ (demo default)'],[.01,'10⁻²']],p.eps,function(v){p.eps=v;reset();});}
+    number(controls,kind==='adadelta'?'Step multiplier η':'Learning rate η',.000001,2,.01,p.lr,function(v){p.lr=v;reset();});
     select(controls,'Gradient batch',[[1,'1 sampled row'],[4,'4 sampled rows'],[16,'16 sampled rows'],[0,'Full dataset (exact)']],p.batch,function(v){p.batch=v;reset();});
     select(controls,'Curvature ratio κ',[[1,'1 · circular'],[5,'5'],[20,'20 · narrow'],[50,'50 · very narrow']],p.k,function(v){p.k=v;reset();});
     number(controls,'Rotation (degrees)',0,90,5,p.angle,function(v){p.angle=v;reset();});
@@ -40,6 +42,7 @@
       out.textContent='Step '+s.t+' / 150. '+(stopped?'Stopped: excess loss exceeded 10¹⁰; this setting diverges.':s.t===150?'Run complete. Reset to replay.':p.batch?'A sampled update can increase full loss.':'Full gradient: no sampling noise.')+' Current excess full loss: '+fmt(losses[losses.length-1])+'.';
       var rows=[['Parameter w',vec(s.w)],['Last gradient g',last?vec(last.g):'—'],['Last displacement Δw',last?vec(last.delta):'—'],['Full loss above minimum',fmt(losses[losses.length-1])]];
       if(kind==='momentum')rows.push(['Buffer b',vec(s.m)],['Buffer multiplier β',fmt(p.beta)]);
+      if(kind==='adadelta')rows.push(['RMS gradient (denominator)',last?vec(last.den):'—'],['Previous RMS update (numerator)',last?vec(last.num):'—'],['Squared-gradient state v',vec(s.v)],['Squared-update state u',vec(s.u)]);
       read(stats,rows);
       step.disabled=play.disabled=stopped||s.t>=150;
       root.dataset.step=String(s.t);root.dataset.loss=String(losses[losses.length-1]);
