@@ -8491,7 +8491,8 @@ var BLOG_TREE = [
         "name": "loss-functions",
         "label": "Loss Functions",
         "children": [
-          {"title": "Overview", "file": "ml/loss-functions/index.html", "links": ["ml/loss-functions/entropy/index.html", "ml/loss-functions/triplet-loss/index.html"]},
+          {"title": "Overview", "file": "ml/loss-functions/index.html", "links": ["ml/loss-functions/prediction-losses/index.html", "ml/loss-functions/entropy/index.html"]},
+          {"name": "prediction-losses", "label": "Prediction Losses & Best Constants", "children": [{"title": "Prediction Losses and Their Best Constants", "file": "ml/loss-functions/prediction-losses/index.html", "links": ["ml/loss-functions/prediction-losses/squared-error.html"]}, {"title": "Squared Error: Why the Best Constant Is the Mean", "file": "ml/loss-functions/prediction-losses/squared-error.html", "links": ["ml/loss-functions/prediction-losses/index.html"]}, {"title": "Absolute Error: Why the Best Constant Is a Median", "file": "ml/loss-functions/prediction-losses/absolute-error.html", "links": ["ml/loss-functions/prediction-losses/index.html"]}, {"title": "Binary Log Loss: From Class Frequency to Initial Log Odds", "file": "ml/loss-functions/prediction-losses/binary-log-loss.html", "links": ["ml/loss-functions/prediction-losses/index.html"]}, {"title": "Poisson Loss: Why the Best Constant Is a Log Mean", "file": "ml/loss-functions/prediction-losses/poisson-loss.html", "links": ["ml/loss-functions/prediction-losses/index.html"]}, {"title": "Huber Loss: Finding a Constant by Balancing Clipped Residuals", "file": "ml/loss-functions/prediction-losses/huber-loss.html", "links": ["ml/loss-functions/prediction-losses/index.html"]}]},
           {
             "name": "entropy",
             "label": "Entropy",
