@@ -13,3 +13,5 @@ assert.equal(M.structuredMask('block',.25,1).flat().filter(x=>!x).length,32);
 const branch=M.structuredMask('branch',.5,4).flat();assert.ok(branch.every(x=>x===branch[0]));
 M.structuredMask('channel',.5,7).forEach(a=>assert.ok(a.every(x=>x===a[0])));
 close(M.cutmix(.75,4,4).lambda,.75);close(M.cutmix(.75,0,4).lambda,.875);close(M.cutmix(1,4,4).lambda,1);close(M.cutmix(0,4,4).lambda,0);
+const target=M.smoothTarget(3,.15,0);close(target[0],.9);close(target[1],.05);
+for(const t of [1,2,8]){const z=[2,.5,-1],q=M.softmax([3,2,-2],t),p=M.softmax(z,t),h=1e-5;for(let i=0;i<3;i++){const a=z.slice(),b=z.slice();a[i]+=h;b[i]-=h;const numeric=t*t*(M.crossEntropy(q,M.softmax(a,t))-M.crossEntropy(q,M.softmax(b,t)))/(2*h);close(numeric,t*(p[i]-q[i]),1e-8);}}
