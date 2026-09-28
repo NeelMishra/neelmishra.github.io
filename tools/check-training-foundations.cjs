@@ -19,3 +19,5 @@ const early=M.earlyData(.35);assert.ok(early.best[0]>0&&early.best[0]<2000);for(
 // Verify the analytic path against one direct gradient step on the actual design matrix.
 const b=Array.from({length:16},(_,k)=>M.mean(early.train.map(([x,y])=>y*(k?Math.sqrt(2)*Math.cos(k*Math.PI*x):1)/(k+1))));early.coefficients(1).forEach((a,k)=>close(a,.8*b[k]/(k+1),1e-12));
 for(const x of [-.8,.4,1]){close(M.noiseLoss(x,2,0).exact,Math.pow(Math.sin(2*x)-.4,2));const r=M.rng(82);let sum=0;for(let i=0;i<100000;i++)sum+=Math.pow(Math.sin(2*(x+.2*M.normal(r)))-.4,2);close(sum/100000,M.noiseLoss(x,2,.2).exact,.006);}
+for(const w of [-1.3,-.2,.6,1.2]){const h=1e-6;close(M.samGradient(w),(M.samLoss(w+h)-M.samLoss(w-h))/(2*h),1e-7);}
+assert.equal(M.samProbe(1,.2).probe,1);assert.ok(M.neighborhoodMax(1,.15).loss>M.neighborhoodMax(-1,.15).loss);close(M.neighborhoodMax(.6,0).loss,M.samLoss(.6));
