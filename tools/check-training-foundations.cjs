@@ -21,3 +21,7 @@ const b=Array.from({length:16},(_,k)=>M.mean(early.train.map(([x,y])=>y*(k?Math.
 for(const x of [-.8,.4,1]){close(M.noiseLoss(x,2,0).exact,Math.pow(Math.sin(2*x)-.4,2));const r=M.rng(82);let sum=0;for(let i=0;i<100000;i++)sum+=Math.pow(Math.sin(2*(x+.2*M.normal(r)))-.4,2);close(sum/100000,M.noiseLoss(x,2,.2).exact,.006);}
 for(const w of [-1.3,-.2,.6,1.2]){const h=1e-6;close(M.samGradient(w),(M.samLoss(w+h)-M.samLoss(w-h))/(2*h),1e-7);}
 assert.equal(M.samProbe(1,.2).probe,1);assert.ok(M.neighborhoodMax(1,.15).loss>M.neighborhoodMax(-1,.15).loss);close(M.neighborhoodMax(.6,0).loss,M.samLoss(.6));
+const net=M.network({sizes:[3,4,2],batch:2,activation:'tanh',seed:3}),h=1e-5;
+function probeInput(offset){let batch=net.h[0].map(r=>r.slice());batch[0][1]+=offset;for(const w of net.weights)batch=M.forwardLayer(w,batch,'tanh',0).h;return batch.flat().reduce((s,v,i)=>s+v*net.grads[2].flat()[i],0);}
+close(net.grads[0][0][1],(probeInput(h)-probeInput(-h))/(2*h),1e-9);
+const zeroNet=M.network({sizes:[4,4,4],gain:0});close(zeroNet.forward[2].second,0);close(zeroNet.backward[0].second,0);
