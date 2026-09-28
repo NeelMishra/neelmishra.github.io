@@ -25,3 +25,4 @@ const net=M.network({sizes:[3,4,2],batch:2,activation:'tanh',seed:3}),h=1e-5;
 function probeInput(offset){let batch=net.h[0].map(r=>r.slice());batch[0][1]+=offset;for(const w of net.weights)batch=M.forwardLayer(w,batch,'tanh',0).h;return batch.flat().reduce((s,v,i)=>s+v*net.grads[2].flat()[i],0);}
 close(net.grads[0][0][1],(probeInput(h)-probeInput(-h))/(2*h),1e-9);
 const zeroNet=M.network({sizes:[4,4,4],gain:0});close(zeroNet.forward[2].second,0);close(zeroNet.backward[0].second,0);
+for(const mode of ['fanin','xavier','fanout']){const n=M.network({sizes:[64,128],mode:mode,batch:256,seed:17}),v=mode==='fanin'?1/64:mode==='fanout'?1/128:2/192;close(n.forward[1].second/n.forward[0].second,64*v,.05);close(n.backward[0].second/n.backward[1].second,128*v,.07);}
