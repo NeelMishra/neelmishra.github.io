@@ -24,3 +24,5 @@ let a=M.fromSVD(4,1,.4,-.2),q=M.polar(a),qtq=M.mul(M.transpose(q),q);[1,0,0,1].f
 let nx=[1,0,0,.1];let nc=M.ns(nx,false),nq=M.ns(nx,true);close(nc[0],1);close(nc[3],.1495);close(nq[0],.701);close(nq[3],.339695315);
 let arbitrary=M.fromSVD(.8,.2,.4,-.3),ns=M.ns(arbitrary,true),expected=M.fromSVD(3.4445*.8-4.775*.8**3+2.0315*.8**5,3.4445*.2-4.775*.2**3+2.0315*.2**5,.4,-.3);close(M.norm(M.add(ns,M.scale(expected,-1))),0,1e-10);
 for(let i=0;i<20;i++)nx=M.ns(nx,false);close(nx[3],1);assert.deepEqual(M.ns([0,0,0,0],true),[0,0,0,0]);
+let sh=M.shampooState(0),sh1=M.shampooStep(sh,[4,0,0,1],1);[1,0,0,1].forEach((v,i)=>close(sh1.direction[i],v));let sh2=M.shampooStep(sh,[4,0,0,1],1);close(sh2.direction[0],1/Math.sqrt(2));close(sh2.direction[3],1/Math.sqrt(2));
+let rowG=[1,2,3,4];assert.deepEqual(M.mul(rowG,M.transpose(rowG)),[5,11,11,25]);assert.deepEqual(M.mul(M.transpose(rowG),rowG),[10,14,14,20]);let rotated=M.mul(M.rot(.5),rowG),column=M.mul(M.transpose(rotated),rotated);[10,14,14,20].forEach((v,i)=>close(column[i],v));

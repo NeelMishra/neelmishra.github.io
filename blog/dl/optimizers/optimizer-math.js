@@ -50,5 +50,10 @@
   M.fromSVD=function(s1,s2,left,right){return M.mul(M.mul(M.rot(left),[s1,0,0,s2]),M.transpose(M.rot(right)));};
   M.polar=function(a){var e=M.eigh(M.mul(M.transpose(a),a)),v=e.values.map(function(x){return x>Math.max(1e-28,e.values[0]*1e-12)?1/Math.sqrt(x):0;});return M.mul(a,M.mul(M.mul(e.q,[v[0],0,0,v[1]]),M.transpose(e.q)));};
   M.ns=function(x,quintic){var a=M.mul(x,M.transpose(x));return quintic?M.add(M.scale(x,3.4445),M.mul(M.add(M.scale(a,-4.775),M.scale(M.mul(a,a),2.0315)),x)):M.add(M.scale(x,1.5),M.scale(M.mul(a,x),-.5));};
+  M.shampooState=function(damping){return {l:[damping,0,0,damping],r:[damping,0,0,damping],v:[damping,damping,damping,damping],t:0,refreshed:0};};
+  M.shampooStep=function(s,g,frequency){s.t++;s.l=M.add(s.l,M.mul(g,M.transpose(g)));s.r=M.add(s.r,M.mul(M.transpose(g),g));s.v=s.v.map(function(v,i){return v+g[i]*g[i];});
+    if(s.t===1||(s.t-1)%frequency===0){s.left=M.power(s.l,-.25,0);s.right=M.power(s.r,-.25,0);s.refreshed=s.t;}
+    return {direction:M.mul(M.mul(s.left,g),s.right),diagonal:g.map(function(v,i){return v/Math.sqrt(s.v[i]);})};
+  };
   root.OptimizerMath=M;
 })(typeof window==='undefined'?globalThis:window);

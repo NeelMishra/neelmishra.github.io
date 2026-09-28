@@ -28,7 +28,17 @@
       U.read(stats,[['Iteration',String(k)],['Singular values',U.vec(sv)],['Distance to exact partial polar',U.fmt(error)],['Orthogonality defect ‖XᵀX − I‖F',U.fmt(defect)]]);out.textContent=(stopped?'Stopped: iterate norm exceeded 10⁶. Unscaled iterations can diverge. ':quintic?'The quintic is a finite approximation; more iterations need not improve its error. ':'The normalized cubic converges on each positive singular direction. ')+(big===0||small===0?'Rank deficiency leaves a nonzero identity defect even at the correct partial polar factor. ':'')+'The horizontal axis counts inner matrix iterations, not optimizer steps.';step.disabled=five.disabled=stopped||k>=20;root.dataset.step=k;root.dataset.error=error;root.dataset.singular=JSON.stringify(sv);
     }reset();
   }
+  function shampoo(root){var damping=.001,frequency=1,mode=0,s,last,g,controls=U.el('div','opt-controls',null,root);
+    U.select(controls,'Gradient history',[[0,'Repeated fixed matrix'],[1,'Rotate left basis after step 5']],0,function(v){mode=v;reset();});U.select(controls,'Root refresh interval',[[1,'Every step'],[5,'Every 5 steps']],1,function(v){frequency=v;reset();});U.select(controls,'Initial damping δ',[[.000001,'10⁻⁶'],[.001,'10⁻³'],[1,'1']],.001,function(v){damping=v;reset();});
+    var actions=U.el('div','opt-actions',null,root),step=U.button(actions,'Step →',advance);U.button(actions,'Run 20 steps',function(){while(s.t<20)advance();});U.button(actions,'Reset',reset);
+    var grid=U.el('div','opt-matrix-grid',null,root),stats=U.el('div','opt-readout',null,root),out=U.el('output','opt-status','',root);out.setAttribute('aria-live','polite');
+    function reset(){s=M.shampooState(damping);last=null;g=null;draw();}
+    function advance(){if(s.t>=20)return;var angle=mode&&s.t>=5?70:20;g=M.fromSVD(4,1,angle*Math.PI/180,-20*Math.PI/180);last=M.shampooStep(s,g,frequency);draw();}
+    function draw(){grid.textContent='';if(last){card(grid,'Current gradient G',g,4.6);card(grid,'Shampoo direction P',last.direction,4.6);card(grid,'Diagonal Adagrad comparison',last.diagonal,4.6);}else U.el('p','','Take a step to see the gradient and two computed directions.',grid);
+      U.read(stats,[['Step',String(s.t)],['Row history L',matrixText(s.l)],['Column history R',matrixText(s.r)],['Eigenvalues of L',U.vec(M.eigh(s.l).values)],['Eigenvalues of R',U.vec(M.eigh(s.r).values)],['Last root refresh',String(s.refreshed)],['Shampoo direction norm',last?U.fmt(M.norm(last.direction)):'—']]);out.textContent='Step '+s.t+'. '+(s.t?'Both histories include the current gradient. Roots were last computed at step '+s.refreshed+'. ':'Histories start at δI. ')+'This supplied matrix sequence isolates preconditioning; it is not a neural-network training benchmark. Diagonal Adagrad accumulates each entry’s squared gradient separately.';step.disabled=s.t>=20;root.dataset.step=s.t;root.dataset.direction=last?JSON.stringify(last.direction):'[]';}reset();
+  }
   document.querySelectorAll('[data-matrix="polar"]').forEach(polar);
+  document.querySelectorAll('[data-matrix="shampoo"]').forEach(shampoo);
   document.querySelectorAll('[data-matrix="schulz"]').forEach(schulz);
   window.OptimizerMatrixUI={card:card,matrixText:matrixText};
 })();

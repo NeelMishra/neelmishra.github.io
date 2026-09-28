@@ -5,7 +5,7 @@
   function shape(svg,tag,attrs,text){var n=document.createElementNS(ns,tag);Object.keys(attrs).forEach(function(k){n.setAttribute(k,attrs[k]);});if(text!==undefined)n.textContent=text;svg.appendChild(n);return n;}
   function svg(parent,label,w,h){var s=document.createElementNS(ns,'svg');s.setAttribute('viewBox','0 0 '+w+' '+h);s.setAttribute('role','img');s.setAttribute('aria-label',label);parent.appendChild(s);return s;}
   function button(p,label,fn){var b=el('button','',label,p);b.type='button';b.addEventListener('click',fn);return b;}
-  function select(p,name,values,value,fn){var l=el('label','',name,p),s=el('select','',null,l);values.forEach(function(v){var o=el('option','',v[1],s);o.value=v[0];});s.value=String(value);s.addEventListener('change',function(){fn(Number(s.value));});return s;}
+  function select(p,name,values,value,fn){var l=el('label','',name,p),s=el('select','',null,l);values.forEach(function(v){var o=el('option','',v[1],s);o.value=v[0];});s.setAttribute('aria-label',name);s.value=String(value);s.addEventListener('change',function(){fn(Number(s.value));});return s;}
   function number(p,name,min,max,step,value,fn){var l=el('label','',name,p),s=el('input','',null,l);s.type='number';s.min=min;s.max=max;s.step=step;s.value=value;s.addEventListener('change',function(){var v=Number(s.value);if(!Number.isFinite(v)||s.value==='')v=value;v=Math.max(min,Math.min(max,v));s.value=v;fn(v);});return s;}
   function fmt(v){return Math.abs(v)>=1e4|| (v!==0&&Math.abs(v)<.001)?v.toExponential(3):v.toFixed(4);}
   function vec(v){return '('+v.map(fmt).join(', ')+')';}
