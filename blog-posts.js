@@ -1,5 +1,9 @@
 /* Blog metadata keyed by BLOG_TREE `file` path. Entries with draft:true stay out of the blog index. */
 var BLOG_POSTS = {
+  /* TRAINING-SERIES:START */
+  "dl/regularization/l1-l2-elastic-net.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "L1, L2, and Elastic Net: What the Penalty Actually Does", "description": "Derive shrinkage and sparsity, inspect the exact solutions, and distinguish a penalty from its optimization algorithm.", "meta": "September 2026 · Deep Learning"},
+  "dl/regularization/index.html": {"category": "dl", "series": "Regularization in Deep Learning", "title": "Regularization in Deep Learning: Reading Guide", "description": "A connected guide with derivations, worked examples, original figures, and interactive experiments.", "meta": "September 2026 · Deep Learning"},
+  /* TRAINING-SERIES:END */
   /* OPTIMIZER-SERIES:START */
   "dl/optimizers/index.html": {"category": "dl", "series": "Optimizers in Deep Learning", "title": "Optimizers in Deep Learning: From SGD to Matrix Geometry", "description": "Ten detailed chapters with worked updates, original figures, and interactive experiments.", "meta": "Deep Learning · Optimizers"},
   "dl/optimizers/sgd.html": {"category": "dl", "series": "Optimizers in Deep Learning", "title": "SGD: Learning from Noisy Gradients", "description": "Derive the mini-batch update, see where sampling noise comes from, and explore learning-rate stability.", "meta": "Deep Learning · Optimizers"},
