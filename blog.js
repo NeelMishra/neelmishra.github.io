@@ -287,7 +287,7 @@ var BLOG_TREE = [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', links: ['ml/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html'] },
                   { title: 'Regression GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html'] },
                   { title: 'Binary Classification GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html'] },
-                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/boosting/modern-boosting.html'] }
+                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/xgboost/index.html'] }
                 ]
               },
               {
@@ -8738,22 +8738,6 @@ var BLOG_TREE = [
             "file": "ml/boosting/classification-losses.html",
             "links": [
               "ml/boosting/gradient-boosting.html",
-              "ml/boosting/modern-boosting.html"
-            ]
-          },
-          {
-            "title": "Newton Boosting & XGBoost: Leaves, Gains & Constraints",
-            "file": "ml/boosting/modern-boosting.html",
-            "links": [
-              "ml/boosting/classification-losses.html",
-              "ml/boosting/library-systems.html"
-            ]
-          },
-          {
-            "title": "XGBoost, LightGBM & CatBoost: How the Systems Differ",
-            "file": "ml/boosting/library-systems.html",
-            "links": [
-              "ml/boosting/modern-boosting.html",
               "ml/boosting/regularization.html"
             ]
           },
@@ -8761,7 +8745,7 @@ var BLOG_TREE = [
             "title": "Regularization, Early Stopping & Model Selection",
             "file": "ml/boosting/regularization.html",
             "links": [
-              "ml/boosting/library-systems.html",
+              "ml/boosting/classification-losses.html",
               "ml/boosting/interview-guide.html"
             ]
           },
@@ -8834,6 +8818,66 @@ var BLOG_TREE = [
           ],
           "start": "ml/gradient-boosted-machines/index.html",
           "note": "Follow all four StatQuest lectures: regression and classification, intuition and derivation."
+        }
+      },
+      {
+        "name": "xgboost",
+        "label": "XGBoost · StatQuest",
+        "children": [
+          {
+            "title": "Series overview",
+            "file": "ml/xgboost/index.html",
+            "links": [
+              "ml/xgboost/regression.html"
+            ]
+          },
+          {
+            "title": "1 · Regression: Build the First Tree",
+            "file": "ml/xgboost/regression.html",
+            "links": [
+              "ml/xgboost/index.html",
+              "ml/xgboost/classification.html"
+            ]
+          },
+          {
+            "title": "2 · Classification: From Corrections to Probabilities",
+            "file": "ml/xgboost/classification.html",
+            "links": [
+              "ml/xgboost/index.html",
+              "ml/xgboost/mathematical-details.html"
+            ]
+          },
+          {
+            "title": "3 · The Mathematics: Where the Formulas Come From",
+            "file": "ml/xgboost/mathematical-details.html",
+            "links": [
+              "ml/xgboost/index.html",
+              "ml/xgboost/optimizations.html"
+            ]
+          },
+          {
+            "title": "4 · Optimizations: Search Less, Move Data Faster",
+            "file": "ml/xgboost/optimizations.html",
+            "links": [
+              "ml/xgboost/index.html",
+              "ml/xgboost/python-walkthrough.html"
+            ]
+          },
+          {
+            "title": "5 · Python: Train, Tune, and Inspect XGBoost",
+            "file": "ml/xgboost/python-walkthrough.html",
+            "links": [
+              "ml/xgboost/index.html"
+            ]
+          }
+        ],
+        "learning": {
+          "title": "XGBoost · StatQuest",
+          "requires": [
+            "gradient-boosted-machines"
+          ],
+          "start": "ml/xgboost/index.html",
+          "note": "Four core StatQuest lectures and a runnable Python walkthrough: corrections, scores, curvature, efficient search, and model fitting."
         }
       },
       {
