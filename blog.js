@@ -8881,65 +8881,64 @@ var BLOG_TREE = [
         "learning": {"title": "Graph ML", "requires": ["gradient-boosted-machines"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
-        "name": "nlp",
-        "label": "NLP",
+        "name": "recommended-papers",
+        "label": "Recommended Papers",
         "children": [
-          {"title": "NLP: Reading Guide", "file": "ml/nlp/index.html", "links": ["ml/nlp/popular-textbooks/index.html"]},
+          {"title": "Overview", "file": "ml/recommended-papers/index.html"}
+        ]
+      }
+    ]
+  },
+  {
+    "name": "nlp",
+    "label": "NLP",
+    "children": [
+      {"title": "NLP: Reading Guide", "file": "nlp/index.html", "links": ["nlp/popular-textbooks/index.html"]},
+      {
+        "name": "popular-textbooks",
+        "label": "Popular Textbooks",
+        "children": [
+          {"title": "Popular NLP Textbooks", "file": "nlp/popular-textbooks/index.html", "links": ["nlp/index.html", "nlp/popular-textbooks/speech-and-language-processing/index.html"]},
           {
-            "name": "popular-textbooks",
-            "label": "Popular Textbooks",
+            "name": "speech-and-language-processing",
+            "label": "Speech and Language Processing",
             "children": [
-              {"title": "Popular NLP Textbooks", "file": "ml/nlp/popular-textbooks/index.html", "links": ["ml/nlp/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/index.html"]},
-              {
-                "name": "speech-and-language-processing",
-                "label": "Speech and Language Processing",
-                "children": [
-                  {"title": "Visual Reading Guide", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/index.html", "links": ["ml/nlp/popular-textbooks/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html"]},
-                  {"title": "01 · Language Models: From Next-Token Prediction to Useful Systems", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/index.html", "ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html"]},
-                  {"title": "02 · Words and Tokens", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/introduction.html", "ml/nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html"]},
-                  {"title": "03 · N-gram Language Models", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "ml/nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html"]},
-                  {"title": "04 · Logistic Regression", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "ml/nlp/popular-textbooks/speech-and-language-processing/embeddings.html"]},
-                  {"title": "05 · Embeddings", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/embeddings.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html", "ml/nlp/popular-textbooks/speech-and-language-processing/neural-networks.html"]},
-                  {"title": "06 · Neural Networks", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/neural-networks.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/embeddings.html", "ml/nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html"]},
-                  {"title": "07 · Transformers and Pretraining", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/neural-networks.html", "ml/nlp/popular-textbooks/speech-and-language-processing/post-training.html"]},
-                  {"title": "08 · Post-training", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/post-training.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html", "ml/nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html"]},
-                  {"title": "09 · Masked Language Models", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/post-training.html", "ml/nlp/popular-textbooks/speech-and-language-processing/interpretability.html"]},
-                  {"title": "10 · Interpretability", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/interpretability.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html", "ml/nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html"]},
-                  {"title": "11 · Information Retrieval and RAG", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/interpretability.html", "ml/nlp/popular-textbooks/speech-and-language-processing/machine-translation.html"]},
-                  {"title": "13 · Machine Translation", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/machine-translation.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html", "ml/nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html"]},
-                  {"title": "14 · RNNs and LSTMs", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/machine-translation.html", "ml/nlp/popular-textbooks/speech-and-language-processing/phonetics-and-speech-features.html"]},
-                  {"title": "15 · Phonetics and Speech Features", "file": "ml/nlp/popular-textbooks/speech-and-language-processing/phonetics-and-speech-features.html", "links": ["ml/nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html"]}
-                ]
-              }
+              {"title": "Visual Reading Guide", "file": "nlp/popular-textbooks/speech-and-language-processing/index.html", "links": ["nlp/popular-textbooks/index.html", "nlp/popular-textbooks/speech-and-language-processing/introduction.html"]},
+              {"title": "01 · Language Models: From Next-Token Prediction to Useful Systems", "file": "nlp/popular-textbooks/speech-and-language-processing/introduction.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/index.html", "nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html"]},
+              {"title": "02 · Words and Tokens", "file": "nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/introduction.html", "nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html"]},
+              {"title": "03 · N-gram Language Models", "file": "nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html"]},
+              {"title": "04 · Logistic Regression", "file": "nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "nlp/popular-textbooks/speech-and-language-processing/embeddings.html"]},
+              {"title": "05 · Embeddings", "file": "nlp/popular-textbooks/speech-and-language-processing/embeddings.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html", "nlp/popular-textbooks/speech-and-language-processing/neural-networks.html"]},
+              {"title": "06 · Neural Networks", "file": "nlp/popular-textbooks/speech-and-language-processing/neural-networks.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/embeddings.html", "nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html"]},
+              {"title": "07 · Transformers and Pretraining", "file": "nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/neural-networks.html", "nlp/popular-textbooks/speech-and-language-processing/post-training.html"]},
+              {"title": "08 · Post-training", "file": "nlp/popular-textbooks/speech-and-language-processing/post-training.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/transformers-and-pretraining.html", "nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html"]},
+              {"title": "09 · Masked Language Models", "file": "nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/post-training.html", "nlp/popular-textbooks/speech-and-language-processing/interpretability.html"]},
+              {"title": "10 · Interpretability", "file": "nlp/popular-textbooks/speech-and-language-processing/interpretability.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/masked-language-models.html", "nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html"]},
+              {"title": "11 · Information Retrieval and RAG", "file": "nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/interpretability.html", "nlp/popular-textbooks/speech-and-language-processing/machine-translation.html"]},
+              {"title": "13 · Machine Translation", "file": "nlp/popular-textbooks/speech-and-language-processing/machine-translation.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/information-retrieval-and-rag.html", "nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html"]},
+              {"title": "14 · RNNs and LSTMs", "file": "nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/machine-translation.html", "nlp/popular-textbooks/speech-and-language-processing/phonetics-and-speech-features.html"]},
+              {"title": "15 · Phonetics and Speech Features", "file": "nlp/popular-textbooks/speech-and-language-processing/phonetics-and-speech-features.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/rnns-and-lstms.html"]}
             ]
           }
-        ],
-        "learning": {"title": "NLP", "requires": ["data-preparation", "loss-functions"], "start": "ml/nlp/index.html", "note": "Start with language tasks and tokens, then connect conditional probability and log-loss to language modeling. Follow the textbook companion in chapter order."}
+        ]
       },
       {
         "name": "recommended-papers",
         "label": "Recommended Papers",
         "children": [
-          {"title": "Overview", "file": "ml/recommended-papers/index.html"},
-          {
-            "name": "nlp",
-            "label": "NLP",
-            "children": [
-              {"title": "Overview", "file": "ml/recommended-papers/nlp/index.html"},
-              {"title": "Entropy of English", "file": "ml/recommended-papers/nlp/shannon-1950-entropy.html"},
-              {"title": "First Neural Language Model", "file": "ml/recommended-papers/nlp/bengio-2003-neural-lm.html"},
-              {"title": "Seq2Seq", "file": "ml/recommended-papers/nlp/sutskever-2014-seq2seq.html"},
-              {"title": "Attention Mechanism", "file": "ml/recommended-papers/nlp/bahdanau-2015-attention.html"},
-              {"title": "BPE for NMT", "file": "ml/recommended-papers/nlp/sennrich-2016-bpe.html"},
-              {"title": "The Transformer", "file": "ml/recommended-papers/nlp/vaswani-2017-transformer.html"},
-              {"title": "ELMo", "file": "ml/recommended-papers/nlp/peters-2018-elmo.html"},
-              {"title": "BERT", "file": "ml/recommended-papers/nlp/devlin-2019-bert.html"},
-              {"title": "GPT-2", "file": "ml/recommended-papers/nlp/radford-2019-gpt2.html"},
-              {"title": "GPT-3", "file": "ml/recommended-papers/nlp/brown-2020-gpt3.html"},
-              {"title": "Scaling Laws", "file": "ml/recommended-papers/nlp/kaplan-2020-scaling-laws.html"},
-              {"title": "Chinchilla", "file": "ml/recommended-papers/nlp/hoffmann-2022-chinchilla.html"}
-            ]
-          }
+          {"title": "Overview", "file": "nlp/recommended-papers/index.html"},
+          {"title": "Entropy of English", "file": "nlp/recommended-papers/shannon-1950-entropy.html"},
+          {"title": "First Neural Language Model", "file": "nlp/recommended-papers/bengio-2003-neural-lm.html"},
+          {"title": "Seq2Seq", "file": "nlp/recommended-papers/sutskever-2014-seq2seq.html"},
+          {"title": "Attention Mechanism", "file": "nlp/recommended-papers/bahdanau-2015-attention.html"},
+          {"title": "BPE for NMT", "file": "nlp/recommended-papers/sennrich-2016-bpe.html"},
+          {"title": "The Transformer", "file": "nlp/recommended-papers/vaswani-2017-transformer.html"},
+          {"title": "ELMo", "file": "nlp/recommended-papers/peters-2018-elmo.html"},
+          {"title": "BERT", "file": "nlp/recommended-papers/devlin-2019-bert.html"},
+          {"title": "GPT-2", "file": "nlp/recommended-papers/radford-2019-gpt2.html"},
+          {"title": "GPT-3", "file": "nlp/recommended-papers/brown-2020-gpt3.html"},
+          {"title": "Scaling Laws", "file": "nlp/recommended-papers/kaplan-2020-scaling-laws.html"},
+          {"title": "Chinchilla", "file": "nlp/recommended-papers/hoffmann-2022-chinchilla.html"}
         ]
       }
     ]
@@ -10646,7 +10645,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -10673,8 +10672,9 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml') && btn.classList.contains('open')) {
-            var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' : 'machine-learning';
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp') && btn.classList.contains('open')) {
+            var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
+              directoryPath[0] === 'nlp' ? 'natural-language-processing' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -10802,6 +10802,7 @@ function flattenBlogTree(nodes, result) {
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Follow the prerequisite map: data and loss foundations, model families, then applications.' },
+    nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
@@ -10866,7 +10867,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* ML and RL use the Explorer's hierarchy and reading order. Metadata insertion
+  /* ML, NLP and RL use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -10945,6 +10946,7 @@ function flattenBlogTree(nodes, result) {
     catSection.dataset.cat = code;
     if (code === 'rl') catSection.id = 'reinforcement-learning';
     if (code === 'ml') catSection.id = 'machine-learning';
+    if (code === 'nlp') catSection.id = 'natural-language-processing';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -10957,7 +10959,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11032,9 +11034,13 @@ function flattenBlogTree(nodes, result) {
   applyFilters();
 
   function openBlogDirectoryLink() {
-    var id = window.location.hash.slice(1);
+    var id = window.location.hash.slice(1)
+      .replace(/^folder-ml--recommended-papers--nlp(?=--|$)/, 'folder-nlp--recommended-papers')
+      .replace(/^folder-ml--nlp(?=--|$)/, 'folder-nlp');
     var code = id === 'reinforcement-learning' || id.indexOf('folder-rl--') === 0 ? 'rl' :
-      id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' : '';
+      id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' :
+      id === 'natural-language-processing' || id === 'folder-nlp' || id.indexOf('folder-nlp--') === 0 ? 'nlp' : '';
+    if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
     if (!target || !root.contains(target)) return;

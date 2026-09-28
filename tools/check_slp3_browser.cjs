@@ -31,7 +31,7 @@ const setRange = (page, selector, value) => page.locator(selector).evaluate((inp
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const files = ['blog/ml/nlp/index.html', 'blog/ml/nlp/popular-textbooks/index.html', `${manifest.base_path}/index.html`, ...published.map(ch => `${manifest.base_path}/${ch.article}`)];
+    const files = ['blog/nlp/index.html', 'blog/nlp/popular-textbooks/index.html', `${manifest.base_path}/index.html`, ...published.map(ch => `${manifest.base_path}/${ch.article}`)];
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 });
       for (const file of files) {
