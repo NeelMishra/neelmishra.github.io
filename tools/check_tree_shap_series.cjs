@@ -14,6 +14,15 @@ const exact = JSON.parse(read(`${folder}/assets/exact-results.json`));
 const library = JSON.parse(read(`${folder}/assets/library-results.json`));
 const near = (a,b,tol=1e-9) => assert(Math.abs(a-b)<=tol,`${a} != ${b}`);
 assert.equal(exact.customers.length,10);
+const maya = JSON.parse(read(folder+'/assets/maya-results.json'));
+assert.equal(manifest.chapters.length,5);
+assert.equal(maya.checked_inputs,8);
+assert.deepEqual(maya.modes.path.exact_phi,['73/3','3','32/3']);
+assert.deepEqual(maya.modes.replacement.exact_phi,['23','3','12']);
+for(const mode of Object.values(maya.modes)){
+  near(mode.baseline+mode.phi.reduce((a,b)=>a+b,0),90);
+  assert(mode.max_error_all_inputs<2e-6);
+}
 near(exact.customers.reduce((sum,row)=>sum+row.spending,0)/10,exact.main.baseline.value);
 const customerRows = exact.customers.map(row=>[
   row.name, ['New','Returning'][row.features[0]],
@@ -62,6 +71,26 @@ if(screenshots) fs.mkdirSync(screenshots,{recursive:true});
             assert(!overflow,`Customer table text must fit at ${width}px`);
           }
         }
+        if(chapter.slug==='why-tree-shap'){
+          const averages=await page.locator('#leaf-marginal-changes tbody tr:last-child td').allTextContents();
+          assert(averages[0].includes('30')&&averages[1].includes('24'));
+          assert.equal(await page.locator('#repeated-features,#ensembles').count(),2);
+        }
+        if(chapter.slug==='background-choice'){
+          const rows=await page.locator('#reference-groups tbody tr').evaluateAll(ns=>
+            ns.map(n=>Array.from(n.cells,c=>c.textContent.trim())));
+          assert.equal(rows.length,8);
+          const value=s=>s==='76⅔'?230/3:Number(s);
+          for(const [label,pathValue,referenceValue] of rows){
+            const key=label==='None'?'none':label.replaceAll(', ','');
+            near(value(pathValue),maya.modes.path.groups[key]);
+            near(value(referenceValue),maya.modes.replacement.groups[key]);
+          }
+        }
+        if(chapter.slug==='python-treeexplainer'){
+          assert.equal(await page.locator('#verified-contributions tbody tr').count(),5);
+          assert.equal(await page.locator('#check-values').count(),1);
+        }
         const formulas = await page.locator('.note-equation').evaluateAll(ns=>ns.filter(n=>n.scrollWidth>n.clientWidth+2).length);
         assert.equal(formulas,0,`${file}: equation overflow ${width}`);
         for(const img of await page.locator('article img').all()){
@@ -86,7 +115,7 @@ if(screenshots) fs.mkdirSync(screenshots,{recursive:true});
           await page.screenshot({path:path.join(screenshots,`${chapter.slug}-${width}.png`),fullPage:true});
         }
       }
-      console.log(`Verified all eight TreeSHAP chapters at ${width}px.`);
+      console.log(`Verified all five TreeSHAP chapters at ${width}px.`);
     }
     await page.goto(`${base}/${folder}/index.html`,{waitUntil:'networkidle'});
     for(let mask=0;mask<8;mask++){
@@ -98,8 +127,13 @@ if(screenshots) fs.mkdirSync(screenshots,{recursive:true});
     }
     await page.locator('[data-feature="0"]').focus();await page.keyboard.press('Space');
     assert(!(await page.locator('[data-feature="0"]').isChecked()));
+    for(const [oldSlug,target] of Object.entries(manifest.redirects)){
+      await page.goto(base+'/'+folder+'/'+oldSlug+'.html');
+      await page.waitForURL(base+'/'+folder+'/'+target);
+      assert.equal(await page.locator(target.slice(target.indexOf('#'))).count(),1);
+    }
     await page.goto(`${base}/blog.html`,{waitUntil:'networkidle'});
-    assert.equal(await page.locator('.blog-card[href^="blog/ml/explainability/tree-shap/"]').count(),8);
+    assert.equal(await page.locator('.blog-card[href^="blog/ml/explainability/tree-shap/"]').count(),5);
     assert.deepEqual(errors,[]);
     console.log('Numerical records, links, responsive layout, formulas, anchors, eight interactive states, keyboard controls, and blog index passed.');
   }finally{await browser.close();}

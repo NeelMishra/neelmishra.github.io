@@ -9138,14 +9138,6 @@ var BLOG_TREE = [
                 "file": "ml/explainability/tree-shap/why-tree-shap.html",
                 "links": [
                   "ml/explainability/tree-shap/path-contributions.html",
-                  "ml/explainability/tree-shap/repeated-features.html"
-                ]
-              },
-              {
-                "title": "When a Tree Splits on the Same Feature Twice",
-                "file": "ml/explainability/tree-shap/repeated-features.html",
-                "links": [
-                  "ml/explainability/tree-shap/why-tree-shap.html",
                   "ml/explainability/tree-shap/background-choice.html"
                 ]
               },
@@ -9153,15 +9145,7 @@ var BLOG_TREE = [
                 "title": "Choose What a Hidden Feature Means",
                 "file": "ml/explainability/tree-shap/background-choice.html",
                 "links": [
-                  "ml/explainability/tree-shap/repeated-features.html",
-                  "ml/explainability/tree-shap/ensembles-and-global.html"
-                ]
-              },
-              {
-                "title": "From One Tree to Forests, Boosting, and Interactions",
-                "file": "ml/explainability/tree-shap/ensembles-and-global.html",
-                "links": [
-                  "ml/explainability/tree-shap/background-choice.html",
+                  "ml/explainability/tree-shap/why-tree-shap.html",
                   "ml/explainability/tree-shap/python-treeexplainer.html"
                 ]
               },
@@ -9169,16 +9153,7 @@ var BLOG_TREE = [
                 "title": "Use TreeExplainer and Verify the Result",
                 "file": "ml/explainability/tree-shap/python-treeexplainer.html",
                 "links": [
-                  "ml/explainability/tree-shap/ensembles-and-global.html",
-                  "ml/explainability/tree-shap/limitations.html"
-                ]
-              },
-              {
-                "title": "Check a TreeSHAP Explanation Before You Trust It",
-                "file": "ml/explainability/tree-shap/limitations.html",
-                "links": [
-                  "ml/explainability/tree-shap/python-treeexplainer.html",
-                  "ml/explainability/index.html"
+                  "ml/explainability/tree-shap/background-choice.html"
                 ]
               }
             ]
