@@ -304,14 +304,14 @@ var BLOG_TREE = [
                   { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/index.html', links: ['ml/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html'] },
                   { title: 'Permutation Importance', file: 'from-scratch/cpp/machine-learning/explainability/permutation-importance.html', links: ['from-scratch/cpp/machine-learning/explainability/index.html', 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html'] },
                   { title: 'LIME from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/lime-from-scratch.html', links: ['ml/explainability/shap-lime/lime-local-surrogates.html', 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html'] },
-                  { title: 'Kernel SHAP from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html', links: ['ml/explainability/shap-lime/kernel-shap.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html'] },
+                  { title: 'Kernel SHAP from Scratch', file: 'from-scratch/cpp/machine-learning/explainability/kernel-shap-from-scratch.html', links: ['ml/explainability/shapley-values/from-players-to-features.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html'] },
                   {
                     name: 'tree-shap',
                     label: 'Tree SHAP',
                     children: [
-                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', links: ['ml/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html'] },
+                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', links: ['ml/explainability/shapley-values/from-players-to-features.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html'] },
                       { title: 'Exact Small Tree', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html'] },
-                      { title: 'Path-Dependent Tree SHAP', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', 'ml/explainability/tree-shap/limitations.html'] }
+                      { title: 'Path-Dependent Tree SHAP', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', 'ml/explainability/shapley-values/limitations.html'] }
                     ]
                   }
                 ]
@@ -8884,31 +8884,115 @@ var BLOG_TREE = [
         "name": "explainability",
         "label": "Explainability",
         "children": [
-          {"title": "Overview", "file": "ml/explainability/index.html", "links": ["ml/explainability/shap-lime/lime-local-surrogates.html", "from-scratch/cpp/machine-learning/explainability/index.html"]},
           {
-            "name": "shap-lime",
-            "label": "SHAP & LIME",
-            "children": [
-              {"title": "LIME: Local Surrogates", "file": "ml/explainability/shap-lime/lime-local-surrogates.html", "links": ["ml/explainability/index.html", "ml/explainability/shap-lime/shapley-values.html"]},
-              {"title": "Shapley Values", "file": "ml/explainability/shap-lime/shapley-values.html", "links": ["ml/explainability/shap-lime/lime-local-surrogates.html", "ml/explainability/shap-lime/kernel-shap.html"]},
-              {"title": "Kernel SHAP", "file": "ml/explainability/shap-lime/kernel-shap.html", "links": ["ml/explainability/shap-lime/shapley-values.html", "ml/explainability/shap-lime/index.html"]},
-              {"title": "Local Explainability: Comparing LIME and SHAP", "file": "ml/explainability/shap-lime/index.html", "links": ["ml/explainability/shap-lime/kernel-shap.html", "ml/explainability/shap-lime/choosing-explainers.html"]},
-              {"title": "Choosing Explainers", "file": "ml/explainability/shap-lime/choosing-explainers.html", "links": ["ml/explainability/shap-lime/index.html", "ml/explainability/tree-shap/index.html"]}
+            "title": "Reading Guide",
+            "file": "ml/explainability/index.html",
+            "links": [
+              "ml/explainability/shapley-values/index.html"
             ]
           },
           {
-            "name": "tree-shap",
-            "label": "Tree SHAP",
+            "name": "shapley-values",
+            "label": "Shapley Values and SHAP",
             "children": [
-              {"title": "Overview", "file": "ml/explainability/tree-shap/index.html", "links": ["ml/explainability/tree-shap/path-contributions.html"]},
-              {"title": "Path Contributions", "file": "ml/explainability/tree-shap/path-contributions.html", "links": ["ml/explainability/tree-shap/index.html", "ml/explainability/tree-shap/why-tree-shap.html"]},
-              {"title": "Why Tree SHAP", "file": "ml/explainability/tree-shap/why-tree-shap.html", "links": ["ml/explainability/tree-shap/path-contributions.html", "ml/explainability/tree-shap/ensembles-and-global.html"]},
-              {"title": "Ensembles and Global Summaries", "file": "ml/explainability/tree-shap/ensembles-and-global.html", "links": ["ml/explainability/tree-shap/why-tree-shap.html", "ml/explainability/tree-shap/limitations.html"]},
-              {"title": "Limitations and Validation", "file": "ml/explainability/tree-shap/limitations.html", "links": ["ml/explainability/tree-shap/ensembles-and-global.html"]}
+              {
+                "title": "SHAP Values: Understand One Prediction",
+                "file": "ml/explainability/shapley-values/index.html",
+                "links": [
+                  "ml/explainability/shapley-values/sharing-credit.html"
+                ]
+              },
+              {
+                "title": "Shapley Values: Work Out Each Person’s Share",
+                "file": "ml/explainability/shapley-values/sharing-credit.html",
+                "links": [
+                  "ml/explainability/shapley-values/index.html",
+                  "ml/explainability/shapley-values/from-players-to-features.html"
+                ]
+              },
+              {
+                "title": "From Shapley Values to Model Explanations",
+                "file": "ml/explainability/shapley-values/from-players-to-features.html",
+                "links": [
+                  "ml/explainability/shapley-values/sharing-credit.html",
+                  "ml/explainability/shapley-values/python-regression.html"
+                ]
+              },
+              {
+                "title": "Calculate and Check SHAP Values in Python",
+                "file": "ml/explainability/shapley-values/python-regression.html",
+                "links": [
+                  "ml/explainability/shapley-values/from-players-to-features.html",
+                  "ml/explainability/shapley-values/reading-plots.html"
+                ]
+              },
+              {
+                "title": "Read SHAP Plots One Question at a Time",
+                "file": "ml/explainability/shapley-values/reading-plots.html",
+                "links": [
+                  "ml/explainability/shapley-values/python-regression.html",
+                  "ml/explainability/shapley-values/limitations.html"
+                ]
+              },
+              {
+                "title": "What a SHAP Explanation Can—and Cannot—Tell You",
+                "file": "ml/explainability/shapley-values/limitations.html",
+                "links": [
+                  "ml/explainability/shapley-values/reading-plots.html",
+                  "ml/explainability/shapley-values/violin-and-heatmap.html"
+                ]
+              },
+              {
+                "title": "SHAP Violin Plots and Heatmaps",
+                "file": "ml/explainability/shapley-values/violin-and-heatmap.html",
+                "links": [
+                  "ml/explainability/shapley-values/limitations.html",
+                  "ml/explainability/shapley-values/classification.html"
+                ]
+              },
+              {
+                "title": "SHAP for Classification: Keep Track of the Output",
+                "file": "ml/explainability/shapley-values/classification.html",
+                "links": [
+                  "ml/explainability/shapley-values/violin-and-heatmap.html",
+                  "ml/explainability/shapley-values/categorical-features.html"
+                ]
+              },
+              {
+                "title": "Explain Categorical Features Without Losing Their Meaning",
+                "file": "ml/explainability/shapley-values/categorical-features.html",
+                "links": [
+                  "ml/explainability/shapley-values/classification.html",
+                  "ml/explainability/shapley-values/anomaly-detection.html"
+                ]
+              },
+              {
+                "title": "Explain Isolation Forest Anomalies with SHAP",
+                "file": "ml/explainability/shapley-values/anomaly-detection.html",
+                "links": [
+                  "ml/explainability/shapley-values/categorical-features.html"
+                ]
+              }
+            ]
+          },
+          {
+            "title": "LIME: Local Surrogates",
+            "file": "ml/explainability/shap-lime/lime-local-surrogates.html",
+            "links": [
+              "ml/explainability/index.html",
+              "ml/explainability/shapley-values/index.html"
             ]
           }
         ],
-        "learning": {"title": "Explainability", "requires": ["regression", "decision-trees"], "start": "ml/explainability/index.html", "note": "Use local linear models for LIME; learn Shapley values before TreeSHAP."}
+        "learning": {
+          "title": "Explainability",
+          "requires": [
+            "regression",
+            "decision-trees"
+          ],
+          "start": "ml/explainability/index.html",
+          "note": "Learn Shapley values from shared credit to predictions, then use SHAP for plots, classification, and anomalies."
+        }
       },
       {
         "name": "representation-learning",

@@ -34,6 +34,8 @@ for (const file of scan(path.join(root, 'blog/ml'))) {
   const html = fs.readFileSync(file, 'utf8');
   // A legacy CS336 URL redirects to its canonical Deep Learning location.
   if (/<meta\b[^>]*http-equiv="refresh"/i.test(html)) continue;
+  // Standalone generated visualizations in assets are not blog articles.
+  if (file.includes(`${path.sep}assets${path.sep}`)) continue;
   assert(files.includes(path.relative(path.join(root, 'blog'), file)), `Article missing from Explorer: ${file}`);
 }
 
@@ -72,12 +74,12 @@ function checkSequence(folder, names) {
     assert(context.BLOG_POSTS[file].series.includes(`Part ${i + 1}`), `Wrong metadata part number: ${file}`);
   });
 }
-checkSequence('ml/explainability/shap-lime', ['lime-local-surrogates', 'shapley-values', 'kernel-shap', 'index', 'choosing-explainers']);
+const shapSeries = JSON.parse(fs.readFileSync(path.join(root, 'tools/shap-series.json'), 'utf8'));
+checkSequence('ml/explainability/shapley-values', shapSeries.chapters.map(c => c.slug));
 const explainabilityGuide = fs.readFileSync(path.join(root, 'blog/ml/explainability/index.html'), 'utf8');
-assert(explainabilityGuide.includes('class="next" href="shap-lime/lime-local-surrogates.html"'), 'Start explainability with the LIME lesson, before the comparison');
+assert(explainabilityGuide.includes('class="next" href="shapley-values/index.html"'), 'Start explainability with the new SHAP series');
 const limeLesson = fs.readFileSync(path.join(root, 'blog/ml/explainability/shap-lime/lime-local-surrogates.html'), 'utf8');
-assert(limeLesson.includes('class="prev" href="../index.html"'), 'The first lesson should return to the parent guide, not the later comparison');
-checkSequence('ml/explainability/tree-shap', ['index', 'path-contributions', 'why-tree-shap', 'ensembles-and-global', 'limitations']);
+assert(limeLesson.includes('class="prev" href="../index.html"'), 'The standalone LIME lesson should return to the guide');
 checkSequence('ml/loss-functions/js-divergence', ['index', 'properties-and-uses', 'gan-connection']);
 
 const prep = ml.children.find(n => n.name === 'data-preparation');
