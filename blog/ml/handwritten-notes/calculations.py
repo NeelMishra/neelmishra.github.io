@@ -1,4 +1,4 @@
-"""Reproduce the six handwritten-note examples and their explanatory figures.
+"""Reproduce the handwritten-note examples and their explanatory figures.
 
 Run from any directory after installing this folder's requirements.txt.
 Outputs live beside this script in assets/. Source PDFs and scans are untouched.
@@ -15,7 +15,7 @@ import numpy as np
 from scipy.integrate import quad
 from scipy.optimize import minimize_scalar
 from scipy.spatial.distance import cdist, pdist
-from scipy.stats import beta
+from scipy.stats import beta, multivariate_normal
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -245,6 +245,66 @@ results["lda"] = {
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
 }
+
+# A separate, simple classification example: compare Gaussian densities, class
+# scores, and sklearn's least-squares LDA using the same MLE covariance.
+classifier_A = np.array([[1,2],[3,2],[2,1],[2,3]], dtype=float)
+classifier_B = np.array([[5,4],[7,4],[6,3],[6,5]], dtype=float)
+training = np.vstack([classifier_A, classifier_B])
+class_labels = np.array(["A"]*4 + ["B"]*4)
+class_means = np.array([classifier_A.mean(0), classifier_B.mean(0)])
+priors = np.array([.5, .5])
+residuals = np.vstack([classifier_A-class_means[0],
+                       classifier_B-class_means[1]])
+shared_covariance = residuals.T @ residuals / len(training)
+near(class_means, [[2,2],[6,4]])
+near(shared_covariance, [[.5,0],[0,.5]])
+class_weights = np.linalg.solve(shared_covariance, class_means.T).T
+class_offsets = -.5*np.sum(class_means*class_weights, axis=1)+np.log(priors)
+new_point = np.array([4.,4.])
+scores = class_weights @ new_point + class_offsets
+posterior = np.exp(scores-scores.max())
+posterior /= posterior.sum()
+density_weights = np.array([
+    multivariate_normal.pdf(new_point, mean=mean, cov=shared_covariance)*prior
+    for mean,prior in zip(class_means,priors)
+])
+near(posterior, density_weights/density_weights.sum())
+near(scores, [24+np.log(.5),28+np.log(.5)])
+near(posterior, [1/(1+np.exp(4)),1/(1+np.exp(-4))])
+classifier = LinearDiscriminantAnalysis(solver="lsqr").fit(training,class_labels)
+near(classifier.covariance_, shared_covariance)
+near(classifier.coef_, [[8,4]])
+near(classifier.intercept_, [-44])
+near(classifier.predict_proba([new_point])[0], posterior)
+assert classifier.predict([new_point])[0] == "B"
+results["lda_classification"] = {
+    "class_a": classifier_A.tolist(), "class_b": classifier_B.tolist(),
+    "means": class_means.tolist(), "priors": priors.tolist(),
+    "covariance_mle": shared_covariance.tolist(),
+    "class_weights": class_weights.tolist(), "class_offsets": class_offsets.tolist(),
+    "new_point": new_point.tolist(), "scores": scores.tolist(),
+    "posterior": posterior.tolist(), "prediction": "B",
+    "boundary_weights": [8,4], "boundary_intercept": -44,
+}
+fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
+xx = np.linspace(.5,7.5,300)
+ax.plot(xx,11-2*xx,color=GRAY,lw=1.8,label="Equal scores: 2x₁ + x₂ = 11")
+ax.scatter(classifier_A[:,0],classifier_A[:,1],s=75,color=GREEN,
+           zorder=3,label="Class A training points")
+ax.scatter(classifier_B[:,0],classifier_B[:,1],s=75,color=GOLD,
+           zorder=3,label="Class B training points")
+ax.scatter(*new_point,s=220,marker="*",color="#244e78",zorder=4,
+           label="New point (4, 4): predict B")
+ax.annotate("(4, 4)",new_point,xytext=(-7,15),textcoords="offset points",
+            ha="right",color="#244e78")
+ax.text(1.1,4.5,"Predict A",color=GREEN,fontweight="bold")
+ax.text(5.6,1.15,"Predict B",color=GOLD,fontweight="bold")
+ax.set(xlim=(.5,7.5),ylim=(.5,6.5),xlabel="Measurement 1 (x₁)",
+       ylabel="Measurement 2 (x₂)",title="LDA compares two linear class scores")
+ax.set_aspect("equal",adjustable="box")
+ax.legend(loc="upper right",frameon=False,fontsize=9)
+save(fig,"lda-classification.svg")
 (OUT/"results.json").write_text(json.dumps(results, indent=2)+"\n")
-print("Verified MLE/MAP, regression, NB, logistic gradients, clustering, PCA and LDA.")
-print("Wrote three figures and assets/results.json.")
+print("Verified MLE/MAP, regression, NB, logistic gradients, clustering, PCA, Fisher LDA and LDA classification.")
+print("Wrote four figures and assets/results.json.")

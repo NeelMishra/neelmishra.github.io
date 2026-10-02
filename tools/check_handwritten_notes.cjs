@@ -98,10 +98,30 @@ for (const item of originals) {
           }
         }
       }
-      console.log('Verified seven handwritten-note pages at '+width+'px.');
+      console.log('Verified '+manifest.chapters.length+' handwritten-note pages at '+width+'px.');
     }
     await page.goto(base+'/blog.html',{waitUntil:'networkidle'});
-    assert.equal(await page.locator('.blog-card[href^="'+folder+'/"]').count(),7);
+    assert.equal(await page.locator('.blog-card[href^="'+folder+'/"]').count(),manifest.chapters.length);
+    const legacyTargets = {
+      '': 'pca.html',
+      '#pca-data': 'pca.html#pca-data',
+      '#covariance': 'pca.html#covariance',
+      '#variance': 'pca.html#variance',
+      '#projection': 'pca.html#projection',
+      '#choose': 'pca.html#choose',
+      '#lda-data': 'lda.html#lda-data',
+      '#scatter': 'lda.html#scatter',
+      '#fisher': 'lda.html#fisher',
+      '#multiclass': 'lda.html#multiclass',
+      '#classification': 'lda-classification.html#model',
+      '#handwritten-source': 'lda.html#handwritten-source'
+    };
+    for (const [anchor, destination] of Object.entries(legacyTargets)) {
+      await page.goto(base+'/'+folder+'/pca-lda.html'+anchor,{waitUntil:'networkidle'});
+      await page.waitForURL(base+'/'+folder+'/'+destination);
+      const hash=new URL(page.url()).hash;
+      if(hash) assert.equal(await page.locator(hash).count(),1,'Legacy anchor '+anchor);
+    }
     await page.goto(base+'/blog/ml/index.html',{waitUntil:'networkidle'});
     assert.equal(await page.locator('h2#handwritten-notes').count(),1);
     assert.deepEqual(errors,[]);

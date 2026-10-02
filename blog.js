@@ -8339,13 +8339,30 @@ var BLOG_TREE = [
             "file": "ml/handwritten-notes/clustering.html",
             "links": [
               "ml/handwritten-notes/index.html",
-              "ml/handwritten-notes/pca-lda.html"
+              "ml/handwritten-notes/pca.html"
             ]
           },
           {
-            "title": "PCA and LDA: Choose What a Projection Preserves",
-            "file": "ml/handwritten-notes/pca-lda.html",
+            "title": "PCA: Preserve Variation in Fewer Dimensions",
+            "file": "ml/handwritten-notes/pca.html",
             "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/lda.html"
+            ]
+          },
+          {
+            "title": "Fisher LDA: Find a Projection That Separates Classes",
+            "file": "ml/handwritten-notes/lda.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/lda-classification.html"
+            ]
+          },
+          {
+            "title": "LDA Classification: From Class Distributions to a Prediction",
+            "file": "ml/handwritten-notes/lda-classification.html",
+            "links": [
+              "ml/handwritten-notes/lda.html",
               "ml/handwritten-notes/index.html"
             ]
           }
