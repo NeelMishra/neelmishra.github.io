@@ -8290,6 +8290,68 @@ var BLOG_TREE = [
     "label": "Machine Learning",
     "children": [
       {"title": "Start Here: ML Learning Map", "file": "ml/index.html", "links": ["ml/data-preparation/index.html", "ml/loss-functions/index.html"]},
+      // HANDWRITTEN-NOTES:START
+      {
+        "name": "handwritten-notes",
+        "label": "Handwritten Notes",
+        "children": [
+          {
+            "title": "Handwritten Machine Learning Notes",
+            "file": "ml/handwritten-notes/index.html",
+            "links": [
+              "ml/handwritten-notes/mle-map.html"
+            ]
+          },
+          {
+            "title": "MLE, MAP, and Bayesian Prediction",
+            "file": "ml/handwritten-notes/mle-map.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/linear-regression.html"
+            ]
+          },
+          {
+            "title": "Linear Regression: From Gaussian Noise to Ridge",
+            "file": "ml/handwritten-notes/linear-regression.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/naive-bayes.html"
+            ]
+          },
+          {
+            "title": "Naïve Bayes: From Word Counts to a Prediction",
+            "file": "ml/handwritten-notes/naive-bayes.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/logistic-regression.html"
+            ]
+          },
+          {
+            "title": "Logistic Regression: From Scores to Learning",
+            "file": "ml/handwritten-notes/logistic-regression.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/clustering.html"
+            ]
+          },
+          {
+            "title": "K-means: Build and Check the Clusters",
+            "file": "ml/handwritten-notes/clustering.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/pca-lda.html"
+            ]
+          },
+          {
+            "title": "PCA and LDA: Choose What a Projection Preserves",
+            "file": "ml/handwritten-notes/pca-lda.html",
+            "links": [
+              "ml/handwritten-notes/index.html"
+            ]
+          }
+        ]
+      },
+      // HANDWRITTEN-NOTES:END
       {
         "name": "data-preparation",
         "label": "Data Preparation and Preprocessing",
