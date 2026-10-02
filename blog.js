@@ -8893,6 +8893,82 @@ var BLOG_TREE = [
             ]
           },
           {
+            "name": "linear-models",
+            "label": "Linear Model Explainability",
+            "children": [
+              {
+                "title": "Explain a Linear Prediction by Hand",
+                "file": "ml/explainability/linear-models/index.html",
+                "links": [
+                  "ml/explainability/linear-models/coefficients.html"
+                ]
+              },
+              {
+                "title": "What Regression Coefficients Actually Mean",
+                "file": "ml/explainability/linear-models/coefficients.html",
+                "links": [
+                  "ml/explainability/linear-models/index.html",
+                  "ml/explainability/linear-models/curves.html"
+                ]
+              },
+              {
+                "title": "How Linear Models Learn Curves",
+                "file": "ml/explainability/linear-models/curves.html",
+                "links": [
+                  "ml/explainability/linear-models/coefficients.html",
+                  "ml/explainability/linear-models/interactions.html"
+                ]
+              },
+              {
+                "title": "When One Feature Changes Another Feature’s Effect",
+                "file": "ml/explainability/linear-models/interactions.html",
+                "links": [
+                  "ml/explainability/linear-models/curves.html",
+                  "ml/explainability/linear-models/meaningful-features.html"
+                ]
+              },
+              {
+                "title": "Build Features People Can Understand",
+                "file": "ml/explainability/linear-models/meaningful-features.html",
+                "links": [
+                  "ml/explainability/linear-models/interactions.html",
+                  "ml/explainability/linear-models/feature-clustering.html"
+                ]
+              },
+              {
+                "title": "Simplify a Model by Grouping Similar Features",
+                "file": "ml/explainability/linear-models/feature-clustering.html",
+                "links": [
+                  "ml/explainability/linear-models/meaningful-features.html",
+                  "ml/explainability/linear-models/reading-plots.html"
+                ]
+              },
+              {
+                "title": "Read a Linear Model Through Its Plots",
+                "file": "ml/explainability/linear-models/reading-plots.html",
+                "links": [
+                  "ml/explainability/linear-models/feature-clustering.html",
+                  "ml/explainability/linear-models/linear-shap.html"
+                ]
+              },
+              {
+                "title": "From Linear Contributions to SHAP Values",
+                "file": "ml/explainability/linear-models/linear-shap.html",
+                "links": [
+                  "ml/explainability/linear-models/reading-plots.html",
+                  "ml/explainability/linear-models/plain-english.html"
+                ]
+              },
+              {
+                "title": "Explain One Prediction in Plain English",
+                "file": "ml/explainability/linear-models/plain-english.html",
+                "links": [
+                  "ml/explainability/linear-models/linear-shap.html"
+                ]
+              }
+            ]
+          },
+          {
             "name": "shapley-values",
             "label": "Shapley Values and SHAP",
             "children": [
@@ -9061,7 +9137,7 @@ var BLOG_TREE = [
             "decision-trees"
           ],
           "start": "ml/explainability/index.html",
-          "note": "Learn Shapley values from shared credit to predictions, then derive TreeSHAP and verify tree explanations in Python."
+          "note": "Explain linear models from a visible customer table, then study Shapley values, SHAP, and TreeSHAP with verified calculations."
         }
       },
       {

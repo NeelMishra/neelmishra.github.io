@@ -73,14 +73,26 @@ def enumerate_shap(model, row, background):
     return total / len(orders)
 
 
+class TeachingVariant:
+    """Rebuild derived terms whenever an original input is replaced."""
+    def __init__(self, function):
+        self.function = function
+
+    def predict(self, rows):
+        rows = np.asarray(rows)
+        return self.function(rows[:, 0], rows[:, 1])
+
+
 def save(fig, name):
-    fig.savefig(ASSETS / (name + ".svg"), bbox_inches="tight", facecolor="white")
+    target = ASSETS / (name + ".svg")
+    fig.savefig(target, bbox_inches="tight", facecolor="white", metadata={"Date": None})
+    target.write_text("\n".join(line.rstrip() for line in target.read_text().splitlines()) + "\n")
     plt.close(fig)
 
 
 def figures(model, fit, scaled_model, linked, phi, baseline):
     plt.rcParams.update({
-        "font.family": "DejaVu Sans", "font.size": 11,
+        "font.family": "sans-serif", "font.size": 11,
         "axes.spines.top": False, "axes.spines.right": False,
         "axes.labelcolor": "#243444", "text.color": "#243444",
         "svg.fonttype": "none", "svg.hashsalt": "linear-model-explainability",
@@ -142,8 +154,9 @@ def figures(model, fit, scaled_model, linked, phi, baseline):
     axes[1].set(xlabel="Predicted spending ($)", ylabel="Observed − predicted ($)",
                 ylim=(-4, 4), title="Residuals")
     for i, name in enumerate(NAMES):
-        axes[0].annotate(name, (pred[i], Y[i]), xytext=(5, 4), textcoords="offset points")
-        axes[1].annotate(name, (pred[i], Y[i] - pred[i]), xytext=(5, 4), textcoords="offset points")
+        offset = (5, -14) if name == "Cara" else (5, 4)
+        axes[0].annotate(name, (pred[i], Y[i]), xytext=offset, textcoords="offset points")
+        axes[1].annotate(name, (pred[i], Y[i] - pred[i]), xytext=offset, textcoords="offset points")
     save(fig, "prediction-errors")
 
     fig, ax = plt.subplots(figsize=(7, 3.8), layout="constrained")
@@ -231,6 +244,17 @@ def main():
     np.testing.assert_allclose(explanation.values[0], phi)
     np.testing.assert_allclose(explanation.base_values[0], baseline)
     np.testing.assert_allclose(baseline + sum(phi), model.predict([MAYA])[0])
+    curved_model = TeachingVariant(curve)
+    interaction_model = TeachingVariant(interaction)
+    curved_phi = enumerate_shap(curved_model, MAYA, X)
+    interaction_phi = enumerate_shap(interaction_model, MAYA, X)
+    np.testing.assert_allclose(curved_phi, [15, 5])
+    np.testing.assert_allclose(interaction_phi, [13, 8])
+    np.testing.assert_allclose(curved_model.predict(X).mean(), 34)
+    np.testing.assert_allclose(interaction_model.predict(X).mean(), 37)
+    for row in HOLDOUT_X:
+        u, p = row[0] - 2, row[1]
+        np.testing.assert_allclose(interaction(row[0], p), 30 + 5*u + 14*p + 2*u*p)
     # Verify the same identity on correlated backgrounds and negative coefficients.
     rng = np.random.default_rng(42)
     for _ in range(50):
@@ -266,6 +290,7 @@ def main():
                    for v in range(6)],
         "interactions": [{"visits": v, "basic": int(interaction(v, 0)),
                            "premium": int(interaction(v, 1))} for v in range(6)],
+        "variant_shap": {"curved": curved_phi.tolist(), "interaction": interaction_phi.tolist()},
         "shap": {"baseline": baseline, "maya": MAYA.tolist(), "values": phi.tolist(),
                  "brute_values": brute.tolist(), "library_values": explanation.values[0].tolist(),
                  "coalitions": {name: coalition_value(model, MAYA, X, known)
