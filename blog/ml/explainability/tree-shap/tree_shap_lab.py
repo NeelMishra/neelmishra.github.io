@@ -29,9 +29,38 @@ def split(feature, threshold, left, right):
                 threshold=threshold, left=left, right=right)
 
 
-TREE = split(0, .5, split(1, .5, Node(30, 10), Node(10, 30)),
-             split(2, .5, Node(20, 50), Node(40, 90)))
-X = (1, 1, 1)
+# The same ten customers shown in Part 1.
+# Columns: name, returning customer, premium plan, high usage, spending ($).
+# A zero means New / Basic / Low; a one means Returning / Premium / High.
+CUSTOMERS = [
+    ('Asha',  0, 0, 0,   8),
+    ('Ben',   0, 0, 1,  10),
+    ('Cara',  0, 0, 0,  12),
+    ('Dev',   0, 1, 1,  30),
+    ('Eli',   1, 0, 0,  45),
+    ('Farah', 1, 1, 0,  55),
+    ('Gia',   1, 0, 1,  80),
+    ('Hari',  1, 1, 1,  85),
+    ('Isha',  1, 0, 1,  95),
+    ('Jay',   1, 1, 1, 100),
+]
+
+
+def customer_tree(rows):
+    """Fill the lesson's split structure with row counts and mean spending."""
+    def leaf(group):
+        return Node(len(group), Q(sum(row[4] for row in group), len(group)))
+    new = [row for row in rows if row[1] == 0]
+    returning = [row for row in rows if row[1] == 1]
+    return split(0, .5,
+                 split(1, .5, leaf([r for r in new if r[2] == 0]),
+                       leaf([r for r in new if r[2] == 1])),
+                 split(2, .5, leaf([r for r in returning if r[3] == 0]),
+                       leaf([r for r in returning if r[3] == 1])))
+
+
+TREE = customer_tree(CUSTOMERS)
+X = (1, 1, 1)  # Maya: Returning / Premium / High; the row we explain.
 REPEATED = split(0, 1, split(1, .5,
                  split(0, 0, Node(10, 10), Node(30, 40)), Node(30, 70)),
                  Node(30, 100))
@@ -165,6 +194,18 @@ def to_json(obj):
 
 def run():
     main = fixture(TREE, X, 3)
+    assert TREE.cover == len(CUSTOMERS) == 10
+    assert main['baseline'] == Q(sum(r[4] for r in CUSTOMERS), len(CUSTOMERS))
+    leaves = {}
+    for row in CUSTOMERS:
+        node = TREE
+        while node.feature >= 0:
+            node = node.left if row[node.feature + 1] <= node.threshold else node.right
+        leaves.setdefault(node, []).append(row)
+    assert sorted(n.cover for n in leaves) == [1, 2, 3, 4]
+    for node, rows in leaves.items():
+        assert node.cover == len(rows)
+        assert node.value == Q(sum(r[4] for r in rows), len(rows))
     assert main['phi'] == [Q(73, 3), Q(3), Q(32, 3)]
     repeated = fixture(REPEATED, (.5, 0), 2)
     assert repeated['phi'] == [Q(-669, 56), Q(-675, 56)]
@@ -203,7 +244,10 @@ def run():
     out = Path(__file__).with_name('assets')
     out.mkdir(exist_ok=True)
     (out / 'exact-results.json').write_text(json.dumps(
-        {'main': main, 'repeated': repeated, 'background_games': games,
+        {'customers': [{'name': r[0], 'features': list(r[1:4]), 'spending': r[4]}
+                       for r in CUSTOMERS],
+         'explained_customer': {'name': 'Maya', 'features': list(X)},
+         'main': main, 'repeated': repeated, 'background_games': games,
          'independent_random_tree_checks': 100}, default=to_json, indent=2) + '\n')
     print('Exact coalition and polynomial calculations agree: 100 random trees and all worked examples.')
     print('Main tree:', main['baseline'], main['phi'], main['prediction'])

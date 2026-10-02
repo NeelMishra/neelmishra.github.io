@@ -4,7 +4,7 @@ from html import escape
 from tree_shap_lab import TREE, REPEATED, CORRELATED, REORDERED
 
 
-def draw(root, filename, title):
+def draw(root, filename, title, customers=False):
     def count(n):
         return 1 if n.feature < 0 else count(n.left) + count(n.right)
     def depth(n):
@@ -32,16 +32,21 @@ def draw(root, filename, title):
                   f'<text x="{(x+xx)/2}" y="{(y+yy)/2+5}" font-size="15">{label}</text>']
     for n, x, y in nodes:
         label = f'Predict {n.value}' if n.feature < 0 else f'{"ABC"[n.feature]} ≤ {n.threshold:g}'
+        detail = f'cover = {n.cover}'
+        if customers:
+            label = f'Predict ${n.value}' if n.feature < 0 else ('New customer?', 'Basic plan?', 'Low usage?')[n.feature]
+            detail = f'{n.cover} customer' + ('s' if n.cover != 1 else '')
         color = '#e8f4ef' if n.feature < 0 else '#f1f5f7'
         parts += [f'<rect x="{x-77}" y="{y-28}" width="154" height="64" rx="9" fill="{color}" stroke="#237267"/>',
                   f'<text x="{x}" y="{y-2}" font-weight="700">{escape(label)}</text>',
-                  f'<text x="{x}" y="{y+22}" font-size="15">cover = {n.cover}</text>']
-    parts += [f'<text x="400" y="{height-10}" font-size="15" fill="#566b70">True → left · False → right · Edge fractions apply when that feature is hidden</text>', '</g></svg>']
+                  f'<text x="{x}" y="{y+22}" font-size="15">{detail}</text>']
+    legend = 'Yes → left · No → right · Counts come from the ten customers in the table' if customers else 'True → left · False → right · Edge fractions apply when that feature is hidden'
+    parts += [f'<text x="400" y="{height-10}" font-size="15" fill="#566b70">{legend}</text>', '</g></svg>']
     Path(__file__).with_name('assets').joinpath(filename).write_text('\n'.join(parts)+'\n')
 
 
 if __name__ == '__main__':
-    draw(TREE, 'main-tree.svg', 'The four-leaf teaching tree')
+    draw(TREE, 'main-tree.svg', 'A spending tree built from the ten-customer table', customers=True)
     draw(REPEATED, 'repeated-tree.svg', 'A tree that splits on A twice along one path')
     draw(CORRELATED, 'background-tree.svg', 'The correlated-feature example: split on A first')
     draw(REORDERED, 'reordered-tree.svg', 'The same prediction function: split on B first')

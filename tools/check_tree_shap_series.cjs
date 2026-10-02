@@ -13,6 +13,13 @@ const manifest = JSON.parse(read('tools/tree-shap-series.json'));
 const exact = JSON.parse(read(`${folder}/assets/exact-results.json`));
 const library = JSON.parse(read(`${folder}/assets/library-results.json`));
 const near = (a,b,tol=1e-9) => assert(Math.abs(a-b)<=tol,`${a} != ${b}`);
+assert.equal(exact.customers.length,10);
+near(exact.customers.reduce((sum,row)=>sum+row.spending,0)/10,exact.main.baseline.value);
+const customerRows = exact.customers.map(row=>[
+  row.name, ['New','Returning'][row.features[0]],
+  ['Basic','Premium'][row.features[1]], ['Low','High'][row.features[2]],
+  String(row.spending)
+]);
 near(exact.main.baseline.value + exact.main.phi.reduce((a,v)=>a+v.value,0),90);
 near(exact.main.phi[1].value,3);
 assert.equal(exact.independent_random_tree_checks,100);
@@ -45,6 +52,16 @@ if(screenshots) fs.mkdirSync(screenshots,{recursive:true});
         assert.equal(await page.locator('.katex-error').count(),0,file);
         assert.equal(await page.locator('link[rel=canonical]').getAttribute('href'),`https://neelmishra.github.io/${file}`);
         assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${file}: page overflow ${width}`);
+        if(chapter.slug==='index') {
+          const rendered = await page.locator('#customer-data tbody tr').evaluateAll(rows=>
+            rows.map(row=>Array.from(row.cells,cell=>cell.textContent.trim())));
+          assert.deepEqual(rendered,customerRows,'The article table must match the Python example data');
+          for(const table of await page.locator('.customer-data').all()) {
+            const overflow=await table.evaluate(n=>n.scrollWidth>n.clientWidth+1 ||
+              Array.from(n.querySelectorAll('th,td')).some(cell=>cell.scrollWidth>cell.clientWidth+1));
+            assert(!overflow,`Customer table text must fit at ${width}px`);
+          }
+        }
         const formulas = await page.locator('.note-equation').evaluateAll(ns=>ns.filter(n=>n.scrollWidth>n.clientWidth+2).length);
         assert.equal(formulas,0,`${file}: equation overflow ${width}`);
         for(const img of await page.locator('article img').all()){

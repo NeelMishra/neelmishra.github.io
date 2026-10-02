@@ -9,7 +9,7 @@
     inputs.forEach(function (input) {
       var feature = Number(input.getAttribute('data-feature'));
       known[feature] = input.checked;
-      if (input.checked) names.push('ABC'[feature]);
+      if (input.checked) names.push(['customer group', 'plan', 'usage'][feature]);
     });
     var leftA = known[0] ? 0 : 0.4;
     var rightA = known[0] ? 1 : 0.6;
@@ -27,7 +27,7 @@
         (weight * 100).toLocaleString('en', {maximumFractionDigits: 3}) + '%';
     });
     root.querySelector('[data-mask-output]').textContent =
-      (names.length ? names.join(', ') + ' known' : 'No inputs known') +
+      (names.length ? names.join(', ') + ' known' : 'No details known') +
       ': average prediction = ' + prediction.toLocaleString('en', {maximumFractionDigits: 6}) + '.';
   }
   inputs.forEach(function (input) { input.addEventListener('change', render); });
