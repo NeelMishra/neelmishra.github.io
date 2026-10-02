@@ -76,6 +76,8 @@ function checkSequence(folder, names) {
 }
 const shapSeries = JSON.parse(fs.readFileSync(path.join(root, 'tools/shap-series.json'), 'utf8'));
 checkSequence('ml/explainability/shapley-values', shapSeries.chapters.map(c => c.slug));
+const treeShapSeries = JSON.parse(fs.readFileSync(path.join(root, 'tools/tree-shap-series.json'), 'utf8'));
+checkSequence('ml/explainability/tree-shap', treeShapSeries.chapters.map(c => c.slug));
 const explainabilityGuide = fs.readFileSync(path.join(root, 'blog/ml/explainability/index.html'), 'utf8');
 assert(explainabilityGuide.includes('class="next" href="shapley-values/index.html"'), 'Start explainability with the new SHAP series');
 const limeLesson = fs.readFileSync(path.join(root, 'blog/ml/explainability/shap-lime/lime-local-surrogates.html'), 'utf8');

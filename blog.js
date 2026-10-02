@@ -309,9 +309,9 @@ var BLOG_TREE = [
                     name: 'tree-shap',
                     label: 'Tree SHAP',
                     children: [
-                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', links: ['ml/explainability/shapley-values/from-players-to-features.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html'] },
+                      { title: 'Overview', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', links: ['ml/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html'] },
                       { title: 'Exact Small Tree', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/index.html', 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html'] },
-                      { title: 'Path-Dependent Tree SHAP', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', 'ml/explainability/shapley-values/limitations.html'] }
+                      { title: 'Path-Dependent Tree SHAP', file: 'from-scratch/cpp/machine-learning/explainability/tree-shap/path-dependent-tree-shap.html', links: ['from-scratch/cpp/machine-learning/explainability/tree-shap/exact-small-tree.html', 'ml/explainability/tree-shap/repeated-features.html'] }
                     ]
                   }
                 ]
@@ -8888,7 +8888,8 @@ var BLOG_TREE = [
             "title": "Reading Guide",
             "file": "ml/explainability/index.html",
             "links": [
-              "ml/explainability/shapley-values/index.html"
+              "ml/explainability/shapley-values/index.html",
+              "ml/explainability/tree-shap/index.html"
             ]
           },
           {
@@ -8976,6 +8977,75 @@ var BLOG_TREE = [
             ]
           },
           {
+            "name": "tree-shap",
+            "label": "TreeSHAP",
+            "children": [
+              {
+                "title": "TreeSHAP: Start with One Small Tree",
+                "file": "ml/explainability/tree-shap/index.html",
+                "links": [
+                  "ml/explainability/tree-shap/path-contributions.html"
+                ]
+              },
+              {
+                "title": "Calculate Tree SHAP Values by Hand",
+                "file": "ml/explainability/tree-shap/path-contributions.html",
+                "links": [
+                  "ml/explainability/tree-shap/index.html",
+                  "ml/explainability/tree-shap/why-tree-shap.html"
+                ]
+              },
+              {
+                "title": "How TreeSHAP Avoids Listing Every Feature Group",
+                "file": "ml/explainability/tree-shap/why-tree-shap.html",
+                "links": [
+                  "ml/explainability/tree-shap/path-contributions.html",
+                  "ml/explainability/tree-shap/repeated-features.html"
+                ]
+              },
+              {
+                "title": "When a Tree Splits on the Same Feature Twice",
+                "file": "ml/explainability/tree-shap/repeated-features.html",
+                "links": [
+                  "ml/explainability/tree-shap/why-tree-shap.html",
+                  "ml/explainability/tree-shap/background-choice.html"
+                ]
+              },
+              {
+                "title": "Choose What a Hidden Feature Means",
+                "file": "ml/explainability/tree-shap/background-choice.html",
+                "links": [
+                  "ml/explainability/tree-shap/repeated-features.html",
+                  "ml/explainability/tree-shap/ensembles-and-global.html"
+                ]
+              },
+              {
+                "title": "From One Tree to Forests, Boosting, and Interactions",
+                "file": "ml/explainability/tree-shap/ensembles-and-global.html",
+                "links": [
+                  "ml/explainability/tree-shap/background-choice.html",
+                  "ml/explainability/tree-shap/python-treeexplainer.html"
+                ]
+              },
+              {
+                "title": "Use TreeExplainer and Verify the Result",
+                "file": "ml/explainability/tree-shap/python-treeexplainer.html",
+                "links": [
+                  "ml/explainability/tree-shap/ensembles-and-global.html",
+                  "ml/explainability/tree-shap/limitations.html"
+                ]
+              },
+              {
+                "title": "Check a TreeSHAP Explanation Before You Trust It",
+                "file": "ml/explainability/tree-shap/limitations.html",
+                "links": [
+                  "ml/explainability/tree-shap/python-treeexplainer.html",
+                  "ml/explainability/index.html"
+                ]
+              }
+            ]
+          },
+          {
             "title": "LIME: Local Surrogates",
             "file": "ml/explainability/shap-lime/lime-local-surrogates.html",
             "links": [
@@ -8991,7 +9061,7 @@ var BLOG_TREE = [
             "decision-trees"
           ],
           "start": "ml/explainability/index.html",
-          "note": "Learn Shapley values from shared credit to predictions, then use SHAP for plots, classification, and anomalies."
+          "note": "Learn Shapley values from shared credit to predictions, then derive TreeSHAP and verify tree explanations in Python."
         }
       },
       {
