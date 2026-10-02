@@ -8311,7 +8311,7 @@ var BLOG_TREE = [
             ]
           },
           {
-            "title": "Linear Regression: From Gaussian Noise to Ridge",
+            "title": "Linear Regression: From Gaussian Noise to Ridge and Lasso",
             "file": "ml/handwritten-notes/linear-regression.html",
             "links": [
               "ml/handwritten-notes/index.html",
