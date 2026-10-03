@@ -8319,7 +8319,7 @@ var BLOG_TREE = [
             ]
           },
           {
-            "title": "Naïve Bayes: From Word Counts to a Prediction",
+            "title": "Naïve Bayes: From Probability Models to Classification",
             "file": "ml/handwritten-notes/naive-bayes.html",
             "links": [
               "ml/handwritten-notes/index.html",
