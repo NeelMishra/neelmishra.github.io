@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.integrate import quad
+from scipy.linalg import eigh
 from scipy.optimize import minimize_scalar
 from scipy.spatial.distance import cdist, pdist
 from scipy.stats import beta, multivariate_normal
@@ -282,11 +283,53 @@ near(mb, [8.4,7.6])
 near(scatter_a, [[4,-2],[-2,13.2]])
 near(scatter_b, [[9.2,-.2],[-.2,13.2]])
 near(within, [[13.2,-2.2],[-2.2,26.4]])
+gap = mb-ma
+maximum_fisher = float(gap@w)
+constraint_direction = w/np.sqrt(maximum_fisher)
+near(constraint_direction@within@constraint_direction, 1)
+near(np.outer(gap,gap)@constraint_direction,
+     maximum_fisher*(within@constraint_direction))
+gradient = (2*gap*(gap@constraint_direction)
+            -2*maximum_fisher*(within@constraint_direction))
+near(gradient, [0,0])
+step = 1e-6
+for index in range(2):
+    offset = np.eye(2)[index]*step
+    plus, minus = constraint_direction+offset, constraint_direction-offset
+    value_plus = (plus@gap)**2-maximum_fisher*(plus@within@plus-1)
+    value_minus = (minus@gap)**2-maximum_fisher*(minus@within@minus-1)
+    near((value_plus-value_minus)/(2*step), gradient[index])
+candidates = [np.array([1.,0.]), np.array([0.,1.]), gap, v]
+fisher_scores = [(candidate@gap)**2/(candidate@within@candidate)
+                for candidate in candidates]
+near(fisher_scores, [2.2090909091,.6060606061,2.8632679650,3.1313700384])
+angles = np.linspace(0,np.pi,2001)
+for angle in angles:
+    candidate = np.array([np.cos(angle),np.sin(angle)])
+    assert (candidate@gap)**2/(candidate@within@candidate) <= maximum_fisher+1e-10
+probe = np.array([1.,-.25])
+coefficient = (probe@gap)/maximum_fisher
+residual = probe-coefficient*w
+near(residual@within@residual,
+     probe@within@probe-(probe@gap)**2/maximum_fisher)
+overall_mean = (len(A)*ma+len(B)*mb)/(len(A)+len(B))
+between = (len(A)*np.outer(ma-overall_mean,ma-overall_mean)
+           +len(B)*np.outer(mb-overall_mean,mb-overall_mean))
+near(between, [[72.9,54],[54,40]])
+near(between, len(A)*len(B)/(len(A)+len(B))*np.outer(gap,gap))
+generalized_values, generalized_vectors = eigh(between,within)
+near(generalized_values, [0,2.5*maximum_fisher])
+near(generalized_vectors.T@within@generalized_vectors, np.eye(2))
+generalized_direction = generalized_vectors[:,-1]
+generalized_direction /= np.linalg.norm(generalized_direction)
+near(np.outer(generalized_direction,generalized_direction), np.outer(v,v))
 lda = LinearDiscriminantAnalysis().fit(np.vstack([A,B]), [0]*5+[1]*5)
 near(lda.coef_[0]/np.linalg.norm(lda.coef_[0]), v)
 results["lda"] = {
     "class_a": A.tolist(), "class_b": B.tolist(), "means": [ma.tolist(),mb.tolist()],
     "scatter_a": scatter_a.tolist(), "scatter_b": scatter_b.tolist(),
+    "between_scatter": between.tolist(), "fisher_scores": fisher_scores,
+    "maximum_fisher": maximum_fisher,
     "within_scatter": within.tolist(), "direction": v.tolist(),
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
@@ -381,6 +424,36 @@ density_weights = np.array([
     for mean,prior in zip(class_means,priors)
 ])
 near(posterior, density_weights/density_weights.sum())
+gaussian_log_weights = np.array([
+    multivariate_normal.logpdf(new_point, mean=mean, cov=shared_covariance)+np.log(prior)
+    for mean,prior in zip(class_means,priors)
+])
+shared_log_term = (-np.log(2*np.pi)-.5*np.log(np.linalg.det(shared_covariance))
+                  -.5*new_point@np.linalg.solve(shared_covariance,new_point))
+near(gaussian_log_weights, scores+shared_log_term)
+classifier_direction = np.linalg.solve(shared_covariance,class_means[1]-class_means[0])
+midpoint = class_means.mean(0)
+near(scores[1]-scores[0],
+     classifier_direction@(new_point-midpoint)+np.log(priors[1]/priors[0]))
+near(classifier_direction, [8,4])
+classifier_fisher = np.linalg.solve(residuals.T@residuals,class_means[1]-class_means[0])
+near(classifier_fisher, [1,.5])
+near(classifier_direction, len(training)*classifier_fisher)
+near((np.array([[4,3],[5,1],[3,5]])-midpoint)@classifier_direction, [0,0,0])
+correlated_covariance = np.array([[2.,.6],[.6,1.]])
+correlated_weights = np.linalg.solve(correlated_covariance,class_means.T).T
+correlated_priors = np.array([.35,.65])
+correlated_scores = (correlated_weights@new_point
+                     -.5*np.sum(class_means*correlated_weights,axis=1)
+                     +np.log(correlated_priors))
+correlated_direction = correlated_weights[1]-correlated_weights[0]
+near(correlated_scores[1]-correlated_scores[0],
+     correlated_direction@(new_point-midpoint)+np.log(correlated_priors[1]/correlated_priors[0]))
+correlated_logs = np.array([
+    multivariate_normal.logpdf(new_point,mean=mean,cov=correlated_covariance)+np.log(prior)
+    for mean,prior in zip(class_means,correlated_priors)
+])
+near(correlated_logs[1]-correlated_logs[0], correlated_scores[1]-correlated_scores[0])
 near(scores, [24+np.log(.5),28+np.log(.5)])
 near(posterior, [1/(1+np.exp(4)),1/(1+np.exp(-4))])
 classifier = LinearDiscriminantAnalysis(solver="lsqr").fit(training,class_labels)
