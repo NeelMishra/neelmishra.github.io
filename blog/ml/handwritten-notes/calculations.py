@@ -283,6 +283,35 @@ near(mb, [8.4,7.6])
 near(scatter_a, [[4,-2],[-2,13.2]])
 near(scatter_b, [[9.2,-.2],[-.2,13.2]])
 near(within, [[13.2,-2.2],[-2.2,26.4]])
+residual_matrix = np.vstack([Ac,Bc])
+near(residual_matrix.T@residual_matrix, within)
+near(within.T, within)
+assert np.linalg.matrix_rank(Ac[:2]) == 2
+assert np.linalg.matrix_rank(residual_matrix) == 2
+assert np.all(np.linalg.eigvalsh(within) > 0)
+duplicate_residuals = np.array([[-1.,-1.],[1.,1.]])
+duplicate_scatter = duplicate_residuals.T@duplicate_residuals
+zero_spread_direction = np.array([1.,-1.])
+near(duplicate_scatter@zero_spread_direction, [0,0])
+near(zero_spread_direction@duplicate_scatter@zero_spread_direction, 0)
+near(np.array([1.,1.])@duplicate_scatter@np.array([1.,1.]), 8)
+near(2*duplicate_scatter@zero_spread_direction, [0,0])
+near(np.linalg.eigvalsh(duplicate_scatter), [0,4])
+assert np.linalg.matrix_rank(duplicate_scatter) == 1
+assert np.all(np.linalg.eigvalsh(duplicate_scatter) >= 0)
+regularized_scatter = duplicate_scatter+.1*np.eye(2)
+near(np.linalg.eigvalsh(regularized_scatter), [.1,4.1])
+near(zero_spread_direction@regularized_scatter@zero_spread_direction, .2)
+quadratic_probe = np.array([.7,-.3])
+quadratic_step = 1e-6
+for matrix in (within,np.array([[2.,3.],[1.,4.]]),duplicate_scatter,regularized_scatter):
+    analytic = (matrix+matrix.T)@quadratic_probe
+    for index in range(2):
+        offset = np.eye(2)[index]*quadratic_step
+        plus, minus = quadratic_probe+offset, quadratic_probe-offset
+        numeric = (plus@matrix@plus-minus@matrix@minus)/(2*quadratic_step)
+        near(numeric, analytic[index])
+near(2*residual_matrix.T@(residual_matrix@quadratic_probe), 2*within@quadratic_probe)
 gap = mb-ma
 maximum_fisher = float(gap@w)
 constraint_direction = w/np.sqrt(maximum_fisher)
