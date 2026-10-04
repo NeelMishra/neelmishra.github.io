@@ -215,7 +215,9 @@ fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
 ax.plot([.6,4.4], [.6,4.4], color=GREEN, label="First principal direction")
 ax.scatter(X[:,0], X[:,1], s=75, color=GOLD, zorder=3, label="Original points")
 ax.scatter([2.5], [2.5], s=85, marker="x", color=GREEN, zorder=4,
-           label="Reconstruction of B and C")
+           label="Shared reconstruction of B and C")
+ax.annotate("B and C reconstruct here", (2.5,2.5), xytext=(9,-18),
+            textcoords="offset points", color=GREEN, fontsize=9)
 for point, restored, label in zip(X, reconstructed, "ABCD"):
     ax.plot([point[0],restored[0]], [point[1],restored[1]],
             ls="--", color=GRAY, alpha=.7)
