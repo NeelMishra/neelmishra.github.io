@@ -39,10 +39,10 @@ def near(actual, expected, atol=1e-8):
     np.testing.assert_allclose(actual, expected, atol=atol, rtol=1e-7)
 
 
-def save(fig, name):
+def save(fig, name, *, crop=True):
     target = OUT / name
     fig.savefig(target, format="svg", metadata={"Date": None},
-                bbox_inches="tight")
+                bbox_inches="tight" if crop else None)
     target.write_text("\n".join(line.rstrip() for line in target.read_text().splitlines())+"\n")
     plt.close(fig)
 
@@ -207,26 +207,66 @@ near(pca.explained_variance_ratio_, [.9])
 reconstructed = pca.inverse_transform(pca.transform(X))
 near(reconstructed, [[1,1], [2.5,2.5], [2.5,2.5], [4,4]])
 near(np.sum((X-reconstructed)**2), 1)
+eigenvalues, directions = np.linalg.eigh(cov)
+pc1, pc2 = directions[:,1], directions[:,0]
+# Fix eigenvector signs to match the worked scores.
+if pc1[0] < 0:
+    pc1 = -pc1
+if pc2[0] < 0:
+    pc2 = -pc2
+pca_scores = centered@pc1
+near(np.column_stack([pc1,pc2]).T@np.column_stack([pc1,pc2]), np.eye(2))
+near(cov@pc1, eigenvalues[1]*pc1)
+near(cov@pc2, eigenvalues[0]*pc2)
+near(np.var(pca_scores, ddof=1), eigenvalues[1])
+near(mean+np.outer(pca_scores,pc1), reconstructed)
+near((X-reconstructed)@pc1, np.zeros(len(X)))
 results["pca"] = {
     "data": X.tolist(), "covariance": cov.tolist(),
     "variance_ratio": .9, "reconstructed": reconstructed.tolist(), "total_error": 1,
 }
-fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
-ax.plot([.6,4.4], [.6,4.4], color=GREEN, label="PC1 retained (90%)")
-ax.plot([1.5,3.5], [3.5,1.5], color="#244e78", ls="--",
-        label="PC2 discarded (10%)")
-ax.scatter(X[:,0], X[:,1], s=75, color=GOLD, zorder=3, label="Original points")
-ax.scatter([2.5], [2.5], s=85, marker="x", color=GREEN, zorder=4,
-           label="Shared reconstruction of B and C")
-ax.annotate("B and C reconstruct here", (2.5,2.5), xytext=(9,-18),
-            textcoords="offset points", color=GREEN, fontsize=9)
+fig, (ax, score_ax) = plt.subplots(
+    2, 1, figsize=(7.2,8.4), layout="constrained",
+    gridspec_kw={"height_ratios": [3.3,1]},
+)
+pc1_line = mean+np.outer([-2.7,2.7],pc1)
+pc2_line = mean+np.outer([-2.7,2.7],pc2)
+ax.plot(pc1_line[:,0], pc1_line[:,1], color=GREEN, lw=2,
+        label="PC1: keep 90%", gid="pca-pc1-axis")
+ax.plot(pc2_line[:,0], pc2_line[:,1], color="#244e78", ls=":", lw=1.5,
+        label="PC2: discard 10%", gid="pca-pc2-axis")
+ax.scatter(X[:,0], X[:,1], s=70, color=GOLD, zorder=3,
+           label="Original points", gid="pca-original-points")
+ax.scatter(reconstructed[:,0], reconstructed[:,1], s=160, facecolors="none",
+           edgecolors=GREEN, linewidths=1.8, zorder=4,
+           label="Projection onto PC1", gid="pca-projected-points")
+for point, restored, label in zip(X, reconstructed, "ABCD"):
+    ax.plot([point[0],restored[0]], [point[1],restored[1]],
+            ls="--", color=GRAY, lw=1.5, gid=f"pca-projection-{label}")
+ax.annotate("B and C project to\n(2.5, 2.5)", (2.5,2.5), xytext=(3.25,1.3),
+            arrowprops={"arrowstyle": "->", "color": GREEN},
+            color=GREEN, fontsize=10, ha="center")
 for point, label in zip(X, "ABCD"):
     ax.annotate(label, point, xytext=(7,7), textcoords="offset points")
-ax.set(xlim=(.5,4.6), ylim=(.5,4.6), xlabel="Measurement 1", ylabel="Measurement 2",
-       title="PCA keeps PC1 and discards PC2")
+ax.set(xlim=(.5,4.5), ylim=(.5,4.5), xlabel="Measurement 1", ylabel="Measurement 2",
+       title="1. Project perpendicularly onto PC1")
 ax.set_aspect("equal", adjustable="box")
-ax.legend(loc="upper left", frameon=False, fontsize=10)
-save(fig, "pca-projection.svg")
+ax.legend(loc="lower center", bbox_to_anchor=(.5,1.12),
+          ncol=2, frameon=False, fontsize=9)
+score_rows = np.array([0,.16,-.16,0])
+score_points = score_ax.scatter(pca_scores, score_rows, s=65, color=GOLD,
+                               zorder=3, gid="pca-score-points")
+near(score_points.get_offsets()[:,0], pca_scores)
+score_ax.axvline(0, color=GREEN, ls=":", lw=1)
+for score, row, label in zip(pca_scores, score_rows, "ABCD"):
+    score_ax.annotate(f"{label}: {score:.2f}", (score,row),
+                      xytext=(0,10 if row >= 0 else -16),
+                      textcoords="offset points", ha="center", fontsize=9)
+score_ax.set(xlim=(-2.8,2.8), ylim=(-.65,.65), yticks=[],
+             xlabel="PC1 score z = v₁ᵀ(x - mean)",
+             title="2. Keep just the one-dimensional scores")
+score_ax.spines["left"].set_visible(False)
+save(fig, "pca-projection.svg", crop=False)
 
 # Transcription of the ten-point LDA dataset on handwritten page 4.
 A = np.array([[4,1],[2,4],[2,3],[3,6],[4,4]], dtype=float)
@@ -251,52 +291,71 @@ results["lda"] = {
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
 }
-fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
+lda_points = np.vstack([A,B])
+lda_origin = lda_points.mean(0)
+lda_scores = lda_points@v
+lda_projected = lda_origin+np.outer((lda_points-lda_origin)@v,v)
+near(lda_projected@v, lda_scores)
+near((lda_points-lda_projected)@v, np.zeros(len(lda_points)))
+fig, ax = plt.subplots(figsize=(7.2,6.8), layout="constrained")
+fisher_line = lda_origin+np.outer([-5.5,5.5],v)
+ax.plot(fisher_line[:,0], fisher_line[:,1], color="#244e78", lw=1.8,
+        label="Fisher projection axis", gid="lda-fisher-axis")
+for point, projected, label in zip(lda_points, lda_projected,
+                                  ["A1","A2","A3","A4","A5","B1","B2","B3","B4","B5"]):
+    ax.plot([point[0],projected[0]], [point[1],projected[1]],
+            ls="--", color=GRAY, alpha=.65, lw=1, gid=f"lda-projection-{label}")
+    ax.annotate(label, point, xytext=(6,6), textcoords="offset points", fontsize=9)
 ax.scatter(A[:,0], A[:,1], color=GREEN, s=75, zorder=3,
-           label="Class A points")
+           label="Class A points", gid="lda-original-a")
 ax.scatter(B[:,0], B[:,1], color=GOLD, marker="s", s=75, zorder=3,
-           label="Class B points")
-ax.plot([ma[0],mb[0]], [ma[1],mb[1]], color=GRAY, ls="--",
-        label="Gap between class means")
-fisher_end = 6*v
-ax.plot([0,fisher_end[0]], [0,fisher_end[1]], color="#244e78", lw=1.8,
-        label="Fisher direction")
-ax.scatter([ma[0],mb[0]], [ma[1],mb[1]], color="#244e78", marker="D",
-           s=85, zorder=4, label="Class means")
+           label="Class B points", gid="lda-original-b")
+ax.scatter(lda_projected[:,0], lda_projected[:,1], facecolors="none",
+           edgecolors="#244e78", s=90, zorder=4,
+           label="Projected points", gid="lda-projected-points")
+ax.scatter(*lda_origin, color="#244e78", marker="+", s=90, zorder=5,
+           label="Overall mean", gid="lda-projection-origin")
 ax.set(xlim=(0,11), ylim=(0,11), xlabel="Measurement 1",
        ylabel="Measurement 2",
-       title="LDA uses spread as well as the mean gap")
+       title="Project each labeled point onto the Fisher axis")
 ax.set_aspect("equal", adjustable="box")
 ax.legend(frameon=False, loc="upper left", fontsize=9)
-save(fig, "lda-classes.svg")
+save(fig, "lda-classes.svg", crop=False)
 score_a, score_b = A@v, B@v
 mean_score_a, mean_score_b = float(ma@v), float(mb@v)
 near(score_a.mean(), mean_score_a)
 near(score_b.mean(), mean_score_b)
-fig, ax = plt.subplots(figsize=(8.4,3.5), layout="constrained")
+fig, ax = plt.subplots(figsize=(7.2,3.6), layout="constrained")
 row_a, row_b = 1, 0
-mean_row_a, mean_row_b = 1.3, .3
-ax.scatter(score_a, np.full(score_a.shape, row_a), color=GREEN, s=75,
-           label="Class A points")
-ax.scatter(score_b, np.full(score_b.shape, row_b), color=GOLD, marker="s",
-           s=75, label="Class B points")
+mean_row_a, mean_row_b = 1.38, .38
+for scores, row, color, marker, class_name in [
+    (score_a, row_a, GREEN, "o", "A"), (score_b, row_b, GOLD, "s", "B"),
+]:
+    offsets = .09*(2*(np.argsort(np.argsort(scores))%2)-1)
+    points = ax.scatter(scores, row+offsets, color=color, marker=marker, s=65,
+                        label=f"Class {class_name} points", gid=f"lda-scores-{class_name}")
+    near(points.get_offsets()[:,0], scores)
+    for index, (score, offset) in enumerate(zip(scores,offsets), 1):
+        ax.annotate(f"{class_name}{index}", (score,row+offset),
+                    xytext=(0,10 if offset > 0 else -15), textcoords="offset points",
+                    ha="center", fontsize=8)
 ax.vlines(mean_score_a, row_a, mean_row_a, color="#244e78", linestyles=":")
 ax.vlines(mean_score_b, row_b, mean_row_b, color="#244e78", linestyles=":")
 ax.scatter([mean_score_a, mean_score_b], [mean_row_a, mean_row_b], color="#244e78",
-           marker="D", s=85, zorder=4, label="Class means")
+           marker="D", s=85, zorder=4, label="Class means", gid="lda-score-means")
 ax.annotate(f"mean {mean_score_a:.2f}", (mean_score_a,mean_row_a),
             xytext=(0,18), textcoords="offset points", ha="center",
             color="#244e78", fontsize=9)
 ax.annotate(f"mean {mean_score_b:.2f}", (mean_score_b,mean_row_b),
             xytext=(0,18), textcoords="offset points", ha="center",
             color="#244e78", fontsize=9)
-ax.set(xlim=(0,14), ylim=(-.55,1.75), yticks=[row_b,row_a],
+ax.set(xlim=(0,14), ylim=(-.55,1.9), yticks=[row_b,row_a],
        yticklabels=["Class B","Class A"],
        xlabel="LDA score z = 0.9196 x₁ + 0.3930 x₂",
        title="Fisher projection separates the class scores")
 ax.grid(axis="x", alpha=.18)
 ax.legend(frameon=False, loc="lower center", ncol=3, fontsize=9)
-save(fig, "lda-projection.svg")
+save(fig, "lda-projection.svg", crop=False)
 
 # A separate, simple classification example: compare Gaussian densities, class
 # scores, and sklearn's least-squares LDA using the same MLE covariance.
@@ -359,4 +418,4 @@ ax.legend(loc="upper right",frameon=False,fontsize=9)
 save(fig,"lda-classification.svg")
 (OUT/"results.json").write_text(json.dumps(results, indent=2)+"\n")
 print("Verified MLE/MAP, regression, NB, logistic gradients, clustering, PCA, Fisher LDA and LDA classification.")
-print("Wrote four figures and assets/results.json.")
+print("Wrote verified figures and assets/results.json.")
