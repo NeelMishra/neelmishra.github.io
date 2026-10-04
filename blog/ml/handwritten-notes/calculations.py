@@ -212,18 +212,18 @@ results["pca"] = {
     "variance_ratio": .9, "reconstructed": reconstructed.tolist(), "total_error": 1,
 }
 fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
-ax.plot([.6,4.4], [.6,4.4], color=GREEN, label="First principal direction")
+ax.plot([.6,4.4], [.6,4.4], color=GREEN, label="PC1 retained (90%)")
+ax.plot([1.5,3.5], [3.5,1.5], color="#244e78", ls="--",
+        label="PC2 discarded (10%)")
 ax.scatter(X[:,0], X[:,1], s=75, color=GOLD, zorder=3, label="Original points")
 ax.scatter([2.5], [2.5], s=85, marker="x", color=GREEN, zorder=4,
            label="Shared reconstruction of B and C")
 ax.annotate("B and C reconstruct here", (2.5,2.5), xytext=(9,-18),
             textcoords="offset points", color=GREEN, fontsize=9)
-for point, restored, label in zip(X, reconstructed, "ABCD"):
-    ax.plot([point[0],restored[0]], [point[1],restored[1]],
-            ls="--", color=GRAY, alpha=.7)
+for point, label in zip(X, "ABCD"):
     ax.annotate(label, point, xytext=(7,7), textcoords="offset points")
 ax.set(xlim=(.5,4.6), ylim=(.5,4.6), xlabel="Measurement 1", ylabel="Measurement 2",
-       title="One PCA coordinate keeps the shared movement")
+       title="PCA keeps PC1 and discards PC2")
 ax.set_aspect("equal", adjustable="box")
 ax.legend(loc="upper left", frameon=False, fontsize=10)
 save(fig, "pca-projection.svg")
