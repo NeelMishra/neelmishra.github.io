@@ -247,6 +247,34 @@ results["lda"] = {
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
 }
+score_a, score_b = A@v, B@v
+mean_score_a, mean_score_b = float(ma@v), float(mb@v)
+near(score_a.mean(), mean_score_a)
+near(score_b.mean(), mean_score_b)
+fig, ax = plt.subplots(figsize=(8.4,3.5), layout="constrained")
+row_a, row_b = 1, 0
+mean_row_a, mean_row_b = 1.3, .3
+ax.scatter(score_a, np.full(score_a.shape, row_a), color=GREEN, s=75,
+           label="Class A points")
+ax.scatter(score_b, np.full(score_b.shape, row_b), color=GOLD, marker="s",
+           s=75, label="Class B points")
+ax.vlines(mean_score_a, row_a, mean_row_a, color="#244e78", linestyles=":")
+ax.vlines(mean_score_b, row_b, mean_row_b, color="#244e78", linestyles=":")
+ax.scatter([mean_score_a, mean_score_b], [mean_row_a, mean_row_b], color="#244e78",
+           marker="D", s=85, zorder=4, label="Class means")
+ax.annotate(f"mean {mean_score_a:.2f}", (mean_score_a,mean_row_a),
+            xytext=(0,18), textcoords="offset points", ha="center",
+            color="#244e78", fontsize=9)
+ax.annotate(f"mean {mean_score_b:.2f}", (mean_score_b,mean_row_b),
+            xytext=(0,18), textcoords="offset points", ha="center",
+            color="#244e78", fontsize=9)
+ax.set(xlim=(0,14), ylim=(-.55,1.75), yticks=[row_b,row_a],
+       yticklabels=["Class B","Class A"],
+       xlabel="LDA score z = 0.9196 x₁ + 0.3930 x₂",
+       title="Fisher projection separates the class scores")
+ax.grid(axis="x", alpha=.18)
+ax.legend(frameon=False, loc="lower center", ncol=3, fontsize=9)
+save(fig, "lda-projection.svg")
 
 # A separate, simple classification example: compare Gaussian densities, class
 # scores, and sklearn's least-squares LDA using the same MLE covariance.
