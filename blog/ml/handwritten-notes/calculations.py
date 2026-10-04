@@ -247,6 +247,24 @@ results["lda"] = {
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
 }
+fig, ax = plt.subplots(figsize=(8.4,5.4), layout="constrained")
+ax.scatter(A[:,0], A[:,1], color=GREEN, s=75, zorder=3,
+           label="Class A points")
+ax.scatter(B[:,0], B[:,1], color=GOLD, marker="s", s=75, zorder=3,
+           label="Class B points")
+ax.plot([ma[0],mb[0]], [ma[1],mb[1]], color=GRAY, ls="--",
+        label="Gap between class means")
+fisher_end = 6*v
+ax.plot([0,fisher_end[0]], [0,fisher_end[1]], color="#244e78", lw=1.8,
+        label="Fisher direction")
+ax.scatter([ma[0],mb[0]], [ma[1],mb[1]], color="#244e78", marker="D",
+           s=85, zorder=4, label="Class means")
+ax.set(xlim=(0,11), ylim=(0,11), xlabel="Measurement 1",
+       ylabel="Measurement 2",
+       title="LDA uses spread as well as the mean gap")
+ax.set_aspect("equal", adjustable="box")
+ax.legend(frameon=False, loc="upper left", fontsize=9)
+save(fig, "lda-classes.svg")
 score_a, score_b = A@v, B@v
 mean_score_a, mean_score_b = float(ma@v), float(mb@v)
 near(score_a.mean(), mean_score_a)
