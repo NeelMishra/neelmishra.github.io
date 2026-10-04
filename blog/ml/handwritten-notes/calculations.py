@@ -233,16 +233,20 @@ A = np.array([[4,1],[2,4],[2,3],[3,6],[4,4]], dtype=float)
 B = np.array([[9,10],[6,8],[9,5],[8,7],[10,8]], dtype=float)
 ma, mb = A.mean(0), B.mean(0)
 Ac, Bc = A-ma, B-mb
-within = Ac.T@Ac + Bc.T@Bc
+scatter_a, scatter_b = Ac.T@Ac, Bc.T@Bc
+within = scatter_a + scatter_b
 w = np.linalg.solve(within, mb-ma)
 v = w/np.linalg.norm(w)
 near(ma, [3,3.6])
 near(mb, [8.4,7.6])
+near(scatter_a, [[4,-2],[-2,13.2]])
+near(scatter_b, [[9.2,-.2],[-.2,13.2]])
 near(within, [[13.2,-2.2],[-2.2,26.4]])
 lda = LinearDiscriminantAnalysis().fit(np.vstack([A,B]), [0]*5+[1]*5)
 near(lda.coef_[0]/np.linalg.norm(lda.coef_[0]), v)
 results["lda"] = {
     "class_a": A.tolist(), "class_b": B.tolist(), "means": [ma.tolist(),mb.tolist()],
+    "scatter_a": scatter_a.tolist(), "scatter_b": scatter_b.tolist(),
     "within_scatter": within.tolist(), "direction": v.tolist(),
     "projected_means": [float(ma@v),float(mb@v)],
     "equal_prior_boundary": float((ma+mb)@v/2),
