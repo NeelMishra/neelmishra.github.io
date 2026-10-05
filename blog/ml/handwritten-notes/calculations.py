@@ -473,6 +473,13 @@ density_weights = np.array([
     multivariate_normal.pdf(new_point, mean=mean, cov=shared_covariance)*prior
     for mean,prior in zip(class_means,priors)
 ])
+class_likelihoods = density_weights/priors
+near(np.linalg.det(shared_covariance), .25)
+near(np.linalg.solve(shared_covariance,np.eye(2)), 2*np.eye(2))
+near(class_likelihoods, [np.exp(-8)/np.pi,np.exp(-4)/np.pi])
+near(class_likelihoods, [.000106781071,.005830048930])
+near(density_weights, [.000053390535,.002915024465])
+near(scores, np.log(density_weights)+np.sum(new_point**2)+np.log(np.pi))
 near(posterior, density_weights/density_weights.sum())
 ordinary_squared_distances = np.sum((class_means-new_point)**2,axis=1)
 near(ordinary_squared_distances, [8,4])
