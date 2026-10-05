@@ -314,6 +314,16 @@ for matrix in (within,np.array([[2.,3.],[1.,4.]]),duplicate_scatter,regularized_
 near(2*residual_matrix.T@(residual_matrix@quadratic_probe), 2*within@quadratic_probe)
 gap = mb-ma
 maximum_fisher = float(gap@w)
+gap_matrix = np.outer(gap,gap)
+binary_values, binary_vectors = eigh(gap_matrix,within)
+near(binary_values, [0,maximum_fisher])
+binary_direction = binary_vectors[:,-1]/np.linalg.norm(binary_vectors[:,-1])
+near(np.outer(binary_direction,binary_direction), np.outer(v,v))
+near(gap_matrix@v, maximum_fisher*(within@v))
+ordinary_fisher_matrix = np.linalg.solve(within,gap_matrix)
+near(ordinary_fisher_matrix@v, maximum_fisher*v)
+near(v@gap_matrix@v, (v@gap)**2)
+near((v@gap)**2/(v@within@v), maximum_fisher)
 constraint_direction = w/np.sqrt(maximum_fisher)
 near(constraint_direction@within@constraint_direction, 1)
 near(np.outer(gap,gap)@constraint_direction,
