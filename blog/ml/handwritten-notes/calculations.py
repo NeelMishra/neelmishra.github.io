@@ -339,6 +339,17 @@ for index in range(2):
     value_minus = (minus@gap)**2-maximum_fisher*(minus@within@minus-1)
     near((value_plus-value_minus)/(2*step), gradient[index])
 candidates = [np.array([1.,0.]), np.array([0.,1.]), gap, v]
+projected_a = np.array([ma@candidate for candidate in candidates])
+projected_b = np.array([mb@candidate for candidate in candidates])
+projected_gaps = projected_b-projected_a
+projected_scatter = np.array([candidate@within@candidate for candidate in candidates])
+near(projected_a, [3,3.6,30.6,4.173302345082104])
+near(projected_b, [8.4,7.6,75.76,10.710727540529703])
+near(projected_gaps, [5.4,4,45.16,6.5374251954476])
+near(projected_scatter, [13.2,26.4,712.272,13.648316124191643])
+for candidate, delta, spread in zip(candidates,projected_gaps,projected_scatter):
+    near(delta, candidate@gap)
+    near(spread, np.sum((Ac@candidate)**2)+np.sum((Bc@candidate)**2))
 fisher_scores = [(candidate@gap)**2/(candidate@within@candidate)
                 for candidate in candidates]
 near(fisher_scores, [2.2090909091,.6060606061,2.8632679650,3.1313700384])
