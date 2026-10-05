@@ -9441,7 +9441,13 @@ var BLOG_TREE = [
             "children": [
               {
                 "title": "Position Encodings: Order Must Enter Somewhere",
-                "file": "dl/transformers/building-blocks/positional-encoding.html"
+                "file": "dl/transformers/building-blocks/positional-encoding.html",
+                "links": ["dl/transformers/building-blocks/positional-encoding-deep-dive.html", "dl/transformers/variants/rope.html"]
+              },
+              {
+                "title": "Positional Encoding Deep Dive",
+                "file": "dl/transformers/building-blocks/positional-encoding-deep-dive.html",
+                "links": ["dl/transformers/building-blocks/positional-encoding.html", "dl/transformers/variants/rope.html"]
               },
               {
                 "title": "RoPE: Relative Position Through Rotated Queries and Keys",
