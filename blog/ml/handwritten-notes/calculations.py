@@ -474,6 +474,11 @@ density_weights = np.array([
     for mean,prior in zip(class_means,priors)
 ])
 near(posterior, density_weights/density_weights.sum())
+ordinary_squared_distances = np.sum((class_means-new_point)**2,axis=1)
+near(ordinary_squared_distances, [8,4])
+relative_weights = priors*np.exp(-ordinary_squared_distances)
+near(relative_weights/relative_weights.sum(), posterior)
+near(scores, np.log(relative_weights)+np.sum(new_point**2))
 gaussian_log_weights = np.array([
     multivariate_normal.logpdf(new_point, mean=mean, cov=shared_covariance)+np.log(prior)
     for mean,prior in zip(class_means,priors)
