@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Understand why attention needs position, derive RoPE rotations, explore fast and slow frequency bands, and compare position interpolation, NTK-aware scaling, and long-context evaluation.">
+  <title>RoPE: Relative Position Through Rotated Queries and Keys | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/architectures/transformers/variants/rope.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../transformers.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="../transformers.js"></script>
+  <link rel="stylesheet" href="../transformer-visuals.css?v=tr-20260911"><script defer src="../transformer-visuals.js?v=tr-20260911"></script>
+</head>
+<body class="tr-series">
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal tr-article">
+      <a class="back-to-blog" href="../../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="../index.html">Deep Learning &middot; Architectures &middot; Transformers</a><span>&middot; Position and architecture</span></div>
+      <h1>RoPE: Relative Position Through Rotated Queries and Keys</h1>
+      <p class="post-meta">Updated October 2026 &middot; 19 min read</p>
+<nav class="tr-reading-tools" aria-label="Ways to read this chapter"><a href="#visual-experiment"><span aria-hidden="true">↔</span> Try it</a><a href="#problem"><span aria-hidden="true">∑</span> Read the explanation</a></nav>
+
+<p>Rotary Position Embedding (RoPE) gives attention a position signal by rotating parts of the query and key vectors. Each token uses its own absolute position to choose an angle. When the rotated vectors are compared, their angles combine into a relative offset.</p>
+<p>Jia-Bin Huang's video <a href="https://www.youtube.com/watch?v=SMBkImDWOyQ">How Rotary Position Embedding Supercharges Modern LLMs [RoPE]</a> connects the order problem to rotation, frequency bands, and context extension. This guide follows that progression in original prose, with independent calculations and figures. We will also connect the geometry to tensor shapes, pair layouts, and cached decoding.</p>
+<h2 id="problem">Why plain attention needs a position signal</h2>
+<p>Compare the word sequences <code>Maya follows Arun</code> and <code>Arun follows Maya</code>. The words are the same; who follows whom is not. A content-only, fully visible self-attention layer has no feature saying which word occupies which slot.</p>
+<p>Shuffle the token rows and their queries, keys, and values shuffle together. Each query still compares with the same collection of keys. Its scores and the values those scores weight move together, so the output belonging to each token stays the same and moves to its new row. This is <em>permutation equivariance</em>: the outputs reorder with the inputs, rather than remaining in their old slots.</p>
+<details class="tr-math-note"><summary>Write the shuffle as a matrix</summary><p>Let $P$ be a permutation matrix acting on token rows, and let softmax act separately on each row. For unmasked attention:</p>
+<div class="tr-eq">$$\begin{aligned}
+A&amp;=\operatorname{softmax}\!\left(QK^\top/\sqrt{d_k}\right),\\
+A'&amp;=\operatorname{softmax}\!\left(PQK^\top P^\top/\sqrt{d_k}\right)=PAP^\top,\\
+A'(PV)&amp;=PAV.
+\end{aligned}$$</div>
+<p>Thus $\operatorname{Attention}(PQ,PK,PV)=P\,\operatorname{Attention}(Q,K,V)$. Shared token-wise projections and feed-forward layers do not remove this symmetry.</p></details>
+<p>A causal mask changes this argument: shuffling tokens while keeping the same lower-triangular mask changes which content each token can see. A decoder therefore gets some order information from visibility. RoPE supplies an explicit position-dependent comparison inside Q and K; the mask still handles visibility.</p>
+<h3 id="addition-versus-rotation">Why rotate instead of adding a position vector?</h3>
+<p>With additive sinusoidal encoding, the input at position $i$ is $x_i+p_i$: token content plus a position vector. The projections see both. Using column vectors, $q_i=W_Q(x_i+p_i)$ and $k_j=W_K(x_j+p_j)$. Put $M=W_Q^\top W_K$ and expand the unscaled score:</p>
+<div class="tr-eq">$$\begin{aligned}
+q_i^\top k_j
+&amp;=x_i^\top Mx_j+x_i^\top Mp_j\\
+&amp;\quad+p_i^\top Mx_j+p_i^\top Mp_j.
+\end{aligned}$$</div>
+<p>The four terms mix content and absolute position. Raw matched sine/cosine features have useful relative-offset identities, as the <a href="../building-blocks/positional-encoding-deep-dive.html#mixing">positional-encoding deep dive</a> explains. Arbitrary learned projections and the cross terms do not automatically make this whole score a function of $j-i$.</p>
+<p>RoPE projects the content first and then applies a position-dependent rotation. That placement gives the query/key dot product an exact relative-position identity. It does not mean additive encoding cannot learn relative relationships or that RoPE alone guarantees better predictions.</p>
+<h2 id="placement">Where does RoPE enter attention?</h2>
+<p>A layer first projects token representations into queries Q, keys K, and values V. Standard RoPE rotates Q and K after those projections; it does not add a separate position vector to the input and ordinarily does not rotate V.</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Roles in one attention head.</caption><thead><tr><th>Quantity</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>$q_i$</td><td>The unrotated query vector for token position $i$: what that token wants to match.</td></tr>
+<tr><td>$k_j$</td><td>The unrotated key vector for position $j$: how that candidate is compared with the query.</td></tr>
+<tr><td>$v_j$</td><td>The value vector mixed into the output after attention weights are computed.</td></tr>
+<tr><td>$\hat q_i,\hat k_j$</td><td>The query and key after their positional rotations.</td></tr>
+</tbody></table></div>
+<div class="tr-eq">$$\text{score}_{ij}=\frac{\hat q_i^\top\hat k_j}{\sqrt{d_k}}.$$</div>
+<p>$d_k$ is the complete query/key width of this head, including any coordinates that are not rotated. A causal or padding mask is then applied, softmax turns the allowed scores into weights, and those weights combine V. RoPE and the mask do different jobs: one changes matching geometry, the other controls which keys are allowed.</p>
+<span class="tr-anchor" id="core-idea" aria-hidden="true"></span><span class="tr-anchor" id="formula" aria-hidden="true"></span><span class="tr-anchor" id="2d-rotation" aria-hidden="true"></span><h2 id="rotation">Begin with one two-dimensional plane</h2>
+<p>Take two coordinates $(a,b)^\top$ from a query or key. Use the counterclockwise rotation convention:</p>
+<div class="tr-eq">$$R(\theta)=
+\begin{pmatrix}\cos\theta&amp;-\sin\theta\\\sin\theta&amp;\cos\theta\end{pmatrix}.$$</div>
+<div class="tr-eq">$$R(\theta)\begin{pmatrix}a\\b\end{pmatrix}
+=\begin{pmatrix}a\cos\theta-b\sin\theta\\a\sin\theta+b\cos\theta\end{pmatrix}.$$</div>
+<p>$\theta$ is an angle in radians. For one coordinate pair, choose a frequency $\omega$, meaning radians of rotation per token step. Position $i$ gives query angle $i\omega$; position $j$ gives key angle $j\omega$. Both use the same frequency:</p>
+<p>This matrix uses ordinary coordinate order $(a,b)$. The fixed-position guide stored its phase features as $(\sin\theta,\cos\theta)$, which gives the opposite off-diagonal signs in that guide's shift matrix. The coordinate convention explains the difference; query and key rotations here must both follow the convention stated above.</p>
+<div class="tr-eq">$$\hat q_i=R(i\omega)q_i,\qquad
+\hat k_j=R(j\omega)k_j.$$</div>
+<h3 id="relative-derivation">Why does the position difference appear?</h3>
+<p>Two facts about rotations do the work. Transposing reverses a rotation, $R(\theta)^\top=R(-\theta)$. Applying two rotations adds their angles, $R(\alpha)R(\beta)=R(\alpha+\beta)$. Substituting the rotated query and key into their dot product gives:</p>
+<div class="tr-eq">$$\begin{aligned}
+\hat q_i^\top\hat k_j
+&=(R(i\omega)q_i)^\top(R(j\omega)k_j)\\
+&=q_i^\top R(i\omega)^\top R(j\omega)k_j\\
+&=q_i^\top R(-i\omega)R(j\omega)k_j\\
+&=q_i^\top R((j-i)\omega)k_j.
+\end{aligned}$$</div>
+<p>The absolute position factors combine into $j-i$. Shifting both indices by the same amount leaves that difference unchanged. This identity holds for fixed unrotated content vectors and the same frequency schedule; the vectors themselves can depend on token content and earlier layers.</p>
+<p>The sign follows our convention. The equivalent expression $(R((i-j)\omega)q_i)^\top k_j$ rotates the query instead. A formula using $i-j$ is not automatically a different algorithm, but its vector ordering and rotation signs must match.</p>
+<h3 id="relative-geometry">See the cancellation as an angle</h3>
+<p>For nonzero two-dimensional content vectors, let their original directions be $\phi_q$ and $\phi_k$. RoPE changes those directions to $\phi_q+i\omega$ and $\phi_k+j\omega$ without changing their lengths. Their angle difference is $(\phi_k-\phi_q)+(j-i)\omega$, so:</p>
+<div class="tr-eq">$$\hat q_i^\top\hat k_j
+=\lVert q_i\rVert\,\lVert k_j\rVert
+\cos\!\left((\phi_k-\phi_q)+(j-i)\omega\right).$$</div>
+<p>The content sets the original lengths and angle; position adds a relative phase. A common position shift turns both arrows by the same extra angle, leaving the angle between them unchanged. If either vector is zero, the dot product is zero and the matrix derivation still applies.</p>
+<span class="tr-anchor" id="relative-property" aria-hidden="true"></span><span class="tr-anchor" id="animation" aria-hidden="true"></span><h2 id="example">A numerical relative-phase example</h2>
+<p>Use an illustrative frequency $\omega=\pi/4$ radians per token, or 45 degrees per token step. This is chosen for easy arithmetic, not as the default first frequency of every model. With $q=k=(1,0)$, query position 1 rotates to $(\sqrt2/2,\sqrt2/2)$ and key position 3 to $(-\sqrt2/2,\sqrt2/2)$. Their dot product is zero, equal to $\cos((3-1)\pi/4)$.</p>
+<p>Shift both positions forward by five: their difference stays two, so the dot product remains zero. Change only the key position to 2 and the dot product becomes $\cos(\pi/4)=\sqrt2/2$. These facts are exact for the chosen vectors, independent of any model training.</p>
+<figure class="tr-demo" id="visual-experiment" data-demo="rope"><strong class="tr-demo-title">Rotate a query and a key</strong><div class="tr-demo-body"></div><noscript><p>The worked example in the text describes this calculation. Enable JavaScript to explore it.</p></noscript><figcaption>Change the relative offset. The diagram and dot product use one two-dimensional plane; a real head combines many frequencies.</figcaption></figure>
+<p>The experiment checks rotation algebra without a causal mask. Some slider settings put a key after the query; a causal decoder would mask that score. RoPE itself does not decide whether a key is visible.</p>
+<h3 id="content-example">Use different query and key values</h3>
+<p>Real projected content vectors need not be identical or unit length. Keep $\omega=\pi/4$, but use $q=(2,1)^\top$, $k=(1,3)^\top$, and positions $i=1,j=3$:</p>
+<div class="tr-eq">$$\begin{aligned}
+\hat q_1
+&=\begin{pmatrix}2\cos(\pi/4)-\sin(\pi/4)\\2\sin(\pi/4)+\cos(\pi/4)\end{pmatrix}
+\approx\begin{pmatrix}0.7071\\2.1213\end{pmatrix},\\
+\hat k_3
+&=\begin{pmatrix}\cos(3\pi/4)-3\sin(3\pi/4)\\\sin(3\pi/4)+3\cos(3\pi/4)\end{pmatrix}
+\approx\begin{pmatrix}-2.8284\\-1.4142\end{pmatrix}.
+\end{aligned}$$</div>
+<p>Using the unrounded values, their dot product is $0.7071(-2.8284)+2.1213(-1.4142)\approx-5$. The relative-angle form produces the exact same answer: $(j-i)\omega=\pi/2$, $R(\pi/2)k=(-3,1)^\top$, and $q^\top(-3,1)=-5$.</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>The same content vectors before and after a joint position shift. Coordinates are rounded.</caption><thead><tr><th>Positions</th><th>Rotated query and key</th><th>Dot product</th></tr></thead><tbody>
+<tr><td>$i=1,j=3$</td><td>q: $(0.7071,2.1213)$<br>k: $(-2.8284,-1.4142)$</td><td>-5</td></tr>
+<tr><td>$i=6,j=8$</td><td>q: $(1,-2)$<br>k: $(1,3)$</td><td>-5</td></tr>
+</tbody></table></div>
+<figure class="tr-figure"><a href="../figures/rope-worked-rotation.svg" aria-label="Open the full-size worked rotary example"><img src="../figures/rope-worked-rotation.svg" width="720" height="700" loading="lazy" alt="Original diagram of non-unit query and key vectors rotated at positions 1 and 3, then at positions 6 and 8. Their directions change under the shared shift, but the dot product remains -5."></a><figcaption>The joint shift rotates both vectors by the same extra angle. Their lengths and mutual angle remain unchanged, so their dot product stays -5.</figcaption></figure>
+<h3 id="content-and-distance">The score still contains content</h3>
+<p>Write the relative angle as $\delta=(j-i)\omega$, with query entries $q_1,q_2$ and key entries $k_1,k_2$. Expanding the relative rotation gives:</p>
+<div class="tr-eq">$$\begin{aligned}
+q^\top R(\delta)k
+&=(q_1k_1+q_2k_2)\cos\delta\\
+&\quad+(q_2k_1-q_1k_2)\sin\delta.
+\end{aligned}$$</div>
+<p>Our vectors give coefficients 5 and -5, so the score is $5\cos\delta-5\sin\delta$. RoPE changes how content is matched across positions; it does not replace content with a distance score. The trigonometric terms also oscillate, so there is no universal rule that farther keys must receive smaller logits.</p>
+<span class="tr-anchor" id="higher-dims" aria-hidden="true"></span><h2 id="channels">Apply different clocks to different coordinate pairs</h2>
+<p>The relevant width is the rotated part of a <em>query/key head</em>, not necessarily the input embedding width. Let $d_r$ be that even rotary width and $b$ the configured frequency base. A standard schedule is:</p>
+<div class="tr-eq">$$\omega_r=b^{-2r/d_r},\qquad r=0,\ldots,d_r/2-1.$$</div>
+<p>For $d_r=4$ and $b=10000$, the frequencies are 1 and 0.01. A vector $(1,2,3,4)$ at position 2 becomes:</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Two coordinate pairs with different phase scales. These frequencies are from the stated standard schedule.</caption><thead><tr><th>Original pair</th><th>Angle $2\omega_r$</th><th>Rotated pair</th></tr></thead><tbody>
+<tr><td>$(1,2)$</td><td>2 radians</td><td>$(-2.2347,0.0770)$</td></tr>
+<tr><td>$(3,4)$</td><td>0.02 radians</td><td>$(2.9194,4.0592)$</td></tr>
+</tbody></table></div>
+<p>Each pair uses its own rotation; combining the blocks does not require constructing a large matrix in code. If only a prefix of the head is rotated, the remaining features pass through unchanged and add their ordinary content dot product to the score.</p>
+<p>For example, embedding width 768 with 12 equal-width query heads gives head width 64. Full-head RoPE would rotate 64 coordinates; a model using a rotary prefix of 32 rotates only half. The frequency configuration belongs to that model. Check the actual rotary width, base, scaling rules, and pairing layout rather than substituting the embedding width or a guessed default.</p>
+<h3 id="frequency-roles">What fast and slow planes let a head learn</h3>
+<p>A frequency is easier to interpret through its wavelength, $\lambda_r=2\pi/\omega_r$: the number of token steps for one complete turn in that plane. With $d_r=8$ and $b=10000$, the four planes span very different scales:</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>One eight-coordinate rotary head. Wavelengths are rounded; they are continuous periods, not claims of exact repetition at integer offsets.</caption><thead><tr><th>Pair $r$</th><th>Frequency $\omega_r$</th><th>Token steps per turn</th></tr></thead><tbody>
+<tr><td>0</td><td>1</td><td>6.28</td></tr>
+<tr><td>1</td><td>0.1</td><td>62.83</td></tr>
+<tr><td>2</td><td>0.01</td><td>628.32</td></tr>
+<tr><td>3</td><td>0.001</td><td>6283.19</td></tr>
+</tbody></table></div>
+<p>One step changes the fastest plane's phase by one radian but the slowest plane's phase by only 0.001 radians. Fast planes can help distinguish nearby offsets. Over a window where $|(j-i)\omega_r|$ is small, a slow plane barely changes the content comparison: $\cos\delta\approx1$ and $\sin\delta\approx\delta$ in the expanded score.</p>
+<figure class="tr-figure"><a href="../figures/rope-frequency-scales.svg" aria-label="Open the full-size rotary frequency comparison"><img src="../figures/rope-frequency-scales.svg" width="720" height="600" loading="lazy" alt="Four original plots of cosine of relative offset times frequency, at frequencies 1, 0.1, 0.01, and 0.001 over integer offsets 0 through 128. Fast planes oscillate repeatedly; the slowest comparison remains close to one."></a><figcaption>Each plot fixes the unrotated pair to q = k = (1, 0), so its contribution is $\cos((j-i)\omega_r)$. Lines join integer-offset samples. These are computed rotary responses, not measurements of trained attention heads or attention probabilities.</figcaption></figure>
+<p>The video connects this geometry to <a href="https://arxiv.org/abs/2410.06205">Round and Round We Go! What makes Rotary Positional Encodings useful?</a> Its main analysis of Gemma 7B finds high-frequency positional heads and low-frequency bands that the authors interpret as semantic information channels. Slow rotations make that interpretation plausible over a limited window, but the paper also shows why those channels need not remain robust at arbitrarily long lengths. These are learned uses of coordinates, not fixed jobs assigned to every pair in every model.</p>
+<p>A full rotary score sums content-weighted contributions from all its planes. Those contributions can reinforce or cancel each other. A fast plane does not impose a hard local window, and a slow plane is not position-free; at sufficiently large offsets its phase changes too. Neither the individual cosine curves nor their learned sum guarantees monotonic distance decay.</p>
+<h2 id="pair-layouts">Adjacent pairs and split-half pairs</h2>
+<p>Adjacent pairing uses $(x_0,x_1),(x_2,x_3),\ldots$. Split-half pairing instead matches $x_r$ with $x_{r+d_r/2}$. For four coordinates, the storage layouts representing the same two logical pairs are:</p>
+<div class="tr-eq">$$\begin{aligned}
+\text{adjacent layout}&:\quad(a,b,c,d),\\
+\text{split-half layout}&:\quad(a,c,b,d).
+\end{aligned}$$</div>
+<p>In the second row, the halves $(a,c)$ and $(b,d)$ are paired across their corresponding entries. Split-half implementations often use $\operatorname{rotate\_half}(x)=(-x_{\mathrm{second\ half}},x_{\mathrm{first\ half}})$, along with cosine/sine tables repeated in the same half-wise order.</p>
+<p>The conventions are equivalent after a consistent coordinate permutation. Switching only the rotation code while keeping a checkpoint's query/key projections unchanged generally changes the model. Tensor shapes can still look correct while the values are wrong. <a href="https://nn.labml.ai/transformers/rope/index.html">LabML's reference</a> illustrates split-half pairing; the short function below uses adjacent pairs.</p>
+<span class="tr-anchor" id="implementation" aria-hidden="true"></span><h3 id="reference-code">A small adjacent-pair reference</h3>
+<p>The function uses NumPy with <code>import numpy as np</code>. Here <code>x</code> ends in an even rotary width, <code>frequencies</code> has one entry per pair, and <code>position</code> supplies the logical token position. The formula operates on feature values; it is not generating a standalone positional vector.</p>
+<pre><code class="language-python">def rotate_pairs(x, position, frequencies):
+    # x: [..., 2*r], with adjacent coordinates forming pairs
+    pairs = x.reshape(*x.shape[:-1], -1, 2)
+    angle = position * frequencies
+    a, b = pairs[..., 0], pairs[..., 1]
+    out = np.stack([a*np.cos(angle) - b*np.sin(angle),
+                    a*np.sin(angle) + b*np.cos(angle)], axis=-1)
+    return out.reshape(x.shape)</code></pre>
+<h2 id="tensor-shapes">Broadcast positions across batches and heads</h2>
+<p>Suppose Q and K each have shape <code>[batch, heads, sequence, head_width]</code>. Position IDs have shape <code>[batch, sequence]</code>. For an even rotated width $d_r$, frequencies have shape <code>[d_r/2]</code>. Add singleton head and pair axes to the IDs:</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Shapes for vectorized adjacent-pair rotation.</caption><thead><tr><th>Quantity</th><th>Shape</th></tr></thead><tbody>
+<tr><td>Q or K</td><td><code>[B, H, S, D]</code></td></tr>
+<tr><td>Paired features</td><td><code>[B, H, S, d_r/2, 2]</code></td></tr>
+<tr><td>Position IDs after reshaping</td><td><code>[B, 1, S, 1]</code></td></tr>
+<tr><td>Angles: IDs times frequencies</td><td><code>[B, 1, S, d_r/2]</code></td></tr>
+</tbody></table></div>
+<p>The singleton head dimension lets the same token positions broadcast across all heads. Q and K may have different head counts in grouped-query attention; apply the rotation to each separately with the same head-coordinate convention.</p>
+<pre><code class="language-python">import numpy as np
+
+# A small full-head example: B=1, H=2, S=3, D=d_r=4.
+q_heads = np.arange(24, dtype=float).reshape(1, 2, 3, 4) / 10
+k_heads = q_heads[..., ::-1].copy()
+position_ids = np.array([[0, 1, 2]])
+frequencies = 10000.0 ** (-np.arange(0, 4, 2) / 4)
+position_view = position_ids[:, None, :, None]  # [1, 1, 3, 1]
+q_rot = rotate_pairs(q_heads, position_view, frequencies)
+k_rot = rotate_pairs(k_heads, position_view, frequencies)
+scores = (q_rot @ k_rot.swapaxes(-1, -2)) / np.sqrt(4)</code></pre>
+<p>For partial rotation, call the function on the selected rotary prefix and concatenate the untouched remainder. Do not assume every coordinate is rotated or that the attention scale should change to $\sqrt{d_r}$; the scale still uses the complete query/key head width.</p>
+<p>The <a href="../examples/rope_math_examples.py">worked-example script</a> checks attention's permutation symmetry, the score expansions, these tensor shapes, equivalent pair layouts, partial rotation, cached scores, and the extension schedules below. It also generates both original figures, using the shared <a href="../examples/transformer_math_lab.py">math-lab helpers</a> for attention and matrix rotation.</p>
+<h2 id="cache">Cached keys retain their original positions</h2>
+<p>During prefill, rotate each key once at its logical position and cache that rotated key. If a prefix contains positions 0, 1, and 2, a new token uses position ID 3. Its new query is rotated at 3 and compared with keys already rotated at 0, 1, and 2.</p>
+<div class="tr-eq">$$\begin{aligned}
+\hat q_3^\top\hat k_1
+&=(R(3\omega)q_3)^\top(R(\omega)k_1)\\
+&=q_3^\top R(-2\omega)k_1.
+\end{aligned}$$</div>
+<p>The cached key is still associated with position 1. Rotating it again for the new query position would change its phase incorrectly. A cache's physical array slot or memory page is not the token's logical position ID.</p>
+<p>If the entire sequence is shifted by a common offset and both Q and K rotations are adjusted consistently, the relative dot-product identity is preserved. Changing only the positions of newly generated tokens or resetting them to zero breaks the intended relation.</p>
+<p>The frequency schedule must also agree across cached keys and new queries. If a context-extension method changes frequencies during generation, follow that implementation's cache-recomputation or invalidation rules; do not mix keys encoded under one schedule with queries under another and expect the same relative identity.</p>
+<h2 id="precision">Compute phases in adequate precision</h2>
+<p>The angle is position times frequency. Constructing large position IDs or angles directly in float16 or bfloat16 can merge nearby positions before the sine or cosine is evaluated. Many implementations form phases in float32, then cast rotation coefficients or outputs to the model's working dtype.</p>
+<p>Float32 is not an unlimited guarantee either: it cannot distinguish every consecutive integer beyond $2^{24}$. Large-angle argument reduction and the actual device/dtype also matter. A query tensor stored in reduced precision does not imply that its angle calculation should use that same reduced precision.</p>
+<p>The examples here use NumPy float64 to check the mathematics. Validate the production kernel, dtype, cache, and position range separately; a passing small rotation example is not a performance or long-context benchmark.</p>
+<span class="tr-anchor" id="extrapolation" aria-hidden="true"></span><span class="tr-anchor" id="models" aria-hidden="true"></span><h2 id="extension">Why a formula at any position is not unlimited context</h2>
+<p>Rotations are periodic in each plane. New lengths expose the network to unfamiliar combinations of phases and distances, and attention must distinguish useful matches from competing tokens over a larger candidate set. A model can therefore fail far beyond its training lengths even though every trigonometric value is finite.</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Different changes to the phase schedule are different model changes.</caption><thead><tr><th>Choice</th><th>What changes</th></tr></thead><tbody>
+<tr><td>Linear position interpolation</td><td>Replace $i$ with $i/s$, equivalently dividing all frequencies by $s$. A wider position range uses the old phase range, with lower local resolution.</td></tr>
+<tr><td>Change the base</td><td>Replace $b$ in $b^{-2r/d_r}$. Each pair changes by a different factor; the first pair stays at frequency 1. This is not uniform position interpolation.</td></tr>
+<tr><td>Band-dependent schemes such as YaRN</td><td>Treat different frequency scales differently and may add an attention or amplitude scaling factor. Use the checkpoint's full configuration.</td></tr>
+</tbody></table></div>
+<h3 id="position-interpolation">Position interpolation compresses every clock equally</h3>
+<p>Suppose a model was trained with a 2048-token window and we want to adapt it to 8192 tokens. The expansion factor is $s=8192/2048=4$. <a href="https://arxiv.org/abs/2306.15595">Position interpolation</a> evaluates the old rotation schedule at a compressed index:</p>
+<div class="tr-eq">$$i'=\frac{i}{s},\qquad
+R(i'\omega_r)=R(i\omega_r'),\qquad
+\omega_r'=\frac{\omega_r}{s}.$$</div>
+<p>Position 6000 now uses the phase that the original schedule assigned to position 1500. A one-token offset uses a quarter of its old phase difference in every plane. This trades fine positional resolution for fitting a longer sequence into the familiar phase range. It changes the geometry even inside the old window; the interpolation paper adapts models with fine-tuning rather than treating this as a cost-free inference switch.</p>
+<h3 id="ntk-aware-scaling">NTK-aware scaling stretches the bands differently</h3>
+<p>The video's next step keeps fast rotations relatively intact while slowing the low-frequency planes more. One fixed, NTK-aware base adjustment for an even rotary width $d_r&gt;2$ is:</p>
+<div class="tr-eq">$$b'=b\,s^{d_r/(d_r-2)},\qquad
+\omega_r'=(b')^{-2r/d_r}
+=\omega_r\,s^{-2r/(d_r-2)}.$$</div>
+<p>The fastest pair, $r=0$, stays unchanged. The slowest pair, $r=d_r/2-1$, is divided by $s$. The pairs between them change by intermediate factors. For our eight-coordinate example and $s=4$:</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Frequencies under two different fourfold-extension schedules. NTK-aware values are rounded; this is a fixed-base example, not every dynamic NTK implementation.</caption><thead><tr><th>Pair</th><th>Original</th><th>Position interpolation</th><th>Fixed NTK-aware</th></tr></thead><tbody>
+<tr><td>0</td><td>1</td><td>0.25</td><td>1</td></tr>
+<tr><td>1</td><td>0.1</td><td>0.025</td><td>0.0629961</td></tr>
+<tr><td>2</td><td>0.01</td><td>0.0025</td><td>0.0039685</td></tr>
+<tr><td>3</td><td>0.001</td><td>0.00025</td><td>0.00025</td></tr>
+</tbody></table></div>
+<p>This difference follows directly from the exponents. The NTK-aware name motivates a frequency-scaling design; it does not prove that the resulting checkpoint preserves all its behavior. Dynamic variants can also make the adjustment depend on sequence length, which brings back the <a href="#cache">cached-frequency consistency problem</a>.</p>
+<p>Some extended schemes add scaling beyond pure rotation, so the standard unit-norm-preserving statement need not describe the full modified operation. None of these changes automatically turns a short-context checkpoint into a reliable long-context model.</p>
+<p>The <a href="https://huggingface.co/docs/transformers/main/en/internal/rope_utils">Transformers rotary-utilities documentation</a> describes configuration fields such as rotary width, base, scaling type, and scaling factor. These names and implementations can vary by framework and model. The existing <a href="../../../popular_videos/umar_jamil/distributed-training-framework/rope-and-yarn.html">RoPE and YaRN chapter</a> develops extension schedules in more detail.</p>
+<h3 id="long-context-evaluation">Evaluate more than whether the sequence fits</h3>
+<p>The video ends with results from <a href="https://arxiv.org/abs/2409.12181">A Controlled Study on Long Context Extension and Generalization in LLMs</a>. It separates adapting to a longer training window from generalizing beyond that window. Its comparisons control the base model, training recipe, and data, so a frequency method is not getting credit for an unrelated model improvement.</p>
+<div class="tr-table"><table class="tr-example-inputs"><caption>Two complementary checks used in the video's long-context discussion.</caption><thead><tr><th>Check</th><th>What it asks</th><th>What it cannot establish alone</th></tr></thead><tbody>
+<tr><td>Language-model perplexity</td><td>Does the model still predict held-out text well as the evaluated context grows?</td><td>An aggregate prediction metric does not establish successful retrieval at every document location.</td></tr>
+<tr><td>Needle in a Haystack</td><td>Can the model recover a planted fact? Vary both total length and the fact's depth in the document.</td><td>Recovering one fact does not establish reliable multi-step reasoning or synthesis across a long document.</td></tr>
+</tbody></table></div>
+<p>Perplexity and downstream performance can correlate; these checks are not opposites. The study reports strong correlation for exact fine-tuned methods under its controlled setup, while approximate attention methods can show different tradeoffs. Its finding that exact fine-tuning generally works better within the adapted window does not establish unlimited extrapolation.</p>
+<p>For a claimed extension, record the pretrained window, the adaptation window, and the evaluation lengths separately. Compare frequency schedules with the same checkpoint and adaptation budget, and inspect retrieval across document depths. A tensor accepting 64K tokens is a capacity claim; using distant information accurately is a behavior to measure.</p>
+<span class="tr-anchor" id="comparison" aria-hidden="true"></span><h2 id="norm">What rotation preserves</h2>
+<p>For standard pure RoPE, $R(\theta)^\top R(\theta)=I$, so it preserves the norm of the vector being rotated. At position zero it is the identity, and at a known position it can be inverted with the opposite angle. Those mathematical properties do not establish easy optimization or accurate predictions.</p>
+<p>Different rotations do not preserve the original query/key dot product; that relative change is the point. Shared orthogonal rotation preserves a dot product. Changing masks, key sets, earlier representations, or frequency schedules can still change a complete attention distribution even when a selected fixed-content pair satisfies the relative identity.</p>
+<p>This distinction is also central to <a href="../building-blocks/mla.html">MLA</a>: position-dependent rotation can obstruct moving a key projection into the query side. Separating positional and content paths allows a compact cache representation.</p>
+<details class="tr-check"><summary>Try it: If both query and key positions increase by the same amount, what happens to their rotary dot product?</summary><p>It is unchanged for fixed unrotated content vectors and the same frequency schedule, because only their position difference appears in the identity.</p></details>
+<details class="tr-check"><summary>Try it: For a fourfold extension, do position interpolation and fixed NTK-aware scaling treat the fastest pair the same way?</summary><p>No. Position interpolation divides every frequency by four. In the stated fixed NTK-aware schedule, the fastest pair stays at frequency 1, while the slowest pair is divided by four. The schedules therefore change nearby-token comparisons differently.</p></details>
+<span class="tr-anchor" id="summary" aria-hidden="true"></span><h2 id="next">Sources and further reading</h2>
+<ul class="note-sources">
+<li>Jia-Bin Huang: <a href="https://www.youtube.com/watch?v=SMBkImDWOyQ">How Rotary Position Embedding Supercharges Modern LLMs [RoPE]</a>, the video behind this guide's progression from order to rotation, frequency roles, and context extension.</li>
+<li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a>, the original Transformer and its additive sinusoidal position encoding.</li>
+<li><a href="https://arxiv.org/abs/2104.09864">RoFormer</a>, the primary rotary-position formulation.</li>
+<li><a href="https://arxiv.org/abs/2410.06205">Round and Round We Go! What makes Rotary Positional Encodings useful?</a>, the video's reference for learned frequency use and the limits of distance-decay intuition.</li>
+<li><a href="https://arxiv.org/abs/2306.15595">Extending Context Window of Large Language Models via Positional Interpolation</a>, uniform phase compression and adaptation.</li>
+<li><a href="https://arxiv.org/abs/2409.12181">A Controlled Study on Long Context Extension and Generalization in LLMs</a>, the video's reference for controlled extension and evaluation.</li>
+<li><a href="https://blog.eleuther.ai/rotary-embeddings/">EleutherAI: Rotary Embeddings</a>, geometric and complex-number intuition.</li>
+<li><a href="https://nn.labml.ai/transformers/rope/index.html">LabML: Rotary Positional Embeddings</a>, a worked derivation and implementation with split-half pairing.</li>
+<li><a href="https://huggingface.co/docs/transformers/main/en/internal/rope_utils">Transformers: Rotary Embeddings Utilities</a>, practical configuration and scaling variants.</li>
+</ul>
+<p>Compare with <a href="alibi.html">ALiBi</a>, which injects a distance preference directly into the logits instead of rotating coordinates.</p>
+
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../building-blocks/positional-encoding-deep-dive.html"><span>Previous</span><span>&larr; Positional Encoding Deep Dive</span></a><a class="next" href="alibi.html"><span>Next</span><span>ALiBi: A Distance Bias in Attention Logits &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js?v=architectures-20261006"></script><script src="../../../../../blog.js?v=architectures-20261006"></script><script src="../../../../../code-highlight.js"></script><script src="../../../../../anim-speed.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Separate online-softmax correctness from work partitioning, GPU occupancy, asynchronous pipelines, and FP8 quantization in later FlashAttention implementations.">
+  <title>FlashAttention-2 and -3: From Algebra to GPU Scheduling | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/architectures/transformers/variants/flash-attention-2.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../transformers.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="../transformers.js"></script>
+  <link rel="stylesheet" href="../transformer-visuals.css?v=tr-20260911"><script defer src="../transformer-visuals.js?v=tr-20260911"></script>
+</head>
+<body class="tr-series">
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal tr-article">
+      <a class="back-to-blog" href="../../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="../index.html">Deep Learning &middot; Architectures &middot; Transformers</a><span>&middot; Efficient execution</span></div>
+      <h1>FlashAttention-2 and -3: From Algebra to GPU Scheduling</h1>
+      <p class="post-meta">Updated September 2026 &middot; 5 min read</p>
+<nav class="tr-reading-tools" aria-label="Ways to read this chapter"><a href="#prerequisite"><span aria-hidden="true">∑</span> Read the explanation</a></nav>
+
+<div class="callout"><strong>The online-softmax identity tells us what may be computed in tiles.</strong> It does not tell us which GPU threads should own those tiles or how to overlap their work. FlashAttention-2 and -3 improve that mapping, with different hardware assumptions.</div>
+<span class="tr-anchor" id="recap" aria-hidden="true"></span><h2 id="prerequisite">Keep the unchanged mathematical target in view</h2>
+<p>The <a href="../building-blocks/flash-attention.html#merge">running maximum, denominator, and numerator</a> still define the output. Correctness comes from their merge identity. Performance comes from the schedule: which queries a thread block owns, which data are reused, where partial results live, and when synchronization occurs.</p>
+<p>A fast kernel may deliberately perform some redundant arithmetic to avoid expensive transfers or synchronization. Counting only matrix-multiply FLOPs misses costs from reductions, exponentials, divisions, memory operations, and thread coordination.</p>
+<span class="tr-anchor" id="parallelism" aria-hidden="true"></span><span class="tr-anchor" id="algorithm" aria-hidden="true"></span><span class="tr-anchor" id="loop-swap" aria-hidden="true"></span><span class="tr-anchor" id="key-changes" aria-hidden="true"></span><span class="tr-anchor" id="non-matmul" aria-hidden="true"></span><h2 id="fa2">FlashAttention-2: expose enough parallel work</h2>
+<p><a href="https://arxiv.org/abs/2307.08691">FlashAttention-2</a> improves work partitioning and reduces non-matmul overhead. One important source of parallelism is the query sequence: different query tiles can be processed independently while each iterates over the relevant key/value tiles. This matters when batch size and head count alone do not provide enough work to occupy the GPU.</p>
+<p>Within a thread block, arranging work so warps own different query rows can reduce communication of partial outputs compared with splitting a query's reduction across multiple warps. The useful question is who owns the accumulated numerator and denominator, and how often those quantities must cross thread or memory boundaries.</p>
+<p>These changes do not turn dense attention into a linear-time operation. They reduce constant factors and improve hardware utilization for a particular workload. A small context or unusual head dimension can produce a different bottleneck.</p>
+<span class="tr-anchor" id="limitations" aria-hidden="true"></span><h2 id="occupancy">Why “more parallelism” has limits</h2>
+<p>Suppose a kernel has only eight independent thread blocks but the device can execute far more concurrently. Splitting work along the query dimension can expose enough blocks to use the device. However, making tiles too small reduces reuse and increases overhead. Making them too large can consume registers or shared memory and reduce the number of active blocks.</p>
+<p>Occupancy is the number of active execution resources, not a direct measurement of useful throughput. A kernel with high occupancy may spend much of its time waiting on memory. A kernel with lower occupancy may run efficiently if its work is compute-dense and well pipelined.</p>
+<span class="tr-anchor" id="backward" aria-hidden="true"></span><span class="tr-anchor" id="causal-masking" aria-hidden="true"></span><h2 id="hopper">FlashAttention-3: overlap work on Hopper</h2>
+<p><a href="https://arxiv.org/abs/2407.08608">FlashAttention-3</a> targets Hopper capabilities including asynchronous data movement and matrix-multiply execution. Its techniques overlap data transfer with computation and interleave matrix operations with softmax work, rather than forcing every stage to finish before another begins.</p>
+<p>A useful conceptual schedule is: while a tile's values participate in an output product, prepare another score tile and prefetch later data. Actual dependencies still constrain execution. Probabilities cannot be consumed before their scores and normalization are ready; buffers cannot be overwritten before their consumers finish.</p>
+<p>TMA transfers and asynchronous matrix instructions require thread-issued commands and synchronization. They do not mean memory movement happens without coordination or that softmax becomes free. A pipeline's steady state, startup, and drain phases have different utilization.</p>
+<span class="tr-anchor" id="animation" aria-hidden="true"></span><h2 id="timeline">A pipeline is constrained by its slowest stage</h2>
+<p>Imagine illustrative stage times of 3 units for loading, 5 for matrix work, and 2 for scalar reductions. Serial execution would take 10 units per tile. An ideal overlapped steady state cannot run faster than the limiting resource permits; five units is an optimistic bound only if those operations use independent resources and all dependencies can be scheduled accordingly.</p>
+<p>This is an analytical illustration, not a FlashAttention benchmark. If two nominal stages compete for the same tensor cores or shared-memory bandwidth, simply taking their maximum understates the cost. Measure the actual kernel and include fill/drain overhead for short workloads.</p>
+<h2 id="fp8">Low precision changes numerical error</h2>
+<p>FP8 storage and multiplication can increase hardware throughput, but quantization introduces error. FP32 accumulation or softmax reductions do not restore information lost when inputs were quantized. Block scaling and the distribution of outliers affect how much error is introduced.</p>
+<p>The paper's incoherent-processing approach uses a shared orthogonal transformation to spread outliers before quantization. For an orthogonal $R$, $(QR)(KR)^\top=QK^\top$ in exact arithmetic. A random sign flip alone preserves coordinate magnitudes and therefore does not by itself spread an outlier across coordinates; mixing transformations are the relevant distinction.</p>
+<span class="tr-anchor" id="benchmarks" aria-hidden="true"></span><h2 id="evaluation">How to compare kernels honestly</h2>
+<p>Record GPU model, dtype, head dimensions, query/key lengths, batch and head counts, causal mode, dropout, and whether timing includes backward. Synchronize asynchronous work and exclude or separately report compilation and warm-up. Compare numerical errors against a reference and measure the same operation on both sides.</p>
+<p>Peak hardware throughput, attention-kernel throughput, and end-to-end model throughput are different denominators. Faster attention may have a limited overall effect if MLPs, communication, or the vocabulary head dominate. Avoid transferring a reported speedup between GPUs or workloads without remeasurement.</p>
+<details class="tr-check"><summary>Try it: If a kernel is twice as fast but attention was only one quarter of total runtime, what is the ideal whole-model speedup?</summary><p>With all other work unchanged, runtime becomes $0.75+0.25/2=0.875$ of the original, a speedup of about 1.143 times. This is an idealized Amdahl-law calculation; actual integration can add other effects.</p></details>
+<span class="tr-anchor" id="summary" aria-hidden="true"></span><h2 id="next">Another use of mergeable statistics</h2><p><a href="ring-attention.html">Ring Attention</a> distributes key/value tiles across devices and combines their contributions using the same softmax mathematics.</p>
+
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../building-blocks/flash-attention.html"><span>Previous</span><span>&larr; FlashAttention: Exact Softmax Without the Full Matrix</span></a><a class="next" href="paged-attention.html"><span>Next</span><span>PagedAttention: Manage the Cache Without Moving the Sequence &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js?v=architectures-20261006"></script><script src="../../../../../blog.js?v=architectures-20261006"></script><script src="../../../../../code-highlight.js"></script><script src="../../../../../anim-speed.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

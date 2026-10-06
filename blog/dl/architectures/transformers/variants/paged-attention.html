@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Explain logical versus physical KV blocks, allocation waste, prefix sharing, copy-on-write, and the boundary between memory management and attention mathematics.">
+  <title>PagedAttention: Manage the Cache Without Moving the Sequence | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/architectures/transformers/variants/paged-attention.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../transformers.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="../transformers.js"></script>
+  <link rel="stylesheet" href="../transformer-visuals.css?v=tr-20260911"><script defer src="../transformer-visuals.js?v=tr-20260911"></script>
+</head>
+<body class="tr-series">
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal tr-article">
+      <a class="back-to-blog" href="../../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="../index.html">Deep Learning &middot; Architectures &middot; Transformers</a><span>&middot; Efficient execution</span></div>
+      <h1>PagedAttention: Manage the Cache Without Moving the Sequence</h1>
+      <p class="post-meta">Updated September 2026 &middot; 4 min read</p>
+<nav class="tr-reading-tools" aria-label="Ways to read this chapter"><a href="#allocation"><span aria-hidden="true">∑</span> Read the explanation</a></nav>
+
+<div class="callout"><strong>The token sequence is logically contiguous; its cache need not occupy one contiguous allocation.</strong> Paging maps logical token blocks to physical memory blocks, allowing a serving system to allocate and share cache storage as requests grow.</div>
+<span class="tr-anchor" id="fragmentation" aria-hidden="true"></span><span class="tr-anchor" id="os-analogy" aria-hidden="true"></span><h2 id="allocation">Why a large contiguous reservation wastes space</h2>
+<p>Requests arrive with different prompt lengths and unknown future output lengths. Reserving the maximum possible cache for each request wastes unused capacity. Growing contiguous allocations can require moving data or finding large free regions, even when enough total memory is available in fragmented pieces.</p>
+<p>Partition the token history into fixed-capacity blocks of $b$ token positions. A block table maps each request's logical block number to a physical cache block. The attention kernel follows this mapping when reading historical keys and values. <a href="https://arxiv.org/abs/2309.06180">The PagedAttention paper</a> develops this serving approach.</p>
+<span class="tr-anchor" id="block-table" aria-hidden="true"></span><span class="tr-anchor" id="blocks" aria-hidden="true"></span><span class="tr-anchor" id="animation" aria-hidden="true"></span><h2 id="example">Map a ten-token sequence into pages</h2>
+<p>With four token slots per block, a ten-token request needs three blocks. Suppose its block table is <code>[7,2,11]</code>. Logical positions 0–3 live in physical block 7, positions 4–7 in block 2, and positions 8–9 in block 11.</p>
+<div class="tr-eq">$$\mathrm{logical\ block}(t)=\lfloor t/b\rfloor,\qquad\mathrm{offset}(t)=t\bmod b.$$</div>
+<p>Token 6 therefore uses logical block 1, physical block 2, offset 2. The attention score still treats it as token position 6. Memory addresses and positional encodings are separate concepts.</p>
+<figure class="tr-figure"><img src="../figures/paging.svg" alt="A logical ten-token history maps to three noncontiguous physical blocks. Token order is recovered through the block table, while only the final block has unused slots." loading="lazy"><figcaption>A logical ten-token history maps to three noncontiguous physical blocks. Token order is recovered through the block table, while only the final block has unused slots. <a href="../figures/paging.svg">Open full-size diagram</a>.</figcaption></figure>
+<h2 id="waste">Quantify the remaining internal fragmentation</h2>
+<p>A request of length $n$ occupies $b\lceil n/b\rceil$ slots. Wasted capacity is that quantity minus $n$, between zero and $b-1$. In our example, twelve allocated slots hold ten tokens, leaving two unused.</p>
+<p>Smaller blocks reduce tail waste and make fine-grained sharing easier, but enlarge metadata and can increase address-translation or scheduling overhead. Larger blocks provide simpler access and less metadata but coarser allocation. The best block size depends on kernel layout and workload, not only this slot-count formula.</p>
+<h2 id="sharing">Shared prefixes can share physical storage</h2>
+<p>If two requests have exactly the same valid prefix computation, their block tables can initially reference the same physical prefix blocks. Reference counts track how many requests use each block. Once all references disappear, the memory can return to the allocator.</p>
+<p>A partial final block needs care. If requests branch into different continuations, writing different new tokens into one shared block would corrupt another request's view. Copy-on-write creates a private block when a shared writable region must diverge. A fully immutable prefix block can remain shared.</p>
+<p>Reuse requires the same model state, tokens, positions, and attention context; matching visible strings alone is insufficient. The <a href="kv-caching.html#reuse">KV-cache chapter</a> states those correctness conditions.</p>
+<span class="tr-anchor" id="algorithm" aria-hidden="true"></span><span class="tr-anchor" id="implementation" aria-hidden="true"></span><h2 id="kernel">The kernel must understand the mapping</h2>
+<p>A generic dense attention kernel that expects one contiguous K/V tensor cannot automatically use arbitrary physical blocks. The serving implementation needs an attention kernel that translates the logical sequence into the relevant physical reads, or a gather operation that materializes a temporary view. The latter can add overhead and undermine the benefit.</p>
+<p>Page tables describe storage; masks describe allowed attention edges. Paging alone does not remove old tokens from the attention computation, change the softmax distribution, or make the history read constant in length.</p>
+<span class="tr-anchor" id="scheduling" aria-hidden="true"></span><h2 id="scheduler">Why memory utilization affects throughput</h2>
+<p>Better cache allocation can admit more simultaneous requests within the same memory budget. More concurrency may improve throughput by batching work, but it can also change individual request latency. A serving benchmark should distinguish tokens per second across the server from latency experienced by one request.</p>
+<p>Continuous batching lets the active set change as requests complete or arrive. Paging is compatible with that scheduling policy but is not identical to it. Likewise, prefix caching, speculative decoding, and cache quantization are separate techniques with their own correctness and resource considerations.</p>
+<span class="tr-anchor" id="benchmarks" aria-hidden="true"></span><h2 id="failure">Useful allocator invariants</h2>
+<p>Every live logical block must refer to valid physical storage. A writable block must be exclusively owned or copied before mutation. Sequence lengths must prevent reading uninitialized tail slots. Releasing one request must not free a block still referenced by another. These invariants matter as much as correct attention arithmetic in a serving system.</p>
+<details class="tr-check"><summary>Try it: Does moving a cache block to another physical address require changing its RoPE positions?</summary><p>No. Logical token positions stay the same. The block table changes where the kernel finds the data; it does not change the sequence locations that produced those keys.</p></details>
+<span class="tr-anchor" id="summary" aria-hidden="true"></span><span class="tr-anchor" id="ecosystem" aria-hidden="true"></span><h2 id="next">Distribute the computation</h2><p><a href="ring-attention.html">Ring Attention</a> addresses a different problem: moving K/V chunks across devices so they can contribute to distributed attention.</p>
+
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="flash-attention-2.html"><span>Previous</span><span>&larr; FlashAttention-2 and -3: From Algebra to GPU Scheduling</span></a><a class="next" href="ring-attention.html"><span>Next</span><span>Ring Attention: Distributed Reads with Online Softmax &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js?v=architectures-20261006"></script><script src="../../../../../blog.js?v=architectures-20261006"></script><script src="../../../../../code-highlight.js"></script><script src="../../../../../anim-speed.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

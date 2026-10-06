@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-CHAPTER_DIR = ROOT / "blog/dl/transformers/building-blocks"
+CHAPTER_DIR = ROOT / "blog/dl/architectures/transformers/building-blocks"
 CSS = '<link rel="stylesheet" href="../foundation-map.css?v=foundation-reading-20260911">'
 
 LOCATIONS = {

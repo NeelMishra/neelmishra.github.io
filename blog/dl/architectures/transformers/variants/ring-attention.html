@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Derive how local queries attend to circulating key/value shards, why per-shard outputs cannot simply be averaged, and when communication can overlap computation.">
+  <title>Ring Attention: Distributed Reads with Online Softmax | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/dl/architectures/transformers/variants/ring-attention.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Playfair+Display:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../../styles.css"><link rel="stylesheet" href="../../../../../blog.css"><link rel="stylesheet" href="../transformers.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="../transformers.js"></script>
+  <link rel="stylesheet" href="../transformer-visuals.css?v=tr-20260911"><script defer src="../transformer-visuals.js?v=tr-20260911"></script>
+</head>
+<body class="tr-series">
+  <header class="site-header"><a class="brand" href="../../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../../index.html">Home</a><a href="../../../../../experience.html">Experience</a><a href="../../../../../projects.html">Projects</a><a href="../../../../../blog.html" class="active">Blog</a><a href="../../../../../index.html#contact">Contact</a></nav></header>
+  <div class="blog-post-layout">
+    <aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside>
+    <article class="blog-post-content reveal tr-article">
+      <a class="back-to-blog" href="../../../../../blog.html">&larr; All Posts</a>
+      <div class="post-series-nav"><a href="../index.html">Deep Learning &middot; Architectures &middot; Transformers</a><span>&middot; Efficient execution</span></div>
+      <h1>Ring Attention: Distributed Reads with Online Softmax</h1>
+      <p class="post-meta">Updated September 2026 &middot; 4 min read</p>
+<nav class="tr-reading-tools" aria-label="Ways to read this chapter"><a href="#partition"><span aria-hidden="true">∑</span> Read the explanation</a></nav>
+
+<div class="callout"><strong>Keep a shard of queries local and bring key/value shards past it.</strong> Each device accumulates the contributions it needs without gathering the complete attention matrix. Online-softmax statistics make those partial reads mergeable.</div>
+<span class="tr-anchor" id="core-idea" aria-hidden="true"></span><span class="tr-anchor" id="topology" aria-hidden="true"></span><span class="tr-anchor" id="memory-wall" aria-hidden="true"></span><h2 id="partition">Partition the sequence across devices</h2>
+<p>Suppose a sequence of length $n$ is split across $P$ devices. Device $r$ holds roughly $n/P$ query positions and one K/V shard. It computes attention contributions from its local K/V shard, then sends that shard to the next device while receiving another shard from its predecessor.</p>
+<p>After the required rounds, each local query has interacted with every allowed K/V shard. The output remains on the device that owns that query. This is sequence/context parallelism; it does not require splitting every model weight matrix across the same devices.</p>
+<span class="tr-anchor" id="math" aria-hidden="true"></span><h2 id="merge">Do not average independently normalized shard outputs</h2>
+<p>One shard can contain far larger scores than another. Averaging each shard's locally normalized output gives them equal influence regardless of their global softmax mass. Instead, retain each shard's running maximum $m$, denominator $\ell$, and numerator $u$, and use the <a href="../building-blocks/flash-attention.html#merge">online-softmax merge</a>.</p>
+<p>For an extreme scalar example, shard A has one score 0 and value 0; shard B has one score 10 and value 1. Averaging local outputs gives 0.5. Global softmax gives $e^{10}/(1+e^{10})\approx0.99995$. The merge must account for the relative exponential scales.</p>
+<span class="tr-anchor" id="algorithm" aria-hidden="true"></span><span class="tr-anchor" id="implementation" aria-hidden="true"></span><span class="tr-anchor" id="overlap" aria-hidden="true"></span><span class="tr-anchor" id="animation" aria-hidden="true"></span><h2 id="schedule">A simple forward schedule</h2>
+<ol><li>Initialize a per-query running softmax summary on each device.</li><li>Compute contributions from the current K/V shard.</li><li>Merge those statistics into the local summary.</li><li>Transfer K/V to the next device and receive the next shard, overlapping where valid.</li><li>After all allowed shards have contributed, normalize $u/\ell$ for the local queries.</li></ol>
+<p>The ring is one communication topology for presenting all shards to all query owners. Double buffering can let one buffer participate in computation while another receives data. Synchronization must ensure a transfer finishes before a consumer reads its buffer.</p>
+<h2 id="causal">Causal masks depend on global positions</h2>
+<p>A query on one device may be forbidden from reading keys on another device because they lie in the future. Local row/column indices are insufficient; shard metadata must identify their global positions.</p>
+<p>Contiguous causal sharding can create imbalance: early queries have few allowed keys while late queries have many. Alternative assignments, including paired early/late chunks, can distribute work more evenly. They require correspondingly careful position and ownership bookkeeping. The existing <a href="../../../popular_videos/umar_jamil/distributed-training-framework/context-parallelism-and-ring-attention.html">context-parallelism chapter</a> develops these layouts further.</p>
+<span class="tr-anchor" id="scaling" aria-hidden="true"></span><h2 id="cost">Separate local compute from network traffic</h2>
+<p>Ignoring masks, each device processes $n/P$ queries against $n$ keys, so attention arithmetic per device is of order $n^2d/P$. Each device sends and receives K/V shards over approximately $P-1$ transfers, with shard size proportional to $nd/P$. Total communicated volume per device is therefore of order $nd$ for large $P$, before protocol details.</p>
+<p>As $P$ grows, compute per device shrinks, but network latency and bandwidth do not disappear. If a shard's matrix work is shorter than its transfer time, communication cannot be fully hidden. A good overlap diagram does not prove a good speedup for every context length and interconnect.</p>
+<h2 id="backward">Backward must aggregate shared dependencies</h2>
+<p>A local query contributes gradients to keys and values on multiple remote shards. Those contributions must be accumulated and returned to the owners of the corresponding K/V data. Recomputing probability tiles can save memory, but it still requires the same score scaling, masks, and any dropout choices.</p>
+<p>The distributed operation should be checked against a single-device reference on a small sequence, including gradients. Matching only forward output misses errors in ownership and reductions that can silently corrupt training.</p>
+<span class="tr-anchor" id="models" aria-hidden="true"></span><h2 id="scope">What is preserved, what is distributed?</h2>
+<p>In its dense form, Ring Attention preserves the softmax function up to numerical differences while distributing memory and computation. It does not make dense attention's global arithmetic linear in $n$. It can compose with tiled kernels and sparse patterns; each additional technique changes a different part of the cost.</p>
+<p>The primary reference is <a href="https://arxiv.org/abs/2310.01889">Ring Attention with Blockwise Transformers</a>. Its title's long-context motivation should be read alongside the actual hardware and workload constraints.</p>
+<details class="tr-check"><summary>Try it: Why is a running numerator vector alone insufficient to merge two attention shards?</summary><p>The two numerators may be expressed relative to different score maxima, and their denominator masses differ. The maximum and denominator are needed to rescale and normalize their contributions consistently.</p></details>
+<span class="tr-anchor" id="summary" aria-hidden="true"></span><h2 id="next">Reduce sequential decoding calls</h2><p><a href="speculative-decoding.html">Speculative decoding</a> tackles a separate bottleneck: how often the expensive target model must be invoked while generating tokens.</p>
+
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="paged-attention.html"><span>Previous</span><span>&larr; PagedAttention: Manage the Cache Without Moving the Sequence</span></a><a class="next" href="speculative-decoding.html"><span>Next</span><span>Speculative Decoding: Draft, Verify, and Correct &rarr;</span></a></nav>
+    </article>
+  </div>
+  <script src="../../../../../script.js"></script><script src="../../../../../blog-posts.js?v=architectures-20261006"></script><script src="../../../../../blog.js?v=architectures-20261006"></script><script src="../../../../../code-highlight.js"></script><script src="../../../../../anim-speed.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

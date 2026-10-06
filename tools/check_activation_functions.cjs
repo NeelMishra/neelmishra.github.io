@@ -71,8 +71,8 @@ for(const c of chapters){
  }
  await page.goto(base+'/blog.html',{waitUntil:'networkidle'});
  assert.equal(await page.locator('.blog-card[href^="'+folder+'/"]').count(),chapters.length);
- await page.goto(base+'/blog/dl/transformers/building-blocks/feed-forward.html',{waitUntil:'networkidle'});
- await page.locator('article a[href="../../activation-functions/swiglu.html"]').click();
+ await page.goto(base+'/blog/dl/architectures/transformers/building-blocks/feed-forward.html',{waitUntil:'networkidle'});
+ await page.locator('article a[href="../../../activation-functions/swiglu.html"]').click();
  assert(page.url().endsWith('/activation-functions/swiglu.html'));
  assert.deepEqual(errors,[]);
  assert.deepEqual(overflows,[]);
