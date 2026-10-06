@@ -1,4 +1,4 @@
-"""Check the expanded RoPE guide's mathematics and generate its original figure.
+"""Check the RoPE guide's mathematics and generate its original figures.
 
 Requires NumPy and Matplotlib. Run from a repository checkout:
 python rope_math_examples.py
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from transformer_math_lab import rotation
+from transformer_math_lab import attention, rotation
 
 
 OUT = Path(__file__).resolve().parent.parent / "figures"
@@ -32,7 +32,66 @@ def rotate_split_half(x, position, frequencies):
                            a*np.sin(angle)+b*np.cos(angle)],axis=-1)
 
 
+def check_position_and_frequency_examples():
+    rng = np.random.default_rng(43)
+    queries, keys, values = rng.normal(size=(3,4,4))
+    permutation = [2,0,3,1]
+    allowed = np.ones((4,4),dtype=bool)
+    np.testing.assert_allclose(
+        attention(queries[permutation],keys[permutation],values[permutation],allowed),
+        attention(queries,keys,values,allowed)[permutation],
+    )
+    causal = np.tril(allowed)
+    permuted_causal = causal[permutation][:,permutation]
+    np.testing.assert_allclose(
+        attention(queries[permutation],keys[permutation],values[permutation],
+                  permuted_causal),
+        attention(queries,keys,values,causal)[permutation],
+    )
+    assert not np.allclose(
+        attention(queries[permutation],keys[permutation],values[permutation],causal),
+        attention(queries,keys,values,causal)[permutation],
+    )
+
+    x_i, x_j, p_i, p_j = rng.normal(size=(4,4))
+    w_q, w_k = rng.normal(size=(2,4,4))
+    projected_metric = w_q.T@w_k
+    expanded = (x_i@projected_metric@x_j + x_i@projected_metric@p_j
+                + p_i@projected_metric@x_j + p_i@projected_metric@p_j)
+    np.testing.assert_allclose(
+        (w_q@(x_i+p_i))@(w_k@(x_j+p_j)),expanded,
+    )
+
+    width, base, scale = 8, 10000., 4
+    pair_indices = np.arange(width//2)
+    frequencies = base**(-2*pair_indices/width)
+    np.testing.assert_allclose(frequencies,[1,.1,.01,.001])
+    np.testing.assert_allclose(
+        np.round(2*np.pi/frequencies,2),[6.28,62.83,628.32,6283.19],
+    )
+    pairs = rotate_pairs(np.tile([1.,0.],width//2),128,frequencies).reshape(-1,2)
+    np.testing.assert_allclose(pairs[:,0],np.cos(128*frequencies))
+    np.testing.assert_allclose(np.sum(pairs**2,axis=-1),np.ones(width//2))
+
+    interpolated = frequencies/scale
+    assert 8192/2048 == scale
+    assert 6000/scale == 1500
+    np.testing.assert_allclose(6000*interpolated,(6000/scale)*frequencies)
+    new_base = base*scale**(width/(width-2))
+    ntk_frequencies = new_base**(-2*pair_indices/width)
+    np.testing.assert_allclose(
+        ntk_frequencies,frequencies*scale**(-2*pair_indices/(width-2)),
+    )
+    np.testing.assert_allclose(interpolated,[.25,.025,.0025,.00025])
+    np.testing.assert_allclose(
+        np.round(ntk_frequencies,7),[1,.0629961,.0039685,.00025],
+    )
+    np.testing.assert_allclose(ntk_frequencies[[0,-1]],
+                               [frequencies[0],frequencies[-1]/scale])
+
+
 def main():
+    check_position_and_frequency_examples()
     q, k = np.array([2.,1.]), np.array([1.,3.])
     frequency = np.pi/4
     q1, k3 = rotation(frequency)@q, rotation(3*frequency)@k
@@ -44,6 +103,15 @@ def main():
     np.testing.assert_allclose([q1@k3,q6@k8],[-5,-5])
     np.testing.assert_allclose([np.linalg.norm(q1),np.linalg.norm(k3)],
                                [np.linalg.norm(q),np.linalg.norm(k)])
+    original_angle = np.arctan2(k[1],k[0])-np.arctan2(q[1],q[0])
+    np.testing.assert_allclose(
+        np.linalg.norm(q)*np.linalg.norm(k)*np.cos(original_angle+2*frequency),
+        q1@k3,
+    )
+    relative_angle = 2*frequency
+    expanded_score = ((q[0]*k[0]+q[1]*k[1])*np.cos(relative_angle)
+                      +(q[1]*k[0]-q[0]*k[1])*np.sin(relative_angle))
+    np.testing.assert_allclose(expanded_score,q1@k3)
 
     omega = 10000.0**(-np.arange(0,4,2)/4)
     x = np.array([1.,2.,3.,4.])
@@ -103,8 +171,11 @@ def main():
     assert 10000.0**0 == 1000000.0**0 == 1
     assert np.float16(2048) == np.float16(2049)
     assert np.float32(2**24) == np.float32(2**24+1)
-    print("Verified rotations, relative scores, tensor broadcasting, pair layouts, partial RoPE, caching, and interpolation.")
+    print("Verified permutation symmetry, score expansions, rotations, frequency bands, "
+          "tensor broadcasting, pair layouts, partial RoPE, caching, interpolation, "
+          "and fixed NTK-aware scaling.")
     draw_figure(q1,k3,q6,k8)
+    draw_frequency_figure()
 
 
 def draw_figure(q1,k3,q6,k8):
@@ -134,6 +205,36 @@ def draw_figure(q1,k3,q6,k8):
         ax.grid(alpha=.15)
     OUT.mkdir(exist_ok=True)
     target=OUT/"rope-worked-rotation.svg"
+    fig.savefig(target,format="svg",metadata={"Date":None})
+    target.write_text("\n".join(line.rstrip() for line in target.read_text().splitlines())+"\n")
+    plt.close(fig)
+
+
+def draw_frequency_figure():
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({
+        "svg.hashsalt":"rope-frequency-20261006","axes.unicode_minus":False,
+    })
+    frequencies = 10000.**(-np.arange(0,8,2)/8)
+    offsets = np.arange(129)
+    colors = ["#126650","#a45113","#3b6596","#805b9a"]
+    fig, axes = plt.subplots(2,2,figsize=(7.2,6.0),layout="constrained",
+                             sharex=True,sharey=True,gridspec_kw={"wspace":.15})
+    fig.suptitle("Same content, four rotary frequency scales",fontsize=14)
+    for pair,(ax,frequency,color) in enumerate(zip(axes.flat,frequencies,colors)):
+        ax.plot(offsets,np.cos(offsets*frequency),color=color,lw=1.7)
+        ax.axhline(0,color="#657369",lw=.7)
+        ax.set(xlim=(0,128),ylim=(-1.1,1.1))
+        ax.set_title(f"Pair {pair}: frequency = {frequency:g}\n"
+                     f"One turn = {2*np.pi/frequency:.2f} tokens",fontsize=11)
+        ax.set_xticks([0,32,64,96,128])
+        ax.tick_params(labelsize=10)
+        ax.grid(alpha=.15)
+    for ax in axes[-1]:
+        ax.set_xlabel("Relative offset j - i (tokens)",fontsize=10)
+    for ax in axes[:,0]:
+        ax.set_ylabel("Pair dot product",fontsize=10)
+    target = OUT/"rope-frequency-scales.svg"
     fig.savefig(target,format="svg",metadata={"Date":None})
     target.write_text("\n".join(line.rstrip() for line in target.read_text().splitlines())+"\n")
     plt.close(fig)
