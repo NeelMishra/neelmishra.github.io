@@ -10728,6 +10728,10 @@ var BLOG_TREE = [
         "label": "ANN Methods",
         "children": [
           {
+            "title": "ANN methods: define the target before choosing the index",
+            "file": "rag/ann-methods/index.html"
+          },
+          {
             "name": "hnsw",
             "label": "HNSW",
             "children": []
