@@ -77,7 +77,11 @@ def main(selected):
                 if screenshots:
                     page.set_viewport_size({"width": 1440, "height": 1000})
                     page.evaluate("scrollTo(0, 0)")
-                    page.screenshot(path=str(Path(screenshots) / (Path(chapter["file"]).stem + "-rag.png")))
+                    name = chapter["file"].removesuffix(".html").replace("/", "-") + ".png"
+                    page.screenshot(path=str(Path(screenshots) / name))
+                    if lab.count():
+                        lab.scroll_into_view_if_needed()
+                        lab.screenshot(path=str(Path(screenshots) / "hnsw-search-lab.png"))
             page.goto(BASE + "/blog.html#retrieval-augmented-generation", wait_until="networkidle")
             all_chapters = json.loads((ROOT / "blog/rag/series.json").read_text())["chapters"]
             assert page.locator('#retrieval-augmented-generation .blog-card').count() == len(all_chapters)
@@ -92,6 +96,9 @@ def main(selected):
             if not selected and any(chapter["file"].endswith("/search-layer.html")
                                     for chapter in all_chapters):
                 failure = browser.new_page()
+                failure.route("**/*", lambda route: route.abort()
+                              if "goatcounter.com" in route.request.url or "gc.zgo.at" in route.request.url
+                              else route.continue_())
                 failure.route("**/search-traces.json", lambda route: route.fulfill(
                     status=503, body="Unavailable", content_type="text/plain"
                 ))
