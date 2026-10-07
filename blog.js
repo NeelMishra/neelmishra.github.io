@@ -10742,6 +10742,10 @@ var BLOG_TREE = [
               {
                 "title": "HNSW graphs: why the hierarchy changes the route",
                 "file": "rag/ann-methods/hnsw/graph-and-hierarchy.html"
+              },
+              {
+                "title": "HNSW search: trace both heaps before changing ef",
+                "file": "rag/ann-methods/hnsw/search-layer.html"
               }
             ]
           }

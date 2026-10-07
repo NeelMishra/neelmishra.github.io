@@ -89,6 +89,16 @@ def main(selected):
                 assert page.locator("#folder-rag--ann-methods").evaluate("node => node.open")
             assert not errors, errors
             assert not bad_responses, bad_responses
+            if not selected and any(chapter["file"].endswith("/search-layer.html")
+                                    for chapter in all_chapters):
+                failure = browser.new_page()
+                failure.route("**/search-traces.json", lambda route: route.fulfill(
+                    status=503, body="Unavailable", content_type="text/plain"
+                ))
+                failure.goto(BASE + "/blog/rag/ann-methods/hnsw/search-layer.html",
+                             wait_until="networkidle")
+                assert "could not load" in failure.locator("[data-hnsw-lab] [role=alert]").inner_text()
+                failure.close()
         finally:
             browser.close()
     print(f"RAG browser checks passed for {len(chapters)} pages: math, assets, navigation, controls, and mobile layouts.")
