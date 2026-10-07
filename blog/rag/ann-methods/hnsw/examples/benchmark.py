@@ -35,7 +35,10 @@ def exact_neighbors(items, queries):
 
 def measure(library, items, queries, truth, maximum, construction_ef, directory):
     started = perf_counter()
-    if library == "faiss":
+    if library == "faiss-flat":
+        index = faiss.IndexFlatL2(DIMENSION)
+        index.add(items)
+    elif library == "faiss":
         index = faiss.IndexHNSWFlat(DIMENSION, maximum, faiss.METRIC_L2)
         index.hnsw.rng = faiss.RandomGenerator(SEED)
         index.hnsw.efConstruction = construction_ef
@@ -50,15 +53,16 @@ def measure(library, items, queries, truth, maximum, construction_ef, directory)
         raise ValueError("unsupported benchmark library")
     build_seconds = perf_counter() - started
     path = directory / f"{library}-{maximum}.bin"
-    if library == "faiss":
+    if library in ("faiss", "faiss-flat"):
         faiss.write_index(index, str(path))
     else:
         index.save_index(str(path))
     serialized_bytes = path.stat().st_size
     rows = []
-    for search_ef in SEARCH_EFS:
-        if library == "faiss":
-            index.hnsw.efSearch = search_ef
+    for search_ef in ((None,) if library == "faiss-flat" else SEARCH_EFS):
+        if library in ("faiss", "faiss-flat"):
+            if search_ef is not None:
+                index.hnsw.efSearch = search_ef
             index.search(queries[:8], K)
         else:
             index.set_ef(search_ef)
@@ -66,7 +70,7 @@ def measure(library, items, queries, truth, maximum, construction_ef, directory)
         latencies, recalls = [], []
         for query, expected in zip(queries, truth):
             started_ns = perf_counter_ns()
-            if library == "faiss":
+            if library in ("faiss", "faiss-flat"):
                 distances, labels = index.search(query[None, :], K)
             else:
                 labels, distances = index.knn_query(query[None, :], k=K, num_threads=1)
@@ -101,10 +105,13 @@ def run(output):
     truth = exact_neighbors(items, queries)
     rows = []
     with tempfile.TemporaryDirectory(prefix="hnsw-benchmark-") as temporary:
+        flat = measure("faiss-flat", items, queries, truth, None, None, Path(temporary))[0]
         for library in ("faiss", "hnswlib"):
             for maximum, construction_ef in CONFIGURATIONS:
                 rows.extend(measure(library, items, queries, truth, maximum,
                                     construction_ef, Path(temporary)))
+    if flat["recall_at_10"] != 1:
+        raise AssertionError("flat search disagreed with the generated exact reference")
     for library in ("faiss", "hnswlib"):
         high_effort = next(row for row in rows if row["library"] == library
                            and row["M"] == 16 and row["efSearch"] == 128)
@@ -124,10 +131,12 @@ def run(output):
         "warmup": "eight-query batch for each operating point",
         "quantile": "nearest rank (NumPy inverted_cdf)",
         "memory_measure": "serialized index file bytes, not resident or peak build memory",
-        "rows": rows,
+        "flat_baseline": flat, "rows": rows,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
+    print(f"flat exact recall={flat['recall_at_10']:.4f} "
+          f"p95={flat['p95_ms']:.4f} ms file={flat['serialized_bytes']} bytes")
     for row in rows:
         print(f"{row['library']:7s} M={row['M']:2d} efC={row['efConstruction']:3d} "
               f"ef={row['efSearch']:3d} recall={row['recall_at_10']:.4f} "

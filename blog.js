@@ -10750,6 +10750,10 @@ var BLOG_TREE = [
               {
                 "title": "Build HNSW: choose routes, not just nearby neighbors",
                 "file": "rag/ann-methods/hnsw/construction-and-diversity.html"
+              },
+              {
+                "title": "Tune HNSW: recall, latency, and memory under one workload",
+                "file": "rag/ann-methods/hnsw/tuning-and-benchmarks.html"
               }
             ]
           }

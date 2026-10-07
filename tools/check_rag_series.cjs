@@ -61,6 +61,13 @@ const benchmarkPage = path.join(root, 'blog/rag/ann-methods/hnsw/tuning-and-benc
 if (fs.existsSync(benchmarkPage)) {
   const html = fs.readFileSync(benchmarkPage, 'utf8');
   const data = JSON.parse(fs.readFileSync(path.join(root, 'blog/rag/ann-methods/hnsw/assets/benchmark-results.json'), 'utf8'));
+  const flat = html.match(/<tr data-flat-benchmark>([\s\S]*?)<\/tr>/);
+  assert(flat, 'Missing exact flat benchmark row');
+  for (const value of [data.flat_baseline.recall_at_10.toFixed(4),
+                       data.flat_baseline.p95_ms.toFixed(4),
+                       String(data.flat_baseline.serialized_bytes)]) {
+    assert(flat[1].includes(value), 'Flat benchmark differs from the recorded result');
+  }
   for (const row of data.rows) {
     const key = `${row.library}-${row.M}-${row.efConstruction}-${row.efSearch}`;
     const match = html.match(new RegExp(`<tr data-benchmark="${key}">([\\s\\S]*?)</tr>`));
