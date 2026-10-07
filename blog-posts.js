@@ -1,5 +1,8 @@
 /* Blog metadata keyed by BLOG_TREE `file` path. Entries with draft:true stay out of the blog index. */
 var BLOG_POSTS = {
+  /* RAG-SERIES:START */
+  "rag/index.html": {"category": "rag", "series": "RAG &middot; Reading guide", "title": "RAG: separate retrieval from generation", "description": "Follow a RAG query through retrieval, eligibility, reranking, context assembly, and generation, and separate index accuracy from useful evidence.", "meta": "October 2026 &middot; 6 min read"},
+  /* RAG-SERIES:END */
   /* ACTIVATION-SERIES:START */
   "dl/activation-functions/index.html": {"category": "dl", "series": "Deep Learning &middot; Activation Functions", "title": "Activation Functions: A Reading Guide", "description": "Nine focused guides to activation values, gradients, SwiGLU, and designing a function of your own.", "meta": "October 2026 &middot; 4 min read"},
   "dl/activation-functions/why-activations.html": {"category": "dl", "series": "Deep Learning &middot; Activation Functions", "title": "Why Neural Networks Need Activation Functions", "description": "See where an activation sits, why linear layers collapse, and how its slope affects learning.", "meta": "October 2026 &middot; 5 min read"},

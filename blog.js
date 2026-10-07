@@ -10714,6 +10714,29 @@ var BLOG_TREE = [
     ]
   },
 
+  // RAG-SERIES:START
+  {
+    "name": "rag",
+    "label": "RAG",
+    "children": [
+      {
+        "title": "RAG: separate retrieval from generation",
+        "file": "rag/index.html"
+      },
+      {
+        "name": "ann-methods",
+        "label": "ANN Methods",
+        "children": [
+          {
+            "name": "hnsw",
+            "label": "HNSW",
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
+  // RAG-SERIES:END
   {
     name: 'rl',
     label: 'Reinforcement Learning',
@@ -11030,7 +11053,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11057,10 +11080,11 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
-              directoryPath[0] === 'dl' ? 'deep-learning' : 'machine-learning';
+              directoryPath[0] === 'dl' ? 'deep-learning' :
+              directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -11191,6 +11215,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
+    rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
   };
@@ -11253,7 +11278,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* DL, ML, NLP and RL use the Explorer's hierarchy and reading order. Metadata insertion
+  /* RAG, DL, ML, NLP and RL use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -11312,7 +11337,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11334,6 +11359,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'ml') catSection.id = 'machine-learning';
     if (code === 'nlp') catSection.id = 'natural-language-processing';
     if (code === 'dl') catSection.id = 'deep-learning';
+    if (code === 'rag') catSection.id = 'retrieval-augmented-generation';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11346,7 +11372,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11428,7 +11454,8 @@ function flattenBlogTree(nodes, result) {
     var code = id === 'reinforcement-learning' || id.indexOf('folder-rl--') === 0 ? 'rl' :
       id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' :
       id === 'natural-language-processing' || id === 'folder-nlp' || id.indexOf('folder-nlp--') === 0 ? 'nlp' :
-      id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' : '';
+      id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' :
+      id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
