@@ -4,6 +4,7 @@ Run from any directory: python3 tools/sync_rag_series.py
 Only the RAG-SERIES marker blocks are managed.
 """
 
+import html
 import json
 from pathlib import Path
 import re
@@ -71,6 +72,43 @@ def main():
     replace_block(ROOT / "blog-posts.js",
                   r"  /\* RAG-SERIES:START \*/.*?  /\* RAG-SERIES:END \*/",
                   metadata(chapters))
+    hnsw = [chapter for chapter in chapters
+            if chapter["file"].startswith("rag/ann-methods/hnsw/")]
+    if hnsw:
+        notes = [chapter for chapter in hnsw
+                 if chapter["file"] != "rag/ann-methods/hnsw/index.html"]
+        cards = "".join(
+            f'<a href="{Path(chapter["file"]).name}"><span>{number:02d}</span>'
+            f'<div><strong>{html.escape(chapter["title"])}</strong>'
+            f'<p>{html.escape(chapter["description"])}</p></div></a>\n'
+            for number, chapter in enumerate(notes, 1)
+        )
+        listing = '<!-- HNSW-CHAPTERS:START -->\n'
+        if cards:
+            listing += '<div class="note-chapters">\n' + cards + '</div>\n'
+        listing += '<!-- HNSW-CHAPTERS:END -->'
+        replace_block(ROOT / "blog/rag/ann-methods/hnsw/index.html",
+                      r"<!-- HNSW-CHAPTERS:START -->.*?<!-- HNSW-CHAPTERS:END -->",
+                      listing)
+        for position, chapter in enumerate(hnsw):
+            previous = hnsw[position - 1] if position else {
+                "file": "../index.html",
+                "title": "ANN methods: define the target before choosing the index",
+            }
+            previous_file = (Path(previous["file"]).name if position else "../index.html")
+            navigation = ('<!-- HNSW-NAV:START -->\n'
+                          '<nav class="post-nav" aria-label="Reading navigation">'
+                          f'<a class="prev" href="{previous_file}"><span>Previous</span>'
+                          f'<span>{html.escape(previous["title"])}</span></a>')
+            if position + 1 < len(hnsw):
+                following = hnsw[position + 1]
+                navigation += (f'<a class="next" href="{Path(following["file"]).name}">'
+                               '<span>Next</span>'
+                               f'<span>{html.escape(following["title"])}</span></a>')
+            navigation += '</nav>\n<!-- HNSW-NAV:END -->'
+            replace_block(ROOT / "blog" / chapter["file"],
+                          r"<!-- HNSW-NAV:START -->.*?<!-- HNSW-NAV:END -->",
+                          navigation)
     print(f"Synchronized {len(chapters)} published RAG articles.")
 
 

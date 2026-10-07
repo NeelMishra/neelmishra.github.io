@@ -10734,7 +10734,12 @@ var BLOG_TREE = [
           {
             "name": "hnsw",
             "label": "HNSW",
-            "children": []
+            "children": [
+              {
+                "title": "HNSW: understand the graph before tuning it",
+                "file": "rag/ann-methods/hnsw/index.html"
+              }
+            ]
           }
         ]
       }
