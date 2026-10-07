@@ -15,6 +15,41 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get("RAG_BASE_URL", "http://127.0.0.1:8879")
 
+TABLE_LAYOUT = r"""() => {
+    const issues = [];
+    for (const cell of document.querySelectorAll('article th, article td, article caption, .rag-table-caption')) {
+        const bounds = cell.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) continue;
+        const heading = cell.closest('thead');
+        if (heading && getComputedStyle(heading).clipPath !== 'none') continue;
+        const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            const node = walker.currentNode;
+            if (!node.textContent.trim() || node.parentElement.closest('.katex')) continue;
+            const style = getComputedStyle(node.parentElement);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of range.getClientRects()) {
+                if (rect.width < 1 || rect.height < 1) continue;
+                if (rect.left < bounds.left - 1 || rect.right > bounds.right + 1 ||
+                    rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1) {
+                    issues.push({kind: 'text outside cell', text: node.textContent.trim().slice(0, 80)});
+                }
+            }
+            for (const token of node.textContent.matchAll(/[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*/g)) {
+                range.setStart(node, token.index);
+                range.setEnd(node, token.index + token[0].length);
+                const lines = new Set([...range.getClientRects()]
+                    .filter(rect => rect.width > 0 && rect.height > 0)
+                    .map(rect => Math.round(rect.top)));
+                if (lines.size > 1) issues.push({kind: 'split token', text: token[0]});
+            }
+        }
+    }
+    return issues;
+}"""
+
 
 def main(selected):
     chapters = json.loads((ROOT / "blog/rag/series.json").read_text())["chapters"]
@@ -69,11 +104,32 @@ def main(selected):
                     lab.locator("[data-next]").focus()
                     page.keyboard.press("Enter")
                     assert json.loads(lab.get_attribute("data-result"))["step"] == 1
-                for width in [320, 375, 768]:
+                page.evaluate("document.fonts.ready")
+                page.locator("article details").evaluate_all(
+                    "nodes => nodes.forEach(node => node.open = true)"
+                )
+                for width in [320, 375, 600, 768, 960, 1024, 1280, 1440]:
                     page.set_viewport_size({"width": width, "height": 950})
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), (
                         source, width
                     )
+                    assert not page.evaluate(TABLE_LAYOUT), (source, width, page.evaluate(TABLE_LAYOUT))
+                    if width == 375:
+                        for scroller in page.locator(".rag-table-scroll").all():
+                            assert scroller.get_attribute("tabindex") == "0", source
+                            assert scroller.get_attribute("role") == "region", source
+                            scroller.focus()
+                            scroller.evaluate("node => node.scrollLeft = 0")
+                            page.keyboard.press("ArrowRight")
+                            page.wait_for_timeout(150)
+                            assert scroller.evaluate("node => node.scrollLeft > 0"), source
+                            scroller.evaluate("node => node.scrollLeft = 0")
+                        for cell in page.locator(".rag-table-prose td").all():
+                            label = cell.get_attribute("data-label")
+                            assert label, source
+                            assert cell.evaluate(
+                                "node => getComputedStyle(node, '::before').content"
+                            ) == '"' + label + '"', source
                 if screenshots:
                     page.set_viewport_size({"width": 1440, "height": 1000})
                     page.evaluate("scrollTo(0, 0)")
