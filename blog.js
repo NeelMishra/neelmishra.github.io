@@ -9273,7 +9273,7 @@ var BLOG_TREE = [
             "name": "speech-and-language-processing",
             "label": "Speech and Language Processing",
             "children": [
-              {"title": "Visual Reading Guide", "file": "nlp/popular-textbooks/speech-and-language-processing/index.html", "links": ["nlp/popular-textbooks/index.html", "nlp/popular-textbooks/speech-and-language-processing/introduction.html"]},
+              {"title": "Chapter outlines", "file": "nlp/popular-textbooks/speech-and-language-processing/index.html", "links": ["nlp/popular-textbooks/index.html", "nlp/popular-textbooks/speech-and-language-processing/introduction.html"]},
               {"title": "01 · Language Models: From Next-Token Prediction to Useful Systems", "file": "nlp/popular-textbooks/speech-and-language-processing/introduction.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/index.html", "nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html"]},
               {"title": "02 · Words and Tokens", "file": "nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/introduction.html", "nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html"]},
               {"title": "03 · N-gram Language Models", "file": "nlp/popular-textbooks/speech-and-language-processing/ngram-language-models.html", "links": ["nlp/popular-textbooks/speech-and-language-processing/words-and-tokens.html", "nlp/popular-textbooks/speech-and-language-processing/logistic-regression.html"]},
