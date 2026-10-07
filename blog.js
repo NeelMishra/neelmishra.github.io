@@ -10746,6 +10746,10 @@ var BLOG_TREE = [
               {
                 "title": "HNSW search: trace both heaps before changing ef",
                 "file": "rag/ann-methods/hnsw/search-layer.html"
+              },
+              {
+                "title": "Build HNSW: choose routes, not just nearby neighbors",
+                "file": "rag/ann-methods/hnsw/construction-and-diversity.html"
               }
             ]
           }
