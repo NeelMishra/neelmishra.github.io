@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Define filtered exact neighbors, distinguish routing from result eligibility, verify native filter/deletion behavior, and diagnose where ANN misses affect a RAG answer.">
+<title>HNSW in RAG: filters, updates, and evidence quality | Neel Mishra</title>
+<link rel="canonical" href="https://neelmishra.github.io/blog/rag/ann-methods/hnsw/filtered-retrieval-and-rag.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../rag.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../../learning-notes.js"></script>
+</head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
+<article class="blog-post-content learning-note rag-note">
+<a class="back-to-blog" href="index.html">&larr; HNSW reading route</a><div class="post-series-nav"><a href="../../index.html">RAG</a><span>&middot;</span><a href="../index.html">ANN Methods</a><span>&middot; HNSW</span></div>
+<h1>HNSW in RAG: filters, updates, and evidence quality</h1><p class="post-meta">October 2026 &middot; 9 min read</p>
+<p>A vector index does not retrieve from a single universal corpus. A request may be restricted to a tenant, document version, language, date range, or application permission set. Those constraints change which nearest-neighbor problem should be solved.</p>
+<p>They also change the graph-search workload. Removing routing nodes, discarding a shortlist, and allowing traversal while restricting results are different operations. Treating them all as “filtering” can hide why the returned evidence is short or wrong.</p>
+
+<h2 id="filtered-target">The exact target lives inside the eligible set</h2>
+<p>For query q, let $E(q)$ be the eligible IDs. The reference is the closest K items within E, not a global top-K list that happens to contain some eligible items:</p>
+<div class="note-equation">$$T_k^{E}(q)=\operatorname{topk}_{i\in E(q)}[-d(q,x_i)].$$</div>
+<p>Use q=(0,0), K=2, and these constructed vectors. X and Y are unavailable for this request:</p>
+<div class="note-table"><table><caption>Lower squared L2 is better. The corpus is deliberately small enough to inspect completely.</caption><thead><tr><th scope="col">ID</th><th scope="col">Vector</th><th scope="col">Squared distance</th><th scope="col">Eligible?</th></tr></thead><tbody>
+<tr><th scope="row">X</th><td>(0.1, 0)</td><td>0.01</td><td>No</td></tr><tr><th scope="row">Y</th><td>(0.2, 0)</td><td>0.04</td><td>No</td></tr><tr><th scope="row">A</th><td>(0.3, 0)</td><td>0.09</td><td>Yes</td></tr><tr><th scope="row">B</th><td>(0.4, 0)</td><td>0.16</td><td>Yes</td></tr><tr><th scope="row">C</th><td>(0.5, 0)</td><td>0.25</td><td>Yes</td></tr>
+</tbody></table></div>
+<p>Global exact top-2 is X,Y. Filtering afterward leaves no result. Eligible exact top-2 is A,B. This failure occurs even without ANN error: the candidate selection and eligibility stages were ordered differently.</p>
+<p>Fetching the global top four would recover A,B in this example. It does not establish that a twofold oversampling factor works generally. A stricter filter, another category, or a query near unavailable items can require much greater depth.</p>
+<details class="note-check"><summary>Reproduce both exact targets</summary><pre><code class="language-python">from reference import exact_topk
+
+q = (0.0, 0.0)
+items = {"X": (.1, 0.), "Y": (.2, 0.), "A": (.3, 0.),
+         "B": (.4, 0.), "C": (.5, 0.)}
+eligible = {"A", "B", "C"}
+global_ids = exact_topk(q, items, 2)
+print(global_ids)                                 # ['X', 'Y']
+print([item for item in global_ids if item in eligible])  # []
+print(exact_topk(q, items, 2, eligible))           # ['A', 'B']</code></pre><p>The <a href="examples/reference.py">reference</a> evaluates squared L2 and uses the same eligibility set in the exact task.</p></details>
+
+<h2 id="routing">A routing predicate is not the same as a result predicate</h2>
+<p>In a separate schematic graph, eligible node A reaches eligible node B only through node X, which is ineligible for results:</p>
+<figure class="note-figure"><div class="note-flow"><div><strong>A</strong><span>Eligible entry</span></div><div><strong>X</strong><span>Routing-only bridge, if the storage policy permits it</span></div><div><strong>B</strong><span>Eligible result</span></div></div><figcaption>Illustrative path A to X to B. Removing X from traversal disconnects the route. This schematic is separate from the five-vector score table and is not a native index export.</figcaption></figure>
+<p>One approach removes every ineligible node from the traversable graph. That can fragment a useful graph into disconnected eligible components. Another approach allows broader routing but admits only eligible IDs into the result set. It preserves different routes and has different work costs.</p>
+<p>hnswlib 0.8.0's filtered base search distinguishes those decisions: qualifying routing candidates can enter its candidate queue, while the filter determines whether they enter retained results. It also changes the stopping condition when the eligible result set is not full. The unfiltered trace from the search chapter is therefore not a complete filtered-search specification.</p>
+<p>An index's internal routing policy is not an application authorization decision. Whether it may inspect vectors across a boundary depends on the deployment's data-access requirements. Never resolve or pass unauthorized passage text to a reranker or generator just because an internal graph route visited an ID.</p>
+<p>Payload-aware graph designs can add or preserve routes for filtered subsets. Qdrant's <a href="https://qdrant.tech/articles/filterable-hnsw/">2019 filterable-HNSW article</a> is a useful historical discussion of that problem, but its page explicitly says it is not a complete description of Qdrant's current filtered search. Use the engine's current documentation and measured behavior for operational claims.</p>
+
+<h2 id="native-filter">Run a real label filter with explicit result expectations</h2>
+<p>Use the same five vectors, but native labels 0 through 4. Eligible labels are 2,3,4, corresponding to A,B,C. This small hnswlib example is checked against the exact result:</p>
+<pre><code class="language-python">import hnswlib
+import numpy as np
+
+items = np.array([[.1, 0.], [.2, 0.], [.3, 0.],
+                  [.4, 0.], [.5, 0.]], dtype=np.float32)
+query = np.zeros((1, 2), dtype=np.float32)
+index = hnswlib.Index(space="l2", dim=2)
+index.init_index(max_elements=5, M=2, ef_construction=20, random_seed=72)
+index.add_items(items, np.arange(5), num_threads=1)
+index.set_ef(64)
+allowed = {2, 3, 4}
+labels, distances = index.knn_query(
+    query, k=2, num_threads=1, filter=lambda label: label in allowed)
+np.testing.assert_array_equal(labels, [[2, 3]])
+np.testing.assert_allclose(distances, [[.09, .16]], rtol=1e-6)</code></pre>
+<p>The Python callback can add substantial overhead and interacts with the GIL. The pinned documentation recommends one thread for filtered Python queries. A database's native filter implementation is not equivalent to timing this callback path.</p>
+<p>If fewer than K results can be found, hnswlib's fixed-shape query API can raise an exception. The <a href="examples/check_native.py">native tests</a> verify that requesting two results while the filter allows only one fails explicitly. An application should distinguish no eligible data, an impossible requested count, a search underfill, and a service error; they are not all “zero recall.”</p>
+
+<h2 id="selectivity">Selectivity needs a distribution, not only a fraction</h2>
+<p>A random filter retaining 10% of the corpus can behave differently from a tenant or category filter retaining 10%. The eligible points may cluster in vector space or be scattered throughout it. Queries can also sit near excluded rather than eligible points.</p>
+<p>Benchmark the same filter in exact and approximate search. Record eligible counts, returned counts, overlap recall, latency, and failures per query. Break out strict filters and rare categories instead of averaging them away in an easy global workload.</p>
+<p>If fewer than K items are eligible, normalize overlap by the smaller nonempty reference set and keep the result-fill rate separate. For zero eligible items, report the empty-reference count rather than creating a recall number with a zero denominator.</p>
+<p>When an eligible subset is small, a filtered exact scan can be a reasonable query plan. Other designs use partitions, payload-aware graph links, or broader traversal. No single filter placement or oversampling constant is best for every workload.</p>
+
+<h2 id="updates">Deletion, replacement, and rebuilding are different operations</h2>
+<p>In hnswlib 0.8.0, <code>mark_deleted(label)</code> removes a label from returned results without physically rebuilding all graph topology. <code>unmark_deleted</code> makes it eligible again. The internal search checks deletion separately from routing, just as it checks a result filter.</p>
+<p>Logical deletion does not imply immediate memory reclamation. Reusing deleted slots requires the corresponding initialization and insertion options. Existing labels can be updated, but that update has different costs from adding a fresh label. Resizing capacity, inserting, and querying also have documented concurrency constraints.</p>
+<p>Faiss's documented HNSW index operations differ: its standard HNSW variant does not support removing vectors from the index. Do not implement a generic database delete by assuming every library has the same API.</p>
+<p>Track the vector-to-passage mapping and source versions alongside the index. A graph label that resolves to a different document after an unrelated store update can make apparently good neighbors unsafe or misleading. Use consistent corpus snapshots or versioned mappings when replacing an index.</p>
+
+<h2 id="rag-diagnosis">Locate the miss before changing the system</h2>
+<div class="note-table"><table><caption>Each comparison holds the rest of the relevant task fixed.</caption><thead><tr><th scope="col">Comparison</th><th scope="col">Question</th><th scope="col">Possible next experiment</th></tr></thead><tbody>
+<tr><th scope="row">ANN versus eligible exact search</th><td>Did approximation miss the score's best neighbors?</td><td>Query effort or a different graph build</td></tr>
+<tr><th scope="row">Exact vector ranking versus judged evidence</th><td>Does the representation prefer useful passages?</td><td>Embedding, lexical/hybrid retrieval, or candidate budget</td></tr>
+<tr><th scope="row">Candidates versus best attainable reranked order</th><td>Is the evidence unavailable or just poorly ordered?</td><td>Discovery or reranker comparison</td></tr>
+<tr><th scope="row">Final context versus answer claims</th><td>Did assembly or generation lose or misuse evidence?</td><td>Context selection and faithful-answer evaluation</td></tr>
+</tbody></table></div>
+<p>A reranker cannot recover evidence that candidate discovery did not return. Perfect ANN agreement can reproduce an embedding's irrelevant exact neighbors. A correct retrieved passage can still be left out of the final prompt or misrepresented by the generator.</p>
+<p>The <a href="../../../ml/search-and-retrieval/evaluation/retrieval-reranking-and-ann-diagnostics.html">retrieval and reranking diagnosis guide</a> calculates those distinct ceilings with judged IDs. The <a href="../../../ml/search-and-retrieval/evaluation/rag-evaluation-from-evidence-to-answer.html">evidence-to-answer guide</a> continues through generated claims. Measure those outcomes alongside index cost rather than treating ANN recall as end-to-end RAG success.</p>
+<details class="note-check"><summary>Does a short post-filtered list prove that ANN recall is poor?</summary><p>No. Our exact global top-two list becomes empty after filtering. First compare against the eligible exact target and inspect candidate depth and eligibility placement.</p></details>
+<details class="note-check"><summary>Can a result filter double as a complete access-control boundary?</summary><p>Not without understanding internal routing, metadata lookup, passage resolution, logging, and the deployment's isolation rules. Enforce the actual access policy before content reaches downstream components.</p></details>
+<details class="note-check"><summary>What should be held fixed when testing a larger ef under strict filters?</summary><p>Corpus snapshot, query vectors, embedding version, metric, normalization, eligibility predicate, K, graph build, threads, timer boundary, and query slices. Otherwise the measured difference has more than one possible cause.</p></details>
+<h2 id="sources">Sources</h2>
+<ul class="note-sources"><li><a href="https://github.com/nmslib/hnswlib/blob/v0.8.0/README.md">hnswlib 0.8.0 API</a> and <a href="https://github.com/nmslib/hnswlib/blob/v0.8.0/hnswlib/hnswalg.h">filtered/deleted base search</a>.</li><li><a href="https://github.com/facebookresearch/faiss/wiki/Faiss-indexes">Faiss HNSW operation support</a>.</li><li><a href="https://qdrant.tech/articles/filterable-hnsw/">Filterable HNSW</a>, explicitly scoped to the historical 2019 design discussion.</li><li><a href="https://arxiv.org/pdf/1603.09320">HNSW paper</a> and <a href="https://www.pinecone.io/learn/series/faiss/hnsw/">Pinecone guide</a>, the graph construction and search foundations.</li></ul>
+<!-- HNSW-NAV:START -->
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="tuning-and-benchmarks.html"><span>Previous</span><span>Tune HNSW: recall, latency, and memory under one workload</span></a></nav>
+<!-- HNSW-NAV:END -->
+</article></div><footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+<script src="../../../../script.js"></script><script src="../../../../blog-posts.js?v=rag-hnsw-20261007"></script><script src="../../../../blog.js?v=rag-hnsw-20261007"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body></html>

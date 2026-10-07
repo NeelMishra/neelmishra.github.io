@@ -10754,6 +10754,10 @@ var BLOG_TREE = [
               {
                 "title": "Tune HNSW: recall, latency, and memory under one workload",
                 "file": "rag/ann-methods/hnsw/tuning-and-benchmarks.html"
+              },
+              {
+                "title": "HNSW in RAG: filters, updates, and evidence quality",
+                "file": "rag/ann-methods/hnsw/filtered-retrieval-and-rag.html"
               }
             ]
           }
