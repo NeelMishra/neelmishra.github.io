@@ -10736,7 +10736,7 @@ var BLOG_TREE = [
             "label": "HNSW",
             "children": [
               {
-                "title": "HNSW: understand the graph before tuning it",
+                "title": "HNSW: take a detour to find the nearest neighbor",
                 "file": "rag/ann-methods/hnsw/index.html"
               },
               {

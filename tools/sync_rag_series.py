@@ -79,7 +79,9 @@ def main():
                  if chapter["file"] != "rag/ann-methods/hnsw/index.html"]
         cards = "".join(
             f'<a href="{Path(chapter["file"]).name}"><span>{number:02d}</span>'
-            f'<div><strong>{html.escape(chapter["title"])}</strong>'
+            '<div>' + (f'<span class="rag-chapter-question">{html.escape(chapter["learning_question"])}</span>'
+                       if chapter.get("learning_question") else "")
+            + f'<strong>{html.escape(chapter["title"])}</strong>'
             f'<p>{html.escape(chapter["description"])}</p></div></a>\n'
             for number, chapter in enumerate(notes, 1)
         )

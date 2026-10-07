@@ -100,6 +100,22 @@ def main(selected):
                         result = json.loads(lab.get_attribute("data-result"))
                         assert result["nearest"][0] == nearest
                         assert result["distance_evaluations"] == evaluations
+                        assert lab.locator("[data-returned]").inner_text() == nearest
+                        assert lab.locator("[data-scored]").inner_text() == str(evaluations)
+                    if lab.get_attribute("data-challenge") is not None:
+                        lab.locator("select").select_option("1")
+                        lab.locator('[data-guess="D"]').click()
+                        lab.locator("[data-finish]").click()
+                        assert "returns B, not D" in lab.locator("[data-prediction]").inner_text()
+                        lab.locator("select").select_option("3")
+                        assert json.loads(lab.get_attribute("data-result"))["prediction"] is None
+                        lab.locator('[data-guess="D"]').focus()
+                        page.keyboard.press("Enter")
+                        lab.locator("[data-finish]").click()
+                        assert "Correct" in lab.locator("[data-prediction]").inner_text()
+                        lab.locator("summary").focus()
+                        page.keyboard.press("Enter")
+                        assert lab.locator("details").evaluate("node => node.open")
                     lab.locator("[data-reset]").click()
                     lab.locator("[data-next]").focus()
                     page.keyboard.press("Enter")
@@ -137,7 +153,8 @@ def main(selected):
                     page.screenshot(path=str(Path(screenshots) / name))
                     if lab.count():
                         lab.scroll_into_view_if_needed()
-                        lab.screenshot(path=str(Path(screenshots) / "hnsw-search-lab.png"))
+                        name = chapter["file"].removesuffix(".html").replace("/", "-") + "-lab.png"
+                        lab.screenshot(path=str(Path(screenshots) / name))
             page.goto(BASE + "/blog.html#retrieval-augmented-generation", wait_until="networkidle")
             all_chapters = json.loads((ROOT / "blog/rag/series.json").read_text())["chapters"]
             assert page.locator('#retrieval-augmented-generation .blog-card').count() == len(all_chapters)
@@ -158,10 +175,21 @@ def main(selected):
                 failure.route("**/search-traces.json", lambda route: route.fulfill(
                     status=503, body="Unavailable", content_type="text/plain"
                 ))
-                failure.goto(BASE + "/blog/rag/ann-methods/hnsw/search-layer.html",
-                             wait_until="networkidle")
-                assert "could not load" in failure.locator("[data-hnsw-lab] [role=alert]").inner_text()
+                for name in ["index", "search-layer"]:
+                    failure.goto(BASE + "/blog/rag/ann-methods/hnsw/" + name + ".html",
+                                 wait_until="networkidle")
+                    assert "could not load" in failure.locator("[data-hnsw-lab] [role=alert]").inner_text()
+                    if name == "index":
+                        assert failure.locator("[data-hnsw-lab] img").count() == 1
                 failure.close()
+                fallback = browser.new_page(java_script_enabled=False)
+                fallback.goto(BASE + "/blog/rag/ann-methods/hnsw/index.html", wait_until="networkidle")
+                assert fallback.locator("[data-hnsw-lab] img").count() == 1
+                fallback.locator("[data-hnsw-lab] img").scroll_into_view_if_needed()
+                fallback.wait_for_function(
+                    "document.querySelector('[data-hnsw-lab] img').naturalWidth > 0"
+                )
+                fallback.close()
         finally:
             browser.close()
     print(f"RAG browser checks passed for {len(chapters)} pages: math, assets, navigation, controls, and mobile layouts.")
