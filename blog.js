@@ -10738,6 +10738,10 @@ var BLOG_TREE = [
               {
                 "title": "HNSW: understand the graph before tuning it",
                 "file": "rag/ann-methods/hnsw/index.html"
+              },
+              {
+                "title": "HNSW graphs: why the hierarchy changes the route",
+                "file": "rag/ann-methods/hnsw/graph-and-hierarchy.html"
               }
             ]
           }

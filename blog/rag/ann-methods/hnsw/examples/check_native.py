@@ -35,6 +35,14 @@ class NativeExamples(unittest.TestCase):
         np.testing.assert_array_equal(labels, [[0, 1]])
         np.testing.assert_allclose(distances, [[.01, .04]], rtol=1e-6)
 
+    def test_faiss_counts_occupied_levels(self):
+        index = faiss.IndexHNSWFlat(2, 2, faiss.METRIC_L2)
+        index.add(self.items)
+        levels = faiss.vector_to_array(index.hnsw.levels)
+        self.assertEqual(len(levels), len(self.items))
+        self.assertTrue(np.all(levels >= 1))
+        self.assertEqual(int(levels.max()) - 1, index.hnsw.max_level)
+
     def test_filtered_results_and_deleted_labels(self):
         index = self.build_hnswlib()
         allowed = lambda label: label >= 2

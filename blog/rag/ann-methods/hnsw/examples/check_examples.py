@@ -22,6 +22,8 @@ class HNSWExamples(unittest.TestCase):
         self.assertEqual(result["nearest"], ["D", "B", "A"])
         self.assertEqual(result["distance_evaluations"], 4)
         self.assertEqual(result["traces"][-1]["expanded"], ["A", "B", "C", "D"])
+        self.assertEqual(search_layer(QUERY, VECTORS, GRAPH, "B", 1)["nearest"], ["B"])
+        self.assertEqual(search_layer(QUERY, VECTORS, GRAPH, "B", 3)["nearest"][0], "D")
         for trace in result["traces"]:
             self.assertLessEqual(len(trace["retained"]), 3)
             self.assertLessEqual(set(trace["expanded"]), set(trace["visited"]))
