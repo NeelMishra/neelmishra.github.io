@@ -97,7 +97,18 @@ remaining = [[row[j] for j in free] for row in X]
 remaining_h = scale(matmul(transpose(remaining), remaining), 2.0)
 assert all(abs(reduced[i][j] - invert(remaining_h)[i][j]) < 1e-8 for i in range(2) for j in range(2))
 
+# OBS special case: constrain the same coordinate to 0, not to the grid.
+obs_target = 0.0
+obs_delta = [-(w[q] - obs_target) / Hinv[q][q] * Hinv[i][q] for i in range(3)]
+obs_updated = [w[i] + obs_delta[i] for i in range(3)]
+obs_residual = [dot(row, w) - row[q] * obs_target for row in X]
+obs_beta = matmul(invert(normal), matmul(transpose(Xf), [[v] for v in obs_residual]))
+assert all(abs(obs_updated[j] - obs_beta[k][0]) < 1e-9 for k, j in enumerate(free))
+obs_saliency = 0.5 * (w[q] - obs_target) ** 2 / Hinv[q][q]
+assert abs(squared_error(X, w, obs_updated) - obs_saliency) < 1e-9
+
 print("chosen column", q, "target", target)
 print("score", round(score, 6), "sse", round(sse_updated, 6), "naive", round(sse_naive, 6))
 print("updated", [round(v, 6) for v in updated])
+print("obs to zero", [round(v, 6) for v in obs_updated], "saliency", round(obs_saliency, 6))
 print("gptq update check passed")
