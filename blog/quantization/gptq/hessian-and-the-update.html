@@ -17,7 +17,7 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 2</span></div>
-<h1>The Hessian update, and which X it expects</h1><p class="post-meta">October 2026 &middot; 16 min read</p>
+<h1>The Hessian update, and which X it expects</h1><p class="post-meta">October 2026 &middot; 18 min read</p>
 <p>The previous note left two formulas unnamed: which weight to snap, and how to move the weights that are still free. Both come from a quadratic model of the layer error. The quadratic is the Hessian. The annoying part, and the part that stalled the video's author, is that the paper writes the linear layer as $WX$ and the Hessian as $2XX^{\mathsf T}$. A PyTorch linear activation is not shaped for that product unless you transpose it first.</p>
 
 <h2 id="layout">Two layouts, two Hessians</h2>
@@ -139,14 +139,27 @@ L_q=\frac12\frac{\bigl(w_q-\operatorname{quant}(w_q)\bigr)^2}{[H^{-1}]_{qq}}.$$<
 <p>The update is $\delta=-(w_1-(-1))/[H^{-1}]_{11}\cdot(H^{-1})_{:,1}$, which evaluates to $(0.105629,-0.150000,-0.017195)$. The new weights are $(1.305629,-1,0.382805)$. Column 1 is on the grid. Columns 0 and 2 moved.</p>
 <p>Snapping column 1 and leaving the others alone gives output squared error 0.05265. The compensated weights give 0.00309, which is half the winning score, as the factor-of-2 remark predicted. Those free weights also match the least-squares solution that holds column 1 at $-1$ and refits the other two. <code>tools/check_gptq_update.py</code> asserts both comparisons. This is not a claim about a 7B model. It is a check that the formula you implement is the constrained quadratic, not a proportional nudge by $H_{qq}$.</p>
 
-<h2 id="eliminate">Do not invert the remaining Hessian from scratch</h2>
+<h2 id="eliminate">One Gaussian-elimination step, instead of a new inverse</h2>
 <figure class="note-figure">
 <img class="q-frame" src="frames/inverse-update.jpg" alt="The inverse-Hessian removal formula: subtract a scaled outer product of column q and row q, then drop row q and column q.">
-<figcaption>Frame from the video, about 19:49. The $-p$ on the slide means the row and column are then removed. The paper writes the same removal as equation (3).</figcaption>
+<figcaption>Frame from the video, about 19:49. The $-p$ on the slide means the row and column are then removed. That subtraction is one step of Gaussian elimination on the inverse. The paper writes it as equation (3).</figcaption>
 </figure>
-<div class="note-equation">$$H^{-1}_{-q}=\left(H^{-1}-\frac{1}{[H^{-1}]_{qq}}H^{-1}_{:,q}H^{-1}_{q,:}\right)_{-q}.$$</div>
-<p>You need $H^{-1}$, not $H$, for the next score and the next update. Rebuilding $H$ from the remaining columns and inverting it is correct and expensive. One step of Gaussian elimination on the inverse removes coordinate $q$ directly. On the example above, that reduced inverse matches $ (2X_{\text{remaining}}^{\mathsf T}X_{\text{remaining}})^{-1} $ to numerical noise. The check script asserts that too.</p>
-<p>A 4096-wide projection has a $4096\times 4096$ inverse. Doing this elimination once per weight, and once per row, is the cubic cost from the previous note. The next note is how GPTQ stops repeating it.</p>
+<p>You were right about the operation. After weight $q$ is quantized it is no longer free, so the next score and the next repair need the inverse of the remaining Hessian, not the inverse you already have. Rebuilding $H$ from the remaining columns and inverting it is correct. It is also what makes OBQ cubic: an $n\times n$ inversion is $O(n^3)$, and you would do it once per weight.</p>
+<p>Deleting row $q$ and column $q$ of $H^{-1}$ is not the same thing. The inverse of a submatrix is not the matching submatrix of the inverse. The coupling through weight $q$ is still sitting in the other entries. Gaussian elimination is how you remove that coupling without factoring $H$ again.</p>
+<p>You already have $G=H^{-1}$. One elimination step uses $[G]_{qq}$ as the pivot and clears column $q$ in every other row. For each row $i\neq q$,</p>
+<div class="note-equation">$$\text{row}_i \leftarrow \text{row}_i-\frac{G_{iq}}{G_{qq}}\,\text{row}_q.$$</div>
+<p>Entrywise, that is $G_{ij}\leftarrow G_{ij}-G_{iq}G_{qj}/G_{qq}$. Written for the whole matrix, it is the outer product on the video slide:</p>
+<div class="note-equation">$$G \leftarrow G-\frac{1}{G_{qq}}G_{:,q}G_{q,:}.$$</div>
+<p>Apply the same subtraction to the pivot row and it becomes the zero row, because you subtract $\text{row}_q$ from itself. Column $q$ is zero for the same reason. The subscript $-q$ means delete that zero row and zero column. What remains is $H^{-1}_{-q}$.</p>
+<p>Why is the leftover block the inverse you wanted? Partition $H$ so coordinate $q$ is last. $A$ is the remaining Hessian, $c=H_{qq}$, and $b$ is the column of couplings:</p>
+<div class="note-equation">$$H=\begin{bmatrix}A&amp;b\\ b^{\mathsf T}&amp;c\end{bmatrix}.$$</div>
+<p>The top-left block of $H^{-1}$ is not $A^{-1}$. It is $A^{-1}$ plus a rank-one term built from $A^{-1}b$. Column $q$ of $H^{-1}$, apart from the pivot, is exactly the vector that carries that rank-one term. Subtracting $G_{:,q}G_{q,:}/G_{qq}$ cancels it. The block that is left is $A^{-1}$, the inverse of the Hessian with weight $q$ removed. That is the only fact the elimination step is buying. You do not solve a new linear system. You downdate the inverse you already paid for.</p>
+<p>The same three-weight inverse makes the arithmetic visible. After the layout transpose,</p>
+<div class="note-equation">$$H^{-1}=\begin{bmatrix}1.92250&amp;-2.56343&amp;-0.35974\\ -2.56343&amp;3.64025&amp;0.41730\\ -0.35974&amp;0.41730&amp;0.52342\end{bmatrix}.$$</div>
+<p>Eliminate coordinate 1. The pivot is $3.64025$. The multiplier for row 0 is $-2.56343/3.64025=-0.70419$, and for row 2 it is $0.41730/3.64025=0.11463$. Subtract those multiples of row 1. Row 1 itself is then deleted. The $2\times 2$ block that remains is</p>
+<div class="note-equation">$$\begin{bmatrix}0.11735&amp;-0.06588\\ -0.06588&amp;0.47558\end{bmatrix}.$$</div>
+<p>The Hessian with column 1 of $X$ removed is $\begin{bmatrix}9.24&amp;1.28\\ 1.28&amp;2.28\end{bmatrix}$, and its inverse is that same $2\times 2$ block. <code>tools/check_gptq_update.py</code> asserts the match. One elimination step replaced an inversion.</p>
+<p>The cost of the step is the outer product, $O(n^2)$ writes, not $O(n^3)$. A 1000-wide layer is a million updates instead of a billion. A 4096-wide projection is the same idea with a much larger matrix. OBQ still pays that outer product once per weight and once per row, which is the cubic total from the first note. The <a href="fixed-order-cholesky.html">next note</a> is why GPTQ stops repeating the elimination: a fixed order needs it only once per column, and enough repeated steps make the running inverse indefinite, which is why the implementation switches to Cholesky.</p>
 <details class="note-check"><summary>The paper prints $2XX^{\mathsf T}$. Should I patch the PDF before using GPTQ?</summary><p>No. Orient $X$ as $(\text{in},\text{tokens})$, which is what the authors' linear path does by transposing, and the printed formula applies. Patching the PDF and also transposing will transpose twice.</p></details>
 <details class="note-check"><summary>Why is the compensated error half the score?</summary><p>Because $H=2X^{\mathsf T}X$, and the output squared error is $\tfrac12\delta^{\mathsf T}H\delta$ at the full-precision point. Rank weights by the score, or by the squared error. Do not mix the two numbers in a log.</p></details>
 <details class="note-check"><summary>Can I use the diagonal of $H$ instead of $H^{-1}$?</summary><p>Only as a different method. The OBQ update is a column of the inverse. The diagonal of $H$ ignores the correlation the whole construction is there to use. On this example the two updates are not the same vector.</p></details>
@@ -154,7 +167,7 @@ L_q=\frac12\frac{\bigl(w_q-\operatorname{quant}(w_q)\bigr)^2}{[H^{-1}]_{qq}}.$$<
 <ul class="note-sources">
 <li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, equations (1) to (3). Objective, greedy score, update, and the inverse removal.</li>
 <li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>add_batch</code>: linear inputs are transposed before <code>inp @ inp.T</code>.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=914s">Savolainen's walkthrough, from 15:14</a>. The OBS equations on the paused paper page, the substitution from zero to a grid point, and the earlier layout and Taylor frames.</li>
+<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=1117s">Savolainen, from 18:37</a>. One Gaussian-elimination step on the inverse, after the OBS derivation that starts at 15:14.</li>
 <li>Hassibi, Stork, and Wolff, <a href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html">Optimal Brain Surgeon and general network pruning</a>, NeurIPS 1992. Equations (1) to (5): the Taylor expansion, the zero constraint, the Lagrangian, the update, and the saliency $L_q$.</li>
 <li><a href="https://arxiv.org/abs/2208.11580">Optimal Brain Compression</a>, the same Lagrangian with a quantization-grid target instead of zero.</li>
 </ul>
