@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Why LLM quantization shrinks the weight tensor, what a per-row or per-group scale buys, and how Optimal Brain Surgeon became the GPTQ layer objective.">
+<title>Quantize one slice, then repair the rest | Neel Mishra</title>
+<link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/compensate-the-layer.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-gptq-20261008">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
+</head>
+<body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
+<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
+<article class="blog-post-content learning-note">
+<a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
+<div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 1</span></div>
+<h1>Quantize one slice, then repair the rest</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
+<p>The setting in the video is an LLM that is already trained and already too slow. The weights are floating point. The job is inference on a GPU, not a requirement that the model run only on a CPU, and not a determinism constraint. Quantization is the tool because the weight tensor is what has to move.</p>
+
+<h2 id="memory">The wait is the bytes, not the multiply</h2>
+<p>Savolainen's description matches the paper's limitation sentence. You quantize so fewer weight bytes cross into the part of the GPU that will use them. The multiply often happens after those values have been cast back to floating point. The paper is explicit that, on the hardware they targeted, there was no speedup for the multiplications themselves, because mainstream GPUs did not have mixed-precision operands such as FP16 times INT4. Their kernels still got about 3.25 times on an A100 and 4.5 times on an A6000, from loading the compressed weights faster.</p>
+<p>That split matters when you read a benchmark. A smaller checkpoint, a faster load, and a faster matmul are three measurements. GPTQ, as published, is evidence for the first two.</p>
+<p>The video also separates three waits inside a GPU program, with a paperwork analogy that is worth keeping in plain language:</p>
+<ul>
+<li>Compute-bound: the arithmetic is the wait.</li>
+<li>Memory-bound: moving values already on the machine is the wait.</li>
+<li>I/O-bound: getting values to the machine and back is the wait.</li>
+</ul>
+<p>Large-language-model inference, in the regime this method targets, is memory-bound. The later speedups inside GPTQ itself, the lazy batch updates, are an answer to that same wait. They show up in the <a href="fixed-order-cholesky.html">third note</a>.</p>
+
+<h2 id="scale">One scale for the tensor is a coarse grid</h2>
+<p>A quantizer needs a scale, and usually a zero, to turn a floating-point number into an integer and back. One scale for an entire weight tensor is legal. It is also blunt: a single range has to cover every row, including the outliers.</p>
+<p>Per-channel scales are the usual step up. Per-row scales, or scales shared by a group of input channels, spend a few extra parameters for a tighter fit. The video's point is that you may accept that extra tuple if the reconstruction error drops enough. Nothing in that choice requires the Hessian update. Round-to-nearest can be per-row too. The group size is a property of the grid, not of GPTQ's solver.</p>
+<p>Keep it separate from the other 128 you will see. Algorithm 1 quantizes 128 columns before it writes the update into the rest of the matrix. A group size of 128, which the authors' code exposes as <code>groupsize</code>, means 128 columns share a scale and a zero. Same number, different object. The basic algorithm in the paper fixes the grid before the solve and does not require those groups.</p>
+
+<h2 id="compensate">The move that makes it GPTQ's ancestor</h2>
+<p>Round-to-nearest snaps each weight and leaves the others alone. The idea the video builds toward is more ambitious, and it is older than GPTQ:</p>
+<ol>
+<li>Snap one slice of the weight matrix onto the grid.</li>
+<li>Move the weights that are still full precision so the layer output moves back toward the original output.</li>
+<li>Repeat until nothing full precision remains.</li>
+</ol>
+<p>Each snap adds error. The update spends the remaining degrees of freedom to buy some of that error back. When you reach the last slice, there is nothing left to move. That is why the order is not a cosmetic choice, and why the third note spends so long on it.</p>
+<p>The video says "row" for the slice you snap. The paper's layout is more specific. Under $Y=WX$, each row of $W$ is one output unit, and the Hessian of that row depends only on $X$, not on the row itself. OBQ therefore solves each row independently, and inside a row it picks a single weight, not the whole row. GPTQ then quantizes column $j$ across every row at the same step, because every row shares that Hessian. The next note uses "column" in that sense. If a sentence in the video says "row", read it as "the slice being snapped", and check the index against equation (2) before you implement it.</p>
+
+<h2 id="lineage">Three papers, one objective, then a faster solve</h2>
+<p>The compensation idea is not native to transformers. Hassibi, Stork, and Wolff's Optimal Brain Surgeon (1993) used it for pruning: set a weight to zero, then adjust the others so the training loss barely moves. The network was assumed to sit at a local minimum, so the gradient term in the Taylor expansion dropped out, and the Hessian carried the update.</p>
+<p>Optimal Brain Compression, and the OBQ method inside it, keeps the second-order update and changes the target. A pruned weight has one legal value, zero. A quantized weight has one legal value per grid point. For 8-bit weights that is 256 possibilities; for 4-bit, 16. You snap to the nearest grid point, then compensate. You do not get to pick any real number.</p>
+<p>GPTQ does not replace that objective. The paper says so by building the section "The GPTQ Algorithm" as three modifications of OBQ. What changed is the cost. OBQ's runtime on a $d_{\text{row}}\times d_{\text{col}}$ matrix is $O(d_{\text{row}}\cdot d_{\text{col}}^3)$. The video's practical translation: hours or days on a large model. GPTQ's translation, measured: about four GPU hours for OPT-175B and BLOOM-176B, to 3 or 4 bits, with the perplexity curves in Figure 1 staying near FP16 where round-to-nearest blows up.</p>
+<p>The video says the speedup is as much as three orders of magnitude, and that a large model can finish in a couple of minutes. The paper's wording is "more than three orders of magnitude" against OBQ, and "approximately four GPU hours" for those two models. Use the paper's clock when you quote a runtime. The minutes figure is the video's, and it is looser than the experiment.</p>
+
+<h2 id="procedure">What you actually run, before the algebra</h2>
+<p>For one layer:</p>
+<ol>
+<li>Push calibration inputs through the full-precision network and keep this layer's inputs. The paper uses a modest set, on the order of thousands of examples, not a second training run.</li>
+<li>Fix the quantization grid. Per tensor, per channel, or per group: that choice is the scale and zero, decided before the compensation loop in the paper's setup.</li>
+<li>Measure squared error between the full-precision layer output and the output you would get from the weights you have quantized so far.</li>
+<li>In OBQ, pick the remaining weight with the smallest extra error, snap it, and update the other free weights with the inverse Hessian. In GPTQ, skip the search and take the next column in a fixed order. The update stays.</li>
+<li>Remove that column from the free set and continue.</li>
+</ol>
+<p>Step 4 is the whole method. The <a href="hessian-and-the-update.html">next note</a> derives the pick and the update. The <a href="fixed-order-cholesky.html">note after that</a> is why you stop searching for the easiest weight.</p>
+<details class="note-check"><summary>If the matmul is still in floating point, why quantize at all?</summary><p>Because the weights still have to be stored and loaded. The paper's speedups are from that load. If your profiler says the matmul is the wait, and the hardware cannot use the low-bit operands, weight-only GPTQ will not fix that wait.</p></details>
+<details class="note-check"><summary>Is a per-row scale the same thing as GPTQ?</summary><p>No. A finer scale reduces rounding error before any compensation. GPTQ is the compensation, plus the schedule that makes the compensation cheap. You can round to nearest on a per-row grid and never touch a Hessian.</p></details>
+<details class="note-check"><summary>Does the floating-point model have to be at a training minimum?</summary><p>For pruning, OBS assumed that, so the gradient of the training loss was treated as zero. For this quantization objective the full-precision weights already have zero reconstruction error. They are the minimum of $\lVert WX-\widehat W X\rVert^2$ by construction. You do not need a separate claim that training had fully converged.</p></details>
+<h2 id="sources">Sources</h2>
+<ul class="note-sources">
+<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0">Savolainen, GPTQ Quantization Explained</a>, 01:43 to 10:27. Memory-bound weights, row and group scales, and the OBS to OBC to GPTQ line.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, sections 1 and 3. The 3.25&times; and 4.5&times; load speedups, the four GPU hours, and the $O(d_{\text{row}}\cdot d_{\text{col}}^3)$ OBQ cost.</li>
+<li><a href="https://arxiv.org/abs/2208.11580">Frantar, Singh, and Alistarh, Optimal Brain Compression</a>, the quantization generalization of OBS.</li>
+<li>Hassibi, Stork, and Wolff, Optimal Brain Surgeon and general network pruning, NeurIPS 1993. The pruning update GPTQ's ancestors start from.</li>
+</ul>
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="index.html"><span>Previous</span><span>GPTQ: quantize the layer, then compensate</span></a><a class="next" href="hessian-and-the-update.html"><span>Next</span><span>The Hessian update, and which X it expects</span></a></nav>
+</article></div>
+<footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-gptq-20261008"></script><script src="../../../blog.js?v=quant-gptq-20261008"></script><script src="../../../code-highlight.js"></script>
+<script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body></html>

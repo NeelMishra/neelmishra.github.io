@@ -9724,6 +9724,23 @@ var BLOG_TREE = [
     ]
   },
   {
+    name: 'quantization',
+    label: 'Quantization',
+    children: [
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html'] },
+      {
+        name: 'gptq',
+        label: 'GPTQ',
+        children: [
+          { title: 'GPTQ: quantize the layer, then compensate', file: 'quantization/gptq/index.html', links: ['quantization/index.html', 'quantization/gptq/compensate-the-layer.html'] },
+          { title: '1. Quantize one slice, then repair the rest', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/hessian-and-the-update.html'] },
+          { title: '2. The Hessian update, and which X it expects', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/fixed-order-cholesky.html'] },
+          { title: '3. Fixed order, lazy batches, and Cholesky', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/index.html'] }
+        ]
+      }
+    ]
+  },
+  {
     name: 'mlops',
     label: 'MLOps',
     children: [
@@ -11266,6 +11283,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
+    quantization: { label: 'Quantization', blurb: 'Post-training weight quantization, starting with the GPTQ layer update and the schedule that makes it finish.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
@@ -11330,7 +11348,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* RAG, DL, ML, NLP, RL, and diffusion use the Explorer's hierarchy and reading order. Metadata insertion
+  /* RAG, DL, ML, NLP, RL, diffusion, and quantization use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -11389,7 +11407,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11413,6 +11431,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'dl') catSection.id = 'deep-learning';
     if (code === 'rag') catSection.id = 'retrieval-augmented-generation';
     if (code === 'diffusion') catSection.id = 'diffusion-models';
+    if (code === 'quantization') catSection.id = 'quantization';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11425,7 +11444,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
