@@ -9628,65 +9628,6 @@ var BLOG_TREE = [
         ]
       },
       {
-        name: 'diffusion-models',
-        label: 'Diffusion &amp; Flow Models',
-        children: [
-          {
-            name: 'large-language-diffusion-models',
-            label: 'Large Language Diffusion Models',
-            children: [
-              {"title": "Overview & Roadmap", "file": "dl/diffusion-models/large-language-diffusion-models/index.html", "links": ["dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html", "dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html"]},
-              {"title": "1. From Continuous Paths to Token Jumps", "file": "dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "links": ["dl/diffusion-models/large-language-diffusion-models/index.html", "dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html"]},
-              {"title": "2. The Masked Diffusion Objective, Derived", "file": "dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "links": ["dl/diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html"]},
-              {"title": "3. Sampling: Parallel Reveals, Confidence, and Remasking", "file": "dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "links": ["dl/diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html"]},
-              {"title": "4. Discrete Flow Matching: Probability Moves, Tokens Jump", "file": "dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "links": ["dl/diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html"]},
-              {"title": "5. LLaDA, Dream, and the Design of a Diffusion LLM", "file": "dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "links": ["dl/diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html"]},
-              {"title": "6. Conditioning, Infilling, and Guidance", "file": "dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "links": ["dl/diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html"]},
-              {"title": "7. Efficiency and Evaluation: What to Measure", "file": "dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "links": ["dl/diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html"]},
-              {"title": "8. Build a Tiny Diffusion Language Model", "file": "dl/diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html", "links": ["dl/diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "dl/diffusion-models/large-language-diffusion-models/index.html"]},
-
-              // APPLIED-NOTES:DIFFUSION:START
-              {"title": "Quantizing a Masked Diffusion LM: Weights, Trajectories, and Calibration", "file": "dl/diffusion-models/large-language-diffusion-models/quantization-and-calibration.html", "links": ["dl/diffusion-models/large-language-diffusion-models/speculative-refinement.html"]},
-              {"title": "Speculative Refinement: Give Diffusion a Draft, Then Evaluate the Edits", "file": "dl/diffusion-models/large-language-diffusion-models/speculative-refinement.html", "links": ["dl/diffusion-models/large-language-diffusion-models/quantization-and-calibration.html"]},
-              // APPLIED-NOTES:DIFFUSION:END
-            ]
-          },
-          {
-            name: 'popular-courses',
-            label: 'Popular Courses',
-            children: [
-              {
-                name: 'mit-6-s184',
-                label: 'MIT 6.S184 &middot; Generative AI with SDEs',
-                children: [
-                  {
-                    name: 'lecture-01',
-                    label: 'Lecture 1 &middot; Flow &amp; Diffusion Foundations',
-                    children: [
-                      { title: 'Introduction to Flow &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html'] }
-                    ]
-                  },
-                  {
-                    name: 'lecture-02',
-                    label: 'Lecture 2 &middot; Constructing a Training Target',
-                    children: [
-                      { title: 'Constructing a Training Target: Paths, Fields &amp; Scores', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html'] }
-                    ]
-                  },
-                  {
-                    name: 'lecture-03',
-                    label: 'Lecture 3 &middot; Flow Matching &amp; Diffusion Models',
-                    children: [
-                      { title: 'Flow Matching, Score Matching &amp; Diffusion Models', file: 'dl/diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html', links: ['dl/diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', 'dl/diffusion-models/large-language-diffusion-models/index.html'] }
-                    ]
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      {
         name: 'popular_videos',
         label: 'Popular Videos',
         children: [
@@ -9715,6 +9656,65 @@ var BLOG_TREE = [
                   { title: 'Expert Parallelism &amp; All-to-All', file: 'dl/popular_videos/umar_jamil/distributed-training-framework/expert-parallelism-and-all-to-all.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/mixture-of-experts.html', 'dl/popular_videos/umar_jamil/distributed-training-framework/device-meshes-and-combining-parallelism.html'] },
                   { title: 'Device Meshes &amp; Combining Parallelism', file: 'dl/popular_videos/umar_jamil/distributed-training-framework/device-meshes-and-combining-parallelism.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/expert-parallelism-and-all-to-all.html', 'dl/popular_videos/umar_jamil/distributed-training-framework/training-loop-metrics-and-checkpointing.html'] },
                   { title: 'The Training Loop, Metrics &amp; Checkpointing', file: 'dl/popular_videos/umar_jamil/distributed-training-framework/training-loop-metrics-and-checkpointing.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/device-meshes-and-combining-parallelism.html', 'dl/popular_videos/umar_jamil/distributed-training-framework/index.html'] }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    name: 'diffusion',
+    label: 'Diffusion &amp; Flow Models',
+    children: [
+      {
+        name: 'large-language-diffusion-models',
+        label: 'Large Language Diffusion Models',
+        children: [
+          {"title": "Overview & Roadmap", "file": "diffusion-models/large-language-diffusion-models/index.html", "links": ["diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html", "diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html"]},
+          {"title": "1. From Continuous Paths to Token Jumps", "file": "diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "links": ["diffusion-models/large-language-diffusion-models/index.html", "diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html"]},
+          {"title": "2. The Masked Diffusion Objective, Derived", "file": "diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "links": ["diffusion-models/large-language-diffusion-models/from-continuous-paths-to-token-jumps.html", "diffusion-models/large-language-diffusion-models/sampling-and-remasking.html"]},
+          {"title": "3. Sampling: Parallel Reveals, Confidence, and Remasking", "file": "diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "links": ["diffusion-models/large-language-diffusion-models/masked-diffusion-objective.html", "diffusion-models/large-language-diffusion-models/discrete-flow-matching.html"]},
+          {"title": "4. Discrete Flow Matching: Probability Moves, Tokens Jump", "file": "diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "links": ["diffusion-models/large-language-diffusion-models/sampling-and-remasking.html", "diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html"]},
+          {"title": "5. LLaDA, Dream, and the Design of a Diffusion LLM", "file": "diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "links": ["diffusion-models/large-language-diffusion-models/discrete-flow-matching.html", "diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html"]},
+          {"title": "6. Conditioning, Infilling, and Guidance", "file": "diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "links": ["diffusion-models/large-language-diffusion-models/llada-dream-and-model-design.html", "diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html"]},
+          {"title": "7. Efficiency and Evaluation: What to Measure", "file": "diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "links": ["diffusion-models/large-language-diffusion-models/conditioning-infilling-and-guidance.html", "diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html"]},
+          {"title": "8. Build a Tiny Diffusion Language Model", "file": "diffusion-models/large-language-diffusion-models/build-a-tiny-diffusion-language-model.html", "links": ["diffusion-models/large-language-diffusion-models/efficiency-and-evaluation.html", "diffusion-models/large-language-diffusion-models/index.html"]},
+
+          // APPLIED-NOTES:DIFFUSION:START
+          {"title": "Quantizing a Masked Diffusion LM: Weights, Trajectories, and Calibration", "file": "diffusion-models/large-language-diffusion-models/quantization-and-calibration.html", "links": ["diffusion-models/large-language-diffusion-models/speculative-refinement.html"]},
+          {"title": "Speculative Refinement: Give Diffusion a Draft, Then Evaluate the Edits", "file": "diffusion-models/large-language-diffusion-models/speculative-refinement.html", "links": ["diffusion-models/large-language-diffusion-models/quantization-and-calibration.html"]},
+          // APPLIED-NOTES:DIFFUSION:END
+        ]
+      },
+      {
+        name: 'popular-courses',
+        label: 'Popular Courses',
+        children: [
+          {
+            name: 'mit-6-s184',
+            label: 'MIT 6.S184 &middot; Generative AI with SDEs',
+            children: [
+              {
+                name: 'lecture-01',
+                label: 'Lecture 1 &middot; Flow &amp; Diffusion Foundations',
+                children: [
+                  { title: 'Introduction to Flow &amp; Diffusion Models', file: 'diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', links: ['diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html'] }
+                ]
+              },
+              {
+                name: 'lecture-02',
+                label: 'Lecture 2 &middot; Constructing a Training Target',
+                children: [
+                  { title: 'Constructing a Training Target: Paths, Fields &amp; Scores', file: 'diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', links: ['diffusion-models/popular-courses/mit-6-s184/lecture-01/introduction-to-flow-and-diffusion-models.html', 'diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html'] }
+                ]
+              },
+              {
+                name: 'lecture-03',
+                label: 'Lecture 3 &middot; Flow Matching &amp; Diffusion Models',
+                children: [
+                  { title: 'Flow Matching, Score Matching &amp; Diffusion Models', file: 'diffusion-models/popular-courses/mit-6-s184/lecture-03/flow-matching-score-matching-diffusion.html', links: ['diffusion-models/popular-courses/mit-6-s184/lecture-02/constructing-a-training-target.html', 'diffusion-models/large-language-diffusion-models/index.html'] }
                 ]
               }
             ]
@@ -11264,7 +11264,8 @@ function flattenBlogTree(nodes, result) {
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Follow the prerequisite map: data and loss foundations, model families, then applications.' },
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
-    dl:    { label: 'Deep Learning', blurb: 'Neural architectures and generative dynamics, from transformers to diffusion and flow models.' },
+    dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
+    diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
@@ -11329,7 +11330,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* RAG, DL, ML, NLP and RL use the Explorer's hierarchy and reading order. Metadata insertion
+  /* RAG, DL, ML, NLP, RL, and diffusion use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -11411,6 +11412,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'nlp') catSection.id = 'natural-language-processing';
     if (code === 'dl') catSection.id = 'deep-learning';
     if (code === 'rag') catSection.id = 'retrieval-augmented-generation';
+    if (code === 'diffusion') catSection.id = 'diffusion-models';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11423,7 +11425,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
