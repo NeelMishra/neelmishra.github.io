@@ -9733,9 +9733,13 @@ var BLOG_TREE = [
         label: 'GPTQ',
         children: [
           { title: 'GPTQ: quantize the layer, then compensate', file: 'quantization/gptq/index.html', links: ['quantization/index.html', 'quantization/gptq/compensate-the-layer.html'] },
-          { title: '1. Quantize one slice, then repair the rest', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/hessian-and-the-update.html'] },
-          { title: '2. The Hessian update, and which X it expects', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/fixed-order-cholesky.html'] },
-          { title: '3. Fixed order, lazy batches, and Cholesky', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/index.html'] }
+          { title: '1. Quantize one slice, then repair the rest', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/the-loop.html'] },
+          { title: '2. Feed the layer, store the MSE, quantize the easiest row', file: 'quantization/gptq/the-loop.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/hessian-and-the-update.html'] },
+          { title: '3. The Hessian update, and which X it expects', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/the-loop.html', 'quantization/gptq/obs-derivatives.html'] },
+          { title: '4. The Optimal Brain Surgeon derivatives', file: 'quantization/gptq/obs-derivatives.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/worked-example-and-elimination.html'] },
+          { title: '5. A worked update, then one elimination step', file: 'quantization/gptq/worked-example-and-elimination.html', links: ['quantization/gptq/obs-derivatives.html', 'quantization/gptq/fixed-order-cholesky.html'] },
+          { title: '6. Fixed order, and what is precomputed', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/worked-example-and-elimination.html', 'quantization/gptq/lazy-batches-and-cholesky.html'] },
+          { title: '7. Lazy batches and Cholesky', file: 'quantization/gptq/lazy-batches-and-cholesky.html', links: ['quantization/gptq/fixed-order-cholesky.html', 'quantization/gptq/index.html'] }
         ]
       }
     ]
