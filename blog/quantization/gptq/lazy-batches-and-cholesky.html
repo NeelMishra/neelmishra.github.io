@@ -1,71 +1,16 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why GPTQ writes weight updates in blocks of 128, and why the precomputed inverse is a Cholesky factor rather than a running elimination.">
-<title>Lazy batches and Cholesky | Neel Mishra</title>
-<link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/lazy-batches-and-cholesky.html">
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-gptq-20261008">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>window.location.replace('fixed-order-cholesky.html' + (window.location.hash || '#batch'));</script>
+<meta http-equiv="refresh" content="0; url=fixed-order-cholesky.html#batch">
+<link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/fixed-order-cholesky.html">
+<title>Lazy batches and Cholesky have moved | Neel Mishra</title>
 </head>
 <body>
-<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
-<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
-<article class="blog-post-content learning-note">
-<a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
-<div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 7</span></div>
-<h1>Lazy batches and Cholesky</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
-<p>The previous note precomputes the inverse rows. Two further changes make that schedule finish on a large GPU: do not write the weight matrix after every column, and do not build those rows by repeated elimination.</p>
-<h2 id="batch">Write the other columns when you need them</h2>
-<p>A direct column loop is a poor GPU program even after the order is fixed. Equation (3) touches a large matrix and does a few FLOPs per entry. The arithmetic units wait on memory bandwidth. The video's earlier distinction applies inside the quantizer, not only at inference: this step is memory-bound.</p>
-<p>The observation that unlocks the batch is narrow. The rounding decision for column $i$ depends only on updates already applied to column $i$. Updates destined for later columns do not change that decision. So you can quantize a block, keep the corrections inside the block, and apply them to the rest of $W$ once, as a matrix product, when the block is done.</p>
-<p>The paper uses $B=128$. The video says a chunk of about 200 or 256 rows. Same idea, and the constant to implement is 128 unless you are deliberately changing <code>blocksize</code>. Inside the block the algorithm still walks column by column, using the $B\times B$ diagonal block of the inverse. At the end of the block it applies the multi-weight versions of the update and the removal:</p>
-<div class="note-equation">$$\delta_F=-(w_Q-\operatorname{quant}(w_Q))\bigl([H_F^{-1}]_{QQ}\bigr)^{-1}(H_F^{-1})_{:,Q},$$</div>
-<div class="note-equation">$$H^{-1}_{-Q}=\left(H^{-1}-H^{-1}_{:,Q}\bigl([H^{-1}]_{QQ}\bigr)^{-1}H^{-1}_{Q,:}\right)_{-Q}.$$</div>
-<p>$Q$ is the set of columns just quantized. This does not reduce the FLOP count. It raises the arithmetic done per byte moved, which is why the paper calls it an order-of-magnitude speedup on very large models and "a critical component", separate from the asymptotic gain of the shared column order.</p>
-<p>Do not confuse this 128 with a group size. <code>groupsize</code> decides which columns share a scale and a zero. <code>blocksize</code> decides how many columns are quantized before the rest of the weight matrix is updated. The paper's Algorithm 1 has a block size and a single grid. The code can use both.</p>
-
-<h2 id="cholesky">Elimination accumulates; Cholesky is computed once</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/cholesky.jpg" alt="A 3 by 3 inverse Hessian written as an upper-triangular factor U, with zeros below the diagonal boxed. The slide lists that U is upper triangular, U transpose U equals the inverse, and the diagonal is positive.">
-<figcaption>Frame from the video, about 31:29. The entries are a rounded illustration, not a Hessian from the paper. The useful part is the triangle: row 0 still involves every later column, and the last row involves only itself.</figcaption>
-</figure>
-<p>The elimination step itself is the <a href="worked-example-and-elimination.html#eliminate">rank-one downdate of the inverse</a>. Repeated elimination, and the extra inversion inside the block update, can make the running $H_F^{-1}$ indefinite. The next update then pushes the remaining weights the wrong way, and that layer's quantization can be arbitrarily bad. The paper reports that this shows up on models larger than a few billion parameters, on at least a few layers, almost certainly.</p>
-<p>Dampening is the first patch. Add $\lambda$ to the diagonal of $H$, with $\lambda$ equal to 1% of the average diagonal value. The authors' code uses <code>percdamp=.01</code> in exactly that way. Dead columns, where the diagonal is already 0, are set to 1 and the corresponding weights to 0 before the dampening, so the factor exists. For smaller models the paper says dampening is enough. For the large ones it is not, because there are more elimination steps and the error accumulates. They keep the dampening and stop eliminating.</p>
-<p>Only part of $H_F^{-1}$ is ever read. When column $q$ is quantized, the update needs row $q$ of the inverse that still includes $q$ and the later columns, from the diagonal rightward. For a symmetric positive definite matrix, producing all of those rows is a Cholesky factorization, up to a scale. Ordinary elimination does not divide row $q$ by $\sqrt{[H^{-1}]_{qq}}$. Cholesky does. That is the "minor difference" the paper names. After the factor is computed, Algorithm 1 stores the upper triangle and uses it in place of the inverse:</p>
-<div class="note-equation">$$H^{-1}=(2XX^{\mathsf T}+\lambda I)^{-1},\qquad H^{-1}\leftarrow \operatorname{Cholesky}(H^{-1})^{\mathsf T}.$$</div>
-<p>In the inner loop the per-column error is $(W_{:,j}-Q_{:,j})/[H^{-1}]_{jj}$, and the block update is a product against the stored rows of that factor. The square-root scaling is why this is not a drop-in replacement that ignores the diagonal. The code follows Algorithm 1: Cholesky, invert, Cholesky again with <code>upper=True</code>, then divide by the diagonal of that factor.</p>
-<p>The video adds two reasons to prefer the kernel, beyond the stability the paper measured. Symmetry is built in, so a general elimination does about twice the FLOPs, and Cholesky kernels have had years of tuning. I would not quote "twice as fast" as a GPTQ benchmark. The paper's claim is that the factor is stable on the models where dampened elimination was not, and that a good kernel is also faster. The slide above is the intuition for the triangle, with 1.41 and 1.32 standing in for square roots.</p>
-
-<h2 id="together">What to remember as the method</h2>
-<p>Put the three changes back together and the procedure for one layer is short.</p>
-<ol>
-<li>Collect calibration inputs. Transpose them if they are $(\text{tokens},\text{in})$, form $H=2XX^{\mathsf T}$, damp the diagonal by 1% of its mean, and replace the inverse by its upper Cholesky factor.</li>
-<li>Walk columns from left to right, in blocks of 128. Quantize the column, record $(w-q)/H_{jj}$, and apply that correction inside the block immediately.</li>
-<li>When the block ends, apply the recorded corrections to all later columns in one product. Those later columns are still full precision. The columns already quantized are left on the grid.</li>
-</ol>
-<p>Group-wise scales, if you use them, are chosen on the columns they cover. They are not a fourth step in Algorithm 1.</p>
-<p>The result is not identical to greedy OBQ. The paper's claim is that on large layers the squared error is similar, and the solve is cheap enough to run. Figure 1 is the published check: 4-bit GPTQ on the OPT family and 3-bit GPTQ on BLOOM, against FP16 and round-to-nearest, measured as WikiText-2 perplexity. The video skips those plots and says you can assume the method is in use because it is good enough, while granting that full OBQ can still be more accurate in its raw form. Read the figure if you need the comparison. Do not promote the video's aside into a benchmark.</p>
-<p>Activation quantization is a separate problem. The paper leaves it out and points at other methods for it. A GPTQ weight tensor does not, by itself, mean the activations are 4-bit.</p>
-<details class="note-check"><summary>Should I restore the greedy weight pick to get OBQ accuracy?</summary><p>On a large layer the paper's finding is that the accuracy gap is small and the shared inverse disappears as soon as each row has its own order. If you need the greedy pick, you are running OBQ, and you should budget for the cubic pass. <code>actorder</code> does not restore that pick.</p></details>
-<details class="note-check"><summary>If the inverse rows are precomputed, can every column be quantized at once?</summary><p>No. The inverse row for column $q$ does not depend on earlier snaps. The weight value in column $q$ does. It has to include the compensation from columns $0,\ldots,q-1$. The paper walks the columns in order. The precompute removes the inverse's serial dependence, not the weight matrix's.</p></details>
-<details class="note-check"><summary>The paper writes $H=2XX^{\mathsf T}$. Do I precompute that on a PyTorch activation as stored?</summary><p>No. Transpose a linear activation to $(\text{in},\text{tokens})$ first. Then $2XX^{\mathsf T}$ is the paper's matrix, and the Cholesky of its inverse is the object Algorithm 1 stores. Skipping the transpose precomputes the wrong coordinates. The video's layout correction applies to this step, not only to the printed objective.</p></details>
-<details class="note-check"><summary>Why did dampening work on small models and fail on large ones?</summary><p>The paper's account is accumulation. Each elimination step, and each block inversion, adds numerical error. A model with wider layers takes more steps. Cholesky computes the rows you need once, from the damped $H$, instead of updating a running inverse.</p></details>
-<details class="note-check"><summary>Is the 128 in a GPTQ config the group size or the block size?</summary><p>Read the argument name. In the authors' <code>fasterquant</code>, <code>blocksize</code> defaults to 128 and <code>groupsize</code> defaults to $-1$, meaning the grid is not re-estimated every 128 columns. A config that sets both to 128 is using both knobs.</p></details>
-
-<h2 id="sources">Sources</h2>
-<ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, section 4 and Algorithm 1. $B=128$, dampening, and the Cholesky rewrite.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>fasterquant</code>: <code>blocksize=128</code>, <code>percdamp=.01</code>, and the upper Cholesky.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=1392s">Savolainen, from 23:12</a>. Memory-bound batches, and the Cholesky frame at about 31:29.</li>
-</ul>
-<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="fixed-order-cholesky.html"><span>Previous</span><span>Fixed order, and what is precomputed</span></a><a class="next" href="index.html"><span>Next</span><span>GPTQ: quantize the layer, then compensate</span></a></nav>
-</article></div>
-<footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-gptq-split-20261008"></script><script src="../../../blog.js?v=quant-gptq-split-20261008"></script><script src="../../../code-highlight.js"></script>
-<script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
-</body></html>
-
+<h1>Lazy batches and Cholesky have moved</h1>
+<p>This chapter is now part of <a href="fixed-order-cholesky.html#batch">GPTQ: fixed order, lazy batches, and Cholesky</a>.</p>
+<p>Continue to <a href="fixed-order-cholesky.html#batch">lazy batches</a>, <a href="fixed-order-cholesky.html#cholesky">Cholesky</a>, the <a href="fixed-order-cholesky.html#together">procedure recap</a>, or <a href="fixed-order-cholesky.html#sources">sources</a>.</p>
+</body>
+</html>

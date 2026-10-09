@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a fixed column order lets GPTQ precompute the inverse-Hessian rows, and why that is fewer eliminations rather than a parallel quantize.">
-<title>Fixed order, and what is precomputed | Neel Mishra</title>
+<meta name="description" content="See how GPTQ shares a fixed column order, applies sequential compensation in blocks, and uses a damped inverse-Hessian Cholesky factor with the correct normalizer.">
+<title>GPTQ: fixed order, lazy batches, and Cholesky | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/fixed-order-cholesky.html">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-gptq-20261008">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261009">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
 </head>
@@ -16,38 +16,84 @@
 <div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
-<div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 6</span></div>
-<h1>Fixed order, and what is precomputed</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
-<p>The <a href="obs-derivatives.html">update formula</a> is Optimal Brain Quantization. The loop is still: feed calibration data through the layer, store the MSE for each remaining row, quantize one row, and adjust the floating-point weights that are left. This note is the first schedule change: stop searching for the easiest row. That fixed order is what makes the inverse rows knowable before the first snap. The other two changes, lazy writes and Cholesky, are the <a href="lazy-batches-and-cholesky.html">next note</a>.</p>
+<div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 3</span></div>
+<h1>GPTQ: fixed order, lazy batches, and Cholesky</h1><p class="post-meta">October 2026 &middot; 7 min read</p>
+<p><a href="hessian-and-the-update.html">Part 2</a> derived the compensation after rounding one weight. Applying that update separately to every weight in a large layer would be expensive. GPTQ makes it practical by sharing one column order, preparing a triangular factor once, and delaying writes to columns outside the current block.</p>
 
-<h2 id="order">A fixed order is slightly worse and much cheaper</h2>
-<p>OBQ always snaps the remaining weight with the smallest score. On a large, heavily parameterized layer the paper finds that this greedy pass is only a small improvement over any fixed order. The reason it gives is the one the video spends time on. Greedy search leaves the expensive weights until the end. By then few full-precision weights remain, so the compensation those hard weights needed is no longer available. You have traded a few early, easy snaps for a tail of error you cannot repair.</p>
-<p>GPTQ quantizes every row in the same order. Because $H_F$ depends only on the remaining input columns, that shared order means every row has the same free set $F$ and the same $H_F^{-1}$. The inverse update from equation (3) runs once per column, not once per weight. The cost moves from $O(d_{\text{row}}\cdot d_{\text{col}}^3)$ to $O(\max\{d_{\text{row}}\cdot d_{\text{col}}^2,\, d_{\text{col}}^3\})$, a factor of $\min(d_{\text{row}}, d_{\text{col}})$. On a transformer projection that factor is thousands, which is the "orders of magnitude" in the paper. It is an operation count, not the four GPU hours. The four hours are the measured end-to-end quantization of OPT-175B and BLOOM-176B.</p>
-<p>A known order also tells you, before the first snap, which inverse-Hessian entries column $q$ will need: the part of row $q$ from the diagonal to the right, in the matrix that still contains columns $q, q+1, \ldots$. You can prepare those entries instead of discovering them with an elimination step between columns. The video reads that as a GPU scheduling win: the kernel is not waiting on a serial elimination to learn what the next column requires. The paper reads it as the algebraic reason a triangular factor is enough.</p>
-<p>The authors' code has a later flag, <code>actorder</code>, that permutes columns by descending Hessian diagonal and then still walks left to right. That is not OBQ's greedy loop, and it is not Algorithm 1. If you see it in a config, it is a column permutation applied before the fixed pass.</p>
+<h2 id="order">Process the same column across every output row</h2>
+<p>Let $W$ have $m$ output rows and $d$ input columns. Greedy OBQ chooses the cheapest next weight independently in each row. After those choices, different rows may have different sets of free columns and need different active inverses.</p>
+<p>GPTQ chooses a column order in advance and shares it across all output rows. In left-to-right order, step $j$ rounds column $j$ in every row. Each entry may land on a different grid point, but every row has the same free set $F=\{j,\ldots,d-1\}$.</p>
+<p>The Hessian depends only on calibration inputs, not the row's weights. A shared free set therefore means a shared active inverse. One preparation serves all $m$ output rows.</p>
+<p>The paper finds that on its large layers, fixed-order reconstruction is competitive with the greedy method. This is an empirical trade-off, not a guarantee that every fixed order is equally accurate. Order can change the final rounding decisions.</p>
+<p>With separate greedy orders, OBQ's repeated inverse updates cost $O(md^3)$. GPTQ instead pays $O(d^3)$ for matrix preparation and $O(md^2)$ for weight corrections. This operation-count reduction is not a universal wall-clock speedup; matrix sizes, hardware, and kernels still matter.</p>
+<p>The authors' later <code>actorder</code> option permutes input columns by descending Hessian diagonal before the pass. It still uses one shared order. It is not OBQ's adaptive greedy selection.</p>
 
-<h2 id="precompute">What is precomputed, and why that is fewer eliminations</h2>
-<p>The object stored before the first snap is not a quantized weight. It is the inverse-Hessian row each column will read. Section 4 of the paper is this schedule. Use it with the layout warning from the video: the printed Hessian is $2XX^{\mathsf T}$ only after $X$ is $(\text{in},\text{tokens})$. A PyTorch activation is $(\text{tokens},\text{in})$. Transpose first, as <code>add_batch</code> does, and then Algorithm 1 applies. Form $2XX^{\mathsf T}$ on the untransposed tensor and you precompute a tokens-by-tokens matrix. Every later update is then in the wrong coordinates. The paper's objective line has that orientation slip. The precompute inherits it. The code that transposes first is the path that matches the printed algorithm.</p>
-<p>Two facts make the rows knowable before any weight moves. The order is fixed and shared, so when column $q$ is reached the free columns are $q,q+1,\ldots$ for every output row. You know that set before the first <code>quant</code> call. And $H_F=2X_F X_F^{\mathsf T}$ depends only on those input columns, not on $W$. The inverse row for column $q$ does not depend on which grid point column $q-1$ snapped to.</p>
-<p>What column $q$ actually reads is one row: row $q$ of the inverse of the Hessian on the still-free columns, from the diagonal to the right. Columns already quantized are absent from that row. Producing those rows one at a time is the <a href="worked-example-and-elimination.html#eliminate">Gaussian-elimination downdate</a>: eliminate $0$, read the new row for column $1$, eliminate $1$, and so on. Cholesky of the full inverse writes every such row before the loop. The paper's difference is a scale. Elimination leaves the inverse's own row. Cholesky divides row $q$ by $\sqrt{[H^{-1}]_{qq}}$. That is why Algorithm 1 divides the weight error by the factor's diagonal, not by the inverse's diagonal.</p>
-<p>The checked three-weight inverse shows the scale. Row 0 of $H^{-1}$, from the diagonal right, is $(1.92250,-2.56343,-0.35974)$. The upper Cholesky factor of that same inverse has row $(1.38654,-1.84880,-0.25945)$. The first entry of the inverse divided by the first entry of the factor is $1.38654$, which is $\sqrt{1.92250}$. The stored row is the inverse row divided by the square root of its pivot. Zeros below the diagonal are the columns already out of the free set. That is the triangle on the video slide, with this matrix's own numbers rather than the slide's rounded illustration.</p>
-<p>The speedup from this storage is an operation count, and it is the sentence the video author said they would take on faith. OBQ gives each output row its own greedy order, so each row has its own sequence of free sets. The elimination runs $d_{\text{row}}\cdot d_{\text{col}}$ times. The cost is $O(d_{\text{row}}\cdot d_{\text{col}}^3)$. GPTQ has one order, so it builds one factor, $O(d_{\text{col}}^3)$, and applies each stored row to every output row, $O(d_{\text{row}}\cdot d_{\text{col}}^2)$. The cost is $O(\max\{d_{\text{row}}\cdot d_{\text{col}}^2,\, d_{\text{col}}^3\})$. The ratio is $\min(d_{\text{row}}, d_{\text{col}})$. A square $4096\times 4096$ projection shares the elimination 4096 ways. That factor is about 3.6 orders of magnitude in the elimination count. The paper's "more than three orders of magnitude" is this comparison with OBQ, not a claim that GPTQ is 1000 times faster than round-to-nearest. The measured clock for OPT-175B and BLOOM-176B is still about four GPU hours.</p>
-<p>The inverse rows also have no serial dependence on the snaps. Column $q$'s stored row depends on the free-set, which the order fixes, and on $X$, which the calibration pass fixes. A kernel that quantizes column $q$ loads that row. It does not wait for an elimination that has to finish after column $q-1$. The weight update is still serial. Rounding column $q$ uses $W$ after columns $0,\ldots,q-1$ have been compensated. The video considers turning the whole problem parallel if inversion were free. That would be true of the inverse rows. It is not true of $W$. The paper does not quantize columns independently. It precomputes $H^{-1}$ and still walks columns in order.</p>
-<p>Do not file the lazy batch under this precompute. The batch changes when the weight matrix is written. It does not reduce the elimination count. <a href="lazy-batches-and-cholesky.html">The next note</a> is that other speedup.</p>
+<h2 id="precompute">Prepare the directions, not the rounded values</h2>
+<p>Use the same sample-row table $A\in\mathbb R^{n\times d}$ as before and $H=2A^{\mathsf T}A$. The paper's $X=A^{\mathsf T}$ gives the identical matrix $2XX^{\mathsf T}$. Neither form requires transposing the stored PyTorch weight matrix away from its $(\text{out},\text{in})$ layout.</p>
+<p>In a fixed order, every future active Hessian is known from the start. It depends on which columns remain free, not on the grid values chosen for earlier columns. We can prepare the correction directions before rounding any weight.</p>
+<p>The rounded values cannot be prepared independently. Column $j$ must include compensation from columns $0,\ldots,j-1$ before its grid point is chosen. Precomputing the matrix removes repeated inverse work, not this sequential dependence between weights.</p>
 
+<h2 id="batch">Update nearby columns now; later columns can wait</h2>
+<p>After each column, an immediate update to every later weight would repeatedly read and write a large matrix. Lazy batching reduces that traffic. Choose an update block of $B$ consecutive input columns; the paper and authors' code use 128 by default.</p>
+<ol>
+<li>Round the first column in the block using its current weights.</li>
+<li>Immediately compensate the unrounded columns <em>inside</em> the block.</li>
+<li>Round the next column using those updated values and repeat.</li>
+<li>At the block's end, apply all its recorded corrections to columns <em>after</em> the block in one matrix multiplication.</li>
+</ol>
+<p>Waiting to update those distant columns is safe: none is rounded until the current block finishes. Rounding all columns inside the block at once would not be equivalent. The next rounding decision depends on the previous correction.</p>
+<p>Here is the actual blocked update in triangular-factor notation, defined below. Let $Q$ be the quantized weight matrix and $U$ the $d\times d$ upper-triangular factor. For column $j$, the vector $E_{:,j}$ contains one normalized rounding discrepancy per output row:</p>
+<div class="note-equation">$$Q_{:,j}=\operatorname{quant}(W_{:,j}),\qquad
+ E_{:,j}=\frac{W_{:,j}-Q_{:,j}}{U_{jj}}.$$</div>
+<p>The quantizer uses the relevant grid for each entry. $E_{:,j}$ has shape $m\times1$. If the block ends just before column $b$, apply its outer-product correction inside the block:</p>
+<div class="note-equation">$$W_{:,j:b}\leftarrow
+ W_{:,j:b}-E_{:,j}U_{j,j:b}.$$</div>
+<p>The slice $j:b$ includes $j$ but excludes $b$. The product has shape $m\times(b-j)$. Its first column subtracts $W_{:,j}-Q_{:,j}$, placing column $j$ exactly on the grid. Later columns in the block receive compensation before they are rounded.</p>
+<p>At the end, let $J$ be the completed block and $T$ the columns after it. Stack its recorded vectors into $E_{:,J}$, of shape $m\times B$. The delayed correction is:</p>
+<div class="note-equation">$$W_{:,T}\leftarrow W_{:,T}-E_{:,J}U_{J,T}.$$</div>
+<p>With $|T|$ later columns, $U_{J,T}$ has shape $B\times|T|$, so this one product updates an $m\times|T|$ region. The final block may have fewer than $B$ columns. This reorganizes the same sequential corrections; it does not solve a joint rounding problem for the whole block.</p>
+<p>A <strong>quantization group</strong> has a different purpose: its entries share scale and zero-point parameters. <code>groupsize</code> changes the grids and storage overhead; <code>blocksize</code> changes the correction schedule. Group-wise implementations may estimate grids as groups are reached, or keep them fixed. Either way, groups are not the update blocks.</p>
 
-<p id="batch">Lazy batches are the next note: <a href="lazy-batches-and-cholesky.html">Lazy batches and Cholesky</a>.</p>
-<p id="cholesky">The Cholesky factor is in <a href="lazy-batches-and-cholesky.html#cholesky">the same note</a>.</p>
-<p id="together">The short procedure recap is in <a href="lazy-batches-and-cholesky.html#together">the same note</a>.</p>
+<h2 id="cholesky">Damp the Hessian, then store a triangular factor</h2>
+<p>Input features may be correlated or rarely active, making $H$ singular or nearly singular. Direct inversion and repeated inverse downdates can then amplify numerical error. GPTQ adds a positive diagonal term before factorization.</p>
+<p>Let $\lambda$ be the damping strength, $I_d$ the $d\times d$ identity, and $\alpha$ a chosen fraction of the average Hessian diagonal. Call the resulting Hessian $H_{\mathrm{damped}}$ and its inverse $G$. The authors' default is $\alpha=0.01$:</p>
+<div class="note-equation">$$\lambda=\alpha\frac{\operatorname{tr}(H)}{d},\qquad
+ H_{\mathrm{damped}}=H+\lambda I_d,\qquad
+ G=H_{\mathrm{damped}}^{-1}.$$</div>
+<p>Damping makes the solve less sensitive to weakly observed directions. It also changes the objective: with our sum convention it adds $\tfrac{\lambda}{2}\lVert v-w\rVert_2^2$ to the reconstruction cost. The resulting updates optimize this regularized quadratic, not exactly the undamped output error in Part 2. Consistently scaling $H$ and $\lambda$ preserves the compensation.</p>
+<p>The authors' code also handles input columns with zero Hessian diagonal before damping: those features are absent on calibration data, so their weights can be set to zero without changing the observed outputs. This alone says nothing about unseen inputs.</p>
+<p>Now factor the inverse as follows. $U$ is upper triangular with positive diagonal entries:</p>
+<div class="note-equation">$$U^{\mathsf T}U=G=H_{\mathrm{damped}}^{-1}.$$</div>
+<p>This orientation matters: $U$ factors the <em>inverse</em>, not the Hessian. The authors' implementation first factors the damped Hessian to compute its inverse, then takes an upper Cholesky factor of that inverse.</p>
+<p>Why can this one triangle replace the active inverse at every step? Let $G^{(j)}$ be the inverse on the columns still free at step $j$, after eliminating earlier columns. Upper Cholesky performs those same rank-one eliminations while storing scaled pivot rows:</p>
+<div class="note-equation">$$G^{(j)}_{jj}=U_{jj}^2,\qquad
+ G^{(j)}_{j,j:}=U_{jj}U_{j,j:}.$$</div>
+<p>Each stored row is the corresponding active-inverse row divided by the square root of its pivot. For a single output row with discrepancy $a=v_j-t$, substituting these identities into the inverse update gives:</p>
+<div class="note-equation">$$\delta_{j:}^{\mathsf T}
+ =-\frac{a}{G^{(j)}_{jj}}G^{(j)}_{j,j:}
+ =-\frac{a}{U_{jj}}U_{j,j:}.$$</div>
+<p>This explains the normalizer in the block loop. Divide the weight discrepancy by $U_{jj}$, then multiply by the stored factor row. Do not divide by the original inverse diagonal $G_{jj}$, or by the Hessian diagonal $H_{jj}$.</p>
+<p>For the undamped numerical example in Part 2, the original inverse starts with row $(1.92250,-2.56343,-0.35974)$. Its upper factor starts with row approximately $(1.38654,-1.84880,-0.25945)$. Since $1.38654^2\approx1.92250$, dividing the inverse row by $1.38654$ produces the factor row.</p>
+<p>Later pivots correspond to reduced active inverses, not the original inverse's diagonals. The triangular factor supplies those pivots without repeatedly modifying a running inverse during quantization. This improves numerical robustness; it is not a promise of exact arithmetic or a fixed speed multiplier.</p>
+
+<h2 id="together">The complete pass</h2>
+<ol>
+<li>Collect representative calibration inputs, form the input-feature Hessian, and choose the quantization scheme.</li>
+<li>Choose one shared column order, damp the Hessian, and compute $U$ with $U^{\mathsf T}U=H_{\mathrm{damped}}^{-1}$ in that order.</li>
+<li>Within each update block, round columns sequentially. Divide each current rounding discrepancy by $U_{jj}$ and immediately correct the remaining columns inside the block.</li>
+<li>Apply the accumulated block correction to later columns in one product. Keep completed columns fixed and continue.</li>
+</ol>
+<p>The result is a low-bit weight matrix chosen to preserve calibration outputs. Test the finished model's quality and serving performance separately. Calibration error is not task accuracy, and compressed storage is not by itself a fast serving kernel.</p>
+<details class="note-check"><summary>Why not use the whole inverse directly?</summary><p>The first step can use it directly. Later steps need inverses on smaller free sets. The factor stores the required reduced directions and their normalizers in advance, without repeated downdates.</p></details>
+<details class="note-check"><summary>Does a block of 128 mean all 128 columns round together?</summary><p>No. Rounding and compensation remain sequential inside the block. Only the writes to columns outside it are delayed and combined.</p></details>
 <h2 id="sources">Sources</h2>
 <ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, section 4 and Algorithm 1. Fixed order, $B=128$, dampening at 1% of the mean diagonal, and the Cholesky rewrite. Figure 1 for the perplexity comparison.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>fasterquant</code>: <code>blocksize=128</code>, <code>percdamp=.01</code>, <code>actorder</code>, and the upper Cholesky of the inverse.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=1197s">Savolainen, from 19:57</a>. The fixed-order argument, the memory-bound batch, and the Cholesky frame at about 31:29.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, the fixed-order, lazy-batch, and Cholesky changes and Algorithm 1.</li>
+<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>fasterquant</code>: <code>blocksize=128</code>, <code>percdamp=.01</code>, <code>actorder</code>, and factor-diagonal normalization.</li>
 </ul>
-<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="worked-example-and-elimination.html"><span>Previous</span><span>A worked update, then one elimination step</span></a><a class="next" href="lazy-batches-and-cholesky.html"><span>Next</span><span>Lazy batches and Cholesky</span></a></nav>
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="hessian-and-the-update.html"><span>Previous</span><span>GPTQ: derive and check the Hessian update</span></a><a class="next" href="index.html"><span>Next</span><span>GPTQ: quantize the layer, then compensate</span></a></nav>
 </article></div>
 <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-gptq-split-20261008"></script><script src="../../../blog.js?v=quant-gptq-split-20261008"></script><script src="../../../code-highlight.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261009"></script><script src="../../../blog.js?v=quant-plain-20261009"></script><script src="../../../code-highlight.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>
