@@ -10703,6 +10703,14 @@ var BLOG_TREE = [
                 "file": "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/householder-matrix.html",
+                  "math/linear-algebra/matrix-decomposition/gram-schmidt.html"
+                ]
+              },
+              {
+                "title": "Gram-Schmidt: subtract the projections, then normalize",
+                "file": "math/linear-algebra/matrix-decomposition/gram-schmidt.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
