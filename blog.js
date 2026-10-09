@@ -10695,6 +10695,14 @@ var BLOG_TREE = [
                 "file": "math/linear-algebra/matrix-decomposition/householder-matrix.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/householder-qr.html",
+                  "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html"
+                ]
+              },
+              {
+                "title": "Gram-Schmidt QR: orthonormal columns, then a triangular solve",
+                "file": "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/householder-matrix.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
