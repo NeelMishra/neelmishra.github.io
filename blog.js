@@ -10659,6 +10659,32 @@ var BLOG_TREE = [
           }
         ]
       },
+      {
+        "name": "linear-algebra",
+        "label": "Linear Algebra",
+        "children": [
+          {
+            "name": "matrix-decomposition",
+            "label": "Matrix Decomposition",
+            "children": [
+              {
+                "title": "Matrix decomposition: reading guide",
+                "file": "math/linear-algebra/matrix-decomposition/index.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html"
+                ]
+              },
+              {
+                "title": "Eigenvalue decomposition: diagonalize a square matrix",
+                "file": "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/index.html"
+                ]
+              }
+            ]
+          }
+        ]
+      },
       // APPLIED-NOTES:math:START
       {
         "name": "numerical-optimization",
