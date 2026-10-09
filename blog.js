@@ -10678,6 +10678,15 @@ var BLOG_TREE = [
                 "title": "Eigenvalue decomposition: diagonalize a square matrix",
                 "file": "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html",
                 "links": [
+                  "math/linear-algebra/matrix-decomposition/index.html",
+                  "math/linear-algebra/matrix-decomposition/householder-qr.html"
+                ]
+              },
+              {
+                "title": "Householder QR: reflect columns, then read off Q and R",
+                "file": "math/linear-algebra/matrix-decomposition/householder-qr.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
