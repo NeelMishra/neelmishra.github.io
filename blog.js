@@ -10719,6 +10719,14 @@ var BLOG_TREE = [
                 "file": "math/linear-algebra/matrix-decomposition/cholesky.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/gram-schmidt.html",
+                  "math/linear-algebra/matrix-decomposition/permuted-lu.html"
+                ]
+              },
+              {
+                "title": "Permuted LU: swap the zero pivot, then solve",
+                "file": "math/linear-algebra/matrix-decomposition/permuted-lu.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/cholesky.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
