@@ -245,7 +245,7 @@
   function init(){
     if(window.renderMathInElement){
       document.querySelectorAll('.learning-note').forEach(function(article){
-        window.renderMathInElement(article,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});
+        window.renderMathInElement(article,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}],throwOnError:false});
       });
     }
     document.querySelectorAll('[data-note-lab]').forEach(function(figure){

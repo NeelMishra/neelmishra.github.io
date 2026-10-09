@@ -10711,6 +10711,14 @@ var BLOG_TREE = [
                 "file": "math/linear-algebra/matrix-decomposition/gram-schmidt.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
+                  "math/linear-algebra/matrix-decomposition/cholesky.html"
+                ]
+              },
+              {
+                "title": "Cholesky: square-root the pivots, then multiply",
+                "file": "math/linear-algebra/matrix-decomposition/cholesky.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/gram-schmidt.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
