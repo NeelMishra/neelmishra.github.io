@@ -9727,32 +9727,58 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/other-methods/index.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/choosing-a-method.html'] },
+      { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
         children: [
           { title: 'GPTQ: quantize the layer, then compensate', file: 'quantization/gptq/index.html', links: ['quantization/index.html', 'quantization/gptq/compensate-the-layer.html'] },
-          { title: '1. Quantize one slice, then repair the rest', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/the-loop.html'] },
-          { title: '2. Feed the layer, store the MSE, quantize the easiest row', file: 'quantization/gptq/the-loop.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/hessian-and-the-update.html'] },
-          { title: '3. The Hessian update, and which X it expects', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/the-loop.html', 'quantization/gptq/obs-derivatives.html'] },
-          { title: '4. The Optimal Brain Surgeon derivatives', file: 'quantization/gptq/obs-derivatives.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/worked-example-and-elimination.html'] },
-          { title: '5. A worked update, then one elimination step', file: 'quantization/gptq/worked-example-and-elimination.html', links: ['quantization/gptq/obs-derivatives.html', 'quantization/gptq/fixed-order-cholesky.html'] },
-          { title: '6. Fixed order, and what is precomputed', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/worked-example-and-elimination.html', 'quantization/gptq/lazy-batches-and-cholesky.html'] },
-          { title: '7. Lazy batches and Cholesky', file: 'quantization/gptq/lazy-batches-and-cholesky.html', links: ['quantization/gptq/fixed-order-cholesky.html', 'quantization/gptq/index.html'] }
+          { title: '1. GPTQ: the layer objective and compensation loop', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/hessian-and-the-update.html'] },
+          { title: '2. GPTQ: derive and check the Hessian update', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/fixed-order-cholesky.html'] },
+          { title: '3. GPTQ: fixed order, lazy batches, and Cholesky', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/index.html'] }
         ]
       },
       {
-        name: 'other-methods',
-        label: 'Other quantization methods',
+        name: 'fundamentals',
+        label: 'Fundamentals',
         children: [
-          { title: 'Beyond GPTQ: choose what to quantize', file: 'quantization/other-methods/index.html', links: ['quantization/index.html', 'quantization/other-methods/scales-and-zero-points.html'] },
-          { title: '1. Scales, zero points, and clipping', file: 'quantization/other-methods/scales-and-zero-points.html', links: ['quantization/other-methods/index.html', 'quantization/other-methods/llm-int8.html'] },
-          { title: '2. LLM.int8: separate the outliers', file: 'quantization/other-methods/llm-int8.html', links: ['quantization/other-methods/scales-and-zero-points.html', 'quantization/other-methods/smoothquant.html'] },
-          { title: '3. SmoothQuant: move the difficult range', file: 'quantization/other-methods/smoothquant.html', links: ['quantization/other-methods/llm-int8.html', 'quantization/other-methods/awq.html'] },
-          { title: '4. AWQ: protect important weight channels', file: 'quantization/other-methods/awq.html', links: ['quantization/other-methods/smoothquant.html', 'quantization/other-methods/nf4-and-qlora.html'] },
-          { title: '5. NF4 and QLoRA: storage is not training precision', file: 'quantization/other-methods/nf4-and-qlora.html', links: ['quantization/other-methods/awq.html', 'quantization/other-methods/quantization-aware-training.html'] },
-          { title: '6. QAT: train with the error in the loop', file: 'quantization/other-methods/quantization-aware-training.html', links: ['quantization/other-methods/nf4-and-qlora.html', 'quantization/other-methods/index.html'] }
+          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/choosing-a-method.html', 'quantization/llm-int8/index.html'] }
+        ]
+      },
+      {
+        name: 'llm-int8',
+        label: 'LLM.int8',
+        children: [
+          { title: 'LLM.int8: separate the outliers', file: 'quantization/llm-int8/index.html', links: ['quantization/fundamentals/index.html', 'quantization/smoothquant/index.html'] }
+        ]
+      },
+      {
+        name: 'smoothquant',
+        label: 'SmoothQuant',
+        children: [
+          { title: 'SmoothQuant: move the difficult range', file: 'quantization/smoothquant/index.html', links: ['quantization/llm-int8/index.html', 'quantization/awq/index.html'] }
+        ]
+      },
+      {
+        name: 'awq',
+        label: 'AWQ',
+        children: [
+          { title: 'AWQ: protect important weight channels', file: 'quantization/awq/index.html', links: ['quantization/smoothquant/index.html', 'quantization/qlora/index.html'] }
+        ]
+      },
+      {
+        name: 'qlora',
+        label: 'NF4 & QLoRA',
+        children: [
+          { title: 'NF4 and QLoRA: storage is not training precision', file: 'quantization/qlora/index.html', links: ['quantization/awq/index.html', 'quantization/qat/index.html'] }
+        ]
+      },
+      {
+        name: 'qat',
+        label: 'QAT',
+        children: [
+          { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/choosing-a-method.html'] }
         ]
       }
     ]
@@ -11359,7 +11385,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
-    quantization: { label: 'Quantization', blurb: 'Separate reading paths for GPTQ and other methods: quantization basics, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, and QAT.' },
+    quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for quantization fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, and QAT.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
