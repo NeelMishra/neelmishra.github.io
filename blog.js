@@ -10687,6 +10687,14 @@ var BLOG_TREE = [
                 "file": "math/linear-algebra/matrix-decomposition/householder-qr.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html",
+                  "math/linear-algebra/matrix-decomposition/householder-matrix.html"
+                ]
+              },
+              {
+                "title": "Householder matrices: a reflection that is its own inverse",
+                "file": "math/linear-algebra/matrix-decomposition/householder-matrix.html",
+                "links": [
+                  "math/linear-algebra/matrix-decomposition/householder-qr.html",
                   "math/linear-algebra/matrix-decomposition/index.html"
                 ]
               }
