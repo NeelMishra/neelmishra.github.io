@@ -9727,7 +9727,7 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/other-methods/index.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
@@ -9740,6 +9740,19 @@ var BLOG_TREE = [
           { title: '5. A worked update, then one elimination step', file: 'quantization/gptq/worked-example-and-elimination.html', links: ['quantization/gptq/obs-derivatives.html', 'quantization/gptq/fixed-order-cholesky.html'] },
           { title: '6. Fixed order, and what is precomputed', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/worked-example-and-elimination.html', 'quantization/gptq/lazy-batches-and-cholesky.html'] },
           { title: '7. Lazy batches and Cholesky', file: 'quantization/gptq/lazy-batches-and-cholesky.html', links: ['quantization/gptq/fixed-order-cholesky.html', 'quantization/gptq/index.html'] }
+        ]
+      },
+      {
+        name: 'other-methods',
+        label: 'Other quantization methods',
+        children: [
+          { title: 'Beyond GPTQ: choose what to quantize', file: 'quantization/other-methods/index.html', links: ['quantization/index.html', 'quantization/other-methods/scales-and-zero-points.html'] },
+          { title: '1. Scales, zero points, and clipping', file: 'quantization/other-methods/scales-and-zero-points.html', links: ['quantization/other-methods/index.html', 'quantization/other-methods/llm-int8.html'] },
+          { title: '2. LLM.int8: separate the outliers', file: 'quantization/other-methods/llm-int8.html', links: ['quantization/other-methods/scales-and-zero-points.html', 'quantization/other-methods/smoothquant.html'] },
+          { title: '3. SmoothQuant: move the difficult range', file: 'quantization/other-methods/smoothquant.html', links: ['quantization/other-methods/llm-int8.html', 'quantization/other-methods/awq.html'] },
+          { title: '4. AWQ: protect important weight channels', file: 'quantization/other-methods/awq.html', links: ['quantization/other-methods/smoothquant.html', 'quantization/other-methods/nf4-and-qlora.html'] },
+          { title: '5. NF4 and QLoRA: storage is not training precision', file: 'quantization/other-methods/nf4-and-qlora.html', links: ['quantization/other-methods/awq.html', 'quantization/other-methods/quantization-aware-training.html'] },
+          { title: '6. QAT: train with the error in the loop', file: 'quantization/other-methods/quantization-aware-training.html', links: ['quantization/other-methods/nf4-and-qlora.html', 'quantization/other-methods/index.html'] }
         ]
       }
     ]
@@ -11346,7 +11359,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
-    quantization: { label: 'Quantization', blurb: 'Post-training weight quantization, starting with the GPTQ layer update and the schedule that makes it finish.' },
+    quantization: { label: 'Quantization', blurb: 'Separate reading paths for GPTQ and other methods: quantization basics, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, and QAT.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
