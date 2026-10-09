@@ -9727,8 +9727,9 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/choosing-a-method.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/choosing-a-method.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
       { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html'] },
+      { title: 'Quantization methods: compare the tradeoffs', file: 'quantization/method-comparison.html', links: ['quantization/index.html', 'quantization/fundamentals/grids-and-scales.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
@@ -9743,35 +9744,40 @@ var BLOG_TREE = [
         name: 'fundamentals',
         label: 'Fundamentals',
         children: [
-          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/choosing-a-method.html', 'quantization/llm-int8/index.html'] }
+          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/choosing-a-method.html', 'quantization/llm-int8/index.html'] },
+          { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/method-comparison.html', 'quantization/llm-int8/outlier-features.html'] }
         ]
       },
       {
         name: 'llm-int8',
         label: 'LLM.int8',
         children: [
-          { title: 'LLM.int8: separate the outliers', file: 'quantization/llm-int8/index.html', links: ['quantization/fundamentals/index.html', 'quantization/smoothquant/index.html'] }
+          { title: 'LLM.int8: separate the outliers', file: 'quantization/llm-int8/index.html', links: ['quantization/fundamentals/index.html', 'quantization/smoothquant/index.html'] },
+          { title: 'LLM.int8: isolate the outlier features', file: 'quantization/llm-int8/outlier-features.html', links: ['quantization/fundamentals/grids-and-scales.html', 'quantization/awq/activation-aware-scaling.html'] }
         ]
       },
       {
         name: 'smoothquant',
         label: 'SmoothQuant',
         children: [
-          { title: 'SmoothQuant: move the difficult range', file: 'quantization/smoothquant/index.html', links: ['quantization/llm-int8/index.html', 'quantization/awq/index.html'] }
+          { title: 'SmoothQuant: move the difficult range', file: 'quantization/smoothquant/index.html', links: ['quantization/llm-int8/index.html', 'quantization/awq/index.html'] },
+          { title: 'SmoothQuant: move the activation difficulty into weights', file: 'quantization/smoothquant/activation-migration.html', links: ['quantization/awq/activation-aware-scaling.html', 'quantization/qlora/adapter-training.html'] }
         ]
       },
       {
         name: 'awq',
         label: 'AWQ',
         children: [
-          { title: 'AWQ: protect important weight channels', file: 'quantization/awq/index.html', links: ['quantization/smoothquant/index.html', 'quantization/qlora/index.html'] }
+          { title: 'AWQ: protect important weight channels', file: 'quantization/awq/index.html', links: ['quantization/smoothquant/index.html', 'quantization/qlora/index.html'] },
+          { title: 'AWQ: protect weights with activation-aware scaling', file: 'quantization/awq/activation-aware-scaling.html', links: ['quantization/llm-int8/outlier-features.html', 'quantization/smoothquant/activation-migration.html'] }
         ]
       },
       {
         name: 'qlora',
         label: 'NF4 & QLoRA',
         children: [
-          { title: 'NF4 and QLoRA: storage is not training precision', file: 'quantization/qlora/index.html', links: ['quantization/awq/index.html', 'quantization/qat/index.html'] }
+          { title: 'NF4 and QLoRA: storage is not training precision', file: 'quantization/qlora/index.html', links: ['quantization/awq/index.html', 'quantization/qat/index.html'] },
+          { title: 'NF4 and QLoRA: quantization for adapter training', file: 'quantization/qlora/adapter-training.html', links: ['quantization/smoothquant/activation-migration.html', 'quantization/gguf/index.html'] }
         ]
       },
       {
@@ -9779,6 +9785,20 @@ var BLOG_TREE = [
         label: 'QAT',
         children: [
           { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/choosing-a-method.html'] }
+        ]
+      },
+      {
+        name: 'gguf',
+        label: 'GGUF & K-quants',
+        children: [
+          { title: 'GGUF and K-quants: format versus quantizer', file: 'quantization/gguf/index.html', links: ['quantization/qlora/adapter-training.html', 'quantization/fp8/index.html'] }
+        ]
+      },
+      {
+        name: 'fp8',
+        label: 'FP8',
+        children: [
+          { title: 'FP8 and evaluation: match the format to the workload', file: 'quantization/fp8/index.html', links: ['quantization/gguf/index.html', 'quantization/method-comparison.html'] }
         ]
       }
     ]
@@ -11385,7 +11405,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
-    quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for quantization fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, and QAT.' },
+    quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, QAT, GGUF, and FP8, with supplementary examples and method comparisons.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
