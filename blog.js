@@ -10683,34 +10683,18 @@ var BLOG_TREE = [
                 ]
               },
               {
-                "title": "Householder QR: reflect columns, then read off Q and R",
+                "title": "Householder QR: the reflector, then Q and R",
                 "file": "math/linear-algebra/matrix-decomposition/householder-qr.html",
                 "links": [
                   "math/linear-algebra/matrix-decomposition/eigenvalue-decomposition.html",
-                  "math/linear-algebra/matrix-decomposition/householder-matrix.html"
-                ]
-              },
-              {
-                "title": "Householder matrices: a reflection that is its own inverse",
-                "file": "math/linear-algebra/matrix-decomposition/householder-matrix.html",
-                "links": [
-                  "math/linear-algebra/matrix-decomposition/householder-qr.html",
-                  "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html"
-                ]
-              },
-              {
-                "title": "Gram-Schmidt QR: orthonormal columns, then a triangular solve",
-                "file": "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
-                "links": [
-                  "math/linear-algebra/matrix-decomposition/householder-matrix.html",
                   "math/linear-algebra/matrix-decomposition/gram-schmidt.html"
                 ]
               },
               {
-                "title": "Gram-Schmidt: subtract the projections, then normalize",
+                "title": "Gram-Schmidt: subtract the projections, then read off R",
                 "file": "math/linear-algebra/matrix-decomposition/gram-schmidt.html",
                 "links": [
-                  "math/linear-algebra/matrix-decomposition/gram-schmidt-qr.html",
+                  "math/linear-algebra/matrix-decomposition/householder-qr.html",
                   "math/linear-algebra/matrix-decomposition/cholesky.html"
                 ]
               },
