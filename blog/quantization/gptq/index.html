@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="GPTQ reading guide in three posts: the layer objective and compensation loop, the Hessian derivation and numerical check, then fixed order, lazy batches, and Cholesky.">
+<meta name="description" content="Learn GPTQ in three steps: round a weight, compensate the layer's output error, then make the updates practical with fixed order, blocks, and Cholesky.">
 <title>GPTQ: quantize the layer, then compensate | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/index.html">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-gptq-20261008">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261009">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
 </head>
@@ -17,58 +17,56 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Reading guide</span></div>
-<h1>GPTQ: quantize the layer, then compensate</h1><p class="post-meta">October 2026 &middot; 6 min read</p>
-<p>GPTQ solves the same layer problem as Optimal Brain Quantization. The loop the video states, before any of the speedups, is the thing to keep in front of you. For one layer, and then again until nothing full precision remains:</p>
+<h1>GPTQ: quantize the layer, then compensate</h1><p class="post-meta">October 2026 &middot; 4 min read</p>
+<p>Rounding a weight changes a layer's output. GPTQ reduces that change by adjusting weights that have not been rounded yet. Those weights can partly compensate for the error because different input features often carry related information.</p>
+<p>The aim is not to keep every weight close to its original value. It is to keep the layer's answers close on representative inputs. An unrounded weight may move farther from its original value if that makes the output more accurate.</p>
 <ol>
-<li>Feed calibration data through the layer.</li>
-<li>Measure the quantization error as the mean squared error between the floating-point output and the quantized output, and store that error. The next step reads it.</li>
-<li>Quantize the row with the smallest stored error. That is the easiest row.</li>
-<li>Adjust the remaining floating-point weights so the layer output moves back toward the original output. The adjustment uses the Hessian.</li>
+<li>Collect inputs from a small calibration set.</li>
+<li>Round one input column of weights, across all output rows.</li>
+<li>Adjust the remaining columns to reduce the resulting output error.</li>
+<li>Repeat in a fixed order, keeping rounded columns fixed.</li>
 </ol>
-<p>That is the procedure at <a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=416s">06:56 in the walkthrough</a>. GPTQ does not replace it with a new objective. It later stops searching for the easiest row and quantizes in a fixed order, because a greedy pass is too slow and leaves the hard rows until nothing is left to adjust. It still feeds data, still uses that MSE, and still adjusts the remaining floating-point weights after each snap. The schedule around the loop is a fixed column order, a precomputed inverse Hessian, updates in blocks of 128 columns, and a Cholesky factor.</p>
-<p>That schedule is why the paper can quantize OPT-175B and BLOOM-176B in about four GPU hours. The video describes the same speedup more loosely, as minutes and as much as three orders of magnitude. The paper's measured figure for those two models is the four hours. The "more than three orders of magnitude" claim is the comparison with OBQ's cubic pass, not with round-to-nearest.</p>
+<p>GPTQ shares the same input-dependent correction across output rows. A triangular factor prepares those corrections in advance; blocks let the implementation apply them with fewer large weight-matrix writes. Neither change removes the need to update a column before rounding it.</p>
 
-<h2 id="one-layer">One layer, stated once</h2>
-<p>Take a weight matrix $W$ and the layer inputs $X$ from a calibration set. The paper writes the objective as</p>
-<div class="note-equation">$$\operatorname{argmin}_{\widehat W}\lVert WX-\widehat W X\rVert_2^2.$$</div>
-<p>That formula assumes the weights multiply on the left. A PyTorch linear layer multiplies on the right, $Y=XW_{\text{torch}}$. The two agree after you transpose the activation tensor. The <a href="hessian-and-the-update.html#layout">Hessian layout section in Part 2</a> is where that orientation matters, because the wrong orientation builds a Hessian of the wrong shape.</p>
-<p>The stored error is one number per remaining row, not one number for the whole layer. A single layer MSE cannot tell you which row to quantize. In the method, the number you store for a row is the extra output MSE of snapping that row and applying the optimal adjustment. The inverse Hessian produces it, as $(\operatorname{quant}(w)-w)^2/[H^{-1}]_{qq}$, so you do not quantize every row, run a separate forward, and write those MSEs out by hand. The <a href="hessian-and-the-update.html#example">worked example in Part 2</a> stores three of them: 0.020806, 0.006181, and 0.019105. The smallest is the middle weight, so that is the row you quantize, and the other two are the floating-point weights you adjust.</p>
-<p>The video says "row" for the slice you snap. Under the paper's layout the independent problem is one output row, and the entry you snap inside it is one weight. GPTQ later snaps the same column of every output row together, because those rows share the Hessian. The four steps stay the same either way. <a href="compensate-the-layer.html#loop">Part 1 writes those four steps out</a>, including what changes after GPTQ drops the search in step 3.</p>
+<h2 id="one-layer">Keep the output, not each individual weight</h2>
+<p>Let $A$ be a table with $n$ calibration samples and $d$ input features: its shape is $n\times d$. Let $W$ contain the original weights, with shape $m\times d$, where $m$ is the number of output channels. PyTorch <code>nn.Linear</code> stores weights in this order and computes $Y=AW^{\mathsf T}$, an $n\times m$ output table.</p>
+<p>We want a low-bit matrix $\widehat W$ whose outputs are similar. The loss below adds up squared differences over every sample and output channel; the subscript $F$ denotes the Frobenius norm, not a set of free weights.</p>
+<div class="note-equation">$$\min_{\widehat W\ \text{on the quantization grid}}
+ \lVert AW^{\mathsf T}-A\widehat W^{\mathsf T}\rVert_F^2.$$</div>
+<p>Zero would mean identical outputs on the calibration set. This is a sum, not a mean. Dividing by $nm$ gives mean squared error but does not change which weights minimize it.</p>
+<p>The paper puts samples in columns instead: $X=A^{\mathsf T}$ has shape $d\times n$, and its output is $WX=Y^{\mathsf T}$. Thus its loss $\lVert WX-\widehat W X\rVert_F^2$ is the same sum. <a href="hessian-and-the-update.html#layout">Part 2</a> shows why this transpose matters when building the correction matrix.</p>
 
-<h2 id="route">Three posts, from objective to implementation</h2>
-<div class="note-table q-table"><table><caption>Read these three posts in order. Each uses the previous one's objects.</caption>
-<thead><tr><th scope="col">Post</th><th scope="col">Question it answers</th><th scope="col">What it does not answer</th></tr></thead>
+<h2 id="route">Three posts, from the idea to the implementation</h2>
+<div class="note-table q-table"><table><caption>Read in order, or jump to the part you need.</caption>
+<thead><tr><th scope="col">Post</th><th scope="col">What you learn</th></tr></thead>
 <tbody>
-<tr><th scope="row"><a href="compensate-the-layer.html">1. GPTQ: the layer objective and compensation loop</a><br>13 min read</th><td data-label="Question">Memory traffic, row scales, the OBS to OBQ line, and the four-step calibration and compensation loop</td><td data-label="Not answered">The algebraic derivation of the adjustment</td></tr>
-<tr><th scope="row"><a href="hessian-and-the-update.html">2. GPTQ: derive and check the Hessian update</a><br>23 min read</th><td data-label="Question">$WX$ versus $XW$, both OBS Lagrangian derivatives, the grid substitution, the three-weight check, and Gaussian elimination</td><td data-label="Not answered">The shared fixed-order schedule</td></tr>
-<tr><th scope="row"><a href="fixed-order-cholesky.html">3. GPTQ: fixed order, lazy batches, and Cholesky</a><br>16 min read</th><td data-label="Question">Why fixed order shares the precompute, lazy batches reduce weight writes, and Cholesky stabilizes the solve</td><td data-label="Not answered">A serving kernel</td></tr>
+<tr><th scope="row"><a href="compensate-the-layer.html">1. GPTQ: the layer objective and compensation loop</a><br>5 min read</th><td>Why rounding causes output error, how compensation helps, and what calibration and quantization grids do.</td></tr>
+<tr><th scope="row"><a href="hessian-and-the-update.html">2. GPTQ: derive and check the Hessian update</a><br>8 min read</th><td>The constrained least-squares derivation, a three-weight numerical example, and the reduced inverse after a weight is fixed.</td></tr>
+<tr><th scope="row"><a href="fixed-order-cholesky.html">3. GPTQ: fixed order, lazy batches, and Cholesky</a><br>7 min read</th><td>How a shared order, sequential block updates, damping, and a triangular factor make compensation practical.</td></tr>
 </tbody></table></div>
 
-<h2 id="video">Where the video spends its time</h2>
-<p>The walkthrough is <a href="https://www.youtube.com/watch?v=6J_0BDqMFi0">GPTQ Quantization Explained</a>. These timestamps match sections within the three posts above.</p>
+<h2 id="video">The distinctions to keep straight</h2>
 <ul>
-<li>01:43, why the weight tensor is the thing being shrunk.</li>
-<li>05:47, Optimal Brain Surgeon, then Optimal Brain Compression, then GPTQ.</li>
-<li>06:56, feed the layer, store the MSE, quantize the easiest row, adjust the remaining floating-point weights.</li>
-<li>08:10, the $WX$ versus $XW$ layout, and the two Hessians.</li>
-<li>15:14, the Optimal Brain Surgeon equations: Taylor series, the zero constraint, the Lagrangian, and the saliency. Quantization changes the target from 0 to a grid point.</li>
-<li>19:57, fixed order, which is what makes the inverse rows knowable in advance. 23:12, memory traffic and lazy batches, a separate speedup. 29:00, Cholesky, the stored form of those rows.</li>
+<li><strong>Rounding versus compensation:</strong> the grid chooses a legal value; compensation changes the weights still free to move.</li>
+<li><strong>OBQ versus GPTQ:</strong> greedy OBQ chooses the cheapest next weight separately in each output row. GPTQ processes the same input column across all rows in a fixed order.</li>
+<li><strong>Group versus block:</strong> a group shares quantization parameters. A block controls when corrections are written to later columns.</li>
+<li><strong>Layer error versus model quality:</strong> matching calibration outputs is useful, but it does not guarantee identical generated text or unchanged task accuracy.</li>
 </ul>
-<p>The video skips the paper's result tables on purpose. Figure 1 of the paper is the comparison that belongs there: 4-bit OPT and 3-bit BLOOM perplexity against FP16 and round-to-nearest. GPTQ tracks FP16 on those plots where round-to-nearest does not. That is a perplexity result, not a claim that every downstream task is unchanged.</p>
+<p>These posts explain weight-only quantization. Low-bit weights do not imply low-bit activations. Inference speed also depends on the hardware, kernels, and workload, not just the number of bits.</p>
 
-<h2 id="check">A check before the algebra</h2>
-<p>Round-to-nearest picks each weight's grid point independently. GPTQ's update can move a weight that has not been quantized yet, so two weights that started on opposite sides of a grid boundary can end on different points than a naive snap would choose. The <a href="hessian-and-the-update.html#example">worked example in Part 2</a> is small enough to recompute: five input rows, three weights, and a grid of halves. Compensating the other two weights cuts the output squared error from 0.05265 to 0.00309. <code>tools/check_gptq_update.py</code> checks that number against a constrained least-squares solve.</p>
-<details class="note-check"><summary>Is GPTQ the same algorithm as the MLOps inference note?</summary><p>Same method, different job. The <a href="../../mlops/llm-inference/quantization-gptq.html">inference note</a> is the serving summary. These notes are the derivation, including the layout transpose the paper's formula needs and the block update the paper actually runs.</p></details>
-<details class="note-check"><summary>Does a good GPTQ reconstruction mean the generated text is unchanged?</summary><p>No. The objective is layer output error on the calibration inputs. Perplexity on WikiText-2, which the paper reports, is a further check. A task the calibration set never resembles can still move.</p></details>
+<h2 id="check">A small result you can check</h2>
+<p>In <a href="hessian-and-the-update.html#example">the worked example</a>, one output uses three weights and five calibration samples. Rounding the middle weight from $-0.85$ to $-1$ alone gives output squared error $0.05265$. Adjusting the other two weights reduces it to about $0.003090$.</p>
+<p>That is one compensated step, not the error of the finished low-bit layer. The other two weights still need rounding. The existing <code>tools/check_gptq_update.py</code> verifies the step against a direct least-squares solve.</p>
+<details class="note-check"><summary>Where does this fit into inference?</summary><p>The <a href="../../mlops/llm-inference/quantization-gptq.html">inference note</a> covers the serving context. This series explains how GPTQ chooses and repairs low-bit weights before serving.</p></details>
 <h2 id="sources">Sources</h2>
 <ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">GPTQ paper</a>, equation (1), Algorithm 1, and the four-GPU-hour figure for OPT-175B and BLOOM-176B.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0">Savolainen's walkthrough</a>, the teaching order used here.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">IST-DASLab/gptq, gptq.py</a>, <code>blocksize=128</code>, <code>percdamp=.01</code>, and the linear-input transpose.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, the layer objective, compensation update, and Algorithm 1.</li>
+<li><a href="https://arxiv.org/abs/2208.11580">Frantar, Singh, and Alistarh, Optimal Brain Compression</a>, including the greedy OBQ predecessor.</li>
+<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, calibration accumulation and the blocked Cholesky-based implementation.</li>
 </ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../index.html"><span>Previous</span><span>Quantization: shrink the weights, then repair the layer</span></a><a class="next" href="compensate-the-layer.html"><span>Next</span><span>GPTQ: the layer objective and compensation loop</span></a></nav>
 </article></div>
 <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-layout-20261009"></script><script src="../../../blog.js?v=quant-layout-20261009"></script><script src="../../../code-highlight.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261009"></script><script src="../../../blog.js?v=quant-plain-20261009"></script><script src="../../../code-highlight.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>

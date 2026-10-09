@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Orient the GPTQ Hessian, derive both OBS Lagrangian conditions, and check the quantization update and Gaussian-elimination downdate numerically.">
+<meta name="description" content="Derive GPTQ's constrained quantization update from exact linear-layer squared error, check a three-weight example, and downdate the inverse for remaining weights.">
 <title>GPTQ: derive and check the Hessian update | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/gptq/hessian-and-the-update.html">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-gptq-20261008">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261009">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
 </head>
@@ -17,109 +17,84 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../index.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 2</span></div>
-<h1>GPTQ: derive and check the Hessian update</h1><p class="post-meta">October 2026 &middot; 23 min read</p>
-<p>The <a href="compensate-the-layer.html#loop">previous post's compensation loop</a> left two formulas unnamed: which weight to snap, and how to move the weights that are still free. Both come from a quadratic model of the layer error. The quadratic is the Hessian. The annoying part, and the part that stalled the video's author, is that the paper writes the linear layer as $WX$ and the Hessian as $2XX^{\mathsf T}$. A PyTorch linear activation is not shaped for that product unless you transpose it first. We will fix that orientation, derive the update from both Lagrangian conditions, then check the update and inverse removal on three weights.</p>
+<h1>GPTQ: derive and check the Hessian update</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
+<p>The question is precise: if one weight must land on a grid point, how should the remaining weights move to keep the outputs as close as possible? We will solve that constrained least-squares problem, check it with numbers, then prepare the next step.</p>
 
-<h2 id="layout">Two layouts, two Hessians</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/layout-hessians.jpg" alt="Video frame comparing the paper objective WX with a linear-layer product XW, and the Hessians 2XX^T and 2X^T X.">
-<figcaption>Frame from <a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=525s">GPTQ Quantization Explained, 08:45</a>. The slide is the video's correction. The equations below are the ones that match the paper and the authors' code once $X$ is oriented.</figcaption>
-</figure>
-<p>The paper's objective is consistent inside its own convention. $W$ is $d_{\text{row}}\times d_{\text{col}}$, $X$ is $d_{\text{col}}\times n$ calibration tokens, and the layer is $Y=WX$. One row $w$ of $W$ produces one output channel. Its squared error is $\lVert wX-\hat w X\rVert^2$, so the Hessian with respect to that row is</p>
-<div class="note-equation">$$H_F=2X_F X_F^{\mathsf T}.$$</div>
-<p>$F$ is the set of columns that are still full precision. $H_F$ is $d_{\text{col}}\times d_{\text{col}}$. It does not depend on $w$. Every output row shares it. That is why a later column-wise schedule can update the inverse once per column instead of once per weight.</p>
-<p>A PyTorch <code>nn.Linear</code> stores the weight as $(\text{out},\text{in})$ and computes $y=xW^{\mathsf T}$, with $x$ shaped $(\text{samples},\text{in})$. If you drop that $x$ into the paper formula and form $2xx^{\mathsf T}$, you get a samples-by-samples matrix. The Hessian that matches the paper, for this layout, is $2x^{\mathsf T}x$.</p>
-<p>The video calls the paper's wording a mistake: it presents $WX$ as the linear-layer forward, and that product is the convolutional, left-multiply convention. Inside $Y=WX$ the algebra is not wrong. The bug is real if you implement the printed formula on a PyTorch activation without transposing. The Hessian comes out transposed, or the wrong shape entirely, and the weight update steps in the wrong coordinates.</p>
-<p>The authors' code does the transpose. In <code>add_batch</code>, a linear or Conv1D input is reshaped to $(\text{tokens},\text{in})$ and then transposed, so the stored matrix is $(\text{in},\text{tokens})$. The accumulation is <code>inp @ inp.T</code>, with a $\sqrt{2/n}$ scale so the result matches $2XX^{\mathsf T}$ in the paper's orientation. Conv2d does not take that transpose. It unfolds patches, which is already the left-multiply layout. The video also shows a torchao GPTQ file doing the linear transpose. I read the authors' file. Treat the torchao path as the video's second check, not as a line I am citing from the current library tree.</p>
-<p>Practical rule: build $H=2XX^{\mathsf T}$ only after $X$ is $(\text{in},\text{tokens})$. If your tensor is $(\text{tokens},\text{in})$, transpose first, or build $2X^{\mathsf T}X$ and do not also transpose.</p>
+<h2 id="layout">One layer, two ways to arrange the samples</h2>
+<p>Use $A$ for a calibration table with $n$ samples as rows and $d$ input features as columns. The weight matrix $W$ has $m$ output rows and $d$ input columns. $Y$ is the output table, with one row per sample. These are the shapes used by PyTorch <code>nn.Linear</code>:</p>
+<div class="note-equation">$$A\in\mathbb R^{n\times d},\qquad
+ W\in\mathbb R^{m\times d},\qquad Y=AW^{\mathsf T}\in\mathbb R^{n\times m}.$$</div>
+<p>Each output row of $W$ defines a separate reconstruction problem. Write that row as a length-$d$ column vector $w$; its original outputs are $y=Aw$. We can solve for each output channel separately because the layer's total squared error is the sum of their errors.</p>
+<p>The paper instead puts samples in columns. Set $X=A^{\mathsf T}$, with shape $d\times n$. Its left-multiplied output is the transpose of our output table. The Hessian $H$ is the $d\times d$ second-derivative matrix of one output channel's squared reconstruction error:</p>
+<div class="note-equation">$$WX=WA^{\mathsf T}=Y^{\mathsf T},\qquad
+ H=2A^{\mathsf T}A=2XX^{\mathsf T}\in\mathbb R^{d\times d}.$$</div>
+<p>Both products for $H$ describe input-feature correlations. Computing $2AA^{\mathsf T}$ instead would give an $n\times n$ sample-correlation matrix, not the weight-coordinate Hessian.</p>
+<p>The authors' <code>add_batch</code> transposes linear inputs before accumulating <code>inp @ inp.T</code>. It also normalizes its accumulation by the number of calibration examples seen. Below we use the unnormalized sum $H=2A^{\mathsf T}A$ so the numerical costs are easy to check.</p>
 
-<h2 id="why-hessian">Why a second derivative picks a step size</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/loss-landscape.jpg" alt="A curved loss surface drawn over two parameter axes, labeled loss landscape topology.">
-<figcaption>Frame from the video, about 11:02. The surface is an illustration of a loss, not a plot of a GPTQ layer.</figcaption>
-</figure>
-<p>The Hessian of a scalar function is the matrix of second partial derivatives. Here the function is the layer's squared reconstruction error, not the training loss, unless you are back in the pruning paper.</p>
-<p>A first derivative at a point is a slope. If that linear approximation were the whole function, the downhill direction would have no finite step: the line keeps descending. The pictures in the video make that concrete. A slope of 2.11 tells you which way is down. It does not tell you where the curve turns.</p>
-<figure class="note-figure">
-<img class="q-frame" src="frames/slope-only.jpg" alt="A curved function with a red tangent line at a marked point, labeled slope equals 2.11.">
-<figcaption>Frame from the video, about 13:49. The tangent has a direction and no minimum.</figcaption>
-</figure>
-<figure class="note-figure">
-<img class="q-frame" src="frames/quadratic-taylor.jpg" alt="The same curve with a green quadratic Taylor approximation that has a nearby minimum, and the second-order formula underneath.">
-<figcaption>Frame from the video, about 14:39. Adding the second-derivative term gives the local parabola a bottom, so the step is finite. The formula on the slide is the scalar Taylor expansion.</figcaption>
-</figure>
-<p>Newton's method is this idea as an algorithm: fit the local quadratic, step to its minimum. Neural-network training usually does not form the full Hessian. It is too big, and the training loss is not the quadratic GPTQ assumes. GPTQ can form this Hessian because, for one layer, $H=2XX^{\mathsf T}$ is the size of the input dimension, and $X$ is a calibration batch rather than the whole pretraining corpus.</p>
-<p>That quadratic is where Optimal Brain Surgeon starts. The video leaves the GPTQ formulas on screen and derives them from the 1993 pruning paper, then changes the target from zero to a grid point. With the orientation and finite step established, we can now derive both stationarity conditions. The grid formulas are the same algebra with the target substituted in.</p>
+<h2 id="why-hessian">The quadratic is exact here</h2>
+<p>Let $v$ be the current length-$d$ weight vector and keep $y=Aw$ as the original target. The output residual is $r=Av-y$, a length-$n$ vector. The reconstruction cost is $C(v)=r^{\mathsf T}r$, the sum of squared residuals.</p>
+<p>Let $F$ be the set of unfixed input columns. $A_F$ contains just those columns, and $\delta_F$ is a length-$|F|$ vector of changes to their weights. $H_F$ is the Hessian restricted to these free coordinates. Expanding the square gives:</p>
+<div class="note-equation">$$C(v+\delta)-C(v)
+ =2r^{\mathsf T}A_F\delta_F+\frac12\delta_F^{\mathsf T}H_F\delta_F,
+ \qquad H_F=2A_F^{\mathsf T}A_F.$$</div>
+<p>Here $\delta$ is zero outside $F$. The active Hessian $H_F$ has shape $|F|\times|F|$, not always $d\times d$. No Taylor remainder is being dropped: a linear layer with fixed inputs and squared error is exactly quadratic in its weights.</p>
+<p>Initially $v=w$, so $r=0$. After earlier weights are fixed, optimal compensation makes the remaining coordinates a least-squares optimum. That gives $A_F^{\mathsf T}r=0$, even though $r$ itself need not be zero.</p>
+<p>At such a point the linear term vanishes. The extra cost of the next constraint is therefore $\tfrac12\delta_F^{\mathsf T}H_F\delta_F$. It is an <em>increment</em> on top of error from earlier steps, not the layer's total error. This statement assumes the remaining coordinates have been optimized; it is not valid for an arbitrary partially rounded vector.</p>
 
+<h2 id="obs">Derive the quantization constraint</h2>
+<p>Choose an unfixed column index $q\in F$. Let $t=\operatorname{quant}(v_q)$ be its target grid value and $a=v_q-t$ its current rounding discrepancy. The coordinate must change by $-a$.</p>
+<p>Define $e_q$ as a length-$|F|$ vector with 1 at the position of column $q$ and 0 elsewhere. It selects that coordinate. The constrained problem is:</p>
+<div class="note-equation">$$\min_{\delta_F}\frac12\delta_F^{\mathsf T}H_F\delta_F
+ \quad\text{subject to}\quad e_q^{\mathsf T}\delta_F+a=0.$$</div>
+<p>The constraint says $v_q+\delta_q=t$. All other entries of $\delta_F$ can vary. For now assume $H_F$ is positive definite, so its inverse exists; <a href="fixed-order-cholesky.html#cholesky">Part 3</a> handles damping when the inputs make it poorly conditioned.</p>
+<p>Introduce a scalar multiplier $\mu$ to enforce this one constraint. The Lagrangian is the quadratic plus the multiplier times the constraint residual:</p>
+<div class="note-equation">$$\mathcal L(\delta_F,\mu)=
+ \frac12\delta_F^{\mathsf T}H_F\delta_F+
+ \mu(e_q^{\mathsf T}\delta_F+a).$$</div>
+<p>Setting both derivatives to zero will give a minimum that lands exactly on the grid.</p>
 
-<h2 id="obs">The Optimal Brain Surgeon equations</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/obs-equations.jpg" alt="The Optimal Brain Surgeon page the video pauses on: the Taylor expansion, the constraint that sets one weight to zero, the Lagrangian, and the closed-form update and saliency.">
-<figcaption>Frame from the video, about 16:20. Hassibi, Stork, and Wolff, Optimal Brain Surgeon. The equations below are the ones on that page. The photo is there so you can see which lines the video is pointing at. Compute from the typeset formulas, not from the 360p page.</figcaption>
-</figure>
-<p>OBS prunes. It deletes one weight and moves the others so the training loss barely changes. Three moves get from the Taylor series to the update.</p>
-<p>First, the network is assumed to sit at a local minimum of the training error. The gradient is then zero: you are at the bottom of a valley, so the linear term has nothing to say. For the quantization objective this assumption is free. The full-precision weights already have zero reconstruction error, so they are the minimum of $\lVert WX-\widehat W X\rVert^2$ whether or not training had fully converged.</p>
-<p>Second, expand the loss for a weight step $\delta w$:</p>
-<div class="note-equation">$$\delta E=\left(\frac{\partial E}{\partial w}\right)^{\mathsf T}\delta w+\frac12\delta w^{\mathsf T}H\,\delta w+O(\lVert\delta w\rVert^3).$$</div>
-<p>The first term is zero at the minimum. OBS drops the third-order remainder. What remains is the quadratic,</p>
-<div class="note-equation">$$\delta E\approx\frac12\delta w^{\mathsf T}H\,\delta w.$$</div>
-<p>$H$ is the Hessian of that error, not a learning-rate heuristic. For one layer it is $2XX^{\mathsf T}$ once $X$ has the paper's orientation.</p>
-<p>Third, write the prune as a constraint. Setting weight $q$ to zero means the step on that coordinate is the opposite of the current weight, $\delta w_q=-w_q$. In the paper's unit-vector form, $e_q$ is 1 in position $q$ and 0 elsewhere, and the constraint is</p>
-<div class="note-equation">$$e_q^{\mathsf T}\delta w+w_q=0.$$</div>
-<p>The problem is then: choose the coordinate $q$ and the step $\delta w$ that minimize the quadratic, subject to that one linear constraint. OBS forms the Lagrangian. $\lambda$ is a free scalar whose only job is to enforce the constraint.</p>
-<div class="note-equation">$$L(\delta w,\lambda)=\frac12\delta w^{\mathsf T}H\,\delta w+\lambda\left(e_q^{\mathsf T}\delta w+w_q\right).$$</div>
+<h3 id="obs-derivatives">Two derivatives determine the correction</h3>
+<p>Because $H_F$ is symmetric, differentiating the quadratic gives $H_F\delta_F$. The factor $\tfrac12$ cancels the two equal contributions from the left and right copies of $\delta_F$. Differentiating with respect to $\mu$ gives the constraint itself:</p>
+<div class="note-equation">$$\frac{\partial\mathcal L}{\partial\delta_F}
+ =H_F\delta_F+\mu e_q=0,\qquad
+ \frac{\partial\mathcal L}{\partial\mu}=e_q^{\mathsf T}\delta_F+a=0.$$</div>
+<p>Write $G_F=H_F^{-1}$, also $|F|\times|F|$. Multiplying the first equation by $G_F$ gives $\delta_F=-\mu G_Fe_q$. The product $G_Fe_q$ is column $q$ of the inverse: this is the direction of the compensation.</p>
+<p>Substitute that direction into the second equation. Since $e_q^{\mathsf T}G_Fe_q$ selects the diagonal entry $(G_F)_{qq}$, the scale is:</p>
+<div class="note-equation">$$-\mu(G_F)_{qq}+a=0
+ \quad\Rightarrow\quad \mu=\frac{a}{(G_F)_{qq}},
+ \qquad
+ \delta_F=-\frac{a}{(G_F)_{qq}}(G_F)_{:,q}.$$</div>
+<p>On coordinate $q$, the diagonal cancels, giving $\delta_q=-a=t-v_q$. Off-diagonal entries move the other weights. The formula includes the snap itself; do not snap coordinate $q$ and then add this same change to it again.</p>
+<p>To compute the extra squared output error, put the correction back into the quadratic. The identity $G_FH_FG_F=G_F$ reduces the matrix product to one diagonal entry:</p>
+<div class="note-equation">$$\Delta C_q
+ =\frac12\frac{a^2}{(G_F)_{qq}^2}
+ e_q^{\mathsf T}G_FH_FG_Fe_q
+ =\frac12\frac{a^2}{(G_F)_{qq}}.$$</div>
+<p>For the same rounding discrepancy, a larger inverse diagonal means a cheaper compensated constraint. The inverse captures how the other input features can help; the diagonal of $H_F$ alone does not provide that correction.</p>
 
-<h3 id="obs-derivatives">Set both derivatives to zero</h3>
-<p>A minimum of $L$ has two stationarity conditions, not one. The derivative with respect to $\delta w$ finds the cheapest step for a fixed penalty $\lambda$. The derivative with respect to $\lambda$ puts the deleted weight exactly at zero. Skip either one and you do not get the OBS update.</p>
-<p>Take the weight step first. $H$ is symmetric, because it is a Hessian, so the derivative of the quadratic form is the matrix-vector product $H\,\delta w$. In coordinates, the quadratic is $\tfrac12\sum_{ij}\delta w_i H_{ij}\delta w_j$. Differentiating with respect to coordinate $k$ hits $\delta w_k$ once from the left and once from the right. Symmetry, $H_{ki}=H_{ik}$, makes those two contributions the same, and the factor $\tfrac12$ cancels one of them. What is left is row $k$ of $H$ times $\delta w$. The constraint term $\lambda e_q^{\mathsf T}\delta w$ is linear, so its derivative is $\lambda e_q$. The constant $\lambda w_q$ does not depend on $\delta w$, so it contributes nothing. Setting the vector derivative to zero is therefore</p>
-<div class="note-equation">$$\frac{\partial L}{\partial \delta w}=H\,\delta w+\lambda e_q=0.$$</div>
-<p>That is one linear system. Multiply through by $H^{-1}$:</p>
-<div class="note-equation">$$\delta w=-\lambda H^{-1}e_q.$$</div>
-<p>$H^{-1}e_q$ is column $q$ of the inverse. The step is that column, scaled by $-\lambda$. You do not yet know $\lambda$. This derivative only says the repair has to lie along column $q$. It does not yet say that weight $q$ lands on zero.</p>
-<p>Now differentiate with respect to the multiplier. $L$ is linear in $\lambda$, and the coefficient of $\lambda$ is the constraint residual. Setting that derivative to zero puts the residual at zero:</p>
-<div class="note-equation">$$\frac{\partial L}{\partial \lambda}=e_q^{\mathsf T}\delta w+w_q=0.$$</div>
-<p>Substitute the step you just got. $e_q^{\mathsf T}H^{-1}e_q$ picks out one entry of the inverse, the diagonal $[H^{-1}]_{qq}$:</p>
-<div class="note-equation">$$e_q^{\mathsf T}(-\lambda H^{-1}e_q)+w_q=0
-\qquad\Rightarrow\qquad
--\lambda[H^{-1}]_{qq}+w_q=0
-\qquad\Rightarrow\qquad
-\lambda=\frac{w_q}{[H^{-1}]_{qq}}.$$</div>
-<p>Put that $\lambda$ back into the step. The two derivatives together are the OBS update. The extra loss is what you get by substituting the same step back into the quadratic, which is the saliency $L_q$:</p>
-<div class="note-equation">$$\delta w=-\frac{w_q}{[H^{-1}]_{qq}}H^{-1}e_q,\qquad L_q=\frac12\frac{w_q^2}{[H^{-1}]_{qq}}.$$</div>
-<p>The saliency line is the same substitution, not a second guess. With $\delta w=-\lambda H^{-1}e_q$ and $H\,\delta w=-\lambda e_q$,</p>
-<div class="note-equation">$$\delta w^{\mathsf T}H\,\delta w=\lambda^2 e_q^{\mathsf T}H^{-1}e_q=\lambda^2[H^{-1}]_{qq}=\frac{w_q^2}{[H^{-1}]_{qq}},$$</div>
-<p>and half of that is $L_q$. $L_q$ is the extra loss of deleting weight $q$ and applying the optimal repair. OBS deletes the weight with the smallest saliency, applies $\delta w$, then removes that coordinate from $H$ and repeats. Neither $H$ nor $H^{-1}$ has to be diagonal. The inverse's off-diagonal entries are what move the other weights. A diagonal approximation would delete a weight and leave the rest alone, which is the earlier Optimal Brain Damage method the OBS paper is replacing.</p>
-<p>On the three-weight example, $q=1$ and $w_1=-0.85$. The middle diagonal of the inverse is $3.64025$, so $\partial L/\partial\lambda=0$ gives $\lambda=-0.85/3.64025=-0.23350$. Column 1 of the inverse is $(-2.56343,\,3.64025,\,0.41730)$. Then $\partial L/\partial\delta w=0$ says the step is $-\lambda$ times that column: $(-0.59856,\,0.85,\,0.09744)$. Adding it to $(1.20,-0.85,0.40)$ lands on $(0.601437,\,0,\,0.497439)$. Coordinate 1 is exactly zero. $H\,\delta w+\lambda e_1$ is the zero vector, up to roundoff. The saliency is $0.099238$, and that equals the output squared error after the repair. <code>tools/check_gptq_update.py</code> checks the same step against the least-squares solve that holds coordinate 1 at 0.</p>
+<h2 id="from-prune-to-grid">A grid target; zero is only a special case</h2>
+<p>For a fixed column and fixed grid, the denominator does not depend on the target $t$. Minimizing the cost therefore chooses the nearest grid point to the <em>current</em> weight $v_q$, including clipping at the grid's limits. Earlier compensation may have changed that value.</p>
+<details class="note-check"><summary>The optional pruning connection</summary>
+<p>Optimal Brain Surgeon (OBS) sets a weight to zero. Setting $t=0$ in the derivation gives $a=v_q$, so the constraint, multiplier, update, and cost are:</p>
+<div class="note-equation">$$e_q^{\mathsf T}\delta_F+v_q=0,\qquad
+ \mu=\frac{v_q}{(G_F)_{qq}},\qquad
+ \delta_F=-\frac{v_q}{(G_F)_{qq}}(G_F)_{:,q},\qquad
+ \Delta C_q=\frac12\frac{v_q^2}{(G_F)_{qq}}.$$</div>
+<p>The original OBS training-loss argument uses a second-order approximation near a stationary point. Our linear reconstruction derivation needs neither that training assumption nor an approximation. Quantization simply replaces the zero target with a legal grid value.</p>
+<p>For the example below, setting column 1 to zero gives weights approximately $(0.601437,0,0.497439)$ and squared output error $0.099238$. The existing check script verifies this special case too.</p>
+</details>
 
-<h2 id="from-prune-to-grid">Same Lagrangian, grid target instead of zero</h2>
-<p>Quantization does not have one legal value. An 8-bit grid has 256 of them. A 4-bit grid has 16. The video's substitution is to keep the Lagrangian and change the constraint. You no longer add $-w_q$ so the coordinate lands on 0. You add $\operatorname{quant}(w_q)-w_q$ so it lands on the chosen grid point:</p>
-<div class="note-equation">$$e_q^{\mathsf T}\delta w+w_q=\operatorname{quant}(w_q).$$</div>
-<p>The derivatives do not change shape. $\partial L/\partial\delta w=H\,\delta w+\lambda e_q=0$ is the same, because the grid point is a constant, just as $w_q$ was. It still forces $\delta w=-\lambda H^{-1}e_q$. What changes is $\partial L/\partial\lambda$. The residual is now $e_q^{\mathsf T}\delta w+w_q-\operatorname{quant}(w_q)$, and setting that derivative to zero gives</p>
-<div class="note-equation">$$-\lambda[H^{-1}]_{qq}+\bigl(w_q-\operatorname{quant}(w_q)\bigr)=0,
-\qquad
-\lambda=\frac{w_q-\operatorname{quant}(w_q)}{[H^{-1}]_{qq}}.$$</div>
-<p>So the pruning formulas survive with $w_q$ replaced by $w_q-\operatorname{quant}(w_q)$. The repair and the extra error become</p>
-<div class="note-equation">$$\delta w=-\frac{w_q-\operatorname{quant}(w_q)}{[H^{-1}]_{qq}}H^{-1}e_q,\qquad
-L_q=\frac12\frac{\bigl(w_q-\operatorname{quant}(w_q)\bigr)^2}{[H^{-1}]_{qq}}.$$</div>
-<p>That is the update in the GPTQ paper. The saliency is the stored quantization error for that row: the extra MSE of snapping it and adjusting the floating-point weights that remain. The paper's selection score drops the factor $\tfrac12$. Ranking is unchanged. Comparing the score with a raw $\lVert Y-\hat Y\rVert^2$ is not, which is why the example's winning score is $0.006181$ and the output squared error after the repair is $0.003090$.</p>
-<p>For a fixed denominator, the grid point that minimizes $L_q$ is the nearest one. You do not search all 256 integers. You snap to the nearest grid point, store $L_q$, and among the remaining rows pick the smallest stored error. Then you apply $\delta w$. Optimal Brain Compression is this substitution, written out for quantization and pruning together. The video points there if you want the quantization paper's own derivation rather than the pruning derivation with the target changed at the end.</p>
+<h2 id="formulas">Greedy OBQ chooses a column; GPTQ fixes the order</h2>
+<p>OBQ compares the extra compensated costs for the remaining weights within one output row. It can omit the common factor $\tfrac12$ when ranking candidates. With $G_F=H_F^{-1}$, define the score and selected column as:</p>
+<div class="note-equation">$$S_q=\frac{(v_q-\operatorname{quant}(v_q))^2}{(G_F)_{qq}},
+ \qquad q_{\mathrm{OBQ}}=\operatorname*{argmin}_{q\in F}S_q.$$</div>
+<p>The score is twice the extra <em>sum</em> of squared output errors under our $H=2A^{\mathsf T}A$ convention. For one output channel, the extra mean squared error is $S_q/(2n)$. Scaling the Hessian for a mean changes the reported score, but not the compensation vector when the scaling is consistent.</p>
+<p>GPTQ does not make this greedy choice. It processes columns in a chosen fixed order, shared by every output row. Each row has its own current rounding discrepancy, but all rows use the same inverse-derived correction direction for that column.</p>
 
-<h2 id="formulas">The pick, and the update</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/update-equations.jpg" alt="The OBQ formulas: choose the weight that minimizes squared quantization error over the inverse-Hessian diagonal, then update the free weights with the corresponding column of the inverse.">
-<figcaption>Frame from the video, about 15:14. These match equations (2) in the GPTQ paper. $F$ is the set of weights still full precision.</figcaption>
-</figure>
-<div class="note-equation">$$w_q=\operatorname{argmin}_{w_q}\frac{\bigl(\operatorname{quant}(w_q)-w_q\bigr)^2}{[H_F^{-1}]_{qq}},\qquad
-\delta_F=-\frac{w_q-\operatorname{quant}(w_q)}{[H_F^{-1}]_{qq}}\,(H_F^{-1})_{:,q}.$$</div>
-<p>$\operatorname{quant}(w_q)$ is the grid point you will snap to. The denominator is the matching diagonal entry of the inverse Hessian, not of $H$ itself. Using $H_{qq}$ in that slot is a different, and wrong, update. The column $(H_F^{-1})_{:,q}$ spreads the correction across every free weight, including $w_q$. On coordinate $q$ the correction equals $\operatorname{quant}(w_q)-w_q$, so the formula itself lands on the grid point. You do not snap first and then add a second correction to that same entry.</p>
-<p>Pruning is the special case where the only legal value is 0. Quantization changes the target, not the shape of the solution. Once the target is fixed, you are solving a quadratic with one coordinate constrained. The score above is the extra quadratic error of the best such constraint. OBQ picks the coordinate with the smallest score. GPTQ will stop picking and take coordinates in order. The update formula does not change.</p>
-<p>One constant is easy to drop. The paper's score uses $H=2XX^{\mathsf T}$. The output squared error $\lVert X\delta\rVert^2$ equals $\tfrac12\delta^{\mathsf T}H\delta$ when you expand around the full-precision weights. So the printed score is twice the output squared error. The factor of 2 does not change which weight wins. It does change the number if you compare the score with a raw $\lVert Y-\hat Y\rVert^2$.</p>
-
-<p>Now run those formulas on five calibration rows, then check the elimination step that avoids a second inversion.</p>
-<h2 id="example">Three weights, checked</h2>
-<p>This example is constructed. Five calibration rows, one output, grid points at half-integers from $-1$ to $1$. $X$ is stored as PyTorch would store it, $(\text{samples},\text{in})$.</p>
-<div class="note-table q-table"><table><caption>Calibration inputs. Columns are the three weights.</caption>
-<thead><tr><th scope="col">Row</th><th scope="col">$x_0$</th><th scope="col">$x_1$</th><th scope="col">$x_2$</th></tr></thead>
+<h2 id="example">Three weights, five samples, one compensated snap</h2>
+<p>This is a constructed, undamped example. Use the grid $[-1,-0.5,0,0.5,1]$ and original weights $w=(1.20,-0.85,0.40)^{\mathsf T}$. At the first step $v=w$ and every coordinate is free.</p>
+<div class="note-table q-table"><table><caption>The $5\times3$ calibration table $A$. Each row is one input sample.</caption>
+<thead><tr><th scope="col">Sample</th><th scope="col">$A_{s,0}$</th><th scope="col">$A_{s,1}$</th><th scope="col">$A_{s,2}$</th></tr></thead>
 <tbody>
 <tr><th scope="row">1</th><td>1.0</td><td>0.8</td><td>0.1</td></tr>
 <tr><th scope="row">2</th><td>1.1</td><td>0.7</td><td>$-0.2$</td></tr>
@@ -127,57 +102,59 @@ L_q=\frac12\frac{\bigl(w_q-\operatorname{quant}(w_q)\bigr)^2}{[H^{-1}]_{qq}}.$$<
 <tr><th scope="row">4</th><td>1.2</td><td>0.6</td><td>0.3</td></tr>
 <tr><th scope="row">5</th><td>0.4</td><td>0.2</td><td>1.0</td></tr>
 </tbody></table></div>
-<p>The full-precision weights are $w=(1.20,-0.85,0.40)$. After transposing, $H=2X^{\mathsf T}X$ is</p>
-<div class="note-equation">$$H=\begin{bmatrix}9.24&amp;6.36&amp;1.28\\6.36&amp;4.68&amp;0.64\\1.28&amp;0.64&amp;2.28\end{bmatrix}.$$</div>
-<p>The same matrix is $2X_{\text{paper}}X_{\text{paper}}^{\mathsf T}$ if $X_{\text{paper}}=X^{\mathsf T}$. That is the layout check.</p>
-<div class="note-table q-table"><table><caption>OBQ scores. Lower is the cheaper snap. The score is $(\Delta w)^2/[H^{-1}]_{qq}$.</caption>
-<thead><tr><th scope="col">Column</th><th scope="col">Weight</th><th scope="col">Grid point</th><th scope="col">Score</th></tr></thead>
+<p>Taking twice the dot product of each pair of input columns gives the $3\times3$ Hessian. Its inverse is shown to five decimal places; calculations use unrounded entries.</p>
+<div class="note-equation">$$H=2A^{\mathsf T}A=
+ \begin{bmatrix}9.24&amp;6.36&amp;1.28\\6.36&amp;4.68&amp;0.64\\1.28&amp;0.64&amp;2.28\end{bmatrix},
+ \quad G=H^{-1}\approx
+ \begin{bmatrix}1.92250&amp;-2.56343&amp;-0.35974\\-2.56343&amp;3.64025&amp;0.41730\\-0.35974&amp;0.41730&amp;0.52342\end{bmatrix}.$$</div>
+<p>The strong relation between input columns 0 and 1 appears in the off-diagonal entries. It lets a change to weight 0 compensate much of the error from weight 1.</p>
+<div class="note-table q-table"><table><caption>First-step OBQ scores $S_q=(w_q-t)^2/G_{qq}$. The extra squared output error is half each score.</caption>
+<thead><tr><th scope="col">Column</th><th scope="col">Weight</th><th scope="col">Target $t$</th><th scope="col">Score</th></tr></thead>
 <tbody>
 <tr><th scope="row">0</th><td>1.20</td><td>1.0</td><td>0.020806</td></tr>
 <tr><th scope="row">1</th><td>$-0.85$</td><td>$-1.0$</td><td>0.006181</td></tr>
 <tr><th scope="row">2</th><td>0.40</td><td>0.5</td><td>0.019105</td></tr>
 </tbody></table></div>
-<p>Read that table as one pass of the <a href="compensate-the-layer.html#loop">video's loop</a>. The calibration rows were fed through the layer. The three scores are the stored quantization errors, the extra MSE of snapping each remaining weight and applying the optimal adjustment. The smallest stored error is 0.006181, so column 1 is the row you quantize, from $-0.85$ to $-1$. The other two weights are still floating point, and they are the ones you adjust.</p>
-<p>The update is $\delta=-(w_1-(-1))/[H^{-1}]_{11}\cdot(H^{-1})_{:,1}$, which evaluates to $(0.105629,-0.150000,-0.017195)$. The new weights are $(1.305629,-1,0.382805)$. Column 1 is on the grid. Columns 0 and 2 moved.</p>
-<p>Snapping column 1 and leaving the others alone gives output squared error 0.05265. The compensated weights give 0.00309, which is half the winning score, as the factor-of-2 remark predicted. Those free weights also match the least-squares solution that holds column 1 at $-1$ and refits the other two. <code>tools/check_gptq_update.py</code> asserts both comparisons. This is not a claim about a 7B model. It is a check that the formula you implement is the constrained quadratic, not a proportional nudge by $H_{qq}$.</p>
+<p>Greedy OBQ chooses column 1 because its score is smallest. A GPTQ pass would use its predetermined next column; the following arithmetic also applies if that order starts with column 1.</p>
+<p>Here $a=-0.85-(-1)=0.15$ and $G_{11}\approx3.64025$. Multiply column 1 of $G$ by $-0.15/G_{11}$:</p>
+<div class="note-equation">$$\delta=-\frac{0.15}{G_{11}}G_{:,1}
+ \approx(0.105629,-0.150000,-0.017195)^{\mathsf T},
+ \qquad v+\delta\approx(1.305629,-1,0.382805)^{\mathsf T}.$$</div>
+<p>Weight 1 lands exactly on $-1$. Weight 0 increases and weight 2 decreases slightly. They are still full precision; the value $1.305629$ is allowed at this stage even though it lies outside the final grid.</p>
+<p>Without compensation the output-error vector is $-0.15A_{:,1}$. Its squared norm is $0.15^2(0.8^2+0.7^2+0.9^2+0.6^2+0.2^2)=0.05265$. With compensation the squared norm of $A\delta$ is about $0.003090$, half the score $0.006181$.</p>
+<p>For sample 1, the original output is $1.2-0.85(0.8)+0.4(0.1)=0.56$. The naive snap gives $0.44$; compensation gives about $0.543909$. Squaring such residuals and adding over all five samples produces the costs above.</p>
+<p><code>tools/check_gptq_update.py</code> checks the scores and update indirectly through the chosen minimum, verifies the compensated weights against a constrained least-squares solve, and checks the reduced inverse below. This result concerns one constraint, not a completely quantized layer.</p>
 
-<h2 id="eliminate">One Gaussian-elimination step, instead of a new inverse</h2>
-<figure class="note-figure">
-<img class="q-frame" src="frames/inverse-update.jpg" alt="The inverse-Hessian removal formula: subtract a scaled outer product of column q and row q, then drop row q and column q.">
-<figcaption>Frame from the video, about 19:49. The $-p$ on the slide means the row and column are then removed. That subtraction is one step of Gaussian elimination on the inverse. The paper writes it as equation (3).</figcaption>
-</figure>
-<p>You were right about the operation. After weight $q$ is quantized it is no longer free, so the next score and the next repair need the inverse of the remaining Hessian, not the inverse you already have. Rebuilding $H$ from the remaining columns and inverting it is correct. It is also what makes OBQ cubic: an $n\times n$ inversion is $O(n^3)$, and you would do it once per weight.</p>
-<p>Deleting row $q$ and column $q$ of $H^{-1}$ is not the same thing. The inverse of a submatrix is not the matching submatrix of the inverse. The coupling through weight $q$ is still sitting in the other entries. Gaussian elimination is how you remove that coupling without factoring $H$ again.</p>
-<p>You already have $G=H^{-1}$. One elimination step uses $[G]_{qq}$ as the pivot and clears column $q$ in every other row. For each row $i\neq q$,</p>
-<div class="note-equation">$$\text{row}_i \leftarrow \text{row}_i-\frac{G_{iq}}{G_{qq}}\,\text{row}_q.$$</div>
-<p>Entrywise, that is $G_{ij}\leftarrow G_{ij}-G_{iq}G_{qj}/G_{qq}$. Written for the whole matrix, it is the outer product on the video slide:</p>
-<div class="note-equation">$$G \leftarrow G-\frac{1}{G_{qq}}G_{:,q}G_{q,:}.$$</div>
-<p>Apply the same subtraction to the pivot row and it becomes the zero row, because you subtract $\text{row}_q$ from itself. Column $q$ is zero for the same reason. The subscript $-q$ means delete that zero row and zero column. What remains is $H^{-1}_{-q}$.</p>
-<p>Why is the leftover block the inverse you wanted? Partition $H$ so coordinate $q$ is last. $A$ is the remaining Hessian, $c=H_{qq}$, and $b$ is the column of couplings:</p>
-<div class="note-equation">$$H=\begin{bmatrix}A&amp;b\\ b^{\mathsf T}&amp;c\end{bmatrix}.$$</div>
-<p>The top-left block of $H^{-1}$ is not $A^{-1}$. It is $A^{-1}$ plus a rank-one term built from $A^{-1}b$. Column $q$ of $H^{-1}$, apart from the pivot, is exactly the vector that carries that rank-one term. Subtracting $G_{:,q}G_{q,:}/G_{qq}$ cancels it. The block that is left is $A^{-1}$, the inverse of the Hessian with weight $q$ removed. That is the only fact the elimination step is buying. You do not solve a new linear system. You downdate the inverse you already paid for.</p>
-<p>The same three-weight inverse makes the arithmetic visible. After the layout transpose,</p>
-<div class="note-equation">$$H^{-1}=\begin{bmatrix}1.92250&amp;-2.56343&amp;-0.35974\\ -2.56343&amp;3.64025&amp;0.41730\\ -0.35974&amp;0.41730&amp;0.52342\end{bmatrix}.$$</div>
-<p>Eliminate coordinate 1. The pivot is $3.64025$. The multiplier for row 0 is $-2.56343/3.64025=-0.70419$, and for row 2 it is $0.41730/3.64025=0.11463$. Subtract those multiples of row 1. Row 1 itself is then deleted. The $2\times 2$ block that remains is</p>
-<div class="note-equation">$$\begin{bmatrix}0.11735&amp;-0.06588\\ -0.06588&amp;0.47558\end{bmatrix}.$$</div>
-<p>The Hessian with column 1 of $X$ removed is $\begin{bmatrix}9.24&amp;1.28\\ 1.28&amp;2.28\end{bmatrix}$, and its inverse is that same $2\times 2$ block. <code>tools/check_gptq_update.py</code> asserts the match. One elimination step replaced an inversion.</p>
-<p>The cost of the step is the outer product, $O(n^2)$ writes, not $O(n^3)$. A 1000-wide layer is a million updates instead of a billion. A 4096-wide projection is the same idea with a much larger matrix. OBQ still pays that outer product once per weight and once per row, which is the cubic total from the first post. The <a href="fixed-order-cholesky.html">next post</a> is why GPTQ stops repeating the elimination: a fixed order needs it only once per column, and enough repeated steps make the running inverse indefinite, which is why the implementation switches to Cholesky.</p>
-<details class="note-check"><summary>The paper prints $2XX^{\mathsf T}$. Should I patch the PDF before using GPTQ?</summary><p>No. Orient $X$ as $(\text{in},\text{tokens})$, which is what the authors' linear path does by transposing, and the printed formula applies. Patching the PDF and also transposing will transpose twice.</p></details>
-<details class="note-check"><summary>Why is the compensated error half the score?</summary><p>Because $H=2X^{\mathsf T}X$, and the output squared error is $\tfrac12\delta^{\mathsf T}H\delta$ at the full-precision point. Rank weights by the score, or by the squared error. Do not mix the two numbers in a log.</p></details>
-<details class="note-check"><summary>Can I use the diagonal of $H$ instead of $H^{-1}$?</summary><p>Only as a different method. The OBQ update is a column of the inverse. The diagonal of $H$ ignores the correlation the whole construction is there to use. On this example the two updates are not the same vector.</p></details>
+<h2 id="eliminate">Remove a fixed coordinate without inverting again</h2>
+<p>After fixing column $q$, let $R=F\setminus\{q\}$ be the remaining free set. The next update needs $(H_{RR})^{-1}$. Simply deleting row and column $q$ of $G_F$ is wrong: that submatrix of the inverse still includes the effect of allowing coordinate $q$ to move.</p>
+<p>A rank-one downdate removes that effect. Here write $G=G_F$ for the current active inverse. $G_{R,q}$ is a length-$|R|$ column, $G_{q,R}$ is its transpose, and $G_{qq}$ is a scalar pivot. Their outer product has the required $|R|\times|R|$ shape:</p>
+<div class="note-equation">$$G_{\mathrm{next}}
+ =G_{R,R}-\frac{G_{R,q}G_{q,R}}{G_{qq}}
+ =(H_{R,R})^{-1}.$$</div>
+<p>This is the same subtraction as one Gaussian-elimination step on the inverse, followed by dropping the fixed coordinate. It uses the current active inverse, not always the original full inverse.</p>
+<p>To see why it works, reorder the active Hessian so $q$ is last. Call the remaining Hessian $B$, its coupling column $b$, and the pivot $c$. Set $s=c-b^{\mathsf T}B^{-1}b$ and $u=B^{-1}b$:</p>
+<div class="note-equation">$$H_F=\begin{bmatrix}B&amp;b\\b^{\mathsf T}&amp;c\end{bmatrix},
+ \qquad
+ G_F=\begin{bmatrix}B^{-1}+uu^{\mathsf T}/s&amp;-u/s\\-u^{\mathsf T}/s&amp;1/s\end{bmatrix}.$$</div>
+<p>The inverse's top-left block contains an extra $uu^{\mathsf T}/s$. The downdate subtracts exactly that term, since $(-u/s)(-u^{\mathsf T}/s)/(1/s)=uu^{\mathsf T}/s$. What remains is $B^{-1}$.</p>
+<p>In our example $q=1$ and $R=\{0,2\}$. The reduced Hessian and its inverse are:</p>
+<div class="note-equation">$$H_{R,R}=
+ \begin{bmatrix}9.24&amp;1.28\\1.28&amp;2.28\end{bmatrix},
+ \qquad
+ G_{\mathrm{next}}\approx
+ \begin{bmatrix}0.11735&amp;-0.06588\\-0.06588&amp;0.47558\end{bmatrix}.$$</div>
+<p>The check script verifies that the downdate produces this same inverse. The outer product costs $O(|F|^2)$ rather than a fresh cubic inversion. Repeating it over all coordinates is still cubic per independent row; sharing a fixed order is GPTQ's next improvement.</p>
 <h2 id="sources">Sources</h2>
 <ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, equations (1) to (3). Objective, greedy score, update, and the inverse removal.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>add_batch</code>: linear inputs are transposed before <code>inp @ inp.T</code>.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=1117s">Savolainen, from 18:37</a>. One Gaussian-elimination step on the inverse, after the OBS derivation that starts at 15:14.</li>
-<li>Hassibi, Stork, and Wolff, <a href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html">Optimal Brain Surgeon and general network pruning</a>, NeurIPS 1992. Equations (1) to (5): the Taylor expansion, the zero constraint, the Lagrangian, the update, and the saliency $L_q$.</li>
-<li><a href="https://arxiv.org/abs/2208.11580">Optimal Brain Compression</a>, the same Lagrangian with a quantization-grid target instead of zero.</li>
-<li><a href="https://www.youtube.com/watch?v=6J_0BDqMFi0&amp;t=914s">Savolainen, from 15:14</a>. The paused paper page, and the substitution from zero to a grid point.</li>
-<li><code>tools/check_gptq_update.py</code>, the three-weight check of the update, the prune-to-zero case, and the reduced inverse.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, equations (1)–(3): reconstruction, compensated score and update, and inverse downdate.</li>
+<li><a href="https://arxiv.org/abs/2208.11580">Optimal Brain Compression</a>, the OBQ constrained quantization method.</li>
+<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, linear-input orientation and normalized Hessian accumulation.</li>
+<li>Hassibi, Stork, and Wolff, <a href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html">Optimal Brain Surgeon and general network pruning</a>, the zero-target constrained update.</li>
+<li><code>tools/check_gptq_update.py</code>, the constructed numerical check.</li>
 </ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="compensate-the-layer.html"><span>Previous</span><span>GPTQ: the layer objective and compensation loop</span></a><a class="next" href="fixed-order-cholesky.html"><span>Next</span><span>GPTQ: fixed order, lazy batches, and Cholesky</span></a></nav>
 </article></div>
 <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-layout-20261009"></script><script src="../../../blog.js?v=quant-layout-20261009"></script><script src="../../../code-highlight.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261009"></script><script src="../../../blog.js?v=quant-plain-20261009"></script><script src="../../../code-highlight.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>
