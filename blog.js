@@ -9727,7 +9727,7 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/beyond-gptq/index.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
@@ -9740,6 +9740,20 @@ var BLOG_TREE = [
           { title: '5. A worked update, then one elimination step', file: 'quantization/gptq/worked-example-and-elimination.html', links: ['quantization/gptq/obs-derivatives.html', 'quantization/gptq/fixed-order-cholesky.html'] },
           { title: '6. Fixed order, and what is precomputed', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/worked-example-and-elimination.html', 'quantization/gptq/lazy-batches-and-cholesky.html'] },
           { title: '7. Lazy batches and Cholesky', file: 'quantization/gptq/lazy-batches-and-cholesky.html', links: ['quantization/gptq/fixed-order-cholesky.html', 'quantization/gptq/index.html'] }
+        ]
+      },
+      {
+        name: 'beyond-gptq',
+        label: 'Beyond GPTQ',
+        children: [
+          { title: 'Beyond GPTQ: a reading guide', file: 'quantization/beyond-gptq/index.html', links: ['quantization/index.html', 'quantization/beyond-gptq/grids-and-scales.html'] },
+          { title: '1. Grids, scales, and what low-bit actually means', file: 'quantization/beyond-gptq/grids-and-scales.html', links: ['quantization/beyond-gptq/index.html', 'quantization/beyond-gptq/llm-int8.html'] },
+          { title: '2. LLM.int8: isolate the outlier features', file: 'quantization/beyond-gptq/llm-int8.html', links: ['quantization/beyond-gptq/grids-and-scales.html', 'quantization/beyond-gptq/awq.html'] },
+          { title: '3. AWQ: protect weights with activation-aware scaling', file: 'quantization/beyond-gptq/awq.html', links: ['quantization/beyond-gptq/llm-int8.html', 'quantization/beyond-gptq/smoothquant.html'] },
+          { title: '4. SmoothQuant: move the activation difficulty into weights', file: 'quantization/beyond-gptq/smoothquant.html', links: ['quantization/beyond-gptq/awq.html', 'quantization/beyond-gptq/nf4-and-qlora.html'] },
+          { title: '5. NF4 and QLoRA: quantization for adapter training', file: 'quantization/beyond-gptq/nf4-and-qlora.html', links: ['quantization/beyond-gptq/smoothquant.html', 'quantization/beyond-gptq/gguf-and-k-quants.html'] },
+          { title: '6. GGUF and K-quants: format versus quantizer', file: 'quantization/beyond-gptq/gguf-and-k-quants.html', links: ['quantization/beyond-gptq/nf4-and-qlora.html', 'quantization/beyond-gptq/fp8-and-evaluation.html'] },
+          { title: '7. FP8 and evaluation: match the format to the workload', file: 'quantization/beyond-gptq/fp8-and-evaluation.html', links: ['quantization/beyond-gptq/gguf-and-k-quants.html', 'quantization/beyond-gptq/index.html'] }
         ]
       }
     ]
@@ -11346,7 +11360,7 @@ function flattenBlogTree(nodes, result) {
     nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
-    quantization: { label: 'Quantization', blurb: 'Post-training weight quantization, starting with the GPTQ layer update and the schedule that makes it finish.' },
+    quantization: { label: 'Quantization', blurb: 'GPTQ derivations and a separate Beyond GPTQ path through low-bit grids, LLM.int8, AWQ, SmoothQuant, NF4, GGUF, and FP8.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
