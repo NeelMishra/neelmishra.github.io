@@ -9636,6 +9636,13 @@ var BLOG_TREE = [
             label: 'Umar Jamil',
             children: [
               {
+                name: 'quantization',
+                label: 'Quantization: PTQ &amp; QAT',
+                children: [
+                  { title: 'Quantization explained: from integer grids to PTQ and QAT', file: 'dl/popular_videos/umar_jamil/quantization/index.html', links: ['quantization/fundamentals/grids-and-scales.html', 'dl/popular_videos/umar_jamil/distributed-training-framework/index.html'] }
+                ]
+              },
+              {
                 name: 'distributed-training-framework',
                 label: 'Distributed Training from First Principles',
                 children: [
