@@ -11,6 +11,7 @@ import io
 import json
 import math
 from pathlib import Path
+import platform
 
 import torch
 from torch import nn
@@ -237,6 +238,8 @@ def run(args):
     assert results["static_ptq"]["state_dict_bytes"] < results["fp32"]["state_dict_bytes"]
     return {
         "torch": torch.__version__, "backend": "qnnpack", "seed": args.seed,
+        "python": platform.python_version(), "machine": platform.machine(),
+        "system": platform.system(),
         "mode": "mnist" if args.mnist else "offline_api_check",
         "epochs_fp32": args.epochs, "additional_qat_epochs": args.epochs,
         "training_examples": len(training.dataset), "calibration_examples": len(calibration.dataset),

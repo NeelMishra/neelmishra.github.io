@@ -10,6 +10,7 @@ from functools import partial
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
 from pathlib import Path
 import threading
 from urllib.parse import urlsplit
@@ -21,6 +22,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 ROOT = Path(__file__).resolve().parents[1]
 POST = "dl/popular_videos/umar_jamil/quantization/index.html"
+RESULTS = ROOT / "blog" / POST.replace("index.html", "experiment.json")
 
 
 class ExampleParser(HTMLParser):
@@ -90,6 +92,127 @@ def static_server():
         thread.join()
 
 
+def result(page, selector):
+    return json.loads(page.locator(selector).get_attribute("data-result"))
+
+
+def set_slider(page, selector, value):
+    slider = page.locator(selector)
+    slider.fill(str(value))
+    slider.dispatch_event("input")
+
+
+def check_labs(page, measured, screenshots):
+    toy = measured["examples"]["toy"]
+    grid = result(page, "#q-grid-lab")
+    assert grid["codes"] == toy["codes"]
+    assert abs(grid["mse"] - toy["mse"]) < 1e-12
+    assert float(page.locator("#q-grid-scale").inner_text()) == toy["scale"]
+    page.locator("#q-grid-scheme").select_option("symmetric")
+    symmetric = result(page, "#q-grid-lab")
+    assert symmetric["codes"] == toy["symmetric_codes"]
+    assert abs(symmetric["mse"] - toy["symmetric_mse"]) < 1e-12
+    set_slider(page, "#q-grid-bits", 8)
+    finer = result(page, "#q-grid-lab")
+    assert finer["mse"] < symmetric["mse"]
+    for original, reconstructed in zip(finer["values"], finer["restored"]):
+        assert abs(original - reconstructed) <= finer["scale"] / 2 + 1e-12
+
+    page.locator("#q-grid-scheme").select_option("asymmetric")
+    page.locator("#q-grid-dataset").select_option("positive")
+    positive = result(page, "#q-grid-lab")
+    reference = torch.quantize_per_tensor(
+        torch.tensor(positive["values"]), 2 / 255, 0, torch.quint8)
+    assert positive["codes"] == reference.int_repr().tolist()
+    assert positive["zero"] == 0
+    page.locator("#q-grid-dataset").select_option("clipped")
+    set_slider(page, "#q-grid-bits", 2)
+    clipped = result(page, "#q-grid-lab")
+    assert clipped["saturated"] > 0
+    assert abs(clipped["values"][-1] - clipped["restored"][-1]) > clipped["scale"] / 2
+    page.locator("#q-grid-dataset").select_option("skewed")
+    set_slider(page, "#q-grid-bits", 4)
+    page.locator("#q-grid-bits").focus()
+    page.keyboard.press("ArrowRight")
+    assert result(page, "#q-grid-lab")["bits"] == 5
+    set_slider(page, "#q-grid-bits", 4)
+
+    outliers = result(page, "#q-outlier-lab")
+    for key, fixture_key in [("minmax", "minmax"), ("percentile", "percentile_range")]:
+        expected = measured["examples"]["outliers"][fixture_key]
+        for metric in ["scale", "bulk_mse", "all_mse"]:
+            assert abs(outliers[key][metric] - expected[metric]) < 1e-8, (key, metric)
+    assert outliers["percentile"]["bulk_mse"] < outliers["minmax"]["bulk_mse"]
+    assert outliers["percentile"]["all_mse"] > outliers["minmax"]["all_mse"]
+    for row, key in zip(page.locator("#q-outlier-lab tbody tr").all(), ["minmax", "percentile"]):
+        cells = row.locator("td").all_inner_texts()
+        for cell, metric in zip(cells[2:], ["scale", "bulk_mse", "all_mse"]):
+            assert abs(float(cell) - outliers[key][metric]) <= 0.00000051
+    set_slider(page, "#q-outlier-value", 150)
+    assert abs(result(page, "#q-outlier-lab")["minmax"]["scale"] - 200 / 255) < 1e-12
+    set_slider(page, "#q-outlier-value", 1000)
+
+    mac = page.locator("#q-mac-lab")
+    mac.scroll_into_view_if_needed()
+    page.wait_for_function(
+        "JSON.parse(document.getElementById('q-mac-lab').getAttribute('data-result')).step > 0")
+    page.locator("#q-mac-reset").click()
+    assert result(page, "#q-mac-lab")["accumulator"] == 5
+    for step, accumulator in [(1, 5), (2, -5), (3, 55), (4, 55), (5, 55)]:
+        page.locator("#q-mac-next").click()
+        assert result(page, "#q-mac-lab")["step"] == step
+        assert result(page, "#q-mac-lab")["accumulator"] == accumulator
+    final = result(page, "#q-mac-lab")
+    assert final["output_code"] == measured["examples"]["mac"]["output_code"]
+    assert abs(final["restored"] - 1.1) < 1e-12
+    assert page.locator("#q-mac-next").is_disabled()
+    page.locator("#q-mac-reset").click()
+    page.locator("#q-mac-play").click()
+    page.wait_for_function(
+        "JSON.parse(document.getElementById('q-mac-lab').getAttribute('data-result')).step >= 2")
+    page.locator("#q-mac-reset").click()
+    page.wait_for_timeout(900)
+    assert result(page, "#q-mac-lab")["step"] == 0, "Reset must cancel pending animation steps."
+
+    for value, expected_forward, expected_gradient in [
+            (0.8, 0.75, 1), (1.2, 1, 0), (-1.2, -1, 0),
+            (0.125, 0, 1), (0.375, 0.5, 1), (-0.125, 0, 1)]:
+        set_slider(page, "#q-ste-value", value)
+        ste = result(page, "#q-ste-lab")
+        assert ste["restored"] == expected_forward
+        assert ste["ste_gradient"] == expected_gradient
+        assert float(page.locator("#q-ste-forward").inner_text()) == expected_forward
+        assert float(page.locator("#q-ste-value-label").inner_text()) == value
+    set_slider(page, "#q-ste-value", 0.8)
+
+    for model, data in measured["models"].items():
+        cells = page.locator('#q-measured-results tr[data-model="' + model + '"] td').all_inner_texts()
+        assert cells[1] == f'{data["accuracy"] * 100:.2f}%'
+        assert cells[2] == f'{data["state_dict_bytes"]:,}'
+        assert int(cells[3]) == (measured["additional_qat_epochs"] if model == "qat_int8" else 0)
+
+    quiz = page.locator("#q-lesson-quiz")
+    quiz.get_by_role("button", name="Start", exact=True).click()
+    questions = set()
+    for index in range(8):
+        questions.add(quiz.locator(".bq-qmeaning").inner_text())
+        assert quiz.locator(".bq-choice").count() == 4
+        quiz.locator(".bq-choice").first.click()
+        assert quiz.locator(".bq-feedback").inner_text()
+        assert all(choice.is_disabled() for choice in quiz.locator(".bq-choice").all())
+        if index < 7:
+            quiz.get_by_role("button", name="Next", exact=False).click()
+    assert len(questions) == 8
+    assert "Bank complete" in quiz.locator(".bq-feedback").inner_text()
+    quiz.get_by_role("button", name="Reset", exact=True).click()
+    assert quiz.locator(".bq-choice").count() == 0
+    assert quiz.get_by_role("button", name="Start", exact=True).is_visible()
+    if screenshots:
+        for name in ["grid", "outlier", "mac", "ste"]:
+            page.locator("#q-" + name + "-lab").screenshot(path=str(screenshots / (name + "-lab.png")))
+    print("Labs: PyTorch-oracle grids, clipping, outliers, auto-play/reset, STE ties, and quiz passed.")
+
+
 def check_browser(base, screenshots):
     errors = []
     failed_local = []
@@ -140,6 +263,10 @@ def check_browser(base, screenshots):
                 assert context.request.get(url.split("#")[0]).status == 200, url
                 if path.fragment and path.path.endswith("/" + POST):
                     assert page.locator('[id="' + path.fragment + '"]').count() == 1, url
+            measured = json.loads(RESULTS.read_text(encoding="utf-8"))
+            if screenshots:
+                screenshots.mkdir(parents=True, exist_ok=True)
+            check_labs(page, measured, screenshots)
             for width in [1440, 768, 390, 320]:
                 page.set_viewport_size({"width": width, "height": 900})
                 assert page.evaluate(
@@ -151,6 +278,29 @@ def check_browser(base, screenshots):
                     screenshots.mkdir(parents=True, exist_ok=True)
                     page.locator("#asymmetric").scroll_into_view_if_needed()
                     page.screenshot(path=str(screenshots / ("post-" + str(width) + ".png")))
+            page.locator("#q-grid-lab").scroll_into_view_if_needed()
+            diagram = page.locator("#q-grid-lab .q-scroll").first
+            diagram.focus()
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(150)
+            assert diagram.evaluate("el => el.scrollLeft") > 0
+            page.emulate_media(reduced_motion="reduce")
+            page.reload(wait_until="domcontentloaded")
+            page.locator("#q-mac-lab").scroll_into_view_if_needed()
+            page.wait_for_timeout(900)
+            assert result(page, "#q-mac-lab")["step"] == 0
+            page.locator("#q-mac-play").click()
+            assert result(page, "#q-mac-lab")["step"] == 5
+            page.locator("#q-mac-reset").click()
+            assert result(page, "#q-mac-lab")["step"] == 0
+            page.locator(".q-details summary").first.click()
+            page.locator(".q-chapters").get_by_role(
+                "link", name="Asymmetric quantization", exact=True).click()
+            page.wait_for_function("""() => {
+                var heading = document.getElementById('asymmetric').getBoundingClientRect();
+                var header = document.querySelector('.site-header').getBoundingClientRect();
+                return heading.top >= header.bottom - 1 && heading.top < innerHeight / 2;
+            }""")
             page.goto(base + "/blog.html", wait_until="domcontentloaded")
             card = page.locator('a.blog-card[href="blog/' + POST + '"]')
             assert card.count() == 1
