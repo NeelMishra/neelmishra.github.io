@@ -9635,7 +9635,6 @@ var BLOG_TREE = [
             name: 'umar_jamil',
             label: 'Umar Jamil',
             children: [
-              { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'dl/popular_videos/umar_jamil/quantization-explained-with-pytorch.html', links: ['dl/popular_videos/umar_jamil/distributed-training-framework/index.html'] },
               {
                 name: 'distributed-training-framework',
                 label: 'Distributed Training from First Principles',
@@ -9728,6 +9727,7 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
+      { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] },
       { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/choosing-a-method.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
       { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html'] },
       { title: 'Quantization methods: compare the tradeoffs', file: 'quantization/method-comparison.html', links: ['quantization/index.html', 'quantization/fundamentals/grids-and-scales.html'] },
