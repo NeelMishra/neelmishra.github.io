@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="An illustrated walkthrough of speculative decoding for reducing LLM inference latency: classic draft-target verification, rejection sampling, EAGLE-3 multi-layer feature drafting, DeepSeek-R1 Multi-Token Prediction (MTP), and NVIDIA TensorRT-Model Optimizer.">
+  <title>An Introduction to Speculative Decoding for Reducing Latency in AI Inference | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../../styles.css">
+  <link rel="stylesheet" href="../../../../blog.css">
+  <link rel="stylesheet" href="article.css?v=spec-decoding-20261014">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../../index.html">Home</a>
+      <a href="../../../../experience.html">Experience</a>
+      <a href="../../../../projects.html">Projects</a>
+      <a href="../../../../blog.html" class="active">Blog</a>
+      <a href="../../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout" data-mobile-sidebar>
+    <aside class="blog-sidebar">
+      <nav class="blog-nav" aria-label="Blog explorer"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal spec-article">
+      <a class="back-to-blog" href="../../../../blog.html">&#8592; All Posts</a>
+      <div class="post-series-nav">
+        <a href="../../../../blog.html#speculative-decoding">Speculative Decoding</a>
+        <span>&middot;</span>
+        <a href="../../../../blog.html#folder-speculative-decoding--blogs">Blogs</a>
+        <span>&middot;</span>
+        <span>Difficulty Level 1 &middot; Basics</span>
+      </div>
+
+      <h1>An Introduction to Speculative Decoding for Reducing Latency in AI Inference</h1>
+      <p class="post-meta">Difficulty Level 1: Basics &middot; 11 min read &middot; NVIDIA Technical Blog Companion</p>
+
+      <p class="spec-credit">
+        Adapted from the NVIDIA Technical Blog article <a href="https://developer.nvidia.com/blog/an-introduction-to-speculative-decoding-for-reducing-latency-in-ai-inference/" target="_blank" rel="noopener"><em>An Introduction to Speculative Decoding for Reducing Latency in AI Inference</em></a> by Jamie Li, Chenhan Yu, and Hao Guo (September 2025). Figures and animations are reproduced from the original article; click any figure to view it at full resolution.
+      </p>
+
+      <figure class="spec-figure">
+        <a href="figures/hero-llama-eagle.jpg" target="_blank" rel="noopener">
+          <img src="figures/hero-llama-eagle.jpg" width="1920" height="1080" alt="Speculative decoding with Llama and EAGLE-3 for accelerating AI inference.">
+        </a>
+        <figcaption>Accelerating autoregressive LLM inference with Draft&ndash;Target verification, EAGLE-3 feature-level drafting, and Multi-Token Prediction.</figcaption>
+      </figure>
+
+      <div class="spec-summary-box">
+        <h3>Key Takeaways</h3>
+        <ul>
+          <li><strong>Breaking the sequential wall:</strong> Speculative decoding pairs a large target model with a lightweight draft mechanism to propose and verify multiple tokens per forward pass, cutting latency and boosting throughput while preserving output quality.</li>
+          <li><strong>Classic Draft&ndash;Target verification:</strong> Uses a separate smaller model to generate candidate tokens that the target model verifies in parallel, accepting the longest matching prefix through rejection sampling.</li>
+          <li><strong><a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3</a>:</strong> Eliminates the separate draft model by attaching a lightweight drafting head to the target model's internal layers, using multi-layer fused features and a dynamic draft tree to improve acceptance rates.</li>
+          <li><strong>Multi-Token Prediction (MTP) in DeepSeek:</strong> Employs specialized prediction heads to forecast several future tokens simultaneously, offering a verification-based speedup without a separate drafter.</li>
+          <li><strong>Turnkey conversion with TensorRT-Model Optimizer:</strong> The <a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer" target="_blank" rel="noopener">NVIDIA TensorRT-Model Optimizer API</a> provides a Speculative Decoding module (`modelopt.torch.speculative`) that converts models to use EAGLE-3 in just a few lines of Python.</li>
+          <li><strong>Collapsed waiting periods:</strong> By collapsing sequential generation steps into fewer forward passes&mdash;for example, generating three tokens in one 250 ms pass instead of three 200 ms passes (600 ms total)&mdash;speculative decoding creates far more responsive interactive applications.</li>
+        </ul>
+      </div>
+
+      <p>Generating text with large language models (LLMs) often involves running into a fundamental bottleneck. GPUs offer massive compute, yet much of that power sits idle because autoregressive generation is inherently sequential: each token requires a full forward pass, reloading weights from high-bandwidth memory (HBM), and synchronizing memory at every step. This combination of memory access and step-by-step dependency raises latency, underutilizes hardware, and limits system efficiency.</p>
+
+      <p>Speculative decoding helps break through this wall. By predicting and verifying multiple tokens simultaneously, this technique shortens the path to results and makes AI inference faster and more responsive, significantly reducing latency while preserving output quality. Below, we explore how speculative decoding works, when to use it, and how to deploy advanced techniques like <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3</a> and Multi-Token Prediction on GPUs.</p>
+
+      <h2 id="what-is-speculative-decoding">What is speculative decoding?</h2>
+
+      <p><em>Speculative decoding</em> is an inference optimization technique that pairs a target model with a lightweight draft mechanism that quickly proposes several next tokens. The target model verifies those proposals in a single forward pass, accepts the longest prefix that matches its own predictions, and continues from there. Compared with standard autoregressive decoding, which produces one token per pass, this technique lets the system generate multiple tokens at once, cutting latency and boosting throughput without any impact on accuracy.</p>
+
+      <p>Though highly capable, LLMs often push the limits of AI hardware, making it challenging to further optimize user experience at scale. Speculative decoding offers an alternative by offloading part of the work to a less resource-intensive mechanism.</p>
+
+      <div class="spec-callout">
+        <strong>The Chief Scientist &amp; Lab Assistant Analogy:</strong> Speculative decoding works much like a chief scientist in a laboratory relying on a less experienced but fast assistant to handle routine experiments. The assistant rapidly works through the checklist, while the chief scientist focuses on validation and progress&mdash;stepping in to correct or take charge whenever necessary.
+      </div>
+
+      <p>With speculative decoding, the lightweight assistant proposes multiple possible continuations and the larger model verifies them in batches. The ultimate benefit is reducing the number of sequential steps, alleviating memory bandwidth bottlenecks. Critically, this acceleration occurs while preserving output quality, as verification mechanisms discard any results divergent from what the baseline target model itself would generate.</p>
+
+      <h2 id="speculative-decoding-basics">Speculative decoding basics using Draft&ndash;Target and EAGLE-3</h2>
+
+      <p>This section lays out the core concepts behind speculative decoding, breaking down the mechanics that make it effective. To begin, the Transformer forward pass allows sequences of tokens to be processed in parallel. Subsequent steps include draft generation, parallel verification, and rejection sampling. Together, these fundamentals provide the context needed to understand both the classic draft&ndash;target method and advanced single-model architectures like <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3</a>.</p>
+
+      <h3 id="draft-target-approach">What is the Draft&ndash;Target approach to speculative decoding?</h3>
+
+      <p>The draft&ndash;target approach is the classic implementation of speculative decoding, operating as a two-model system:</p>
+      <ul>
+        <li><strong>Target Model ($M_p$):</strong> The large, high-quality model whose output you want to accelerate (the meticulous chief scientist ensuring correctness).</li>
+        <li><strong>Draft Model ($M_q$):</strong> A much smaller, faster model&mdash;often a distilled or smaller-parameter member of the same model family&mdash;working alongside the target to propose candidate continuations rapidly.</li>
+      </ul>
+
+      <p>Figure 1 shows this partnership in action: given the input prompt <code>"The Quick"</code>, the draft model rapidly proposes four draft tokens (<code>"Brown"</code>, <code>"Fox"</code>, <code>"Hopped"</code>, <code>"Over"</code>). The target model ingests the prompt and all four draft tokens in one pass, verifies and keeps the first two (<code>"Brown"</code> and <code>"Fox"</code>), rejects <code>"Hopped"</code> (and everything after it), and simultaneously emits its own corrected token (<code>"Jumped"</code>) from the same forward pass.</p>
+
+      <figure class="spec-figure">
+        <a href="figures/fig1-draft-target-approach.gif" target="_blank" rel="noopener">
+          <img src="figures/fig1-draft-target-approach.gif" width="1920" height="1080" loading="lazy" alt="Animation showing an example where the input is 'The Quick'. From this input, the draft model proposes 'Brown', 'Fox', 'Hopped', 'Over'. The input and draft are ingested by the target model, which verifies 'Brown' and 'Fox' before rejecting 'Hopped' and subsequently everything after. 'Jumped' is the target model's own generation resulting from the forward pass.">
+        </a>
+        <figcaption><strong>Figure 1.</strong> The draft&ndash;target approach to speculative decoding operates as a two-model system: the draft model proposes <code>"Brown"</code>, <code>"Fox"</code>, <code>"Hopped"</code>, <code>"Over"</code>; the target model verifies <code>"Brown"</code> and <code>"Fox"</code>, rejects <code>"Hopped"</code>, and generates <code>"Jumped"</code> in a single forward pass.</figcaption>
+      </figure>
+
+      <p>Speculative decoding using the draft&ndash;target approach involves three core stages:</p>
+
+      <div class="spec-grid">
+        <div class="spec-card">
+          <h4>1. Draft Generation</h4>
+          <p>A smaller, more efficient mechanism autoregressively generates a sequence of $\gamma$ candidate tokens (typically $3$ to $12$ tokens). Usually this is a separate smaller model trained on the same data distribution, where the target model's output serves as ground truth during distillation.</p>
+        </div>
+        <div class="spec-card">
+          <h4>2. Parallel Verification</h4>
+          <p>The target model processes the input sequence and all $\gamma$ draft tokens simultaneously in a single forward pass, computing probability distributions for each position. Thanks to the KV Cache (which already stores keys and values for the prefix), only the new speculated tokens incur compute cost during verification.</p>
+        </div>
+        <div class="spec-card">
+          <h4>3. Rejection Sampling</h4>
+          <p>After the target model produces its probability distributions, the acceptance logic compares the draft probability $P_{\text{Draft}}(x)$ against the target probability $P_{\text{Target}}(x)$ token by token from left to right, accepting valid prefixes and resampling at the first rejection.</p>
+        </div>
+      </div>
+
+      <h3 id="rejection-sampling">Rejection sampling and the lossless guarantee</h3>
+
+      <p>Rejection sampling is the decision-making stage that occurs after the probability distribution from the target model has been generated. Its key aspect is the <strong>acceptance logic</strong>. As Figure 2 illustrates, this logic compares the proposed probability of the draft model, $P(\text{Draft})$, against the actual probability assigned by the target model, $P(\text{Target})$, at each candidate position.</p>
+
+      <ul>
+        <li>For the first two tokens, <code>"Brown"</code> and <code>"Fox"</code>, $P(\text{Target}) \ge P(\text{Draft})$, so they are immediately <strong>accepted</strong> ($\text{accept probability} = \min\!\left(1, \frac{P_{\text{Target}}(x)}{P_{\text{Draft}}(x)}\right) = 1$).</li>
+        <li>However, for the third token, <code>"Hopped"</code>, $P(\text{Target})$ is significantly lower than $P(\text{Draft})$, indicating an unreliable prediction, and the token is <strong>rejected</strong>.</li>
+        <li>When a token such as <code>"Hopped"</code> is rejected, both it and all subsequent tokens in the draft (<code>"Over"</code>) are discarded because every following token was conditioned on the rejected prefix. The process immediately produces a corrected token (<code>"Jumped"</code>) from the target model's verified distribution at the last accepted prefix (<code>"The Quick Brown Fox"</code>).</li>
+      </ul>
+
+      <figure class="spec-figure">
+        <a href="figures/fig2-verification-phase-target-model.gif" target="_blank" rel="noopener">
+          <img src="figures/fig2-verification-phase-target-model.gif" width="1280" height="720" loading="lazy" alt="Animation showing the verification phase within the target model. P(Target) and P(Draft) are compared for each token. 'Brown' passes because P(Target) >= P(Draft). 'Hopped' fails because P(Target) <= P(Draft). All draft tokens past 'Hopped' are discarded, and the final generation is the prefix plus 'Brown Fox Jumped'.">
+        </a>
+        <figcaption><strong>Figure 2.</strong> The acceptance logic is the key aspect of rejection sampling during parallel verification: <code>"Brown"</code> and <code>"Fox"</code> pass ($P(\text{Target}) \ge P(\text{Draft})$), <code>"Hopped"</code> fails, subsequent draft tokens are discarded, and the target model emits <code>"Jumped"</code>.</figcaption>
+      </figure>
+
+      <div class="spec-math">
+        $$\text{Accept } x_i \text{ with probability } \min\!\left(1, \frac{P_{\text{Target}}(x_i)}{P_{\text{Draft}}(x_i)}\right), \qquad \text{else resample from } P_{\text{residual}}(x) = \frac{\max(0,\, P_{\text{Target}}(x) - P_{\text{Draft}}(x))}{\sum_{v} \max(0,\, P_{\text{Target}}(v) - P_{\text{Draft}}(v))}.$$
+      </div>
+
+      <p>This rigorous, token-by-token validation guarantees that the final output follows the <strong>exact same probability distribution</strong> as what the target model would have produced on its own, ensuring that speedups come with <strong>zero loss in accuracy</strong>.</p>
+
+      <p>The ratio of accepted draft tokens to total drafted tokens is the <strong>acceptance rate ($\alpha$)</strong>. Higher acceptance rates equate to larger speedups, and at worst&mdash;if every draft token is rejected on the very first position&mdash;the target model still emits one valid corrected token from its forward pass, matching standard single-token autoregressive progress.</p>
+
+      <h3 id="eagle-approach">What is the EAGLE approach to speculative decoding?</h3>
+
+      <p><strong>EAGLE</strong> (<em>Extrapolation Algorithm for Greater Language-Model Efficiency</em>) is a speculative decoding method that operates at the <strong>feature level</strong>, extrapolating from the hidden states just before the target model's output LM head. Unlike the draft&ndash;target approach, which relies on a separate standalone draft model to propose tokens, EAGLE uses a lightweight autoregressive prediction head that ingests features directly from the target model's hidden states. This eliminates the operational overhead of hosting, aligning, and running a second model while still allowing the target model to verify multiple token candidates per forward pass.</p>
+
+      <p><strong><a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3</a></strong>, the third generation of EAGLE, builds on this foundation with two major architectural capabilities:</p>
+      <ol>
+        <li><strong>Multi-layer fused feature representations:</strong> Instead of only using the final top-layer hidden state, EAGLE-3 extracts and fuses <strong>low-, middle-, and high-level embeddings</strong> directly from the target model's internal layers into its drafting head, providing a much richer semantic and syntactic signal for multi-step drafting.</li>
+        <li><strong>Context-aware dynamic draft tree &amp; parallel tree attention:</strong> Inherited and refined from EAGLE-2, EAGLE-3 proposes multiple chained hypotheses arranged as a dynamic tree rather than a single linear chain. All candidate branches in the draft tree are verified simultaneously by the target model in a single pass using <strong>parallel tree attention</strong>, pruning invalid branches and boosting both acceptance rate and throughput.</li>
+      </ol>
+
+      <figure class="spec-figure">
+        <a href="figures/fig3-eagle-drafting-mechanism.gif" target="_blank" rel="noopener">
+          <img src="figures/fig3-eagle-drafting-mechanism.gif" width="1280" height="720" loading="lazy" alt="Animation showing that the lightweight EAGLE head is not a standalone model. It drafts tokens from feature outputs taken from the target model's layers, generates prediction trees, then feeds this back into the model for verification.">
+        </a>
+        <figcaption><strong>Figure 3.</strong> The EAGLE-3 drafting mechanism fuses multi-layer features from the target model to generate a tree of candidate tokens, which is then fed back into the target model for parallel tree-attention verification.</figcaption>
+      </figure>
+
+      <h4 id="what-is-the-eagle-head">What is the EAGLE head?</h4>
+
+      <p>Instead of using a separate, smaller model as in the draft&ndash;target approach, EAGLE-3 attaches a lightweight drafting component to the internal layers of the target model called an <strong>EAGLE head</strong>. The EAGLE head is typically made of a lightweight Transformer decoder layer followed by a final linear projection (or reuses the target's LM head)&mdash;essentially a miniature, stripped-down version of the building blocks that make up the main model.</p>
+
+      <p>This EAGLE head generates not just a single flat sequence, but an entire <strong>tree of candidate tokens</strong>. Crucially, this process is <strong>instance-adaptive</strong>: the head evaluates its own confidence as it expands the tree and stops drafting along a branch if confidence drops below a threshold. This allows the EAGLE head to explore multiple generation paths efficiently&mdash;generating deeper branches on predictable text and shallower branches on high-entropy reasoning steps&mdash;all verified for the runtime cost of one target forward pass.</p>
+
+      <h3 id="multi-token-prediction">What is Multi-Token Prediction (MTP) in DeepSeek-R1?</h3>
+
+      <p>Similar to EAGLE, <strong>Multi-Token Prediction (MTP)</strong> is a speculation technique used across the DeepSeek model family (including DeepSeek-V3 and DeepSeek-R1) where the model is trained natively to predict several future tokens at once rather than only the immediate next token.</p>
+
+      <p>MTP uses a <strong>multi-head architecture</strong> where each auxiliary head acts as a dedicated token drafter for a specific future offset: the first MTP head guesses the first draft token ($t+2$), the second head guesses the one after that ($t+3$), and so on. During inference, the main model checks those guesses in order and keeps the longest prefix that matches. Like EAGLE, this naturally removes the need to deploy a separate standalone drafting model.</p>
+
+      <div class="spec-callout">
+        <strong>EAGLE-3 vs. Multi-Token Prediction (MTP):</strong> Both propose multiple tokens for single-pass target verification without an external draft model, but they differ in <em>how proposals are formed</em>. <strong>MTP</strong> uses multiple specialized multi-token prediction heads trained for fixed future offsets, whereas <strong>EAGLE-3</strong> uses a single lightweight autoregressive head that extrapolates fused internal feature states across steps to construct a dynamic candidate tree.
+      </div>
+
+      <div class="spec-table-wrap">
+        <table class="spec-table">
+          <thead>
+            <tr>
+              <th>Dimension</th>
+              <th>Classic Draft&ndash;Target</th>
+              <th>EAGLE-3</th>
+              <th>DeepSeek Multi-Token Prediction (MTP)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Drafting Mechanism</strong></td>
+              <td>Separate standalone small LLM (e.g., 1B drafting for 70B)</td>
+              <td>Single lightweight Transformer head attached to target layers</td>
+              <td>Multiple specialized prediction heads ($k=1,2,\dots$) trained with the backbone</td>
+            </tr>
+            <tr>
+              <td><strong>Input to Drafter</strong></td>
+              <td>Discrete token IDs</td>
+              <td>Fused low-, middle-, and high-level target hidden states + token embeddings</td>
+              <td>Main model hidden representations chained across MTP modules</td>
+            </tr>
+            <tr>
+              <td><strong>Proposal Structure</strong></td>
+              <td>Linear chain of $\gamma$ tokens</td>
+              <td>Instance-adaptive, confidence-pruned dynamic draft tree</td>
+              <td>Sequential multi-step token predictions</td>
+            </tr>
+            <tr>
+              <td><strong>Deployment Footprint</strong></td>
+              <td>Must host &amp; manage two separate models + two KV caches</td>
+              <td>Single model + tiny EAGLE head (~0.5&ndash;1% params)</td>
+              <td>Single model with native MTP heads built into checkpoint</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="how-to-implement-speculative-decoding">How to implement speculative decoding</h2>
+
+      <p>You can use the <a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer" target="_blank" rel="noopener">NVIDIA TensorRT-Model Optimizer</a> (`modelopt`) API to apply speculative decoding to your own Hugging Face models. The steps below convert a pretrained model (`meta-llama/Llama-3.2-1B`) to use <strong>EAGLE-3 speculative decoding</strong> via the `modelopt.torch.speculative` module.</p>
+
+      <h3 id="step-1-load-model">Step 1: Load the original Hugging Face model</h3>
+
+      <pre><code class="language-python">import transformers
+import modelopt.torch.opt as mto
+import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
+
+mto.enable_huggingface_checkpointing()
+
+# Load original HF model
+base_model = "meta-llama/Llama-3.2-1B"
+model = transformers.AutoModelForCausalLM.from_pretrained(
+    base_model, torch_dtype="auto", device_map="cuda"
+)</code></pre>
+
+      <h3 id="step-2-convert-eagle3">Step 2: Import the default config for EAGLE-3 and convert via <code>mtsp.convert</code></h3>
+
+      <pre><code class="language-python"># Read Default Config for EAGLE3
+config = EAGLE3_DEFAULT_CFG["config"]
+
+# Hidden size and vocab size must match base model
+config["eagle_architecture_config"].update(
+    {
+        "hidden_size": model.config.hidden_size,
+        "vocab_size": model.config.vocab_size,
+        "draft_vocab_size": model.config.vocab_size,
+        "max_position_embeddings": model.config.max_position_embeddings,
+    }
+)
+
+# Convert model in-place for EAGLE-3 speculative decoding
+mtsp.convert(model, [("eagle", config)])</code></pre>
+
+      <p>Once converted, the model attaches the EAGLE-3 drafting module and is ready for fine-tuning the drafting head and exporting to serving runtimes such as TensorRT-LLM, vLLM, or SGLang. You can follow the complete end-to-end speculative decoding fine-tuning pipeline in the <a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/examples/speculative_decoding/example.ipynb" target="_blank" rel="noopener"><code>TensorRT-Model-Optimizer/examples/speculative_decoding</code></a> repository.</p>
+
+      <h2 id="latency-impact">How does speculative decoding impact inference latency?</h2>
+
+      <p>The core latency bottleneck in standard autoregressive generation is the fixed, sequential cost of each step. If a single forward pass (loading weights from HBM and computing a token) takes $200\text{ ms}$, generating three tokens sequentially will always take $600\text{ ms}$ ($3 \text{ sequential steps} \times 200\text{ ms}$). The user experiences this delay as distinct, cumulative waiting periods.</p>
+
+      <p>Speculative decoding collapses these multiple waiting periods into one. By using a fast draft mechanism to speculate two candidate tokens and verifying them all in a single $250\text{ ms}$ forward pass, the model generates <strong>three tokens</strong> (two accepted speculations plus one base-model generation) in <strong>$250\text{ ms}$ instead of $600\text{ ms}$</strong>&mdash;a $2.4\times$ wall-clock latency reduction. Figure 4 illustrates this timeline comparison directly.</p>
+
+      <figure class="spec-figure">
+        <a href="figures/fig4-generation-with-without.gif" target="_blank" rel="noopener">
+          <img src="figures/fig4-generation-with-without.gif" width="1280" height="720" loading="lazy" alt="Animation showing a base model (top) using standard autoregressive generation generating a single token in each 200 ms pass, taking 600 ms to generate three. A model with speculative decode (bottom) took slightly longer on one pass (250 ms), but generated three tokens in a single pass.">
+        </a>
+        <figcaption><strong>Figure 4.</strong> Generation without speculative decoding (top: three sequential $200\text{ ms}$ passes $= 600\text{ ms}$ for 3 tokens) versus with speculative decoding (bottom: a single $250\text{ ms}$ pass producing 3 verified tokens).</figcaption>
+      </figure>
+
+      <p>Instead of watching the response appear word by word, the user sees it materialize in much faster, multi-token chunks. This is particularly noticeable in interactive applications like chatbots and coding assistants, where lower inter-token latency creates a much more fluid and natural conversation. Figure 5 compares a live chatbot interaction with speculative decoding turned off versus on.</p>
+
+      <figure class="spec-figure">
+        <a href="figures/fig5-speculative-decoding-on-off.gif" target="_blank" rel="noopener">
+          <img src="figures/fig5-speculative-decoding-on-off.gif" width="853" height="480" loading="lazy" alt="Side-by-side chatbot outputs labeled 'Speculative Decoding Off' (left) and 'Speculative Decoding On' (right), showing much faster response generation with speculative decoding enabled.">
+        </a>
+        <figcaption><strong>Figure 5.</strong> A chatbot with speculative decoding on (right) generates text in fast multi-token bursts, finishing the response much faster than standard autoregressive decoding on the left.</figcaption>
+      </figure>
+
+      <h2 id="get-started">Get started with speculative decoding</h2>
+
+      <p>Speculative decoding has become a foundational strategy for accelerating LLM inference. From the basics of draft&ndash;target generation and parallel rejection-sampling verification to single-model architectures like <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3</a> and DeepSeek's Multi-Token Prediction, these techniques directly attack the problem of idle GPU compute during sequential token generation.</p>
+
+      <p>Pairing speculative decoding with high-performance serving engines such as <a href="https://github.com/NVIDIA/TensorRT-LLM" target="_blank" rel="noopener">NVIDIA TensorRT-LLM</a>, SGLang, and vLLM allows you to deploy models that are significantly faster and more cost-effective in production without sacrificing a single point of model quality.</p>
+
+      <h3 id="further-reading">Further reading in this notebook</h3>
+      <ul>
+        <li><a href="../../../dl/architectures/transformers/variants/speculative-decoding.html">Speculative Decoding: Draft, Verify, and Correct</a> &mdash; Mathematical proof that $\min(p(v),q(v)) + [p(v)-q(v)]_+ = p(v)$ and interactive probability-mass lab.</li>
+        <li><a href="../../../mlops/llm-inference/speculative-decoding.html">MLOps &middot; Speculative Decoding</a> &mdash; Speedup equations, PyTorch reference loop, KV cache rollback, and batching tradeoffs.</li>
+        <li><a href="../../../mlops/sota-frontiers/inference-innovations.html">Inference Innovations: Medusa, Lookahead &amp; EAGLE</a> &mdash; Deep dive into tree attention masks, Jacobi iteration, and staged speculation.</li>
+      </ul>
+
+      <p class="spec-credit">
+        Source: Jamie Li, Chenhan Yu, and Hao Guo, <a href="https://developer.nvidia.com/blog/an-introduction-to-speculative-decoding-for-reducing-latency-in-ai-inference/" target="_blank" rel="noopener"><em>An Introduction to Speculative Decoding for Reducing Latency in AI Inference</em></a>, NVIDIA Technical Blog (September 17, 2025; updated October 8, 2025). Accompanying code and notebooks: <a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/examples/speculative_decoding/example.ipynb" target="_blank" rel="noopener">NVIDIA TensorRT-Model-Optimizer Speculative Decoding Examples</a> and <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3 (arXiv:2503.01840)</a>.
+      </p>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../../script.js"></script>
+  <script src="../../../../blog-posts.js?v=spec-decoding-20261014"></script>
+  <script src="../../../../blog.js?v=spec-decoding-20261014"></script>
+  <script src="../../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

@@ -9805,6 +9805,29 @@ var BLOG_TREE = [
     ]
   },
   {
+    name: 'speculative-decoding',
+    label: 'Speculative Decoding',
+    children: [
+      {
+        name: 'blogs',
+        label: 'Blogs',
+        children: [
+          {
+            name: 'difficulty-level-1-basics',
+            label: 'Difficulty Level 1 · Basics',
+            children: [
+              {
+                title: 'An Introduction to Speculative Decoding for Reducing Latency in AI Inference',
+                file: 'speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html',
+                links: ['dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
     name: 'mlops',
     label: 'MLOps',
     children: [
@@ -11244,7 +11267,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11271,11 +11294,12 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
               directoryPath[0] === 'dl' ? 'deep-learning' :
-              directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' : 'machine-learning';
+              directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' :
+              directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -11407,6 +11431,7 @@ function flattenBlogTree(nodes, result) {
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
     quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, QAT, GGUF, and FP8, with supplementary examples and method comparisons.' },
+    'speculative-decoding': { label: 'Speculative Decoding', blurb: 'Accelerating autoregressive LLM inference with draft-target verification, EAGLE-3 feature extrapolation, and multi-token prediction.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
@@ -11471,7 +11496,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* RAG, DL, ML, NLP, RL, diffusion, and quantization use the Explorer's hierarchy and reading order. Metadata insertion
+  /* RAG, DL, ML, NLP, RL, diffusion, quantization, and speculative-decoding use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -11530,7 +11555,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11555,6 +11580,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'rag') catSection.id = 'retrieval-augmented-generation';
     if (code === 'diffusion') catSection.id = 'diffusion-models';
     if (code === 'quantization') catSection.id = 'quantization';
+    if (code === 'speculative-decoding') catSection.id = 'speculative-decoding';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11567,7 +11593,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11650,7 +11676,8 @@ function flattenBlogTree(nodes, result) {
       id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' :
       id === 'natural-language-processing' || id === 'folder-nlp' || id.indexOf('folder-nlp--') === 0 ? 'nlp' :
       id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' :
-      id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' : '';
+      id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' :
+      id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
