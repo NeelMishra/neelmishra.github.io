@@ -9819,7 +9819,12 @@ var BLOG_TREE = [
               {
                 title: 'An Introduction to Speculative Decoding for Reducing Latency in AI Inference',
                 file: 'speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html',
-                links: ['dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
+                links: ['speculative-decoding/blogs/difficulty-level-1-basics/assisted-generation-low-latency-text-generation.html', 'dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
+              },
+              {
+                title: 'Assisted Generation: A New Direction Toward Low-Latency Text Generation',
+                file: 'speculative-decoding/blogs/difficulty-level-1-basics/assisted-generation-low-latency-text-generation.html',
+                links: ['speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html', 'dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
               }
             ]
           }
