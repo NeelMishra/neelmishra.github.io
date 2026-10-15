@@ -8,6 +8,7 @@ for(let i=0;i<2;i++){let a=w.slice(),b=w.slice();a[i]+=eps;b[i]-=eps;close((M.lo
 let all=M.centers(.35).map(a=>M.mv(h,[w[0]-a[0],w[1]-a[1]]));
 for(let j=0;j<2;j++)close(all.reduce((s,a)=>s+a[j],0)/8,g[j]);
 let s=M.state();M.step('sgd',s,[3,4],{lr:.1});close(s.w[0],2.7);close(s.w[1],1.6);
+let h2=M.hessian(2,0),g2=M.mv(h2,[3,2]),tan=[-4,3];close(M.loss([3,2],h2),8.5);assert.deepEqual(g2,[3,4]);close(g2[0]*tan[0]+g2[1]*tan[1],0);
 s=M.state();M.step('sgd',s,M.mv(M.hessian(1,0),s.w),{lr:1});close(s.w[0],0);close(s.w[1],0);
 let r1=M.rng(7),r2=M.rng(7);for(let i=0;i<100;i++)assert.equal(r1(),r2());
 console.log('Optimizer numerical checks passed.');
