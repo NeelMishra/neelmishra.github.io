@@ -11224,7 +11224,8 @@ var BLOG_TREE = [
           { title: '2. From Greedy Hill-Climbing to Code-Space Tree Search: AIDE &amp; AI Scientist v2', file: 'agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', 'agentic-harness/autoresearch/program-md-and-agent-computer-interface.html'] },
           { title: '3. Programming the Research Organization: program.md, ACI, and Context Economics', file: 'agentic-harness/autoresearch/program-md-and-agent-computer-interface.html', links: ['agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html', 'agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html'] },
           { title: '4. Evolutionary Code Harnesses: FunSearch, AlphaEvolve &amp; MAP-Elites', file: 'agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html', links: ['agentic-harness/autoresearch/program-md-and-agent-computer-interface.html', 'agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html'] },
-          { title: '5. Verifier Boundaries, Goodhart\'s Law &amp; Reward Hacking', file: 'agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html', links: ['agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html'] }
+          { title: '5. Verifier Boundaries, Goodhart\'s Law &amp; Reward Hacking', file: 'agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html', links: ['agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html', 'agentic-harness/autoresearch/multi-gpu-swarms-and-benchmarks.html'] },
+          { title: '6. Multi-GPU Git-Worktree Swarms &amp; Research Benchmarks', file: 'agentic-harness/autoresearch/multi-gpu-swarms-and-benchmarks.html', links: ['agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html', 'agentic-harness/autoresearch/index.html'] }
         ]
       }
     ]
