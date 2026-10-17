@@ -11222,7 +11222,8 @@ var BLOG_TREE = [
           { title: 'Reading Guide: Autoresearch Harnesses', file: 'agentic-harness/autoresearch/index.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html'] },
           { title: '1. Anatomy of the Minimal Autoresearch Harness: prepare.py, train.py, program.md, and val_bpb', file: 'agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', links: ['agentic-harness/autoresearch/index.html', 'agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html'] },
           { title: '2. From Greedy Hill-Climbing to Code-Space Tree Search: AIDE &amp; AI Scientist v2', file: 'agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', 'agentic-harness/autoresearch/program-md-and-agent-computer-interface.html'] },
-          { title: '3. Programming the Research Organization: program.md, ACI, and Context Economics', file: 'agentic-harness/autoresearch/program-md-and-agent-computer-interface.html', links: ['agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html'] }
+          { title: '3. Programming the Research Organization: program.md, ACI, and Context Economics', file: 'agentic-harness/autoresearch/program-md-and-agent-computer-interface.html', links: ['agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html', 'agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html'] },
+          { title: '4. Evolutionary Code Harnesses: FunSearch, AlphaEvolve &amp; MAP-Elites', file: 'agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html', links: ['agentic-harness/autoresearch/program-md-and-agent-computer-interface.html'] }
         ]
       }
     ]
