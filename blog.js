@@ -11227,6 +11227,11 @@ var BLOG_TREE = [
           { title: '5. Verifier Boundaries, Goodhart\'s Law &amp; Reward Hacking', file: 'agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html', links: ['agentic-harness/autoresearch/evolutionary-harnesses-funsearch-alphaevolve.html', 'agentic-harness/autoresearch/multi-gpu-swarms-and-benchmarks.html'] },
           { title: '6. Multi-GPU Git-Worktree Swarms &amp; Research Benchmarks', file: 'agentic-harness/autoresearch/multi-gpu-swarms-and-benchmarks.html', links: ['agentic-harness/autoresearch/verifier-boundaries-and-reward-hacking.html', 'agentic-harness/autoresearch/index.html'] }
         ]
+      },
+      {
+        name: 'mcp',
+        label: 'MCP',
+        children: []
       }
     ]
   }
