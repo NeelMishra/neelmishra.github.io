@@ -66,7 +66,6 @@ FUNCTIONS = {
     "Tanh": (np.tanh, lambda x: 1-np.tanh(x)**2),
     "ReLU": (relu, lambda x: (x>0).astype(float)),
     "Leaky ReLU (a=0.1)": (leaky, lambda x: np.where(x>0, 1, .1)),
-    "Softplus": (softplus, expit),
     "ELU (alpha=1)": (elu, lambda x: np.exp(np.minimum(x, 0))),
     "SELU": (selu, lambda x: SCALE*np.where(x>0, 1, ALPHA*np.exp(np.minimum(x, 0)))),
     "GELU": (gelu, dgelu),
@@ -114,8 +113,7 @@ def bundle(names):
 
 figure("sigmoid-tanh",bundle(["Sigmoid","Tanh"]))
 figure("relu-family",bundle(["ReLU","Leaky ReLU (a=0.1)"]))
-figure("softplus-elu-selu",bundle(["Softplus","ELU (alpha=1)","SELU"]))
-figure("gelu",bundle(["ReLU","GELU"]))
+figure("gelu-selu",bundle(["ReLU","GELU","SELU"]))
 figure("silu-swish-mish",bundle(["SiLU / Swish-1","Swish (beta=2)","Mish"]))
 figure("design",[(f"a=0.1, tau={tau}",lambda x,t=tau:designed(x,tau=t),lambda x,t=tau:ddesigned(x,tau=t)) for tau in [.25,1,2]])
 
@@ -168,5 +166,5 @@ for b in range(2):
 np.testing.assert_allclose(vectorized,coordinate)
 results["design"]={"inputs":[-1,0,1],"outputs":designed(z).tolist(),"slopes":ddesigned(z).tolist()}
 (OUT/"values.json").write_text(json.dumps(results,indent=2)+"\n")
-print("Verified 11 activation derivatives, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
-print("Generated six original curve figures and assets/values.json; no training results are claimed.")
+print("Verified 10 activation derivatives, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
+print("Generated five original curve figures and assets/values.json; no training results are claimed.")
