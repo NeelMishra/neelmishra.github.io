@@ -23,9 +23,6 @@ def relu(x):
 def leaky(x, a=.1):
     return np.where(x >= 0, x, a*x)
 
-def softplus(x):
-    return np.logaddexp(0, x)
-
 def elu(x):
     return np.where(x >= 0, x, np.expm1(np.minimum(x, 0)))
 
@@ -44,13 +41,6 @@ def swish(x, beta=1):
 def dswish(x, beta=1):
     s = expit(beta*x)
     return s+beta*x*s*(1-s)
-
-def mish(x):
-    return x*np.tanh(softplus(x))
-
-def dmish(x):
-    t = np.tanh(softplus(x))
-    return t+x*expit(x)*(1-t*t)
 
 def designed(x, a=.1, tau=1):
     """Centered smooth leaky activation; a and tau are fixed settings."""
@@ -71,7 +61,6 @@ FUNCTIONS = {
     "GELU": (gelu, dgelu),
     "SiLU / Swish-1": (swish, dswish),
     "Swish (beta=2)": (lambda x: swish(x, 2), lambda x: dswish(x, 2)),
-    "Mish": (mish, dmish),
 }
 plt.rcParams.update({
     "font.family":"sans-serif", "font.sans-serif":["DejaVu Sans","Arial","sans-serif"],
@@ -114,7 +103,7 @@ def bundle(names):
 figure("sigmoid-tanh",bundle(["Sigmoid","Tanh"]))
 figure("relu-family",bundle(["ReLU","Leaky ReLU (a=0.1)"]))
 figure("gelu-selu",bundle(["ReLU","GELU","SELU"]))
-figure("silu-swish-mish",bundle(["SiLU / Swish-1","Swish (beta=2)","Mish"]))
+figure("silu-swish",bundle(["SiLU / Swish-1","Swish (beta=2)"]))
 figure("design",[(f"a=0.1, tau={tau}",lambda x,t=tau:designed(x,tau=t),lambda x,t=tau:ddesigned(x,tau=t)) for tau in [.25,1,2]])
 
 # Compare analytic derivatives with independent centered finite differences.
@@ -166,5 +155,5 @@ for b in range(2):
 np.testing.assert_allclose(vectorized,coordinate)
 results["design"]={"inputs":[-1,0,1],"outputs":designed(z).tolist(),"slopes":ddesigned(z).tolist()}
 (OUT/"values.json").write_text(json.dumps(results,indent=2)+"\n")
-print("Verified 10 activation derivatives, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
+print("Verified 9 activation derivatives, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
 print("Generated five original curve figures and assets/values.json; no training results are claimed.")
