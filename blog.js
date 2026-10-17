@@ -11220,7 +11220,8 @@ var BLOG_TREE = [
         label: 'Autoresearch',
         children: [
           { title: 'Reading Guide: Autoresearch Harnesses', file: 'agentic-harness/autoresearch/index.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html'] },
-          { title: '1. Anatomy of the Minimal Autoresearch Harness: prepare.py, train.py, program.md, and val_bpb', file: 'agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', links: ['agentic-harness/autoresearch/index.html'] }
+          { title: '1. Anatomy of the Minimal Autoresearch Harness: prepare.py, train.py, program.md, and val_bpb', file: 'agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', links: ['agentic-harness/autoresearch/index.html', 'agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html'] },
+          { title: '2. From Greedy Hill-Climbing to Code-Space Tree Search: AIDE &amp; AI Scientist v2', file: 'agentic-harness/autoresearch/greedy-ratchet-vs-tree-search-aide.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html'] }
         ]
       }
     ]
