@@ -1,0 +1,70 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Placement in Transformers: Post-LN vs. Pre-LN, Sandwich-LN, and QK-Norm | Neel Mishra</title><meta name="description" content="Derive why Post-LN Transformers attenuate residual gradients and require learning-rate warmup, how Pre-LN restores an identity gradient highway at the cost of linear variance growth, and how Sandwich-LN and QK-Norm stabilize large-scale Transformer training."><link rel="canonical" href="https://neelmishra.github.io/blog/dl/normalization/pre-ln-post-ln-and-qk-norm.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html">← All Posts</a><div class="post-series-nav"><a href="index.html">Deep Learning · Normalization</a><span>Chapter 05 / 7</span></div><h1>Placement in Transformers: Post-LN vs. Pre-LN, Sandwich-LN, and QK-Norm</h1><p class="post-meta">October 2026 · 8 min read</p><p class="optimizer-lede">Derive Xiong et al.’s expected gradient norms for Post-LN vs. Pre-LN Transformers, explain why Pre-LN residual variance grows linearly with depth ($\operatorname{Var}(x_l)\propto l$), and show how Sandwich-LN and QK-Norm prevent logit explosion at scale.</p>
+<p>Moving a LayerNorm or RMSNorm call by a single line of code—from <em>after</em> the residual addition to <em>inside</em> the residual branch—determines whether a 60-layer Transformer diverges on step 10 or trains smoothly without learning-rate warmup. Where you place normalization inside a residual block controls both the forward variance of the residual stream and the backward Jacobian of the skip highway.</p>
+
+<h2 id="post-vs-pre">1. Post-LN vs. Pre-LN: why Post-LN damps the residual highway</h2>
+<p>Let $F_l(\cdot)$ denote a Transformer sublayer (Multi-Head Attention or FFN) at layer $l\in\{1,\dots,L\}$. Compare the two classic placements:</p>
+<div class="opt-equation">$$\begin{aligned}\textbf{Post-LN (Vaswani et al., 2017; BERT):}&\quad x_{l+1} = \operatorname{LN}\!\bigl(x_l + F_l(x_l)\bigr),\\[4pt]\textbf{Pre-LN (GPT-2/3, LLaMA, ViT):}&\quad x_{l+1} = x_l + F_l\!\bigl(\operatorname{LN}(x_l)\bigr),\qquad x_{\text{out}} = \operatorname{LN}(x_L).\end{aligned}$$</div>
+<p>Why does <strong>Post-LN</strong> require thousands of steps of small-learning-rate warmup whereas <strong>Pre-LN</strong> trains stably from step $1$? Follow the variance and backward Jacobian at initialization (Xiong et al., 2020):</p>
+<ul>
+<li><strong>In Post-LN, every layer divides the skip highway by $\sqrt{1+\sigma_F^2}$:</strong> Suppose at initialization $\operatorname{Var}(x_l) = 1$ and the sublayer output $F_l(x_l)$ is approximately independent of $x_l$ with variance $\sigma_F^2 &gt; 0$. Then the unnormalized sum $u_l = x_l + F_l(x_l)$ has variance $\operatorname{Var}(u_l) = 1 + \sigma_F^2 &gt; 1$. LayerNorm divides $u_l$ by $\sigma(u_l) \approx \sqrt{1+\sigma_F^2}$ to reset $\operatorname{Var}(x_{l+1}) = 1$. During backpropagation, the Jacobian $\frac{\partial x_L}{\partial x_l}$ must pass through $L-l$ consecutive Post-LN denominators:
+<div class="opt-equation">$$\frac{\partial x_{l+1}}{\partial x_l}\Big|_{\text{Post-LN}} = \frac{\partial\operatorname{LN}(u_l)}{\partial u_l}\left(I + \frac{\partial F_l(x_l)}{\partial x_l}\right) \approx \frac{1}{\sqrt{1+\sigma_F^2}}\left(I + \frac{\partial F_l(x_l)}{\partial x_l}\right).$$</div>
+Across $L-l$ layers, the direct skip path from $x_L$ back to $x_l$ is attenuated exponentially by $(1+\sigma_F^2)^{-(L-l)/2}$. Consequently, in Post-LN at initialization, the top layer $l=L$ has an $O(1)$ gradient norm while early layers $l\ll L$ have vanishing gradients—forcing you to use a tiny learning rate (warmup) until the top layers adapt!</li>
+<li><strong>In Pre-LN, the skip highway has an exact identity Jacobian $I$:</strong> Unrolling the Pre-LN recurrence from $l$ to $L$ gives
+<div class="opt-equation">$$x_L = x_l + \sum_{k=l}^{L-1} F_k\!\bigl(\operatorname{LN}(x_k)\bigr)\implies \frac{\partial x_L}{\partial x_l}\Big|_{\text{Pre-LN}} = I + \sum_{k=l}^{L-1}\frac{\partial F_k(\operatorname{LN}(x_k))}{\partial x_l}.$$</div>
+Because LayerNorm sits <em>inside</em> the branch $F_k(\operatorname{LN}(x_k))$ rather than on the main highway, gradients flow unimpeded through the identity matrix $I$ to every layer $l\in\{1,\dots,L\}$ on step $1$.</li>
+</ul>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/pre-ln-post-ln-and-qk-norm.svg" width="900" height="360" alt="Four-panel diagram comparing Post-LN, Pre-LN, Sandwich/Peri-LN, and QK-Norm inside a Transformer."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>1: Post-LN places LayerNorm on the main residual highway, damping early-layer gradients by $(1+\sigma_F^2)^{-(L-l)/2}$. 2: Pre-LN moves normalization inside the branch, preserving an identity skip path $I$. 3: Sandwich/Peri-LN bounds both branch inputs and branch outputs. 4: QK-Norm applies RMSNorm to $q$ and $k$ before dot-product attention.</figcaption></figure>
+
+<h2 id="sandwich-ln">2. The Pre-LN depth trap ($\operatorname{Var}(x_l)\propto l$) and Sandwich / Peri-LN</h2>
+<p>Pre-LN’s clean identity highway comes with a subtle forward-pass trade-off: because each sublayer receives a normalized input $\operatorname{LN}(x_l)$ of unit variance and adds an unnormalized output $F_l(\operatorname{LN}(x_l))$ of variance $\sigma_F^2$ onto the residual stream, the residual stream variance accumulates linearly with depth $l$:</p>
+<div class="opt-equation">$$\operatorname{Var}(x_l) = \operatorname{Var}(x_0) + \sum_{k=0}^{l-1}\operatorname{Var}\!\bigl(F_k(\operatorname{LN}(x_k))\bigr) \approx 1 + l\,\sigma_F^2 = \Theta(l).$$</div>
+<p>In a very deep Pre-LN network ($L\ge 64$), two failure modes emerge if branch outputs are left unscaled:</p>
+<ol>
+<li><strong>Deep-layer dilution:</strong> At layer $l=60$, the residual stream $x_l$ has standard deviation $\sqrt{l}\approx 7.7$, while the branch output $F_l(\operatorname{LN}(x_l))$ has standard deviation $O(1)$. Furthermore, the backward Jacobian of $\operatorname{LN}(x_l)$ scales inversely with $\sigma(x_l)\propto 1/\sqrt{l}$, so deep layers contribute less and less relative to early layers.</li>
+<li><strong>Branch activation spikes in bf16:</strong> During large-scale multimodal or LLM pretraining, an unnormalized FFN or Attention branch output $F_l(\operatorname{LN}(x_l))$ can experience a sudden norm spike that gets injected directly into the residual stream.</li>
+</ol>
+<p><strong>Sandwich-LN / Peri-LN</strong> (Ding et al., CogView 2021; Gemma 2; OLMo 2) fixes both issues without sacrificing the identity skip path by wrapping each sublayer $F_l$ with <em>both</em> a pre-normalization and a post-branch normalization:</p>
+<div class="opt-equation">$$x_{l+1} = x_l + \operatorname{RMSNorm}_{\text{post}}\!\Bigl(F_l\bigl(\operatorname{RMSNorm}_{\text{pre}}(x_l)\bigr)\Bigr).$$</div>
+<p>Here $\operatorname{RMSNorm}_{\text{pre}}$ ensures the input to $F_l$ is unit-scale, while $\operatorname{RMSNorm}_{\text{post}}$ caps the norm of the branch update before it touches the residual highway $x_l$—keeping the skip connection’s identity term $I$ completely intact!</p>
+
+<h2 id="qk-norm">3. QK-Norm: bounding attention logits and preventing entropy collapse</h2>
+<p>Even with Pre-LN or Sandwich-LN, standard scaled dot-product attention has an unnormalized quadratic bottleneck! Inside a head of dimension $d_k$, queries $q_i = W_Q\operatorname{LN}(x_i)$ and keys $k_j = W_K\operatorname{LN}(x_j)$ are linear projections whose norms grow as $\|W_Q\|_2$ and $\|W_K\|_2$ grow during training. Because the attention score $s_{ij} = \frac{q_i^\top k_j}{\sqrt{d_k}}$ is bilinear in $(W_Q,W_K)$:</p>
+<ul>
+<li>If $\|W_Q\|_2$ and $\|W_K\|_2$ each grow by $5\times$, the attention logits $s_{ij}$ grow by $25\times$, pushing softmax into complete saturation ($\max_j \alpha_{ij}\to 1$, attention entropy $H(\alpha_i)\to 0$) where $\nabla\operatorname{softmax}\approx 0$, or overflowing `float16`.</li>
+</ul>
+<p><strong>QK-Norm</strong> (Dehghani et al., ViT-22B 2023; Chameleon; Gemma 2/3) places an RMSNorm (or LayerNorm) directly on $q_i$ and $k_j$ <em>before</em> computing $q_i^\top k_j$ (and before applying RoPE rotary embeddings):</p>
+<div class="opt-equation">$$\hat q_i = \operatorname{RMSNorm}(q_i;\gamma_q),\qquad \hat k_j = \operatorname{RMSNorm}(k_j;\gamma_k),\qquad s_{ij} = \frac{\hat q_i^\top\hat k_j}{\sqrt{d_k}}.$$</div>
+<p>Since $\|\bar q_i\|_2 = \sqrt{\sum_{m=1}^{d_k}\bar q_{i,m}^2} \le \sqrt{d_k}$ and $\|\hat q_i\|_2 \le \sqrt{d_k}\|\gamma_q\|_\infty$, the Cauchy–Schwarz inequality guarantees a strict upper bound on every attention logit regardless of how large $W_Q$ and $W_K$ become:</p>
+<div class="opt-equation">$$|s_{ij}| = \frac{|\hat q_i^\top\hat k_j|}{\sqrt{d_k}} \le \frac{\|\hat q_i\|_2\,\|\hat k_j\|_2}{\sqrt{d_k}} \le \sqrt{d_k}\,\|\gamma_q\|_\infty\,\|\gamma_k\|_\infty.$$</div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class QKNormAttention(nn.Module):
+    def __init__(self, d_model: int, n_heads: int):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.q_norm = nn.RMSNorm(self.d_k, eps=1e-6)
+        self.k_norm = nn.RMSNorm(self.d_k, eps=1e-6)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = self.q_norm(q.view(B, T, self.n_heads, self.d_k)).transpose(1, 2)
+        k = self.k_norm(k.view(B, T, self.n_heads, self.d_k)).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_k).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return self.proj(out.transpose(1, 2).contiguous().view(B, T, D))</code></pre>
+
+<h2 id="checks">4. Questions worth answering</h2>
+<div class="self-check"><strong>Why must a Pre-LN Transformer always include a final normalization layer $\operatorname{LN}(x_L)$ immediately before the output unembedding/classifier head?</strong><p>Because in Pre-LN, the residual stream $x_L = x_0 + \sum_{l=0}^{L-1}F_l(\operatorname{LN}(x_l))$ is never normalized on the main highway, so its variance grows as $\Theta(L)$ and its scale fluctuates during training. Placing a final $\operatorname{LN}(x_L)$ before $W_{\text{vocab}}$ stabilizes the logit scale entering the cross-entropy loss.</p></div>
+<div class="self-check"><strong>Should QK-Norm be applied before or after Rotary Position Embeddings (RoPE)?</strong><p>Before RoPE (or using RMSNorm, which commutes with orthogonal 2D rotations only if $\gamma$ is shared within each 2D frequency pair). Because standard element-wise $\gamma_q,\gamma_k$ scales individual coordinates anisotropically, applying QK-Norm immediately after $W_Q,W_K$ and <em>then</em> applying RoPE preserves exact relative-position rotation invariance.</p></div>
+
+<h2 id="sources">Sources</h2><p><a href="https://arxiv.org/abs/2002.04745">Xiong et al., On Layer Normalization in the Transformer Architecture (ICML 2020)</a>; <a href="https://arxiv.org/abs/2105.13290">Ding et al., CogView: Mastering Text-to-Image Generation via Transformers (NeurIPS 2021)</a>; <a href="https://arxiv.org/abs/2302.05442">Dehghani et al., Scaling Vision Transformers to 22 Billion Parameters (ICML 2023)</a>.</p>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="instance-group-and-spatial-norms.html">← Spatial &amp; Vision Normalizations: InstanceNorm &amp; GroupNorm</a><a href="conditional-normalization-adain-film-adaln.html">Conditional Normalization: AdaIN, FiLM, SPADE &amp; AdaLN-Zero →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../training-labs/training-math.js"></script><script src="../training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
