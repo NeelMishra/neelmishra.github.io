@@ -11218,7 +11218,10 @@ var BLOG_TREE = [
       {
         name: 'autoresearch',
         label: 'Autoresearch',
-        children: []
+        children: [
+          { title: 'Reading Guide: Autoresearch Harnesses', file: 'agentic-harness/autoresearch/index.html', links: ['agentic-harness/autoresearch/three-file-ratchet-and-bpb.html'] },
+          { title: '1. Anatomy of the Minimal Autoresearch Harness: prepare.py, train.py, program.md, and val_bpb', file: 'agentic-harness/autoresearch/three-file-ratchet-and-bpb.html', links: ['agentic-harness/autoresearch/index.html'] }
+        ]
       }
     ]
   }
@@ -11286,7 +11289,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11313,12 +11316,13 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
               directoryPath[0] === 'dl' ? 'deep-learning' :
               directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' :
-              directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' : 'machine-learning';
+              directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' :
+              directoryPath[0] === 'agentic-harness' ? 'agentic-harness' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -11575,7 +11579,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11601,6 +11605,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'diffusion') catSection.id = 'diffusion-models';
     if (code === 'quantization') catSection.id = 'quantization';
     if (code === 'speculative-decoding') catSection.id = 'speculative-decoding';
+    if (code === 'agentic-harness') catSection.id = 'agentic-harness';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11613,7 +11618,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11697,7 +11702,8 @@ function flattenBlogTree(nodes, result) {
       id === 'natural-language-processing' || id === 'folder-nlp' || id.indexOf('folder-nlp--') === 0 ? 'nlp' :
       id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' :
       id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' :
-      id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' : '';
+      id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' :
+      id === 'agentic-harness' || id.indexOf('folder-agentic-harness--') === 0 ? 'agentic-harness' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);

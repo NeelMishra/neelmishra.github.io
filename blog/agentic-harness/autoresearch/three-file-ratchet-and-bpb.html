@@ -1,0 +1,189 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Anatomy of the Minimal Autoresearch Harness: prepare.py, train.py, program.md, and the 5-Minute val_bpb Ratchet | Neel Mishra</title><meta name="description" content="Dissect Andrej Karpathy's 3-file autoresearch contract (prepare.py, train.py, program.md), derive why Validation Bits-Per-Byte (val_bpb) is invariant to tokenizer vocabulary changes, analyze how a fixed 300-second wall-clock budget couples hardware throughput to statistical convergence, and trace a 6-experiment overnight results.tsv Git ratchet."><link rel="canonical" href="https://neelmishra.github.io/blog/agentic-harness/autoresearch/three-file-ratchet-and-bpb.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-agentic-harness--autoresearch">← Agentic Harness / Autoresearch</a><div class="post-series-nav"><a href="index.html">Agentic Harness · Autoresearch</a><span>Chapter 01 / 6</span></div><h1>Anatomy of the Minimal Autoresearch Harness: <code>prepare.py</code>, <code>train.py</code>, <code>program.md</code>, and the $5$-Minute <code>val_bpb</code> Ratchet</h1><p class="post-meta">October 2026 · 11 min read</p><p class="optimizer-lede">Why open-ended agentic coding loops collapse on ML repositories, how Andrej Karpathy’s three-file ownership boundary turns LLM pretraining research into a self-verifying Git ratchet, why Validation Bits-Per-Byte (<code>val_bpb</code>) prevents tokenizer gaming, and how a fixed $300$-second wall-clock horizon couples systems throughput directly to statistical loss.</p>
+
+<p>When Andrej Karpathy released <a href="https://github.com/karpathy/autoresearch"><code>karpathy/autoresearch</code></a> in March 2026 (distilled from his single-GPU <code>nanochat</code> pretraining setup), its most striking property was what it <em>excluded</em>. Rather than building a sprawling multi-agent framework with dozens of tools, vector databases, and orchestration layers, the entire autonomous research harness consists of roughly $630$ lines of Python split across <strong>three files with strict read/write ownership boundaries</strong>.</p>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/three-file-ratchet-and-bpb.svg" width="900" height="370" alt="Left: The 3-file autoresearch contract (program.md human instructions, train.py mutable sandbox, prepare.py frozen verifier) and 300-second Git ratchet loop. Right: Overnight ratchet trajectory showing monotonic decrease of kept val_bpb commits while worse or OOM experiments are reverted."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Left: The three-file ownership contract isolates the human research policy (<code>program.md</code>), the agent’s single mutable playground (<code>train.py</code>), and the frozen evaluation oracle (<code>prepare.py</code>). Right: Across an overnight run, the Git ratchet commits only strictly improving <code>val_bpb</code> states and immediately runs <code>git reset --hard</code> on regressions or OOM crashes.</figcaption></figure>
+
+<h2 id="three-file-contract">1. The Three-File Ownership Boundary: Why Surface-Area Compression Matters</h2>
+<p>In a standard ML codebase with $40+$ files (`model.py`, `layers.py`, `attention.py`, `optimizer.py`, `scheduler.py`, `dataset.py`, `eval.py`, `config.yaml`), an autonomous coding agent faces two compounding failure modes:</p>
+<ol>
+<li><strong>Context fragmentation &amp; interface drift:</strong> Changing a tensor signature in `attention.py` requires synchronized edits across `model.py`, `train.py`, and `config.yaml`. Every cross-file hop consumes context tokens and multiplies the probability of a syntax or shape mismatch.</li>
+<li><strong>Verifier contamination:</strong> If the evaluation loop or data loader lives in the same editable scope as the training loop, an agent optimizing validation loss will inevitably (often accidentally) alter batch padding, sequence truncation, or loss normalization in the evaluator.</li>
+</ol>
+<p>Karpathy’s harness eliminates both failure modes by partitioning the workspace into three disjoint roles:</p>
+<div class="note-table"><table><caption>The three-file separation of concerns in <code>karpathy/autoresearch</code>.</caption><thead><tr><th>File</th><th>Owner</th><th>Access Mode</th><th>Exact Responsibility in the Harness</th></tr></thead><tbody>
+<tr><td><code>prepare.py</code></td><td>Harness / System</td><td><strong>Read-Only (Frozen)</strong></td><td>Downloads parquet shards, trains/loads the BPE tokenizer (e.g., $|V|=8192$), builds deterministic train/val <code>DataLoader</code> streams, defines <code>TIME_BUDGET = 300</code>, and exposes the locked <code>evaluate_bpb(model, val_loader)</code> oracle.</td></tr>
+<tr><td><code>train.py</code></td><td>AI Coding Agent</td><td><strong>Read / Write (Mutable)</strong></td><td>Self-contained (~630 lines) single-file GPT architecture, Rotary Positional Embeddings (RoPE), FlashAttention-3 / sliding-window schedule (<code>SSSL</code>), hybrid <code>MuonAdamW</code> optimizer, and the fixed-time training loop.</td></tr>
+<tr><td><code>program.md</code></td><td>Human Researcher</td><td><strong>Human-Edited Prompt</strong></td><td>Natural-language &ldquo;operating system&rdquo; instructing the agent how to set up a <code>autoresearch/&lt;tag&gt;</code> Git branch, propose hypotheses, redirect logs to <code>run.log</code>, parse <code>val_bpb</code>, record to <code>results.tsv</code>, and loop indefinitely.</td></tr>
+</tbody></table></div>
+
+<p>Because the entire model, optimizer, and training schedule fit inside a single ~630-line <code>train.py</code> (~$4{,}500$ tokens), the coding agent can hold the <strong>entire mutable state of the system in working memory at once</strong> without cross-file grep searches.</p>
+
+<h2 id="val-bpb">2. Deriving Validation Bits-Per-Byte (<code>val_bpb</code>): The Tokenizer-Invariant Oracle</h2>
+<p>Why does <code>prepare.py</code> evaluate models using <strong>Validation Bits-Per-Byte (<code>val_bpb</code>)</strong> instead of standard token-level cross-entropy loss $\mathcal{L}_{\text{token}}$ or token perplexity $\operatorname{PPL}_{\text{token}} = \exp(\mathcal{L}_{\text{token}})$?</p>
+<p>Suppose a validation document $D$ consists of $B$ raw UTF-8 bytes, which a tokenizer $T_V$ with vocabulary $V$ segments into $N_V$ tokens $(x_1, x_2, \dots, x_{N_V})$. An autoregressive model $p_\theta$ incurs negative log-likelihood (in nats) on token $t$:</p>
+<div class="opt-equation">$$\ell_t(\theta) = -\ln p_\theta(x_t \mid x_{&lt;t}).$$</div>
+<p>Standard mean token cross-entropy divides the total nats by the <em>number of tokens</em> $N_V$:</p>
+<div class="opt-equation">$$\mathcal{L}_{\text{token}}(\theta; V) = \frac{1}{N_V} \sum_{t=1}^{N_V} \ell_t(\theta).$$</div>
+<p>Notice the vulnerability: if an agent (or researcher comparing two branches) modifies tokenization, sequence packing, or special-token splitting so that the same $B$-byte text is split into <em>more, shorter tokens</em> ($N_{V'} > N_V$), each individual token becomes easier to predict, causing $\mathcal{L}_{\text{token}}$ to drop artificially even if the model compresses the underlying English text <em>worse</em>! Conversely, to measure true information-theoretic compression of the raw byte stream $D$ in bits (base-$2$ logarithms), we must sum the total nats across the sequence, convert nats to bits via $\log_2 e = \frac{1}{\ln 2}$, and divide by the <strong>total number of raw UTF-8 bytes</strong> $B = \sum_{t=1}^{N_V} b(x_t)$:</p>
+<div class="opt-equation">$$\operatorname{val\_bpb}(\theta) = \frac{\sum_{t=1}^{N_V} \ell_t(\theta)}{(\ln 2)\,\sum_{t=1}^{N_V} b(x_t)} = \frac{\mathcal{L}_{\text{token}}(\theta; V)}{(\ln 2)\,\bar{b}_V},\qquad \text{where}\quad \bar{b}_V = \frac{B}{N_V}\;\text{is the mean UTF-8 bytes per token.}$$</div>
+<p>Crucially, in <code>prepare.py</code>’s <code>evaluate_bpb</code> implementation, special control tokens (such as <code>&lt;|bos|&gt;</code> or padding tokens) contribute $b(x_t)=0$ bytes and are masked out of the loss numerator so the agent cannot dilute <code>val_bpb</code> by prepending predictable BOS tokens.</p>
+
+<h3 id="worked-bpb">Worked numerical example: Token Cross-Entropy vs. <code>val_bpb</code></h3>
+<p>Suppose our validation shard contains $B = 1{,}000{,}000$ raw UTF-8 bytes ($1\,\text{MB}$ of text). Compare two configurations:</p>
+<ul>
+<li><strong>Baseline ($|V|=8{,}192$ BPE):</strong> Compresses the $10^6$ bytes into $N_1 = 250{,}000$ tokens ($\bar{b}_1 = 4.00\text{ bytes/token}$) and achieves mean token loss $\mathcal{L}_{\text{token}}^{(1)} = 2.8854\text{ nats/token}$.</li>
+<li><strong>Modified Split ($|V|=4{,}096$ BPE):</strong> Splits the same $10^6$ bytes into $N_2 = 312{,}500$ tokens ($\bar{b}_2 = 3.20\text{ bytes/token}$) and achieves a seemingly lower mean token loss $\mathcal{L}_{\text{token}}^{(2)} = 2.3500\text{ nats/token}$.</li>
+</ul>
+<p>If the harness judged models by $\mathcal{L}_{\text{token}}$, the second model would look $18.5\%$ better ($2.3500 < 2.8854$). Now compute $\operatorname{val\_bpb}$ using $\ln 2 \approx 0.693147$:</p>
+<div class="opt-equation">$$\operatorname{val\_bpb}^{(1)} = \frac{250{,}000 \times 2.8854}{0.693147 \times 1{,}000{,}000} = \frac{2.8854}{0.693147 \times 4.00} = \mathbf{1.0408\text{ bits/byte}},$$</div>
+<div class="opt-equation">$$\operatorname{val\_bpb}^{(2)} = \frac{312{,}500 \times 2.3500}{0.693147 \times 1{,}000{,}000} = \frac{2.3500}{0.693147 \times 3.20} = \mathbf{1.0595\text{ bits/byte}}.$$</div>
+<p>Because total nats increased from $721{,}350$ to $734{,}375$ on the exact same $1\,\text{MB}$ validation text, <code>val_bpb</code> rightly rejects Model 2 ($1.0595 > 1.0408$).</p>
+
+<h2 id="wall-clock-horizon">3. The Fixed $300$-Second Horizon: Coupling Hardware Throughput to Statistical Convergence</h2>
+<p>In traditional academic ML ablations, experiments are run for a <strong>fixed number of gradient steps $S$</strong> (or fixed token count $N_{\text{tok}}$). If an autonomous agent is given a fixed-step budget $S=5{,}000$, it will greedily stack expensive operations—tripling layer depth, widening MLPs, or adding multi-branch attention—that improve loss per step by $1\%$ while slowing wall-clock step time by $4\times$. Within three iterations, each experiment takes $40$ minutes and the overnight loop grinds to a halt.</p>
+<p>Instead, <code>autoresearch</code> enforces a hard <strong>wall-clock training budget</strong> $T_{\text{budget}} = 300\text{ seconds}$ ($5\text{ minutes}$, excluding startup compilation and final validation). Let $\tau(p)$ denote the effective training throughput (in tokens/second) of program $p$ on the target GPU. Then the total number of training tokens processed inside the $300$-second window is an endogenous function of the code itself:</p>
+<div class="opt-equation">$$N_{\text{tok}}(p) = \tau(p)\cdot T_{\text{budget}} = \frac{B_{\text{batch}}\cdot L_{\text{seq}}}{\Delta t_{\text{step}}(p)}\cdot T_{\text{budget}}.$$</div>
+<p>Under a power-law pretraining loss curve where validation bits-per-byte after $K$ steps of effective quality $q(p)$ follows:</p>
+<div class="opt-equation">$$J(p) = J_\infty(p) + A(p)\,\big(N_{\text{tok}}(p)\big)^{-\alpha} = J_\infty(p) + A(p)\,\big(\tau(p)\,T_{\text{budget}}\big)^{-\alpha},$$</div>
+<p>taking the first-order sensitivity of $J(p)$ with respect to a code modification $\Delta p$ reveals a two-term trade-off:</p>
+<div class="opt-equation">$$\Delta J \approx \underbrace{\Delta J_\infty + \big(\tau T_{\text{budget}}\big)^{-\alpha}\Delta A}_{\text{Sample-efficiency / architectural gain}} \;-\; \underbrace{\alpha\,\big(J(p) - J_\infty(p)\big)\frac{\Delta \tau}{\tau}}_{\text{Systems throughput gain }(\Delta\tau/\tau &gt; 0\text{ lowers }J)}.$$</div>
+<p>This single design decision explains three major architectural features built into <code>train.py</code>:</p>
+<ol>
+<li><strong>Sliding-Window Attention Pattern (<code>WINDOW_PATTERN = "SSSL"</code>):</strong> Instead of running full causal attention $\mathcal{O}(L_{\text{seq}}^2)$ on every layer, three out of every four layers use a short sliding window (`S`) and only every fourth layer uses full long context (`L`). This raises $\tau(p)$ enough that the extra gradient steps taken inside $300\text{ s}$ outweigh the slight expressivity drop per step.</li>
+<li><strong>Hybrid <code>MuonAdamW</code> Optimizer:</strong> 2D hidden weight matrices are updated via <strong>Muon</strong> (MomentUm Orthogonalized by Newton-Schulz iteration, which approximates $\text{UV}^\top$ of the momentum matrix in 5 bfloat16 matmul steps), while 1D embeddings, norms, and LM head parameters use <strong>AdamW</strong> with per-parameter learning-rate scalars.</li>
+<li><strong>Wall-Clock Progress Schedule $u(t) = \min(t_{\text{elapsed}} / T_{\text{budget}}, 1)$:</strong> Learning-rate warmup, cosine/linear warmdown, and Muon momentum warmup are parameterized by <em>elapsed wall-clock fraction</em> $u \in [0,1]$ rather than step index $s$, guaranteeing that the learning rate always anneals cleanly to its terminal value right at $t = 300\text{ s}$ regardless of how fast each step runs!</li>
+</ol>
+
+<h2 id="git-ratchet-trace">4. The Overnight Git Ratchet and <code>results.tsv</code> Ledger</h2>
+<p>At the start of an overnight session (say, March 17), the agent creates a dedicated branch <code>git checkout -b autoresearch/mar17</code>. Every iteration follows a deterministic state transition on the current working commit $c_{\text{best}}$ with incumbent score $J_{\text{best}} = \operatorname{val\_bpb}(c_{\text{best}})$:</p>
+<div class="opt-equation">$$c_{t+1} = \begin{cases} \operatorname{git\_commit}(p_{\text{cand}}), & \text{if }\text{status}=\texttt{OK}\;\land\; J(p_{\text{cand}}) &lt; J_{\text{best}}\;\land\; M_{\text{peak}} \le M_{\max}, \\[6pt] c_{\text{best}}\;\;\text{(via }\texttt{git reset --hard HEAD}\text{)}, & \text{otherwise (regression, OOM, or NaN crash)}.\end{cases}$$</div>
+<p>Crucially, while failed commits are wiped from the Git branch history so <code>train.py</code> stays clean, <strong>every trial—kept or discarded—is appended to untracked <code>results.tsv</code></strong> so the agent’s context window retains a complete memory of what has already been tested:</p>
+
+<div class="note-table"><table><caption>Worked 6-experiment trace from an overnight <code>results.tsv</code> ledger ($T_{\text{budget}}=300\text{ s}$ on a single 80GB GPU).</caption><thead><tr><th>Exp</th><th>Commit</th><th><code>val_bpb</code></th><th>$\Delta\text{bpb}$ vs. Best</th><th><code>memory_gb</code></th><th>Status</th><th>Hypothesis &amp; Outcome</th></tr></thead><tbody>
+<tr><td><code>#0</code></td><td><code>a1b2c3d</code></td><td>$1.042000$</td><td>— (Baseline)</td><td>$42.1\text{ GB}$</td><td><strong>KEEP</strong></td><td>Unmodified baseline (`depth=8`, `Muon lr=0.02`, `SSSL`).</td></tr>
+<tr><td><code>#1</code></td><td><code>b4e5f6a</code></td><td>$1.031500$</td><td>$-0.010500$</td><td>$42.1\text{ GB}$</td><td><strong>KEEP</strong></td><td>Increase Muon matrix LR $0.02 \to 0.028$ and warmdown fraction $0.20 \to 0.35$.</td></tr>
+<tr><td><code>#2</code></td><td><code>b4e5f6a</code></td><td>$1.048500$</td><td>$+0.017000$</td><td>$51.8\text{ GB}$</td><td><em>DISCARD</em></td><td>Increase depth $8 \to 12$: step time rose $1.42\times$, fewer steps in $300\text{ s}$. Reverted to <code>b4e5f6a</code>.</td></tr>
+<tr><td><code>#3</code></td><td><code>c7d8e9f</code></td><td>$1.019800$</td><td>$-0.011700$</td><td>$42.4\text{ GB}$</td><td><strong>KEEP</strong></td><td>Add RMSNorm on $Q$ and $K$ projections (QK-Norm) before RoPE; stabilizes higher LR.</td></tr>
+<tr><td><code>#4</code></td><td><code>c7d8e9f</code></td><td>$0.000000$</td><td>$\text{CRASH}$</td><td>$80.0\text{ GB}$</td><td><em>CRASH</em></td><td>Double sequence length $2048 \to 4096$ without halving micro-batch size $\to$ CUDA OOM. Reverted.</td></tr>
+<tr><td><code>#5</code></td><td><code>d0e1f2a</code></td><td>$0.997900$</td><td>$-0.021900$</td><td>$43.6\text{ GB}$</td><td><strong>KEEP</strong></td><td>Add learnable residual value embeddings (`ve_gate`) from token embedding into middle attention layers.</td></tr>
+</tbody></table></div>
+
+<p>Notice that at Experiment <code>#3</code>, the agent branches off <code>b4e5f6a</code> (the winner of <code>#1</code>), completely ignoring the reverted code from <code>#2</code>, yet reading <code>#2</code>’s row in <code>results.tsv</code> tells the agent <em>why</em> naive depth scaling failed under the $300$-second budget.</p>
+
+<h2 id="code">5. Reference Implementation: Locked <code>evaluate_bpb</code> Oracle &amp; Git Ratchet Runner</h2>
+<p>Below is a self-contained implementation of the two foundational mechanics in <code>karpathy/autoresearch</code>: (1) the tokenizer-invariant <code>evaluate_bpb</code> function in <code>prepare.py</code> using a precomputed token-to-byte-length lookup tensor, and (2) the automated Git ratchet loop that executes <code>train.py</code> under a hard timeout, parses the output log, and commits or resets.</p>
+
+<pre><code class="language-python">import math
+import subprocess
+import pathlib
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def evaluate_bpb(
+    model: torch.nn.Module,
+    val_batches: list[tuple[torch.Tensor, torch.Tensor]],
+    token_byte_lengths: torch.Tensor,
+) -> float:
+    """
+    Locked evaluation oracle from prepare.py.
+    Computes Validation Bits-Per-Byte (val_bpb):
+        val_bpb = (sum_t nats_t) / (ln(2) * sum_t utf8_bytes(y_t))
+    Special/control tokens have token_byte_lengths[tok_id] == 0 and are masked out.
+    """
+    model.eval()
+    total_nats = 0.0
+    total_bytes = 0
+
+    for x, y in val_batches:
+        logits = model(x)  # [B, T, V]
+        per_token_nats = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            y.view(-1),
+            reduction="none",
+        ).view_as(y)
+
+        num_bytes = token_byte_lengths[y]  # [B, T], 0 for BOS/pad tokens
+        valid_mask = num_bytes > 0
+
+        total_nats += per_token_nats[valid_mask].double().sum().item()
+        total_bytes += int(num_bytes[valid_mask].sum().item())
+
+    if total_bytes == 0:
+        return float("inf")
+    return total_nats / (math.log(2.0) * total_bytes)
+
+
+def run_ratchet_step(
+    repo_dir: pathlib.Path,
+    description: str,
+    best_bpb: float,
+    hard_timeout_sec: int = 390,
+) -> tuple[float, str]:
+    """
+    Executes one propose -> train -> evaluate -> keep/revert cycle.
+    Assumes the coding agent has just written its candidate edit to train.py.
+    """
+    log_path = repo_dir / "run.log"
+    results_tsv = repo_dir / "results.tsv"
+
+    try:
+        with open(log_path, "w") as log_file:
+            proc = subprocess.run(
+                ["uv", "run", "train.py"],
+                cwd=repo_dir,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                timeout=hard_timeout_sec,
+                check=False,
+            )
+    except subprocess.TimeoutExpired:
+        subprocess.run(["git", "checkout", "--", "train.py"], cwd=repo_dir, check=True)
+        with open(results_tsv, "a") as f:
+            f.write(f"TIMEOUT\t0.000000\t0.0\tcrash\t{description} (timed out)\n")
+        return best_bpb, "timeout"
+
+    # Parse structured summary footer emitted by train.py
+    metrics: dict[str, float] = {}
+    if proc.returncode == 0 and log_path.exists():
+        for line in log_path.read_text().splitlines()[-30:]:
+            if line.startswith(("val_bpb:", "peak_vram_mb:")):
+                k, v = line.split(":", 1)
+                metrics[k.strip()] = float(v.strip())
+
+    if proc.returncode != 0 or "val_bpb" not in metrics or math.isnan(metrics["val_bpb"]):
+        subprocess.run(["git", "checkout", "--", "train.py"], cwd=repo_dir, check=True)
+        with open(results_tsv, "a") as f:
+            f.write(f"CRASH\t0.000000\t0.0\tcrash\t{description}\n")
+        return best_bpb, "crash"
+
+    cand_bpb = metrics["val_bpb"]
+    mem_gb = metrics.get("peak_vram_mb", 0.0) / 1024.0
+
+    if cand_bpb < best_bpb:
+        # Advance the ratchet: stage train.py and commit
+        subprocess.run(["git", "add", "train.py"], cwd=repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", description], cwd=repo_dir, check=True)
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short=7", "HEAD"], cwd=repo_dir, text=True
+        ).strip()
+        with open(results_tsv, "a") as f:
+            f.write(f"{commit_hash}\t{cand_bpb:.6f}\t{mem_gb:.1f}\tkeep\t{description}\n")
+        return cand_bpb, "keep"
+    else:
+        # Revert train.py back to the incumbent HEAD commit
+        subprocess.run(["git", "checkout", "--", "train.py"], cwd=repo_dir, check=True)
+        head_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short=7", "HEAD"], cwd=repo_dir, text=True
+        ).strip()
+        with open(results_tsv, "a") as f:
+            f.write(f"{head_hash}\t{cand_bpb:.6f}\t{mem_gb:.1f}\tdiscard\t{description}\n")
+        return best_bpb, "discard"</code></pre>
+
+<h2 id="checks">6. Questions worth answering</h2>
+<div class="self-check"><strong>Why should <code>results.tsv</code> remain untracked by Git inside the autoresearch loop?</strong><p>When an experiment fails or degrades <code>val_bpb</code>, the agent runs <code>git reset --hard HEAD</code> (or <code>git checkout -- train.py</code>) to restore the working tree to the last winning commit. If <code>results.tsv</code> were tracked in Git, a hard reset to <code>HEAD</code> would erase the log entry of the failed experiment that just ran—causing the agent to forget the negative result and try the exact same failed idea again on the next iteration!</p></div>
+<div class="self-check"><strong>What happens if the learning-rate schedule in <code>train.py</code> is parameterized by step count <code>max_steps = 1000</code> instead of wall-clock fraction <code>t / TIME_BUDGET</code>?</strong><p>Any edit that changes per-step compute time $\Delta t_{\text{step}}$ changes how many steps finish before $t = 300\text{ s}$. If a faster architecture finishes $1{,}400$ steps in $300\text{ s}$, its cosine schedule hits zero early at step $1{,}000$; if a wider architecture only reaches step $650$ at $t=300\text{ s}$, it gets evaluated while its learning rate is still high (mid-cooldown), confounding architectural quality with incomplete LR decay. Scheduling LR as a function of $u = t_{\text{elapsed}} / T_{\text{budget}} \in [0, 1]$ eliminates this confounder.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← Series reading guide</a><a href="greedy-ratchet-vs-tree-search-aide.html">Ch. 02: Greedy Ratchet vs. Code-Space Tree Search (AIDE) →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
