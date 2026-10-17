@@ -153,7 +153,46 @@ for b in range(2):
     for t in range(3):
         coordinate[b,t]=swish(x[b,t]@wg)*(x[b,t]@wu) @ wd
 np.testing.assert_allclose(vectorized,coordinate)
+
+# Stable sigmoid, log-sigmoid, and binary cross-entropy from logits on extreme inputs.
+def stable_sigmoid(z):
+    z = np.asarray(z, dtype=float)
+    pos = z >= 0
+    out = np.empty_like(z)
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    ez = np.exp(z[~pos])
+    out[~pos] = ez / (1.0 + ez)
+    return out
+
+def log_sigmoid(z):
+    return -np.logaddexp(0.0, -np.asarray(z, dtype=float))
+
+def bce_with_logits(z, y):
+    z = np.asarray(z, dtype=float)
+    y = np.asarray(y, dtype=float)
+    return np.maximum(z, 0.0) - z * y + np.log1p(np.exp(-np.abs(z)))
+
+extreme_z = np.array([-1000.0, -100.0, -1.0, 0.0, 1.0, 100.0, 1000.0])
+np.testing.assert_allclose(stable_sigmoid(extreme_z), expit(extreme_z), atol=1e-15)
+np.testing.assert_allclose(stable_sigmoid(points), 0.5 * (1.0 + np.tanh(0.5 * points)), atol=1e-15)
+np.testing.assert_allclose(
+    bce_with_logits(extreme_z, 1.0),
+    -log_sigmoid(extreme_z),
+    atol=1e-12,
+)
+np.testing.assert_allclose(
+    bce_with_logits(extreme_z, 0.0),
+    -log_sigmoid(-extreme_z),
+    atol=1e-12,
+)
+results["stable_sigmoid"] = {
+    "inputs": [-100.0, -1.0, 0.0, 1.0, 100.0],
+    "sigmoid": stable_sigmoid([-100.0, -1.0, 0.0, 1.0, 100.0]).tolist(),
+    "log_sigmoid": log_sigmoid([-100.0, -1.0, 0.0, 1.0, 100.0]).tolist(),
+    "bce_y1": bce_with_logits([-100.0, -1.0, 0.0, 1.0, 100.0], 1.0).tolist(),
+}
+
 results["design"]={"inputs":[-1,0,1],"outputs":designed(z).tolist(),"slopes":ddesigned(z).tolist()}
 (OUT/"values.json").write_text(json.dumps(results,indent=2)+"\n")
-print("Verified 9 activation derivatives, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
+print("Verified 9 activation derivatives, stable sigmoid/log-sigmoid/BCE identities, 12 design settings, softmax Jacobian, and SwiGLU shapes/gradients/budget.")
 print("Generated five original curve figures and assets/values.json; no training results are claimed.")
