@@ -11210,6 +11210,17 @@ var BLOG_TREE = [
         children: []
       }
     ]
+  },
+  {
+    name: 'agentic-harness',
+    label: 'Agentic Harness',
+    children: [
+      {
+        name: 'autoresearch',
+        label: 'Autoresearch',
+        children: []
+      }
+    ]
   }
 
 ];
@@ -11443,7 +11454,8 @@ function flattenBlogTree(nodes, result) {
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
-    gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' }
+    gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' },
+    'agentic-harness': { label: 'Agentic Harness', blurb: 'Autonomous research harnesses, tool loops, verification, and agentic execution systems.' }
   };
 
   /* Build normalised post list: parse series breadcrumb into inner series name + Part tag. */
