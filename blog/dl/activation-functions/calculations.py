@@ -175,6 +175,8 @@ def bce_with_logits(z, y):
 extreme_z = np.array([-1000.0, -100.0, -1.0, 0.0, 1.0, 100.0, 1000.0])
 np.testing.assert_allclose(stable_sigmoid(extreme_z), expit(extreme_z), atol=1e-15)
 np.testing.assert_allclose(stable_sigmoid(points), 0.5 * (1.0 + np.tanh(0.5 * points)), atol=1e-15)
+np.testing.assert_allclose(np.tanh(points), 2.0 * expit(2.0 * points) - 1.0, atol=1e-15)
+np.testing.assert_allclose(1.0 - np.tanh(points) ** 2, 4.0 * expit(2.0 * points) * (1.0 - expit(2.0 * points)), atol=1e-15)
 np.testing.assert_allclose(
     bce_with_logits(extreme_z, 1.0),
     -log_sigmoid(extreme_z),
