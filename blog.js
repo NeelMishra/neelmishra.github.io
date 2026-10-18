@@ -9839,7 +9839,19 @@ var BLOG_TREE = [
     name: 'quantization',
     label: 'Quantization',
     children: [
-      { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] },
+      {
+        name: 'popular_videos',
+        label: 'Popular Videos',
+        children: [
+          {
+            name: 'umar_jamil',
+            label: 'Umar Jamil',
+            children: [
+              { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/popular_videos/umar_jamil/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] }
+            ]
+          }
+        ]
+      },
       {
         name: 'gptq',
         label: 'GPTQ',
