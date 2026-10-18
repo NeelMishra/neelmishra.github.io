@@ -9161,10 +9161,7 @@ var BLOG_TREE = [
             "name": "backpropagation",
             "label": "Backpropagation (with Derivations)",
             "children": [
-              {"title": "Backpropagation: Reverse-Mode Differentiation & Complete Derivations", "file": "dl/neural-networks/backpropagation/index.html", "links": ["dl/neural-networks/index.html", "dl/neural-networks/backpropagation/scalar-and-index-level-derivation.html"]},
-              {"title": "1. Deriving Backpropagation (BP1–BP4): Chain Rule, Scalar Indices & Matrix Form", "file": "dl/neural-networks/backpropagation/scalar-and-index-level-derivation.html", "links": ["dl/neural-networks/backpropagation/index.html", "dl/neural-networks/backpropagation/output-loss-gradients-and-softmax-jacobian.html"]},
-              {"title": "2. Output-Layer Loss Gradients: MSE, Sigmoid+BCE & Softmax+Cross-Entropy", "file": "dl/neural-networks/backpropagation/output-loss-gradients-and-softmax-jacobian.html", "links": ["dl/neural-networks/backpropagation/index.html", "dl/neural-networks/backpropagation/scalar-and-index-level-derivation.html", "dl/neural-networks/backpropagation/worked-numerical-trace-and-gradient-checking.html"]},
-              {"title": "3. Complete Worked Numerical Backprop By Hand & NumPy Implementation", "file": "dl/neural-networks/backpropagation/worked-numerical-trace-and-gradient-checking.html", "links": ["dl/neural-networks/backpropagation/index.html", "dl/neural-networks/backpropagation/output-loss-gradients-and-softmax-jacobian.html", "dl/neural-networks/index.html"]}
+              {"title": "Backpropagation: Deriving BP1–BP4 & Mini-Batch Implementation", "file": "dl/neural-networks/backpropagation/index.html", "links": ["dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "dl/neural-networks/index.html"]}
             ]
           }
         ]
