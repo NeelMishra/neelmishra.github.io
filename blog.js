@@ -9840,9 +9840,9 @@ var BLOG_TREE = [
     label: 'Quantization',
     children: [
       { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] },
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/choosing-a-method.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
-      { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html'] },
-      { title: 'Quantization methods: compare the tradeoffs', file: 'quantization/method-comparison.html', links: ['quantization/index.html', 'quantization/fundamentals/grids-and-scales.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/turboquant/index.html', 'quantization/choosing-a-method.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
+      { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html', 'quantization/turboquant/index.html'] },
+      { title: 'Quantization methods: compare the tradeoffs', file: 'quantization/method-comparison.html', links: ['quantization/index.html', 'quantization/fundamentals/grids-and-scales.html', 'quantization/turboquant/index.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
@@ -9851,6 +9851,16 @@ var BLOG_TREE = [
           { title: '1. GPTQ: the layer objective and compensation loop', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/hessian-and-the-update.html'] },
           { title: '2. GPTQ: derive and check the Hessian update', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/fixed-order-cholesky.html'] },
           { title: '3. GPTQ: fixed order, lazy batches, and Cholesky', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/index.html'] }
+        ]
+      },
+      {
+        name: 'turboquant',
+        label: 'TurboQuant',
+        children: [
+          { title: 'TurboQuant: online vector quantization near the Shannon limit', file: 'quantization/turboquant/index.html', links: ['quantization/index.html', 'quantization/turboquant/rotations-and-polarquant.html'] },
+          { title: '1. TurboQuant & PolarQuant: random rotations, Beta coordinates, and polar angles', file: 'quantization/turboquant/rotations-and-polarquant.html', links: ['quantization/turboquant/index.html', 'quantization/turboquant/qjl-and-inner-products.html'] },
+          { title: '2. TurboQuant: why MSE quantizers bias inner products, and how 1-bit QJL fixes them', file: 'quantization/turboquant/qjl-and-inner-products.html', links: ['quantization/turboquant/rotations-and-polarquant.html', 'quantization/turboquant/lower-bounds-and-kv-cache.html'] },
+          { title: '3. TurboQuant: Shannon lower bounds, KV-cache outlier splitting, and vector search', file: 'quantization/turboquant/lower-bounds-and-kv-cache.html', links: ['quantization/turboquant/qjl-and-inner-products.html', 'quantization/index.html'] }
         ]
       },
       {
