@@ -9866,10 +9866,10 @@ var BLOG_TREE = [
         name: 'turboquant',
         label: 'TurboQuant',
         children: [
-          { title: 'TurboQuant: online vector quantization near the Shannon limit', file: 'quantization/turboquant/index.html', links: ['quantization/turboquant/rotations-and-polarquant.html'] },
-          { title: '1. TurboQuant & PolarQuant: random rotations, Beta coordinates, and polar angles', file: 'quantization/turboquant/rotations-and-polarquant.html', links: ['quantization/turboquant/index.html', 'quantization/turboquant/qjl-and-inner-products.html'] },
-          { title: '2. TurboQuant: why MSE quantizers bias inner products, and how 1-bit QJL fixes them', file: 'quantization/turboquant/qjl-and-inner-products.html', links: ['quantization/turboquant/rotations-and-polarquant.html', 'quantization/turboquant/lower-bounds-and-kv-cache.html'] },
-          { title: '3. TurboQuant: Shannon lower bounds, KV-cache outlier splitting, and vector search', file: 'quantization/turboquant/lower-bounds-and-kv-cache.html', links: ['quantization/turboquant/qjl-and-inner-products.html', 'quantization/turboquant/index.html'] }
+          { title: 'TurboQuant: rotate the vector, round, then fix the dot product', file: 'quantization/turboquant/index.html', links: ['quantization/turboquant/rotations-and-polarquant.html'] },
+          { title: '1. TurboQuant & PolarQuant: why rotation removes block scales', file: 'quantization/turboquant/rotations-and-polarquant.html', links: ['quantization/turboquant/index.html', 'quantization/turboquant/qjl-and-inner-products.html'] },
+          { title: '2. TurboQuant: why rounding shrinks dot products, and how 1-bit QJL fixes it', file: 'quantization/turboquant/qjl-and-inner-products.html', links: ['quantization/turboquant/rotations-and-polarquant.html', 'quantization/turboquant/lower-bounds-and-kv-cache.html'] },
+          { title: '3. TurboQuant: theoretical limits, KV-cache compression, and vector search', file: 'quantization/turboquant/lower-bounds-and-kv-cache.html', links: ['quantization/turboquant/qjl-and-inner-products.html', 'quantization/turboquant/index.html'] }
         ]
       },
       {
