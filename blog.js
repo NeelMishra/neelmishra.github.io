@@ -9147,13 +9147,21 @@ var BLOG_TREE = [
         "name": "neural-networks",
         "label": "Neural Networks",
         "children": [
-          {"title": "Neural Networks: Architecture, Feed-Forward Pass & Backpropagation", "file": "dl/neural-networks/index.html", "links": ["dl/neural-networks/perceptrons-xor-and-representation.html", "dl/neural-networks/feed-forward/index.html", "dl/neural-networks/backpropagation/index.html"]},
-          {"title": "From Perceptrons to Deep Representations: Half-Spaces, XOR & Feature Folding", "file": "dl/neural-networks/perceptrons-xor-and-representation.html", "links": ["dl/neural-networks/index.html", "dl/neural-networks/feed-forward/index.html"]},
+          {"title": "Neural Networks: Architecture, Feed-Forward Pass & Backpropagation", "file": "dl/neural-networks/index.html", "links": ["dl/neural-networks/perceptron/index.html", "dl/neural-networks/feed-forward/index.html", "dl/neural-networks/backpropagation/index.html"]},
+          {
+            "name": "perceptron",
+            "label": "Perceptrons",
+            "children": [
+              {"title": "Perceptrons: Overview & Reading Guide", "file": "dl/neural-networks/perceptron/index.html", "links": ["dl/neural-networks/index.html", "dl/neural-networks/perceptron/learning-rule-and-weight-updates.html"]},
+              {"title": "1. The Perceptron: Geometry, Weight Update Rule & Convergence", "file": "dl/neural-networks/perceptron/learning-rule-and-weight-updates.html", "links": ["dl/neural-networks/perceptron/index.html", "dl/neural-networks/perceptron/xor-and-hidden-layers.html"]},
+              {"title": "2. Linear Separability, the XOR Problem & Hidden Layers", "file": "dl/neural-networks/perceptron/xor-and-hidden-layers.html", "links": ["dl/neural-networks/perceptron/learning-rule-and-weight-updates.html", "dl/neural-networks/feed-forward/index.html"]}
+            ]
+          },
           {
             "name": "feed-forward",
             "label": "Feed-Forward Networks (MLPs)",
             "children": [
-              {"title": "Feed-Forward Networks (MLPs): Overview & Reading Guide", "file": "dl/neural-networks/feed-forward/index.html", "links": ["dl/neural-networks/index.html", "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html"]},
+              {"title": "Feed-Forward Networks (MLPs): Overview & Reading Guide", "file": "dl/neural-networks/feed-forward/index.html", "links": ["dl/neural-networks/perceptron/xor-and-hidden-layers.html", "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html"]},
               {"title": "1. Layer Equations, Index Notation & Mini-Batch Tensor Shapes", "file": "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "links": ["dl/neural-networks/feed-forward/index.html", "dl/neural-networks/backpropagation/index.html"]}
             ]
           },
@@ -9161,7 +9169,7 @@ var BLOG_TREE = [
             "name": "backpropagation",
             "label": "Backpropagation (with Derivations)",
             "children": [
-              {"title": "Backpropagation: Deriving BP1–BP4 & Mini-Batch Implementation", "file": "dl/neural-networks/backpropagation/index.html", "links": ["dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "dl/neural-networks/index.html"]}
+              {"title": "Backpropagation: Derivation & Mini-Batch Implementation", "file": "dl/neural-networks/backpropagation/index.html", "links": ["dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "dl/neural-networks/index.html"]}
             ]
           }
         ]
