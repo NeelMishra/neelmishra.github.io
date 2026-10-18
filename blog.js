@@ -9154,8 +9154,7 @@ var BLOG_TREE = [
             "label": "Feed-Forward Networks (MLPs)",
             "children": [
               {"title": "Feed-Forward Networks (MLPs): Overview & Reading Guide", "file": "dl/neural-networks/feed-forward/index.html", "links": ["dl/neural-networks/index.html", "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html"]},
-              {"title": "1. Layer Equations, Index Notation & Mini-Batch Tensor Shapes", "file": "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "links": ["dl/neural-networks/feed-forward/index.html", "dl/neural-networks/feed-forward/universal-approximation-and-width-vs-depth.html"]},
-              {"title": "2. Polytope Geometry, Universal Approximation & Width vs. Depth (Zaslavsky, Cybenko & Telgarsky)", "file": "dl/neural-networks/feed-forward/universal-approximation-and-width-vs-depth.html", "links": ["dl/neural-networks/feed-forward/index.html", "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "dl/neural-networks/backpropagation/index.html"]}
+              {"title": "1. Layer Equations, Index Notation & Mini-Batch Tensor Shapes", "file": "dl/neural-networks/feed-forward/layer-equations-and-matrix-shapes.html", "links": ["dl/neural-networks/feed-forward/index.html", "dl/neural-networks/backpropagation/index.html"]}
             ]
           },
           {
