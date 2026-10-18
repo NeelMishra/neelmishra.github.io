@@ -9840,12 +9840,11 @@ var BLOG_TREE = [
     label: 'Quantization',
     children: [
       { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] },
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/turboquant/index.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
       {
         name: 'gptq',
         label: 'GPTQ',
         children: [
-          { title: 'GPTQ: quantize the layer, then compensate', file: 'quantization/gptq/index.html', links: ['quantization/index.html', 'quantization/gptq/compensate-the-layer.html'] },
+          { title: 'GPTQ: quantize the layer, then compensate', file: 'quantization/gptq/index.html', links: ['quantization/gptq/compensate-the-layer.html'] },
           { title: '1. GPTQ: the layer objective and compensation loop', file: 'quantization/gptq/compensate-the-layer.html', links: ['quantization/gptq/index.html', 'quantization/gptq/hessian-and-the-update.html'] },
           { title: '2. GPTQ: derive and check the Hessian update', file: 'quantization/gptq/hessian-and-the-update.html', links: ['quantization/gptq/compensate-the-layer.html', 'quantization/gptq/fixed-order-cholesky.html'] },
           { title: '3. GPTQ: fixed order, lazy batches, and Cholesky', file: 'quantization/gptq/fixed-order-cholesky.html', links: ['quantization/gptq/hessian-and-the-update.html', 'quantization/gptq/index.html'] }
@@ -9855,18 +9854,18 @@ var BLOG_TREE = [
         name: 'turboquant',
         label: 'TurboQuant',
         children: [
-          { title: 'TurboQuant: online vector quantization near the Shannon limit', file: 'quantization/turboquant/index.html', links: ['quantization/index.html', 'quantization/turboquant/rotations-and-polarquant.html'] },
+          { title: 'TurboQuant: online vector quantization near the Shannon limit', file: 'quantization/turboquant/index.html', links: ['quantization/turboquant/rotations-and-polarquant.html'] },
           { title: '1. TurboQuant & PolarQuant: random rotations, Beta coordinates, and polar angles', file: 'quantization/turboquant/rotations-and-polarquant.html', links: ['quantization/turboquant/index.html', 'quantization/turboquant/qjl-and-inner-products.html'] },
           { title: '2. TurboQuant: why MSE quantizers bias inner products, and how 1-bit QJL fixes them', file: 'quantization/turboquant/qjl-and-inner-products.html', links: ['quantization/turboquant/rotations-and-polarquant.html', 'quantization/turboquant/lower-bounds-and-kv-cache.html'] },
-          { title: '3. TurboQuant: Shannon lower bounds, KV-cache outlier splitting, and vector search', file: 'quantization/turboquant/lower-bounds-and-kv-cache.html', links: ['quantization/turboquant/qjl-and-inner-products.html', 'quantization/index.html'] }
+          { title: '3. TurboQuant: Shannon lower bounds, KV-cache outlier splitting, and vector search', file: 'quantization/turboquant/lower-bounds-and-kv-cache.html', links: ['quantization/turboquant/qjl-and-inner-products.html', 'quantization/turboquant/index.html'] }
         ]
       },
       {
         name: 'fundamentals',
         label: 'Fundamentals',
         children: [
-          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/index.html', 'quantization/llm-int8/index.html'] },
-          { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/index.html', 'quantization/llm-int8/outlier-features.html'] }
+          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/fundamentals/grids-and-scales.html', 'quantization/llm-int8/index.html'] },
+          { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/fundamentals/index.html', 'quantization/llm-int8/outlier-features.html'] }
         ]
       },
       {
@@ -9905,7 +9904,7 @@ var BLOG_TREE = [
         name: 'qat',
         label: 'QAT',
         children: [
-          { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/index.html'] }
+          { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/gguf/index.html'] }
         ]
       },
       {
@@ -9919,7 +9918,7 @@ var BLOG_TREE = [
         name: 'fp8',
         label: 'FP8',
         children: [
-          { title: 'FP8 and evaluation: match the format to the workload', file: 'quantization/fp8/index.html', links: ['quantization/gguf/index.html', 'quantization/index.html'] }
+          { title: 'FP8 and evaluation: match the format to the workload', file: 'quantization/fp8/index.html', links: ['quantization/gguf/index.html', 'quantization/fundamentals/index.html'] }
         ]
       }
     ]
