@@ -9840,8 +9840,7 @@ var BLOG_TREE = [
     label: 'Quantization',
     children: [
       { title: 'Quantization explained with PyTorch - Post-Training Quantization, Quantization-Aware Training', file: 'quantization/quantization-explained-with-pytorch.html', links: ['quantization/fundamentals/grids-and-scales.html'] },
-      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/turboquant/index.html', 'quantization/choosing-a-method.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
-      { title: 'Quantization: choose the method for the job', file: 'quantization/choosing-a-method.html', links: ['quantization/index.html', 'quantization/fundamentals/index.html', 'quantization/turboquant/index.html'] },
+      { title: 'Quantization: shrink the weights, then repair the layer', file: 'quantization/index.html', links: ['quantization/gptq/index.html', 'quantization/turboquant/index.html', 'quantization/method-comparison.html', 'quantization/gguf/index.html', 'quantization/fp8/index.html'] },
       { title: 'Quantization methods: compare the tradeoffs', file: 'quantization/method-comparison.html', links: ['quantization/index.html', 'quantization/fundamentals/grids-and-scales.html', 'quantization/turboquant/index.html'] },
       {
         name: 'gptq',
@@ -9867,7 +9866,7 @@ var BLOG_TREE = [
         name: 'fundamentals',
         label: 'Fundamentals',
         children: [
-          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/choosing-a-method.html', 'quantization/llm-int8/index.html'] },
+          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/index.html', 'quantization/llm-int8/index.html'] },
           { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/method-comparison.html', 'quantization/llm-int8/outlier-features.html'] }
         ]
       },
@@ -9907,7 +9906,7 @@ var BLOG_TREE = [
         name: 'qat',
         label: 'QAT',
         children: [
-          { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/choosing-a-method.html'] }
+          { title: 'QAT: train with the error in the loop', file: 'quantization/qat/index.html', links: ['quantization/qlora/index.html', 'quantization/method-comparison.html'] }
         ]
       },
       {
