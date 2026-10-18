@@ -5,7 +5,7 @@
 <meta name="description" content="Explain AWQ activation-aware channel scaling, weight-only quantization, scale search, group-size tradeoffs, and its distinction from SmoothQuant and GPTQ.">
 <title>AWQ: protect important weight channels | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/awq/index.html">
-<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../quantization.css">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css?v=quant-plain-20261019"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261019">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
 </head>
@@ -15,15 +15,39 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../../../blog.html">Quantization</a><span>&middot; AWQ</span></div>
-<h1>AWQ: protect important weight channels</h1><p class="post-meta">October 2026 &middot; 5 min read</p>
+<h1>AWQ: protect important weight channels</h1><p class="post-meta">October 2026 &middot; 6 min read</p>
 <p>Activation-aware Weight Quantization (AWQ) asks which weight errors matter to the layer output. A channel frequently multiplied by large activations deserves more protection than a channel that is rarely used. The method uses that observation to choose a weight-only quantization representation, commonly W4A16.</p>
 <h2 id="importance">Weight error is not output error</h2>
 <p>For one output with $y=\sum_c x_cw_c$, a weight perturbation gives $\Delta y=\sum_c x_c\Delta w_c$. If only one weight changes, $|\Delta y|=|x_c||\Delta w_c|$. With several changes, signs and activation correlations also matter; activation magnitude is a useful signal, not a complete proof of importance.</p>
 <p>Take $x=[10,0.1]$. An error of $0.05$ in the first weight changes the output by $0.5$. The same error in the second changes it by $0.005$. Looking only at the size of the weight error would miss a hundredfold difference.</p>
 <h2 id="scaling">Protect channels without a separate exception branch</h2>
-<p>Use the same layout $Y=XW$ as the previous notes and a positive diagonal matrix $S$. The original product is $(XS^{-1})(SW)$. AWQ quantizes the scaled weights while activations stay in higher precision:</p>
+<p>Use the same layout $Y=XW$ as the previous notes and a positive diagonal matrix $S=\operatorname{diag}(s_1,\ldots,s_C)$. The original product is $(XS^{-1})(SW)$. AWQ quantizes the scaled weights while activations stay in higher precision:</p>
 <div class="note-equation">$$\widehat{Y}=(XS^{-1})Q(SW),\qquad \widehat{Y}-Y=XS^{-1}\bigl(Q(SW)-SW\bigr).$$</div>
-<p>Here $Q$ means quantize <em>and reconstruct</em>, not raw integer codes. With a locally fixed weight-grid step $\Delta$, the rounding error in a scaled channel is bounded by roughly $\Delta/2$ before clipping. Dividing its effective contribution by $s_c$ can reduce that channel's error. But scaling can also enlarge the shared group's range and thus $\Delta$, harming other channels. This is why “multiply important channels by a huge number” is not the algorithm.</p>
+<p>To see why scaling helps&mdash;and why it eventually breaks down&mdash;unpack each part of this expression:</p>
+<ol>
+<li><strong>$Q(\cdot)$ means quantize <em>and reconstruct</em>, not raw integer codes.</strong> A low-bit storage format holds integer codes $q\in\{-2^{b-1}+1,\ldots,2^{b-1}-1\}$ (for symmetric $b$-bit quantization), which cannot be subtracted from floating-point weights $SW$ directly. Here $Q$ denotes the full round-trip operator that maps a weight onto the discrete grid and multiplies back by the group's step size $\Delta$:
+<div class="note-equation">$$Q(w)=\Delta\cdot\operatorname{round}\!\left(\frac{w}{\Delta}\right),\qquad \Delta=\frac{\max_{j\in g}|w_j|}{2^{b-1}-1}.$$</div>
+Because $Q(SW)$ has the same units as $SW$, the difference $Q(SW)-SW$ is the floating-point rounding residual on the scaled grid.</li>
+<li><strong>Unscaled rounding error is bounded by $\Delta/2$.</strong> Focus on a single weight $w_c$ in quantization group $g$, multiplied by input activation $x_c$. Before clipping, $\operatorname{round}(w_c/\Delta)$ lands within half an integer step of $w_c/\Delta$. Writing that fractional grid offset as $\varepsilon_c\in[-1/2,1/2]$ gives
+<div class="note-equation">$$\bigl|Q(w_c)-w_c\bigr|=\Delta\,|\varepsilon_c|\le\frac{\Delta}{2},\qquad \bigl|x_c Q(w_c)-x_c w_c\bigr|=\Delta\,|\varepsilon_c|\,|x_c|\le\frac{\Delta}{2}|x_c|.$$</div></li>
+<li><strong>Dividing by $s_c$ shrinks that channel's effective step size.</strong> Suppose we scale channel $c$ by $s_c&gt;1$ before quantizing and divide its activation by $s_c$. Let $\Delta'$ be the group's step size after scaling. In the scaled weight space, $\operatorname{round}(s_c w_c/\Delta')$ still incurs a fractional rounding error $\varepsilon'_c\in[-1/2,1/2]$, so the error in $Q(s_c w_c)$ is bounded by $\Delta'/2$. When the inverse factor $1/s_c$ is applied, that error is divided by $s_c$:
+<div class="note-equation">$$\frac{x_c}{s_c}Q(s_c w_c)=x_c\cdot\frac{\Delta'}{s_c}\operatorname{round}\!\left(\frac{s_c w_c}{\Delta'}\right),\qquad \left|\frac{Q(s_c w_c)}{s_c}-w_c\right|=\frac{\Delta'}{s_c}|\varepsilon'_c|\le\frac{\Delta'}{2s_c}.$$</div>
+Relative to unscaled quantization, the channel's output-error bound changes by the ratio
+<div class="note-equation">$$\text{Relative error factor}=\frac{\Delta'}{\Delta}\cdot\frac{1}{s_c}.$$</div>
+A salient channel is chosen because its <em>activation</em> $|x_c|$ is large, not because its weight $|w_c|$ is already the largest in group $g$. When $|w_c|$ sits below the group maximum $\max_{j\in g}|w_j|$, a moderate scale $s_c&gt;1$ pushes $s_c w_c$ across finer integer steps without changing the group maximum. Then $\Delta'\approx\Delta$, and the error factor drops as $\approx 1/s_c$: channel $c$ acts as if it were quantized with a finer step $\Delta/s_c$.</li>
+<li><strong>Over-scaling inflates $\Delta'$ and harms the rest of the group.</strong> All weights in group $g$ (typically $64$ or $128$ channels) share a single step size $\Delta'=\max_{j\in g}|(SW)_j|/(2^{b-1}-1)$. Once $s_c$ is large enough that $s_c|w_c|$ exceeds the group's original maximum, $\Delta'$ grows linearly with $s_c$. Two things go wrong at once:
+<ul>
+<li><em>Channel $c$ stops improving:</em> because $\Delta'\propto s_c$, the ratio $\Delta'/(\Delta s_c)$ stops shrinking and $s_c w_c$ simply pins to the top integer code $\pm(2^{b-1}-1)$.</li>
+<li><em>Every other channel $j\neq c$ in the group loses precision:</em> an unscaled neighbor ($s_j=1$) still uses the shared step $\Delta'$, so its effective rounding error bound inflates from $\frac{\Delta}{2}|x_j|$ to $\frac{\Delta'}{2}|x_j|$. Even if each non-salient channel has a smaller activation, coarsening the grid for the other $99\%$ of weights in the group wrecks the total dot product.</li>
+</ul></li>
+</ol>
+<p><strong>A four-weight group check.</strong> Take a symmetric 4-bit group (integer codes $-7$ to $7$) with weights $w=[0.14,\,0.15,\,-0.40,\,0.70]$ and suppose channel $1$ ($w_1=0.14$) has the largest activation:</p>
+<ul>
+<li><strong>Unscaled ($s_1=1$):</strong> The group maximum is $0.70$, so $\Delta=0.70/7=0.10$. Weight $w_1=0.14$ rounds to $0.10$, giving an effective weight error of $|0.10-0.14|=0.04$ (bound $\Delta/2=0.05$).</li>
+<li><strong>Moderate scale ($s_1=3$):</strong> The scaled group is $[0.42,\,0.15,\,-0.40,\,0.70]$. Because $0.42&lt;0.70$, the group maximum is unchanged and $\Delta'=\Delta=0.10$. Now $s_1 w_1=0.42$ rounds to $0.40$, and dividing by $s_1=3$ reconstructs $0.40/3\approx 0.1333$. Channel $1$'s error drops sixfold to $0.0067$ (bound $\Delta'/(2s_1)\approx 0.0167$), while channels $2$, $3$, and $4$ suffer zero change in grid step.</li>
+<li><strong>Huge scale ($s_1=20$):</strong> The scaled group becomes $[2.80,\,0.15,\,-0.40,\,0.70]$. Channel $1$ now dominates the range, quadrupling the shared step to $\Delta'=2.80/7=0.40$. On this coarse grid, $w_2=0.15$ collapses to $0.00$ and $w_4=0.70$ jumps to $0.80$.</li>
+</ul>
+<p>This balance between shrinking $\Delta'/s_c$ for salient channels and keeping $\Delta'$ small for their group neighbors is why “multiply important channels by a huge number” is not the algorithm.</p>
 <h2 id="search">What calibration searches for</h2>
 <p>AWQ collects activation statistics, uses them to propose channel scales, and searches for scales that reduce quantized reconstruction error on calibration inputs. The authors' approach also searches clipping ranges. These are calibration searches, not gradient-based retraining of the original model and not GPTQ's inverse-Hessian compensation after each weight snap.</p>
 <p>Its motivation includes protecting a small salient fraction of weights, but the deployed scaling approach need not store those weights in a separate FP16 exception tensor. The important distinction is better effective precision through representation choice, rather than retaining arbitrary selected weights at higher precision.</p>
