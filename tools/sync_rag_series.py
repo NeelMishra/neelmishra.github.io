@@ -18,7 +18,6 @@ ANN_FOLDER_LABELS = {
     "hnsw": "HNSW",
     "hierarchical-k-means": "Hierarchical K-Means",
     "kd-trees": "KD-Trees",
-    "ball-trees": "Ball Trees",
     "annoy": "Annoy (Random Projection Trees)",
     "ivf": "IVF (Inverted File Index)",
     "lsh": "LSH (Locality-Sensitive Hashing)",
