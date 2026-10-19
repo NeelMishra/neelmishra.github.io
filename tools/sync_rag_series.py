@@ -23,6 +23,15 @@ ANN_FOLDER_LABELS = {
     "lsh": "LSH (Locality-Sensitive Hashing)",
 }
 
+CHUNKING_FOLDER_LABELS = {
+    "fixed-size-sliding-window": "Fixed-Size & Sliding Window",
+    "recursive-structure-aware": "Recursive & Structure-Aware",
+    "semantic-chunking": "Semantic Chunking",
+    "parent-child-hierarchical": "Parent-Child & Hierarchical",
+    "contextual-and-late-chunking": "Contextual & Late Chunking",
+    "proposition-and-agentic": "Proposition & Agentic",
+}
+
 
 def load_chapters():
     chapters = json.loads(MANIFEST.read_text())["chapters"]
@@ -39,25 +48,36 @@ def load_chapters():
 
 def tree(chapters):
     root = {"name": "rag", "label": "RAG", "children": []}
-    ann = {"name": "ann-methods", "label": "ANN Methods", "children": []}
-    ann_added = False
+    sections = {
+        "ann-methods": ("ANN Methods", ANN_FOLDER_LABELS),
+        "chunking": ("Chunking", CHUNKING_FOLDER_LABELS),
+    }
+    section_nodes = {}
     subfolders = {}
     for chapter in chapters:
         leaf = {"title": chapter["title"], "file": chapter["file"]}
-        if chapter["file"].startswith("rag/ann-methods/"):
-            if not ann_added:
-                root["children"].append(ann)
-                ann_added = True
-            rest = chapter["file"].removeprefix("rag/ann-methods/")
+        matched_section = None
+        for sec_key in sections:
+            if chapter["file"].startswith(f"rag/{sec_key}/"):
+                matched_section = sec_key
+                break
+        if matched_section:
+            sec_label, label_map = sections[matched_section]
+            if matched_section not in section_nodes:
+                section_nodes[matched_section] = {"name": matched_section, "label": sec_label, "children": []}
+                root["children"].append(section_nodes[matched_section])
+            sec_node = section_nodes[matched_section]
+            rest = chapter["file"].removeprefix(f"rag/{matched_section}/")
             if "/" in rest:
                 folder_name = rest.split("/", 1)[0]
-                if folder_name not in subfolders:
-                    label = ANN_FOLDER_LABELS.get(folder_name, folder_name.replace("-", " ").title())
-                    subfolders[folder_name] = {"name": folder_name, "label": label, "children": []}
-                    ann["children"].append(subfolders[folder_name])
-                subfolders[folder_name]["children"].append(leaf)
+                sub_key = (matched_section, folder_name)
+                if sub_key not in subfolders:
+                    label = label_map.get(folder_name, folder_name.replace("-", " ").title())
+                    subfolders[sub_key] = {"name": folder_name, "label": label, "children": []}
+                    sec_node["children"].append(subfolders[sub_key])
+                subfolders[sub_key]["children"].append(leaf)
             else:
-                ann["children"].append(leaf)
+                sec_node["children"].append(leaf)
         else:
             root["children"].append(leaf)
     return "  // RAG-SERIES:START\n" + "\n".join(
@@ -92,6 +112,33 @@ def relative_href(from_file, to_file):
     return Path(os.path.relpath(target, from_dir)).as_posix()
 
 
+def sync_section_nav(chapters, prefix, hub_file, hub_title, default_marker):
+    sec_chapters = [chapter for chapter in chapters
+                    if chapter["file"].startswith(prefix)
+                    and chapter["file"] != hub_file]
+    for position, chapter in enumerate(sec_chapters):
+        previous = sec_chapters[position - 1] if position else {
+            "file": hub_file,
+            "title": hub_title,
+        }
+        prev_href = relative_href(chapter["file"], previous["file"])
+        marker = "HNSW-NAV" if chapter["file"].startswith("rag/ann-methods/hnsw/") else default_marker
+        navigation = (f'<!-- {marker}:START -->\n'
+                      '<nav class="post-nav" aria-label="Reading navigation">'
+                      f'<a class="prev" href="{prev_href}"><span>Previous</span>'
+                      f'<span>{html.escape(previous["title"])}</span></a>')
+        if position + 1 < len(sec_chapters):
+            following = sec_chapters[position + 1]
+            next_href = relative_href(chapter["file"], following["file"])
+            navigation += (f'<a class="next" href="{next_href}">'
+                           '<span>Next</span>'
+                           f'<span>{html.escape(following["title"])}</span></a>')
+        navigation += f'</nav>\n<!-- {marker}:END -->'
+        replace_block(ROOT / "blog" / chapter["file"],
+                      rf"<!-- {marker}:START -->.*?<!-- {marker}:END -->",
+                      navigation)
+
+
 def main():
     chapters = load_chapters()
     replace_block(ROOT / "blog.js", r"  // RAG-SERIES:START.*?  // RAG-SERIES:END",
@@ -120,30 +167,20 @@ def main():
                       r"<!-- HNSW-CHAPTERS:START -->.*?<!-- HNSW-CHAPTERS:END -->",
                       listing)
 
-    ann_chapters = [chapter for chapter in chapters
-                    if chapter["file"].startswith("rag/ann-methods/")
-                    and chapter["file"] != "rag/ann-methods/index.html"]
-    for position, chapter in enumerate(ann_chapters):
-        previous = ann_chapters[position - 1] if position else {
-            "file": "rag/ann-methods/index.html",
-            "title": "ANN methods: define the target before choosing the index",
-        }
-        prev_href = relative_href(chapter["file"], previous["file"])
-        marker = "HNSW-NAV" if chapter["file"].startswith("rag/ann-methods/hnsw/") else "ANN-NAV"
-        navigation = (f'<!-- {marker}:START -->\n'
-                      '<nav class="post-nav" aria-label="Reading navigation">'
-                      f'<a class="prev" href="{prev_href}"><span>Previous</span>'
-                      f'<span>{html.escape(previous["title"])}</span></a>')
-        if position + 1 < len(ann_chapters):
-            following = ann_chapters[position + 1]
-            next_href = relative_href(chapter["file"], following["file"])
-            navigation += (f'<a class="next" href="{next_href}">'
-                           '<span>Next</span>'
-                           f'<span>{html.escape(following["title"])}</span></a>')
-        navigation += f'</nav>\n<!-- {marker}:END -->'
-        replace_block(ROOT / "blog" / chapter["file"],
-                      rf"<!-- {marker}:START -->.*?<!-- {marker}:END -->",
-                      navigation)
+    sync_section_nav(
+        chapters,
+        prefix="rag/ann-methods/",
+        hub_file="rag/ann-methods/index.html",
+        hub_title="ANN methods: define the target before choosing the index",
+        default_marker="ANN-NAV",
+    )
+    sync_section_nav(
+        chapters,
+        prefix="rag/chunking/",
+        hub_file="rag/chunking/index.html",
+        hub_title="Chunking methods: preserve evidence boundaries before embedding",
+        default_marker="CHUNK-NAV",
+    )
     print(f"Synchronized {len(chapters)} published RAG articles.")
 
 

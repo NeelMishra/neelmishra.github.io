@@ -10928,6 +10928,76 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        "name": "chunking",
+        "label": "Chunking",
+        "children": [
+          {
+            "title": "Chunking methods: preserve evidence boundaries before embedding",
+            "file": "rag/chunking/index.html"
+          },
+          {
+            "name": "fixed-size-sliding-window",
+            "label": "Fixed-Size & Sliding Window",
+            "children": [
+              {
+                "title": "Fixed-size and sliding-window chunking: bound token windows and overlap",
+                "file": "rag/chunking/fixed-size-sliding-window/index.html"
+              }
+            ]
+          },
+          {
+            "name": "recursive-structure-aware",
+            "label": "Recursive & Structure-Aware",
+            "children": [
+              {
+                "title": "Recursive and structure-aware chunking: split along the document hierarchy",
+                "file": "rag/chunking/recursive-structure-aware/index.html"
+              }
+            ]
+          },
+          {
+            "name": "semantic-chunking",
+            "label": "Semantic Chunking",
+            "children": [
+              {
+                "title": "Semantic chunking: detect topic shifts with sliding sentence embeddings",
+                "file": "rag/chunking/semantic-chunking/index.html"
+              }
+            ]
+          },
+          {
+            "name": "parent-child-hierarchical",
+            "label": "Parent-Child & Hierarchical",
+            "children": [
+              {
+                "title": "Parent-child and hierarchical chunking: index small spans, return rich context",
+                "file": "rag/chunking/parent-child-hierarchical/index.html"
+              }
+            ]
+          },
+          {
+            "name": "contextual-and-late-chunking",
+            "label": "Contextual & Late Chunking",
+            "children": [
+              {
+                "title": "Contextual retrieval and late chunking: cure coreference and lost document context",
+                "file": "rag/chunking/contextual-and-late-chunking/index.html"
+              }
+            ]
+          },
+          {
+            "name": "proposition-and-agentic",
+            "label": "Proposition & Agentic",
+            "children": [
+              {
+                "title": "Proposition and agentic chunking: decompose text into atomic self-contained facts",
+                "file": "rag/chunking/proposition-and-agentic/index.html"
+              }
+            ]
+          }
+        ]
       }
     ]
   },
