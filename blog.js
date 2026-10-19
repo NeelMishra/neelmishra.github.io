@@ -9900,8 +9900,8 @@ var BLOG_TREE = [
         name: 'awq',
         label: 'AWQ',
         children: [
-          { title: 'AWQ: protect important weight channels', file: 'quantization/awq/index.html', links: ['quantization/smoothquant/index.html', 'quantization/qlora/index.html'] },
-          { title: 'AWQ: protect weights with activation-aware scaling', file: 'quantization/awq/activation-aware-scaling.html', links: ['quantization/llm-int8/outlier-features.html', 'quantization/smoothquant/activation-migration.html'] }
+          { title: 'AWQ: protect important weight channels', file: 'quantization/awq/index.html', links: ['quantization/smoothquant/index.html', 'quantization/qlora/index.html', 'quantization/awq/activation-aware-scaling.html'] },
+          { title: 'AWQ: scale fusion, weight clipping, and W4A16 execution', file: 'quantization/awq/activation-aware-scaling.html', links: ['quantization/awq/index.html', 'quantization/llm-int8/outlier-features.html', 'quantization/smoothquant/activation-migration.html'] }
         ]
       },
       {

@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Derive AWQ's equivalent channel scaling, see how activation statistics guide weight protection, and understand groupwise and runtime caveats.">
-<title>AWQ: protect weights with activation-aware scaling | Neel Mishra</title>
+<meta name="description" content="Step-by-step guide to AWQ's layer fusion (absorbing inverse scales into RMSNorm and linear layers), per-group weight clipping search (auto_clip), and W4A16 kernel execution.">
+<title>AWQ: scale fusion, weight clipping, and W4A16 execution | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/awq/activation-aware-scaling.html">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css?v=quant-plain-20261019"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261019">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js?v=quant-plain-20261019"></script>
 </head>
 <body>
 <header class="site-header"><a class="brand" href="../../../fundamentals/index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../fundamentals/index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../fundamentals/index.html#contact">Contact</a></nav></header>
@@ -17,28 +17,78 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../../../blog.html">Quantization</a><span>&middot;</span><a href="index.html">AWQ</a><span>&middot; Supplementary guide</span></div>
-<h1>AWQ: protect weights with activation-aware scaling</h1><p class="post-meta">October 2026 &middot; 5 min read</p>
-<p>AWQ is a weight-only quantization method. Its key observation is that weight magnitude alone is a poor guide to importance: a small weight multiplied by a frequently large activation can matter greatly to the output. Activation statistics identify channels worth protecting, while equivalent scaling provides that protection without requiring a separate high-precision weight subset at inference.</p>
-<h2 id="equivalent-scaling">Change coordinates before rounding</h2>
-<p>Use $y=Wx$, with one input feature per column of $W$. For a positive diagonal matrix $S$, the unquantized computation satisfies</p>
-<div class="note-equation">$$Wx=(WS)(S^{-1}x).$$</div>
-<p>AWQ quantizes the scaled weights $WS$ and retains the compensating inverse transformation on the input. Its approximate layer is $Q(WS)S^{-1}x$, where $Q(w)=\Delta\cdot\operatorname{round}(w/\Delta)$ quantizes and reconstructs onto the group's floating-point grid. In a network implementation, compatible adjacent operations can absorb the scaling, but every affected branch must preserve the equivalence. Multiplying weights by a scale and forgetting to divide their inputs changes the model before quantization even begins.</p>
-<p>If the scaled-weight rounding error is $E=Q(WS)-WS$, then the output error is $ES^{-1}x$. For channel $c$ in a quantization group whose step size moves from $\Delta$ to $\Delta'$ after scaling by $s_c&gt;1$, the worst-case rounding error bound changes from $\frac{\Delta}{2}|x_c|$ to $\frac{\Delta'}{2s_c}|x_c|$&mdash;a relative factor of $\frac{\Delta'}{\Delta}\cdot\frac{1}{s_c}$. When $s_c|w_c|$ stays below the group's existing maximum, $\Delta'\approx\Delta$ and division by $s_c$ shrinks that channel's effective error. Once $s_c|w_c|$ becomes the new group maximum, $\Delta'$ grows linearly with $s_c$, inflating errors across all neighboring weights in the shared group. This tradeoff is why the scale needs a search rather than “make important channels arbitrarily large.”</p>
-<h2 id="example">A fixed-grid illustration</h2>
-<p>Consider one output with $w=(0.26,0.74)$ and $x=(10,1)$. The exact output is $3.34$. A toy grid with step $0.25$ rounds the weights to $(0.25,0.75)$, giving $3.25$: the output error is $-0.09$ even though each weight moved by only $0.01$.</p>
-<p>Choose $S=\operatorname{diag}(4,1)$. The transformed weights are $(1.04,0.74)$ and the transformed input is $(2.5,1)$. On the same nonclipping grid, they round to $(1,0.75)$ and still produce $3.25$. So scaling by four did not help this particular sample. Choose instead $S=\operatorname{diag}(2,1)$: $(0.52,0.74)$ rounds to $(0.5,0.75)$, again giving $3.25$. Favorable scales are not guaranteed by the identity alone.</p>
-<p>A scale of $25/13\approx1.92308$ instead sends the first weight to exactly $0.5$, and its input to $5.2$. The reconstructed output is $0.5(5.2)+0.75=3.35$, only $0.01$ above the original. Conversely, a scale of $2.5$ sends $0.26$ to $0.65$, rounds it to $0.75$, and produces $3.75$, which is worse. This example shows both effective protection and why scaling must be evaluated against reconstruction error. Real groupwise grids also recompute their range after scaling, creating another tradeoff.</p>
-<h2 id="calibration">What calibration chooses</h2>
-<p>The paper uses activation magnitudes to guide a channel-scaling search, with calibration forwards evaluating quantization error. This is not GPTQ's sequential inverse-Hessian compensation, nor ordinary gradient-based fine-tuning. Scaling and clipping choices depend on the calibration inputs; preserving the original floating-point weights before conversion lets you repeat that search when the target distribution changes.</p>
-<p>Use inputs resembling the intended workload, including the tokenizer and prompt formatting. Then validate held-out perplexity and downstream tasks. A low local reconstruction error on calibration examples does not prove multilingual, coding, or long-context behavior is unchanged.</p>
-<h2 id="runtime">Protection must survive the kernel</h2>
-<p>AWQ commonly targets low-bit groupwise weights with floating-point activations, rather than W8A8. Deployment needs a compatible packed layout, group size, scale handling, and fused dequantization path. A checkpoint produced by an AWQ converter is not automatically usable by every four-bit runtime. Benchmark batch and context settings explicitly; numerical protection and execution performance are separate results.</p>
-<details class="note-check"><summary>Does “protect” mean keeping selected weights in FP16?</summary><p>Not in the scaling approach taught here. The goal is to improve their effective precision while keeping the low-bit representation uniform enough for efficient execution.</p></details>
+<h1>AWQ: scale fusion, weight clipping, and W4A16 execution</h1><p class="post-meta">October 2026 &middot; 6 min read</p>
+
+<p>In the <a href="index.html">main AWQ guide</a>, we derived how scaling each input channel by $s = s_X^{\,\alpha}$ before rounding shrinks the quantization error of high-activation channels by $\frac{\Delta'}{\Delta}\cdot\frac{1}{s_c}$, and how a 20-point grid search over $\alpha \in [0, 1]$ finds the optimal scale vector $s^*$.</p>
+<p>This companion post covers the three engineering steps that turn $s^*$ into a fast deployed checkpoint in the official <code>llm-awq</code> pipeline:</p>
+<ol>
+<li><strong>Scale fusion (<code>auto_scale</code>):</strong> how to absorb the inverse scale $(s^*)^{-1}$ into the preceding Transformer operation so inference pays zero runtime cost.</li>
+<li><strong>Weight clipping search (<code>auto_clip</code>):</strong> how a second 20-point grid search trims non-salient weight outliers inside each quantization group.</li>
+<li><strong>W4A16 kernel execution:</strong> how packed 4-bit weights are dequantized on the fly inside GPU registers during matrix multiplication.</li>
+</ol>
+
+<h2 id="fusion">1. Scale fusion: absorbing $S^{-1}$ into the Transformer block</h2>
+<p>For a linear layer computing $Y = W X$ (with $W \in \mathbb{R}^{D \times C}$ and input $X \in \mathbb{R}^{C \times N}$), AWQ replaces the layer with</p>
+<div class="note-equation">$$\widehat{Y} = Q(W S)\,(S^{-1} X), \qquad S = \operatorname{diag}(s_1^*, \dots, s_C^*).$$</div>
+<p>If we had to multiply the activation vector $X$ by $S^{-1}$ at runtime before every linear layer, we would add an extra elementwise kernel launch. Instead, AWQ folds $S^{-1}$ offline into whichever operation produces $X$. In a standard Transformer block (such as LLaMA or Mistral), there are four linear sub-blocks per layer:</p>
+
+<div class="note-table q-table"><table><caption>How AWQ shares and fuses channel scales $s^*$ across the four linear sub-blocks of a Transformer layer.</caption>
+<thead><tr><th scope="col">Linear consumer(s)</th><th scope="col">Shared scale search objective</th><th scope="col">Where $(s^*)^{-1}$ is fused offline</th></tr></thead>
+<tbody>
+<tr><th scope="row">Attention $W_q, W_k, W_v$</th><td>Search one shared $s^*$ minimizing $\lVert \widehat{W}_{qkv} X - W_{qkv} X \rVert_F^2$ across all three projections simultaneously.</td><td>Divide the preceding attention <code>RMSNorm</code> scale vector: $\gamma_{\mathrm{attn}} \leftarrow \gamma_{\mathrm{attn}} \oslash s^*$.</td></tr>
+<tr><th scope="row">Attention output $W_o$</th><td>Search $s^*$ minimizing $\lVert \widehat{W}_o X_{\mathrm{attn}} - W_o X_{\mathrm{attn}} \rVert_F^2$.</td><td>Divide the output rows of $W_v$: $W_v \leftarrow \operatorname{diag}(s^*)^{-1} W_v$.</td></tr>
+<tr><th scope="row">MLP $W_{\mathrm{gate}}, W_{\mathrm{up}}$</th><td>Search one shared $s^*$ minimizing combined reconstruction error of both gate and up projections.</td><td>Divide the preceding MLP <code>RMSNorm</code> scale vector: $\gamma_{\mathrm{mlp}} \leftarrow \gamma_{\mathrm{mlp}} \oslash s^*$.</td></tr>
+<tr><th scope="row">MLP $W_{\mathrm{down}}$</th><td>Search $s^*$ minimizing $\lVert \widehat{W}_{\mathrm{down}} X_{\mathrm{act}} - W_{\mathrm{down}} X_{\mathrm{act}} \rVert_F^2$ after $\operatorname{SiLU}(W_{\mathrm{gate}}X)\odot(W_{\mathrm{up}}X)$.</td><td>Divide the output rows of $W_{\mathrm{up}}$: $W_{\mathrm{up}} \leftarrow \operatorname{diag}(s^*)^{-1} W_{\mathrm{up}}$.</td></tr>
+</tbody></table></div>
+
+<p>Why must $W_q$, $W_k$, and $W_v$ share a single scale vector $s^*$? Because all three projections read the <strong>exact same output tensor</strong> from the attention <code>RMSNorm</code>. Searching one $\alpha^*$ for the stacked matrix $W_{qkv} = [W_q; W_k; W_v]$ allows a single modification $\gamma_{\mathrm{attn}} \leftarrow \gamma_{\mathrm{attn}} \oslash s^*$ to feed all three matrices without duplicating the normalization layer.</p>
+
+<h2 id="clipping">2. Per-group weight clipping search (<code>auto_clip</code>)</h2>
+<p>Activation-aware scaling protects channels whose <em>activations</em> are large. What if a quantization group $g$ contains a single large weight $w_m$ whose input activation $x_m$ is small? That single weight stretches the group's step size $\Delta = \max_{j \in g}|w_j| / (2^{b-1}-1)$, coarsening the grid for all $G = 128$ weights in the group even though $w_m$ itself barely contributes to the output.</p>
+<p>After applying $s^*$, AWQ runs a second lightweight grid search called <strong>weight clipping</strong> on each group $g$. For a clipping ratio $\gamma \in (0, 1]$, define the clipped quantizer $Q_\gamma$ on group $g$ with original maximum $M_g = \max_{j \in g}|w_j|$:</p>
+<div class="note-equation">$$\Delta_g(\gamma) = \frac{\gamma M_g}{2^{b-1}-1}, \qquad Q_\gamma(w_j) = \Delta_g(\gamma)\cdot\operatorname{clip}\!\left(\operatorname{round}\!\left(\frac{w_j}{\Delta_g(\gamma)}\right),\, -(2^{b-1}-1),\, 2^{b-1}-1\right).$$</div>
+
+<div class="note-callout">
+<strong>Algorithm 2: AWQ Per-Group Weight Clipping Search (<code>auto_clip</code>)</strong>
+<ol>
+<li><strong>Inputs:</strong> scaled weight group $w_g \in \mathbb{R}^{1 \times G}$, corresponding calibration activations $X_g \in \mathbb{R}^{G \times N}$, grid steps $K = 20$.</li>
+<li>Compute the unclipped group maximum $M_g = \max_{j \in g}|w_j|$ and exact group contribution $y_g = w_g X_g \in \mathbb{R}^{1 \times N}$.</li>
+<li><strong>Grid-search $\gamma \in [0.5, 1.0]$:</strong> initialize $\mathcal{E}_{\min} = \infty$. For $k = 0, 1, \dots, K$:
+<ul>
+<li>Set $\gamma = 1.0 - 0.5\frac{k}{K} \in [0.5, 1.0]$.</li>
+<li>Compute $\widehat{w}_g(\gamma) = Q_\gamma(w_g)$ using the clipped bound $\gamma M_g$.</li>
+<li>Measure group output MSE: $\mathcal{E}(\gamma) = \lVert \widehat{w}_g(\gamma) X_g - y_g \rVert_2^2$.</li>
+<li>If $\mathcal{E}(\gamma) &lt; \mathcal{E}_{\min}$, update $\mathcal{E}_{\min} \leftarrow \mathcal{E}(\gamma)$ and $\gamma_g^* \leftarrow \gamma$.</li>
+</ul></li>
+<li><strong>Output:</strong> clamp $w_g$ to $[-\gamma_g^* M_g,\, +\gamma_g^* M_g]$ and quantize with step size $\Delta_g(\gamma_g^*)$.</li>
+</ol>
+</div>
+
+<p><strong>Numerical check of weight clipping.</strong> Suppose a 4-bit group ($-7$ to $7$) has weights $w_g = [0.24,\, -0.26,\, 0.70]$ and activations $x_g = [5.0,\, 5.0,\, 0.2]^{\mathsf T}$. Notice that the largest weight $w_3 = 0.70$ has a tiny activation ($0.2$), while the smaller weights $w_1, w_2$ have large activations ($5.0$). The exact dot product is $y_g = 0.24(5.0) - 0.26(5.0) + 0.70(0.2) = 1.20 - 1.30 + 0.14 = 0.04$.</p>
+<ul>
+<li><strong>Unclipped ($\gamma = 1.0$):</strong> Group max is $M_g = 0.70 \implies \Delta = 0.70 / 7 = 0.10$. The weights round to $[0.20,\, -0.30,\, 0.70]$, giving $\widehat{y}_g(1.0) = 0.20(5.0) - 0.30(5.0) + 0.70(0.2) = -0.36$ (squared error $(-0.36 - 0.04)^2 = \mathbf{0.1600}$).</li>
+<li><strong>Clipped at $\gamma^* = 0.5$:</strong> Clamping the group max to $0.5 \times 0.70 = 0.35$ halves the step size to $\Delta' = 0.35 / 7 = 0.05$. Now $w_1 = 0.24$ rounds to $0.25$, $w_2 = -0.26$ rounds to $-0.25$, and $w_3 = 0.70$ clips to $0.35$. The reconstructed output is $\widehat{y}_g(0.5) = 0.25(5.0) - 0.25(5.0) + 0.35(0.2) = 0.07$ (squared error $(0.07 - 0.04)^2 = \mathbf{0.0009}$&mdash;a <strong>$177\times$ reduction in error</strong>).</li>
+</ul>
+<p><em>Note:</em> In <code>llm-awq</code>, <code>auto_clip</code> is applied to all linear layers except query and key projections ($W_q, W_k$), where extreme weight entries can participate directly in attention logit scaling.</p>
+
+<h2 id="runtime">3. W4A16 execution: why uniform INT4 beats mixed precision</h2>
+<p>During inference, an AWQ checkpoint stores two tensors per linear layer:</p>
+<ul>
+<li><strong>Packed 4-bit weights $W_q$:</strong> eight 4-bit integers packed into each 32-bit word (<code>int32</code>).</li>
+<li><strong>Group metadata:</strong> one FP16 step size $\Delta_g$ and one 4-bit zero-point $z_g$ for every group of $G = 128$ weights (adding $20 / 128 \approx 0.156$ bits per weight, for an effective footprint of $4.156$ bits per weight).</li>
+</ul>
+<p>During single-batch decoding, LLM inference is <strong>memory-bandwidth bound</strong>: the GPU spends most of its time loading weight matrices from HBM into SRAM/registers rather than performing arithmetic. Because AWQ folded $(s^*)^{-1}$ into the preceding layer and kept every weight in uniform 4-bit groups, the W4A16 kernel loads $4\times$ fewer bytes from HBM, unpacks each 4-bit integer to FP16 inside registers via $\widehat{w}_j = (q_j - z_g)\Delta_g$, and immediately multiplies by the FP16 activation via Tensor Cores.</p>
+
+<details class="note-check"><summary>Does scaling a channel change the number of bits stored for that channel?</summary><p>No. Every channel in an AWQ checkpoint is stored using the exact same number of bits (such as 4 bits). Salient channels gain higher effective precision because multiplying by $s_c &gt; 1$ lets them span more integer steps of their group's 4-bit grid before being divided back by $s_c$.</p></details>
+
 <h2 id="sources">Sources</h2>
-<ul class="note-sources"><li><a href="https://arxiv.org/abs/2306.00978">AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</a>, activation-guided salient-weight protection and equivalent scaling. The fixed-grid examples are illustrative, not reproductions of paper results.</li></ul>
+<ul class="note-sources">
+<li><a href="https://arxiv.org/abs/2306.00978">Lin et al., <em>AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</em> (MLSys 2024)</a> &mdash; Section 3.2 (activation-aware scaling and weight clipping) and Section 3.3 (TinyChat W4A16 kernel fusion).</li>
+<li><a href="https://github.com/mit-han-lab/llm-awq">Authors' <code>llm-awq</code> repository</a> &mdash; reference implementations of <code>auto_scale_block</code> and <code>auto_clip_block</code>.</li>
+</ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../llm-int8/outlier-features.html"><span>Previous</span><span>LLM.int8: isolate the outlier features</span></a><a class="next" href="../smoothquant/activation-migration.html"><span>Next</span><span>SmoothQuant: move the activation difficulty into weights</span></a></nav>
 </article></div>
 <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-merge-20261009"></script><script src="../../../blog.js?v=quant-merge-20261009"></script><script src="../../../code-highlight.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261019"></script><script src="../../../blog.js?v=quant-plain-20261019"></script><script src="../../../code-highlight.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>

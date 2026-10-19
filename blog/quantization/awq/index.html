@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Explain AWQ activation-aware channel scaling, weight-only quantization, scale search, group-size tradeoffs, and its distinction from SmoothQuant and GPTQ.">
+<meta name="description" content="Learn Activation-aware Weight Quantization (AWQ) from scratch: why 1% of channels dominate output error, how equivalent scaling shrinks rounding error, and the exact 1D grid-search algorithm.">
 <title>AWQ: protect important weight channels | Neel Mishra</title>
 <link rel="canonical" href="https://neelmishra.github.io/blog/quantization/awq/index.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css?v=quant-plain-20261019"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261019">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js?v=quant-plain-20261019"></script>
 </head>
 <body>
 <header class="site-header"><a class="brand" href="../../../fundamentals/index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../fundamentals/index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../fundamentals/index.html#contact">Contact</a></nav></header>
@@ -15,51 +17,167 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../../../blog.html">Quantization</a><span>&middot; AWQ</span></div>
-<h1>AWQ: protect important weight channels</h1><p class="post-meta">October 2026 &middot; 6 min read</p>
-<p>Activation-aware Weight Quantization (AWQ) asks which weight errors matter to the layer output. A channel frequently multiplied by large activations deserves more protection than a channel that is rarely used. The method uses that observation to choose a weight-only quantization representation, commonly W4A16.</p>
-<h2 id="importance">Weight error is not output error</h2>
-<p>For one output with $y=\sum_c x_cw_c$, a weight perturbation gives $\Delta y=\sum_c x_c\Delta w_c$. If only one weight changes, $|\Delta y|=|x_c||\Delta w_c|$. With several changes, signs and activation correlations also matter; activation magnitude is a useful signal, not a complete proof of importance.</p>
-<p>Take $x=[10,0.1]$. An error of $0.05$ in the first weight changes the output by $0.5$. The same error in the second changes it by $0.005$. Looking only at the size of the weight error would miss a hundredfold difference.</p>
-<h2 id="scaling">Protect channels without a separate exception branch</h2>
-<p>Use the same layout $Y=XW$ as the previous notes and a positive diagonal matrix $S=\operatorname{diag}(s_1,\ldots,s_C)$. The original product is $(XS^{-1})(SW)$. AWQ quantizes the scaled weights while activations stay in higher precision:</p>
-<div class="note-equation">$$\widehat{Y}=(XS^{-1})Q(SW),\qquad \widehat{Y}-Y=XS^{-1}\bigl(Q(SW)-SW\bigr).$$</div>
-<p>To see why scaling helps&mdash;and why it eventually breaks down&mdash;unpack each part of this expression:</p>
+<h1>AWQ: protect important weight channels</h1><p class="post-meta">October 2026 &middot; 7 min read</p>
+
+<p>When we compress a language model's weights from 16-bit floats (FP16) down to 4-bit or 3-bit integers for fast inference (<strong>W4A16</strong>: low-bit weights, 16-bit activations), plain round-to-nearest (RTN) quantization badly hurts accuracy.</p>
+<p><strong>Activation-aware Weight Quantization (AWQ)</strong> (Lin et al., MLSys 2024) starts from a simple empirical discovery: <strong>only $0.1\%$ to $1\%$ of the weights in a layer drive almost all of the quantization error</strong>, and those critical weights are not the largest weights in the matrix&mdash;they are the weight channels multiplied by the <strong>largest input activations</strong>.</p>
+<p>Keeping that $1\%$ of channels in FP16 and the other $99\%$ in INT4 restores model quality, but mixing FP16 and INT4 columns inside one matrix breaks contiguous GPU memory access. AWQ achieves the same protection while keeping <strong>every weight in uniform 4-bit integers</strong> in four steps:</p>
 <ol>
-<li><strong>$Q(\cdot)$ means quantize <em>and reconstruct</em>, not raw integer codes.</strong> A low-bit storage format holds integer codes $q\in\{-2^{b-1}+1,\ldots,2^{b-1}-1\}$ (for symmetric $b$-bit quantization), which cannot be subtracted from floating-point weights $SW$ directly. Here $Q$ denotes the full round-trip operator that maps a weight onto the discrete grid and multiplies back by the group's step size $\Delta$:
-<div class="note-equation">$$Q(w)=\Delta\cdot\operatorname{round}\!\left(\frac{w}{\Delta}\right),\qquad \Delta=\frac{\max_{j\in g}|w_j|}{2^{b-1}-1}.$$</div>
-Because $Q(SW)$ has the same units as $SW$, the difference $Q(SW)-SW$ is the floating-point rounding residual on the scaled grid.</li>
-<li><strong>Unscaled rounding error is bounded by $\Delta/2$.</strong> Focus on a single weight $w_c$ in quantization group $g$, multiplied by input activation $x_c$. Before clipping, $\operatorname{round}(w_c/\Delta)$ lands within half an integer step of $w_c/\Delta$. Writing that fractional grid offset as $\varepsilon_c\in[-1/2,1/2]$ gives
-<div class="note-equation">$$\bigl|Q(w_c)-w_c\bigr|=\Delta\,|\varepsilon_c|\le\frac{\Delta}{2},\qquad \bigl|x_c Q(w_c)-x_c w_c\bigr|=\Delta\,|\varepsilon_c|\,|x_c|\le\frac{\Delta}{2}|x_c|.$$</div></li>
-<li><strong>Dividing by $s_c$ shrinks that channel's effective step size.</strong> Suppose we scale channel $c$ by $s_c&gt;1$ before quantizing and divide its activation by $s_c$. Let $\Delta'$ be the group's step size after scaling. In the scaled weight space, $\operatorname{round}(s_c w_c/\Delta')$ still incurs a fractional rounding error $\varepsilon'_c\in[-1/2,1/2]$, so the error in $Q(s_c w_c)$ is bounded by $\Delta'/2$. When the inverse factor $1/s_c$ is applied, that error is divided by $s_c$:
-<div class="note-equation">$$\frac{x_c}{s_c}Q(s_c w_c)=x_c\cdot\frac{\Delta'}{s_c}\operatorname{round}\!\left(\frac{s_c w_c}{\Delta'}\right),\qquad \left|\frac{Q(s_c w_c)}{s_c}-w_c\right|=\frac{\Delta'}{s_c}|\varepsilon'_c|\le\frac{\Delta'}{2s_c}.$$</div>
-Relative to unscaled quantization, the channel's output-error bound changes by the ratio
-<div class="note-equation">$$\text{Relative error factor}=\frac{\Delta'}{\Delta}\cdot\frac{1}{s_c}.$$</div>
-A salient channel is chosen because its <em>activation</em> $|x_c|$ is large, not because its weight $|w_c|$ is already the largest in group $g$. When $|w_c|$ sits below the group maximum $\max_{j\in g}|w_j|$, a moderate scale $s_c&gt;1$ pushes $s_c w_c$ across finer integer steps without changing the group maximum. Then $\Delta'\approx\Delta$, and the error factor drops as $\approx 1/s_c$: channel $c$ acts as if it were quantized with a finer step $\Delta/s_c$.</li>
-<li><strong>Over-scaling inflates $\Delta'$ and harms the rest of the group.</strong> All weights in group $g$ (typically $64$ or $128$ channels) share a single step size $\Delta'=\max_{j\in g}|(SW)_j|/(2^{b-1}-1)$. Once $s_c$ is large enough that $s_c|w_c|$ exceeds the group's original maximum, $\Delta'$ grows linearly with $s_c$. Two things go wrong at once:
-<ul>
-<li><em>Channel $c$ stops improving:</em> because $\Delta'\propto s_c$, the ratio $\Delta'/(\Delta s_c)$ stops shrinking and $s_c w_c$ simply pins to the top integer code $\pm(2^{b-1}-1)$.</li>
-<li><em>Every other channel $j\neq c$ in the group loses precision:</em> an unscaled neighbor ($s_j=1$) still uses the shared step $\Delta'$, so its effective rounding error bound inflates from $\frac{\Delta}{2}|x_j|$ to $\frac{\Delta'}{2}|x_j|$. Even if each non-salient channel has a smaller activation, coarsening the grid for the other $99\%$ of weights in the group wrecks the total dot product.</li>
-</ul></li>
+<li><strong>Measure channel importance from activations:</strong> pass a small calibration dataset through the layer and record the average absolute activation $s_X$ for each input channel.</li>
+<li><strong>Scale up important weight channels before rounding:</strong> multiply weight channel $c$ by a scale factor $s_c &gt; 1$ and divide input channel $c$ by $s_c$. This leaves the exact floating-point product $w_c x_c = (s_c w_c)(x_c / s_c)$ unchanged, while shrinking channel $c$'s rounding error by roughly $1/s_c$.</li>
+<li><strong>Grid-search a single exponent $\alpha \in [0, 1]$ per layer:</strong> parameterize all channel scales as $s = s_X^{\,\alpha}$ and test $20$ evenly spaced values of $\alpha \in [0, 1]$ to minimize the layer's output reconstruction error on calibration data.</li>
+<li><strong>Fuse $s^{-1}$ into the previous layer and pack uniform INT4 weights:</strong> fold the $1/s_c$ division into the preceding LayerNorm/RMSNorm or linear layer so inference has zero extra runtime cost.</li>
 </ol>
-<p><strong>A four-weight group check.</strong> Take a symmetric 4-bit group (integer codes $-7$ to $7$) with weights $w=[0.14,\,0.15,\,-0.40,\,0.70]$ and suppose channel $1$ ($w_1=0.14$) has the largest activation:</p>
+
+<h2 id="motivation">1. Motivation: why $1\%$ of activation channels dominate output error</h2>
+<p>Consider one output neuron computing a dot product across $C$ input channels:</p>
+<div class="note-equation">$$y = \sum_{c=1}^{C} w_c x_c.$$</div>
+<p>When we quantize each weight $w_c$ to $\widehat{w}_c = w_c + \delta w_c$ (where $\delta w_c = \widehat{w}_c - w_c$ is the weight rounding error), the error in the layer's output $y$ is</p>
+<div class="note-equation">$$\widehat{y} - y = \sum_{c=1}^{C} (\widehat{w}_c - w_c)\,x_c = \sum_{c=1}^{C} \delta w_c \cdot x_c.$$</div>
+<p>Every weight's rounding error $\delta w_c$ is <strong>amplified by its input activation $x_c$</strong>. In large language models, specific hidden dimensions consistently carry huge activation outliers across tokens:</p>
 <ul>
-<li><strong>Unscaled ($s_1=1$):</strong> The group maximum is $0.70$, so $\Delta=0.70/7=0.10$. Weight $w_1=0.14$ rounds to $0.10$, giving an effective weight error of $|0.10-0.14|=0.04$ (bound $\Delta/2=0.05$).</li>
-<li><strong>Moderate scale ($s_1=3$):</strong> The scaled group is $[0.42,\,0.15,\,-0.40,\,0.70]$. Because $0.42&lt;0.70$, the group maximum is unchanged and $\Delta'=\Delta=0.10$. Now $s_1 w_1=0.42$ rounds to $0.40$, and dividing by $s_1=3$ reconstructs $0.40/3\approx 0.1333$. Channel $1$'s error drops sixfold to $0.0067$ (bound $\Delta'/(2s_1)\approx 0.0167$), while channels $2$, $3$, and $4$ suffer zero change in grid step.</li>
-<li><strong>Huge scale ($s_1=20$):</strong> The scaled group becomes $[2.80,\,0.15,\,-0.40,\,0.70]$. Channel $1$ now dominates the range, quadrupling the shared step to $\Delta'=2.80/7=0.40$. On this coarse grid, $w_2=0.15$ collapses to $0.00$ and $w_4=0.70$ jumps to $0.80$.</li>
+<li>Suppose a neuron has two weights $w = [0.14,\, 0.70]$ and typical input activations $x = [20.0,\, 0.5]$.</li>
+<li>Even though $w_1 = 0.14$ is five times smaller than $w_2 = 0.70$, a rounding error of $\delta w = 0.04$ on channel $1$ changes the output by $0.04 \times 20.0 = 0.80$.</li>
+<li>The exact same rounding error $\delta w = 0.04$ on channel $2$ changes the output by only $0.04 \times 0.5 = 0.02$&mdash;<strong>forty times smaller</strong>.</li>
 </ul>
-<p>This balance between shrinking $\Delta'/s_c$ for salient channels and keeping $\Delta'$ small for their group neighbors is why “multiply important channels by a huge number” is not the algorithm.</p>
-<h2 id="search">What calibration searches for</h2>
-<p>AWQ collects activation statistics, uses them to propose channel scales, and searches for scales that reduce quantized reconstruction error on calibration inputs. The authors' approach also searches clipping ranges. These are calibration searches, not gradient-based retraining of the original model and not GPTQ's inverse-Hessian compensation after each weight snap.</p>
-<p>Its motivation includes protecting a small salient fraction of weights, but the deployed scaling approach need not store those weights in a separate FP16 exception tensor. The important distinction is better effective precision through representation choice, rather than retaining arbitrary selected weights at higher precision.</p>
-<h2 id="compare">AWQ versus SmoothQuant</h2>
-<p>Both use an equivalent channel-rescaling identity. Their targets differ: SmoothQuant balances the difficulty of quantizing <strong>both activations and weights</strong>; AWQ uses activation information to improve <strong>weight-only</strong> quantization. Reusing the identity does not make their objectives, scale searches, or deployment kernels identical.</p>
-<p>Group size, clipping, excluded layers, and scale metadata affect accuracy and storage. Smaller groups may improve fidelity but add metadata and change kernel efficiency. An AWQ checkpoint also needs a runtime that understands its packing and quantization parameters. See the <a href="../../mlops/llm-inference/quantization-awq.html">AWQ inference note</a> for the deployment-side perspective.</p>
-<details class="note-check"><summary>Does activation-aware mean the activations are four-bit?</summary><p>No. Activation statistics guide the choice of weight quantizer. The common W4A16 configuration keeps activations at sixteen bits.</p></details>
+
+<div class="note-table q-table"><table><caption>Protecting $1\%$ of LLaMA-7B channels under 3-bit groupwise quantization (group size $128$, WikiText-2 perplexity from Lin et al., Table 1; lower is better).</caption>
+<thead><tr><th scope="col">Quantization setting</th><th scope="col">How the $1\%$ protected channels are chosen</th><th scope="col">WikiText-2 PPL</th></tr></thead>
+<tbody>
+<tr><th scope="row">FP16 baseline</th><td>All $100\%$ of weights in FP16</td><td>$5.68$</td></tr>
+<tr><th scope="row">RTN (3-bit)</th><td>$0\%$ protected (standard round-to-nearest)</td><td>$43.20$</td></tr>
+<tr><th scope="row">Keep $1\%$ in FP16 (random)</th><td>Random $1\%$ of weights</td><td>$42.90$</td></tr>
+<tr><th scope="row">Keep $1\%$ in FP16 (by weight $|w|$)</th><td>Largest $1\%$ by weight magnitude $|w_c|$</td><td>$42.90$</td></tr>
+<tr><th scope="row">Keep $1\%$ in FP16 (by activation $|x|$)</th><td>Largest $1\%$ by mean activation $\mathbb{E}[|x_c|]$</td><td><strong>$11.39$</strong></td></tr>
+</tbody></table></div>
+
+<p>Selecting the $1\%$ of channels with the largest weight magnitudes $|w_c|$ does no better than picking channels at random. Selecting the $1\%$ of channels with the largest input activations $\mathbb{E}[|x_c|]$ cuts perplexity from $43.20$ down to $11.39$. Our goal now is to get that same protection <strong>without</strong> storing a separate FP16 tensor.</p>
+
+<h2 id="scaling-math">2. Mathematical build-up: how scaling protects a channel</h2>
+<p>Before quantizing weight $w_c$, multiply it by a positive scale factor $s_c &gt; 1$ and divide the corresponding activation $x_c$ by $s_c$. In exact floating-point arithmetic, the product does not change:</p>
+<div class="note-equation">$$w_c x_c = (s_c w_c)\!\left(\frac{x_c}{s_c}\right).$$</div>
+<p>Now apply groupwise $b$-bit symmetric quantization to the weights. A group $g$ of $G$ contiguous weights (typically $G = 128$) shares a single step size $\Delta$. Define $Q(\cdot)$ as the <strong>quantize-and-reconstruct</strong> operator that snaps a weight to the nearest integer code in $\{-2^{b-1}+1, \dots, 2^{b-1}-1\}$ and multiplies back by $\Delta$:</p>
+<div class="note-equation">$$Q(w) = \Delta \cdot \operatorname{round}\!\left(\frac{w}{\Delta}\right), \qquad \Delta = \frac{\max_{j \in g}|w_j|}{2^{b-1}-1}.$$</div>
+<p>Compare the output error of channel $c$ with and without scaling:</p>
+<ol>
+<li><strong>Without scaling ($s_c = 1$):</strong> Rounding $w_c / \Delta$ to the nearest integer produces a fractional grid offset $\varepsilon_c = \operatorname{round}(w_c/\Delta) - w_c/\Delta \in [-1/2, 1/2]$. Multiplying by $\Delta$ and by $x_c$, the output error from channel $c$ is
+<div class="note-equation">$$\operatorname{Err}_{\mathrm{unscaled}}(w_c x_c) = \bigl|Q(w_c)x_c - w_c x_c\bigr| = \Delta \cdot |\varepsilon_c| \cdot |x_c| \le \frac{\Delta}{2}|x_c|.$$</div></li>
+<li><strong>With scaling ($s_c &gt; 1$):</strong> We quantize $s_c w_c$ on the group's new grid of step size $\Delta'$ and multiply by the inverse-scaled activation $x_c / s_c$:
+<div class="note-equation">$$Q(s_c w_c)\,\frac{x_c}{s_c} = \Delta' \cdot \operatorname{round}\!\left(\frac{s_c w_c}{\Delta'}\right)\frac{x_c}{s_c}.$$</div>
+The integer rounding $\operatorname{round}(s_c w_c / \Delta')$ still lands within half a step ($\varepsilon'_c \in [-1/2, 1/2]$), so the error in the <em>scaled</em> weight $Q(s_c w_c) - s_c w_c$ is bounded by $\Delta'/2$. Dividing the activation by $s_c$ divides that error by $s_c$:
+<div class="note-equation">$$\operatorname{Err}_{\mathrm{scaled}}(w_c x_c) = \left|Q(s_c w_c)\frac{x_c}{s_c} - w_c x_c\right| = \frac{\Delta'}{s_c} \cdot |\varepsilon'_c| \cdot |x_c| \le \frac{\Delta'}{2s_c}|x_c|.$$</div></li>
+</ol>
+
+<p>Taking the ratio of the two error bounds gives the <strong>relative error factor</strong> for channel $c$:</p>
+<div class="note-equation">$$\text{Relative error factor} = \frac{\Delta'}{\Delta}\cdot\frac{1}{s_c}.$$</div>
+<p>This ratio reveals the exact trade-off that governs AWQ:</p>
+<ul>
+<li><strong>Why moderate $s_c$ reduces error ($\Delta' \approx \Delta$):</strong> Salient channels are identified by their large <em>activations</em> $|x_c|$, so their weight $|w_c|$ usually sits well below the group's largest weight $\max_{j \in g}|w_j|$. For a moderate scale $s_c &gt; 1$, the scaled weight $s_c|w_c|$ still stays below (or barely nudges) the group maximum. That leaves $\Delta' \approx \Delta$, so the error factor drops to $\approx 1/s_c &lt; 1$ with <strong>zero penalty to the other channels in the group</strong>.</li>
+<li><strong>Why huge $s_c$ ruins the group ($\Delta' \propto s_c$):</strong> Once $s_c$ is pushed large enough that $s_c|w_c| &gt; \max_{j \neq c}|w_j|$, channel $c$ becomes the new group maximum and $\Delta' = s_c|w_c| / (2^{b-1}-1)$ grows linearly with $s_c$. At that point, $\Delta' / (\Delta s_c)$ stops shrinking for channel $c$, while every unscaled neighbor $j \neq c$ ($s_j = 1$) in the same group sees its grid step coarsened by $\Delta'/\Delta &gt; 1$.</li>
+</ul>
+
+<h2 id="algorithm">3. The AWQ Algorithm</h2>
+<p>Let $W \in \mathbb{R}^{D \times C}$ be a linear layer's weight matrix ($D$ output channels, $C$ input channels) and let $X \in \mathbb{R}^{C \times N}$ be the input activations recorded across $N$ calibration tokens. Writing $S = \operatorname{diag}(s_1, \dots, s_C)$, we want to choose positive channel scales $s \in \mathbb{R}^C$ that minimize the layer's output reconstruction error:</p>
+<div class="note-equation">$$s^* = \arg\min_{s \in \mathbb{R}_{&gt;0}^C} \bigl\lVert Q(W S)\,S^{-1} X - W X \bigr\rVert_F^2.$$</div>
+<p>Because the rounding operation $\operatorname{round}(\cdot)$ inside $Q(\cdot)$ has zero gradient almost everywhere, we cannot optimize $s \in \mathbb{R}^C$ with gradient descent, and searching $C = 4096$ independent numbers by brute force is intractable.</p>
+
+<p><strong>AWQ's 1D parameterization.</strong> Because a channel's importance is driven by its average activation magnitude, AWQ first computes the per-channel mean absolute activation across the $N$ calibration tokens:</p>
+<div class="note-equation">$$s_X = \frac{1}{N}\sum_{n=1}^{N} |X_{:, n}| \;\in\; \mathbb{R}^C, \qquad (s_X)_c = \frac{1}{N}\sum_{n=1}^{N} |X_{c, n}|.$$</div>
+<p>It then ties all $C$ channel scales to a <strong>single exponent $\alpha \in [0, 1]$</strong>:</p>
+<div class="note-equation">$$s(\alpha) = s_X^{\,\alpha} \quad \Longleftrightarrow \quad s_c(\alpha) = \bigl((s_X)_c\bigr)^\alpha, \qquad \alpha \in [0, 1].$$</div>
+<p>Here $\alpha = 0$ gives $s = \mathbf{1}$ (plain round-to-nearest, no scaling), $\alpha = 1$ gives $s = s_X$ (full activation-proportional scaling), and intermediate values $\alpha \in (0, 1)$ balance protecting salient channels against inflating the group step size $\Delta'$. This reduces a $C$-dimensional optimization problem to a fast <strong>20-point grid search over $\alpha \in [0, 1]$</strong>.</p>
+
+<div class="note-callout">
+<strong>Algorithm 1: Activation-aware Weight Quantization (AWQ) for a Linear Layer</strong>
+<ol>
+<li><strong>Inputs:</strong> weight matrix $W \in \mathbb{R}^{D \times C}$, calibration activations $X \in \mathbb{R}^{C \times N}$, bit-width $b$ (e.g., $4$), group size $G$ (e.g., $128$), grid steps $K = 20$.</li>
+<li><strong>Compute activation importance:</strong> for each input channel $c \in \{1, \dots, C\}$, compute
+$$s_{X,c} = \frac{1}{N}\sum_{n=1}^{N} |X_{c,n}|.$$</li>
+<li><strong>Grid-search the optimal scaling exponent $\alpha^*$:</strong> initialize $\mathcal{L}_{\min} = \infty$. For $k = 0, 1, \dots, K$:
+<ul>
+<li>Set $\alpha = k / K \in [0, 1]$ and compute raw scales $\tilde{s} = s_X^{\,\alpha}$.</li>
+<li>Normalize $\tilde{s}$ by its geometric range so scales stay centered around $1$:
+$$s(\alpha) = \frac{\tilde{s}}{\sqrt{\max(\tilde{s})\cdot\min(\tilde{s})}}.$$</li>
+<li>Quantize and reconstruct the scaled weights group-by-group: $\widehat{W}(\alpha) = Q\bigl(W \operatorname{diag}(s(\alpha))\bigr)\operatorname{diag}(s(\alpha))^{-1}$.</li>
+<li>Evaluate the layer output MSE on calibration tokens:
+$$\mathcal{L}(\alpha) = \bigl\lVert \widehat{W}(\alpha) X - W X \bigr\rVert_F^2.$$</li>
+<li>If $\mathcal{L}(\alpha) &lt; \mathcal{L}_{\min}$, update $\mathcal{L}_{\min} \leftarrow \mathcal{L}(\alpha)$ and $s^* \leftarrow s(\alpha)$.</li>
+</ul></li>
+<li><strong>Apply optimal scaling:</strong> replace $W \leftarrow W \operatorname{diag}(s^*)$ and fold $(s^*)^{-1}$ into the preceding operation (for example, updating the preceding RMSNorm/LayerNorm weight vector $\gamma \leftarrow \gamma \oslash s^*$).</li>
+<li><strong>Optional per-group weight clipping search:</strong> for each group $g$ of $G$ weights in the scaled matrix, test clipping ratios $\gamma \in \{1.00, 0.95, \dots, 0.50\}$ (clamping $|w| \le \gamma \max_{j \in g}|w_j|$ before setting $\Delta_g$) and pick $\gamma_g^*$ that minimizes $\lVert Q_\gamma(w_g) X_g - w_g X_g \rVert_2^2$.</li>
+<li><strong>Output:</strong> packed $b$-bit integer weights $W_q$ and per-group FP16 step sizes $\Delta_g$ (plus zero-points for asymmetric grids).</li>
+</ol>
+</div>
+
+<h2 id="worked-example">4. Step-by-step numerical walk-through of the algorithm</h2>
+<p>Let's run Algorithm 1 by hand on a single 4-bit symmetric group ($b = 4$, integer codes $-7$ to $7$) with $C = 4$ input channels:</p>
+<div class="note-equation">$$w = [0.14,\; 0.15,\; -0.40,\; 0.70].$$</div>
+<p>Suppose our calibration pass reveals that channel $1$ is an outlier activation channel with mean magnitude $9.0$, while channels $2, 3, 4$ have mean magnitude $1.0$:</p>
+<div class="note-equation">$$s_X = [9.0,\; 1.0,\; 1.0,\; 1.0], \qquad x = [9.0,\; 1.0,\; 1.0,\; 1.0]^{\mathsf T}.$$</div>
+<p>First compute the exact floating-point output $y = w x$:</p>
+<div class="note-equation">$$y = 0.14(9.0) + 0.15(1.0) - 0.40(1.0) + 0.70(1.0) = 1.26 + 0.15 - 0.40 + 0.70 = 1.71.$$</div>
+<p>Now evaluate the grid search over three representative candidates $\alpha \in \{0.0,\, 0.5,\, 1.0\}$ (leaving out the scalar geometric-mean normalization factor since uniform rescaling of a group cancels in $\Delta$):</p>
+
+<ul>
+<li><strong>Candidate $\alpha = 0.0$ (No scaling, standard RTN):</strong>
+<ul>
+<li>Scale vector: $s(0) = s_X^{\,0} = [1,\, 1,\, 1,\, 1]$.</li>
+<li>Group maximum is $0.70$, so the shared step size is $\Delta = 0.70 / 7 = 0.10$.</li>
+<li>Quantized weights: $Q(w) = [0.10,\; 0.20,\; -0.40,\; 0.70]$.</li>
+<li>Reconstructed output: $\widehat{y}(0) = 0.10(9.0) + 0.20(1.0) - 0.40(1.0) + 0.70(1.0) = 1.40$.</li>
+<li><strong>Squared output error:</strong> $\mathcal{L}(0) = (1.40 - 1.71)^2 = (-0.31)^2 = \mathbf{0.0961}$. Rounding $w_1 = 0.14$ to $0.10$ created a $-0.04$ weight error that got multiplied by $x_1 = 9.0$ into a $-0.36$ output shift.</li>
+</ul></li>
+<li><strong>Candidate $\alpha = 0.5$ (Moderate AWQ scaling &mdash; the sweet spot):</strong>
+<ul>
+<li>Scale vector: $s(0.5) = s_X^{\,0.5} = [\sqrt{9},\, 1,\, 1,\, 1] = [3,\, 1,\, 1,\, 1]$.</li>
+<li>Scaled weights: $w \odot s = [0.42,\; 0.15,\; -0.40,\; 0.70]$.</li>
+<li>Because $0.42 &lt; 0.70$, the group maximum is <strong>still $0.70$</strong>, so $\Delta' = 0.70 / 7 = 0.10$ is completely unchanged.</li>
+<li>On the $\Delta' = 0.10$ grid, $0.42$ rounds to $0.40$, giving $Q(w \odot s) = [0.40,\; 0.20,\; -0.40,\; 0.70]$ and effective weights $Q(w \odot s) \oslash s = [0.1333,\; 0.20,\; -0.40,\; 0.70]$.</li>
+<li>Reconstructed output: $\widehat{y}(0.5) = 0.40(9.0/3) + 0.20(1.0) - 0.40(1.0) + 0.70(1.0) = 1.20 + 0.20 - 0.40 + 0.70 = 1.70$.</li>
+<li><strong>Squared output error:</strong> $\mathcal{L}(0.5) = (1.70 - 1.71)^2 = (-0.01)^2 = \mathbf{0.0001}$&mdash;a <strong>$961\times$ reduction in squared error</strong> over RTN.</li>
+</ul></li>
+<li><strong>Candidate $\alpha = 1.0$ (Over-scaling):</strong>
+<ul>
+<li>Scale vector: $s(1.0) = s_X^{\,1.0} = [9,\, 1,\, 1,\, 1]$.</li>
+<li>Scaled weights: $w \odot s = [1.26,\; 0.15,\; -0.40,\; 0.70]$.</li>
+<li>Channel $1$ now overtakes $0.70$ as the group maximum ($1.26$), inflating the shared step size by $1.8\times$ to $\Delta' = 1.26 / 7 = 0.18$.</li>
+<li>On the coarser $\Delta' = 0.18$ grid, the scaled weights round to $[7,\, 1,\, -2,\, 4] \times 0.18 = [1.26,\; 0.18,\; -0.36,\; 0.72]$.</li>
+<li>Reconstructed output: $\widehat{y}(1.0) = 1.26(9.0/9) + 0.18(1.0) - 0.36(1.0) + 0.72(1.0) = 1.80$.</li>
+<li><strong>Squared output error:</strong> $\mathcal{L}(1.0) = (1.80 - 1.71)^2 = (+0.09)^2 = \mathbf{0.0081}$&mdash;$81\times$ worse than $\alpha = 0.5$ because inflating $\Delta'$ degraded channels $2$, $3$, and $4$.</li>
+</ul></li>
+</ul>
+
+<div class="note-table q-table"><table><caption>Summary of the AWQ grid search on the 4-weight group ($w = [0.14, 0.15, -0.40, 0.70]$, $x = [9, 1, 1, 1]^{\mathsf T}$, exact $y = 1.71$).</caption>
+<thead><tr><th scope="col">Exponent $\alpha$</th><th scope="col">Channel $1$ scale $s_1$</th><th scope="col">Group step $\Delta'$</th><th scope="col">Effective weights $Q(w \odot s) \oslash s$</th><th scope="col">Output $\widehat{y}(\alpha)$</th><th scope="col">Squared error $\mathcal{L}(\alpha)$</th></tr></thead>
+<tbody>
+<tr><th scope="row">$\alpha = 0.0$ (RTN)</th><td>$1.0$</td><td>$0.10$</td><td>$[0.1000,\; 0.20,\; -0.40,\; 0.70]$</td><td>$1.40$</td><td>$0.0961$</td></tr>
+<tr><th scope="row"><strong>$\alpha^* = 0.5$ (AWQ chosen)</strong></th><td><strong>$3.0$</strong></td><td><strong>$0.10$</strong></td><td><strong>$[0.1333,\; 0.20,\; -0.40,\; 0.70]$</strong></td><td><strong>$1.70$</strong></td><td><strong>$0.0001$</strong></td></tr>
+<tr><th scope="row">$\alpha = 1.0$ (Over-scaled)</th><td>$9.0$</td><td>$0.18$</td><td>$[0.1400,\; 0.18,\; -0.36,\; 0.72]$</td><td>$1.80$</td><td>$0.0081$</td></tr>
+</tbody></table></div>
+
+<p>Algorithm 1 selects $\alpha^* = 0.5$, scales channel $1$ by $3\times$, divides the preceding normalization layer's first weight by $3$, and packs the integer codes $[4,\, 2,\, -4,\, 7]$ with step size $\Delta = 0.10$.</p>
+
+<h2 id="compare">5. How AWQ compares to LLM.int8, SmoothQuant, and GPTQ</h2>
+<div class="note-table q-table"><table><caption>Comparison of post-training quantization methods for large language models.</caption>
+<thead><tr><th scope="col">Method</th><th scope="col">Target format</th><th scope="col">How it handles outlier channels</th><th scope="col">Calibration procedure</th></tr></thead>
+<tbody>
+<tr><th scope="row"><a href="../llm-int8/index.html">LLM.int8</a></th><td>W8A8 + FP16 branch</td><td>Splits outlier activation channels into a separate FP16 matrix multiplication at runtime.</td><td>None (dynamic runtime threshold).</td></tr>
+<tr><th scope="row"><a href="../smoothquant/index.html">SmoothQuant</a></th><td>W8A8</td><td>Rescales $s_c = (\max|X_c|)^\alpha / (\max|W_c|)^{1-\alpha}$ so <strong>both</strong> weights and activations fit in INT8.</td><td>Records peak activation and weight ranges ($\alpha \approx 0.5$).</td></tr>
+<tr><th scope="row"><a href="../gptq/index.html">GPTQ</a></th><td>W4A16 / W3A16</td><td>Quantizes columns sequentially and adjusts remaining weights via the inverse Hessian $H^{-1} = (2XX^{\mathsf T})^{-1}$.</td><td>Solves sequential Cholesky/Hessian updates across columns.</td></tr>
+<tr><th scope="row"><strong>AWQ</strong></th><td><strong>W4A16 / W3A16</strong></td><td>Scales weights by $s = s_X^{\,\alpha}$ before uniform low-bit rounding so salient channels get a finer effective step $\Delta'/s_c$.</td><td>20-point 1D grid search over $\alpha \in [0, 1]$ + optional clipping ratio $\gamma$.</td></tr>
+</tbody></table></div>
+
+<details class="note-check"><summary>Why does AWQ often generalize better to out-of-distribution tasks than GPTQ at very low bit-widths?</summary><p>GPTQ actively modifies unquantized weights using $H^{-1} = (2XX^{\mathsf T})^{-1}$ to cancel rounding errors on the calibration set, which can overfit if the calibration set is small or narrow. AWQ never alters the underlying floating-point function $W X = (W S)(S^{-1} X)$ before rounding; it only searches two scalar parameters ($\alpha$ and $\gamma$) to choose a better quantization grid.</p></details>
+
 <h2 id="sources">Sources</h2>
-<ul class="note-sources"><li><a href="https://arxiv.org/abs/2306.00978">Lin et al., AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</a>, saliency, scaling, and clipping.</li><li><a href="https://github.com/mit-han-lab/llm-awq">Authors' implementation</a>, calibration search and inference support.</li></ul>
+<ul class="note-sources">
+<li><a href="https://arxiv.org/abs/2306.00978">Lin et al., <em>AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</em> (MLSys 2024)</a> &mdash; Section 3.1 (1% salient weight observation), Section 3.2 (scaling error analysis and 1D grid search over $\alpha \in [0, 1]$).</li>
+<li><a href="https://github.com/mit-han-lab/llm-awq">Authors' <code>llm-awq</code> implementation</a> &mdash; <code>auto_scale.py</code> ($\alpha$ grid search and layer fusion) and <code>auto_clip.py</code> (weight clipping search).</li>
+<li><a href="activation-aware-scaling.html">Supplementary guide: AWQ scaling and clipping details</a> &mdash; deeper dive into layer fusion and runtime kernel execution.</li>
+</ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../smoothquant/index.html"><span>Previous</span><span>SmoothQuant: move the difficult range</span></a><a class="next" href="../qlora/index.html"><span>Next</span><span>NF4 and QLoRA</span></a></nav>
 </article></div>
 <footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
-<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-layout-20261009"></script><script src="../../../blog.js?v=quant-layout-20261009"></script><script src="../../../code-highlight.js"></script>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261019"></script><script src="../../../blog.js?v=quant-plain-20261019"></script><script src="../../../code-highlight.js"></script>
 <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body></html>
