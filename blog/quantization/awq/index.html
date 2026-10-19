@@ -53,16 +53,36 @@
 
 <p>Selecting the $1\%$ of channels with the largest weight magnitudes $|w_c|$ does no better than picking channels at random. Selecting the $1\%$ of channels with the largest input activations $\mathbb{E}[|x_c|]$ cuts perplexity from $43.20$ down to $11.39$. Our goal now is to get that same protection <strong>without</strong> storing a separate FP16 tensor.</p>
 
-<h2 id="scaling-math">2. Mathematical build-up: how scaling protects a channel</h2>
-<p>Before quantizing weight $w_c$, multiply it by a positive scale factor $s_c &gt; 1$ and divide the corresponding activation $x_c$ by $s_c$. In exact floating-point arithmetic, the product does not change:</p>
+<h2 id="scaling-math">2. Mathematical build-up: how uniform quantization and channel scaling work</h2>
+<p>To see how AWQ protects a channel without extra bits, we first build the standard $b$-bit groupwise quantizer from scratch, and then see what happens when we rescale a channel before rounding.</p>
+
+<h3>Step 2a: Where $\Delta = \frac{\max_{j \in g}|w_j|}{2^{b-1}-1}$ and $Q(w) = \Delta\cdot\operatorname{round}(w/\Delta)$ come from</h3>
+<p>Suppose we want to compress a group $g$ of floating-point weights $\{w_j\}_{j \in g}$ (typically $G = 128$ consecutive weights in a row) into $b$-bit signed integers:</p>
+<ol>
+<li><strong>Count the available integer codes:</strong> $b$ bits give $2^b$ binary patterns, which represent signed integers from $-2^{b-1}$ to $2^{b-1}-1$. To keep the grid <strong>symmetric around zero</strong> (so floating-point $0.0$ maps to integer $0$ with no offset), we drop the single extra negative endpoint $-2^{b-1}$ and use the symmetric integer set
+<div class="note-equation">$$q \in \bigl\{-(2^{b-1}-1),\; \dots,\; -1,\; 0,\; +1,\; \dots,\; +(2^{b-1}-1)\bigr\}.$$</div>
+For $b = 4$ bits, $2^{4-1}-1 = 7$, giving $7$ negative steps, $0$, and $7$ positive steps: $\{-7, -6, \dots, 0, \dots, +6, +7\}$.</li>
+<li><strong>Set the grid spacing $\Delta$ so the largest weight fits at the top integer code:</strong> Let $M_g = \max_{j \in g}|w_j|$ be the largest weight magnitude in group $g$, so every weight in the group lies in $[-M_g, +M_g]$. To cover $[-M_g, +M_g]$ with $2^{b-1}-1$ evenly spaced steps on each side of zero without clipping $M_g$, the top integer code $q_{\max} = 2^{b-1}-1$ must land at $M_g$:
+<div class="note-equation">$$(2^{b-1}-1)\cdot\Delta = \max_{j \in g}|w_j| \quad \Longrightarrow \quad \Delta = \frac{\max_{j \in g}|w_j|}{2^{b-1}-1}.$$</div>
+Here $\Delta$ is the <strong>step size</strong> (distance between two adjacent grid points). For example, if $b = 4$ and the largest weight in the group is $0.70$, dividing $0.70$ into $7$ equal steps gives $\Delta = 0.70 / 7 = 0.10$, placing the allowed grid points at $\{-0.70, -0.60, \dots, 0.00, 0.10, \dots, 0.70\}$. <em>(Note: some implementations divide by $2^{b-1}$ instead of $2^{b-1}-1$; the scaling analysis below is identical because the denominator is a fixed constant.)</em></li>
+<li><strong>Quantize to an integer code $q$, then reconstruct to float $Q(w)$:</strong> Once $\Delta$ is fixed, snapping a continuous weight $w$ onto the grid is a two-step round trip:
+<ul>
+<li><em>Quantize (float $\to$ stored integer $q$):</em> divide $w$ by the step size $\Delta$ to measure how many grid steps $w$ sits from zero, then round to the nearest integer:
+<div class="note-equation">$$q = \operatorname{round}\!\left(\frac{w}{\Delta}\right) \;\in\; \bigl\{-(2^{b-1}-1),\; \dots,\; +(2^{b-1}-1)\bigr\}.$$</div></li>
+<li><em>Dequantize / reconstruct (stored integer $q \to$ float $Q(w)$):</em> before multiplying by an activation at inference time, multiply the integer code $q$ back by the step size $\Delta$ to restore its original floating-point units:
+<div class="note-equation">$$Q(w) = \Delta \cdot q = \Delta \cdot \operatorname{round}\!\left(\frac{w}{\Delta}\right).$$</div></li>
+</ul>
+For instance, with $\Delta = 0.10$, a weight $w_1 = 0.14$ lies at $w_1 / \Delta = 1.4$ steps, rounds to integer code $q_1 = \operatorname{round}(1.4) = 1$, and reconstructs to $Q(0.14) = 0.10 \times 1 = 0.10$.</li>
+</ol>
+
+<h3>Step 2b: How scaling a channel before $Q(\cdot)$ shrinks its rounding error</h3>
+<p>Now suppose that before quantizing weight $w_c$, we multiply it by a positive scale factor $s_c &gt; 1$ and divide the corresponding activation $x_c$ by $s_c$. In exact floating-point arithmetic, the product does not change:</p>
 <div class="note-equation">$$w_c x_c = (s_c w_c)\!\left(\frac{x_c}{s_c}\right).$$</div>
-<p>Now apply groupwise $b$-bit symmetric quantization to the weights. A group $g$ of $G$ contiguous weights (typically $G = 128$) shares a single step size $\Delta$. Define $Q(\cdot)$ as the <strong>quantize-and-reconstruct</strong> operator that snaps a weight to the nearest integer code in $\{-2^{b-1}+1, \dots, 2^{b-1}-1\}$ and multiplies back by $\Delta$:</p>
-<div class="note-equation">$$Q(w) = \Delta \cdot \operatorname{round}\!\left(\frac{w}{\Delta}\right), \qquad \Delta = \frac{\max_{j \in g}|w_j|}{2^{b-1}-1}.$$</div>
-<p>Compare the output error of channel $c$ with and without scaling:</p>
+<p>Compare the output error of channel $c$ when we apply $Q(\cdot)$ with and without scaling:</p>
 <ol>
 <li><strong>Without scaling ($s_c = 1$):</strong> Rounding $w_c / \Delta$ to the nearest integer produces a fractional grid offset $\varepsilon_c = \operatorname{round}(w_c/\Delta) - w_c/\Delta \in [-1/2, 1/2]$. Multiplying by $\Delta$ and by $x_c$, the output error from channel $c$ is
 <div class="note-equation">$$\operatorname{Err}_{\mathrm{unscaled}}(w_c x_c) = \bigl|Q(w_c)x_c - w_c x_c\bigr| = \Delta \cdot |\varepsilon_c| \cdot |x_c| \le \frac{\Delta}{2}|x_c|.$$</div></li>
-<li><strong>With scaling ($s_c &gt; 1$):</strong> We quantize $s_c w_c$ on the group's new grid of step size $\Delta'$ and multiply by the inverse-scaled activation $x_c / s_c$:
+<li><strong>With scaling ($s_c &gt; 1$):</strong> We quantize $s_c w_c$ on the group's new grid of step size $\Delta' = \frac{\max_{j \in g}|s_j w_j|}{2^{b-1}-1}$ and multiply by the inverse-scaled activation $x_c / s_c$:
 <div class="note-equation">$$Q(s_c w_c)\,\frac{x_c}{s_c} = \Delta' \cdot \operatorname{round}\!\left(\frac{s_c w_c}{\Delta'}\right)\frac{x_c}{s_c}.$$</div>
 The integer rounding $\operatorname{round}(s_c w_c / \Delta')$ still lands within half a step ($\varepsilon'_c \in [-1/2, 1/2]$), so the error in the <em>scaled</em> weight $Q(s_c w_c) - s_c w_c$ is bounded by $\Delta'/2$. Dividing the activation by $s_c$ divides that error by $s_c$:
 <div class="note-equation">$$\operatorname{Err}_{\mathrm{scaled}}(w_c x_c) = \left|Q(s_c w_c)\frac{x_c}{s_c} - w_c x_c\right| = \frac{\Delta'}{s_c} \cdot |\varepsilon'_c| \cdot |x_c| \le \frac{\Delta'}{2s_c}|x_c|.$$</div></li>
