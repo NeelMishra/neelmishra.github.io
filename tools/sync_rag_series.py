@@ -16,13 +16,12 @@ MANIFEST = ROOT / "blog/rag/series.json"
 
 ANN_FOLDER_LABELS = {
     "hnsw": "HNSW",
-    "hierarchical-trees": "Hierarchical K-Means & Trees",
+    "hierarchical-k-means": "Hierarchical K-Means",
+    "kd-trees": "KD-Trees",
+    "ball-trees": "Ball Trees",
+    "annoy": "Annoy (Random Projection Trees)",
     "ivf": "IVF (Inverted File Index)",
-    "product-quantization": "Product Quantization (PQ)",
-    "scalar-binary-quantization": "Scalar & Binary Quantization",
     "lsh": "LSH (Locality-Sensitive Hashing)",
-    "scann": "ScaNN (Score-Aware Quantization)",
-    "diskann-vamana": "DiskANN & Vamana",
 }
 
 

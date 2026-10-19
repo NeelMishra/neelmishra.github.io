@@ -11083,12 +11083,42 @@ var BLOG_TREE = [
             ]
           },
           {
-            "name": "hierarchical-trees",
-            "label": "Hierarchical K-Means & Trees",
+            "name": "hierarchical-k-means",
+            "label": "Hierarchical K-Means",
             "children": [
               {
-                "title": "Hierarchical k-means and trees: split the space and merge a forest",
-                "file": "rag/ann-methods/hierarchical-trees/index.html"
+                "title": "Hierarchical k-means: route through nested centroids with a branch queue",
+                "file": "rag/ann-methods/hierarchical-k-means/index.html"
+              }
+            ]
+          },
+          {
+            "name": "kd-trees",
+            "label": "KD-Trees",
+            "children": [
+              {
+                "title": "KD-trees: split coordinate axes and prune with query balls",
+                "file": "rag/ann-methods/kd-trees/index.html"
+              }
+            ]
+          },
+          {
+            "name": "ball-trees",
+            "label": "Ball Trees",
+            "children": [
+              {
+                "title": "Ball trees: bound metric balls and prune with the triangle inequality",
+                "file": "rag/ann-methods/ball-trees/index.html"
+              }
+            ]
+          },
+          {
+            "name": "annoy",
+            "label": "Annoy (Random Projection Trees)",
+            "children": [
+              {
+                "title": "Annoy: bisect random point pairs and merge a forest",
+                "file": "rag/ann-methods/annoy/index.html"
               }
             ]
           },
@@ -11103,52 +11133,12 @@ var BLOG_TREE = [
             ]
           },
           {
-            "name": "product-quantization",
-            "label": "Product Quantization (PQ)",
-            "children": [
-              {
-                "title": "Product quantization: split subspaces and score with lookup tables",
-                "file": "rag/ann-methods/product-quantization/index.html"
-              }
-            ]
-          },
-          {
-            "name": "scalar-binary-quantization",
-            "label": "Scalar & Binary Quantization",
-            "children": [
-              {
-                "title": "Scalar and binary quantization: compress coordinates and rerank the shortlist",
-                "file": "rag/ann-methods/scalar-binary-quantization/index.html"
-              }
-            ]
-          },
-          {
             "name": "lsh",
             "label": "LSH (Locality-Sensitive Hashing)",
             "children": [
               {
                 "title": "LSH: turn angular similarity into hash collisions",
                 "file": "rag/ann-methods/lsh/index.html"
-              }
-            ]
-          },
-          {
-            "name": "scann",
-            "label": "ScaNN (Score-Aware Quantization)",
-            "children": [
-              {
-                "title": "ScaNN: weight parallel quantization error for inner-product search",
-                "file": "rag/ann-methods/scann/index.html"
-              }
-            ]
-          },
-          {
-            "name": "diskann-vamana",
-            "label": "DiskANN & Vamana",
-            "children": [
-              {
-                "title": "DiskANN and Vamana: route with RAM codes and fetch vectors from SSD",
-                "file": "rag/ann-methods/diskann-vamana/index.html"
               }
             ]
           }
