@@ -11081,6 +11081,76 @@ var BLOG_TREE = [
                 "file": "rag/ann-methods/hnsw/filtered-retrieval-and-rag.html"
               }
             ]
+          },
+          {
+            "name": "hierarchical-trees",
+            "label": "Hierarchical K-Means & Trees",
+            "children": [
+              {
+                "title": "Hierarchical k-means and trees: split the space and merge a forest",
+                "file": "rag/ann-methods/hierarchical-trees/index.html"
+              }
+            ]
+          },
+          {
+            "name": "ivf",
+            "label": "IVF (Inverted File Index)",
+            "children": [
+              {
+                "title": "IVF: partition into Voronoi cells and probe the nearest lists",
+                "file": "rag/ann-methods/ivf/index.html"
+              }
+            ]
+          },
+          {
+            "name": "product-quantization",
+            "label": "Product Quantization (PQ)",
+            "children": [
+              {
+                "title": "Product quantization: split subspaces and score with lookup tables",
+                "file": "rag/ann-methods/product-quantization/index.html"
+              }
+            ]
+          },
+          {
+            "name": "scalar-binary-quantization",
+            "label": "Scalar & Binary Quantization",
+            "children": [
+              {
+                "title": "Scalar and binary quantization: compress coordinates and rerank the shortlist",
+                "file": "rag/ann-methods/scalar-binary-quantization/index.html"
+              }
+            ]
+          },
+          {
+            "name": "lsh",
+            "label": "LSH (Locality-Sensitive Hashing)",
+            "children": [
+              {
+                "title": "LSH: turn angular similarity into hash collisions",
+                "file": "rag/ann-methods/lsh/index.html"
+              }
+            ]
+          },
+          {
+            "name": "scann",
+            "label": "ScaNN (Score-Aware Quantization)",
+            "children": [
+              {
+                "title": "ScaNN: weight parallel quantization error for inner-product search",
+                "file": "rag/ann-methods/scann/index.html"
+              }
+            ]
+          },
+          {
+            "name": "diskann-vamana",
+            "label": "DiskANN & Vamana",
+            "children": [
+              {
+                "title": "DiskANN and Vamana: route with RAM codes and fetch vectors from SSD",
+                "file": "rag/ann-methods/diskann-vamana/index.html"
+              }
+            ]
           }
         ]
       }
