@@ -11022,6 +11022,76 @@ var BLOG_TREE = [
             ]
           }
         ]
+      },
+      {
+        "name": "retrieval",
+        "label": "Retrieval",
+        "children": [
+          {
+            "title": "Retrieval methods: match, fuse, and rerank evidence across representations",
+            "file": "rag/retrieval/index.html"
+          },
+          {
+            "name": "lexical-bm25-and-splade",
+            "label": "BM25 & Learned Sparse (SPLADE)",
+            "children": [
+              {
+                "title": "Lexical and learned sparse retrieval: score exact terms with BM25 and SPLADE",
+                "file": "rag/retrieval/lexical-bm25-and-splade/index.html"
+              }
+            ]
+          },
+          {
+            "name": "dense-bi-encoders",
+            "label": "Dense Bi-Encoders",
+            "children": [
+              {
+                "title": "Dense bi-encoders: map queries and passages into a shared metric space",
+                "file": "rag/retrieval/dense-bi-encoders/index.html"
+              }
+            ]
+          },
+          {
+            "name": "hybrid-search-and-fusion",
+            "label": "Hybrid Search & Fusion",
+            "children": [
+              {
+                "title": "Hybrid retrieval and score fusion: combine lexical and dense rankings",
+                "file": "rag/retrieval/hybrid-search-and-fusion/index.html"
+              }
+            ]
+          },
+          {
+            "name": "colbert-late-interaction",
+            "label": "Late Interaction (ColBERT)",
+            "children": [
+              {
+                "title": "Multi-vector late interaction: preserve token-level alignment with ColBERT MaxSim",
+                "file": "rag/retrieval/colbert-late-interaction/index.html"
+              }
+            ]
+          },
+          {
+            "name": "query-rewriting-and-hyde",
+            "label": "Query Rewriting & HyDE",
+            "children": [
+              {
+                "title": "Query transformation and HyDE: bridge the question-to-document representation gap",
+                "file": "rag/retrieval/query-rewriting-and-hyde/index.html"
+              }
+            ]
+          },
+          {
+            "name": "reranking-and-mmr-diversity",
+            "label": "Cross-Encoders & MMR Diversity",
+            "children": [
+              {
+                "title": "Cross-encoder reranking and MMR: refine top-k precision and eliminate redundancy",
+                "file": "rag/retrieval/reranking-and-mmr-diversity/index.html"
+              }
+            ]
+          }
+        ]
       }
     ]
   },

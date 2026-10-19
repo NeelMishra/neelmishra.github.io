@@ -32,6 +32,15 @@ CHUNKING_FOLDER_LABELS = {
     "proposition-and-agentic": "Proposition & Agentic",
 }
 
+RETRIEVAL_FOLDER_LABELS = {
+    "lexical-bm25-and-splade": "BM25 & Learned Sparse (SPLADE)",
+    "dense-bi-encoders": "Dense Bi-Encoders",
+    "hybrid-search-and-fusion": "Hybrid Search & Fusion",
+    "colbert-late-interaction": "Late Interaction (ColBERT)",
+    "query-rewriting-and-hyde": "Query Rewriting & HyDE",
+    "reranking-and-mmr-diversity": "Cross-Encoders & MMR Diversity",
+}
+
 
 def load_chapters():
     chapters = json.loads(MANIFEST.read_text())["chapters"]
@@ -51,6 +60,7 @@ def tree(chapters):
     sections = {
         "ann-methods": ("ANN Methods", ANN_FOLDER_LABELS),
         "chunking": ("Chunking", CHUNKING_FOLDER_LABELS),
+        "retrieval": ("Retrieval", RETRIEVAL_FOLDER_LABELS),
     }
     section_nodes = {}
     subfolders = {}
@@ -180,6 +190,13 @@ def main():
         hub_file="rag/chunking/index.html",
         hub_title="Chunking methods: preserve evidence boundaries before embedding",
         default_marker="CHUNK-NAV",
+    )
+    sync_section_nav(
+        chapters,
+        prefix="rag/retrieval/",
+        hub_file="rag/retrieval/index.html",
+        hub_title="Retrieval methods: match, fuse, and rerank evidence across representations",
+        default_marker="RETRIEVAL-NAV",
     )
     print(f"Synchronized {len(chapters)} published RAG articles.")
 

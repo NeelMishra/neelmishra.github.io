@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Rescore bi-encoder candidate pools with full self-attention cross-encoders, calibrate relevance thresholds, and diversify assembled context with Maximal Marginal Relevance (MMR).">
+<title>Cross-encoder reranking and MMR: refine top-k precision and eliminate redundancy | Neel Mishra</title>
+<link rel="canonical" href="https://neelmishra.github.io/blog/rag/retrieval/reranking-and-mmr-diversity/index.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../rag.css?v=hnsw-puzzle-20261007">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../../learning-notes.js"></script>
+</head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header>
+<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
+<article class="blog-post-content learning-note rag-note">
+<a class="back-to-blog" href="../index.html">&larr; Retrieval methods</a><div class="post-series-nav"><a href="../../index.html">RAG</a><span>&middot;</span><a href="../index.html">Retrieval</a><span>&middot; Cross-Encoders &amp; MMR Diversity</span></div>
+<h1>Cross-encoder reranking and MMR: refine top-k precision and eliminate redundancy</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
+<p>First-stage retrievers—whether BM25, dense bi-encoders, or hybrid RRF—are built for sub-10-millisecond recall across millions of documents. To achieve that speed, a bi-encoder compresses each passage into a single vector offline without ever seeing the user's query, blinding it to fine-grained token interactions such as negation, relational directionality, and multi-condition conjunctions.</p>
+<p>Even after a second-stage <strong>cross-encoder</strong> rescores the top-$K$ candidates with full query-to-document self-attention, a second failure mode appears at prompt assembly: <strong>top-$k$ redundancy</strong>. Because enterprise corpora routinely contain duplicated runbooks, overlapping chunks, and mirrored release notes, selecting the top $k$ chunks purely by individual relevance fills the context window with near-identical copies of the highest-scoring fact while crowding out secondary steps. <strong>Maximal Marginal Relevance (MMR)</strong> resolves this by penalizing each candidate for its maximum similarity to already-selected passages.</p>
+
+<h2 id="redundancy-puzzle">When three near-duplicate top hits crowd out the rollback procedure</h2>
+<div class="rag-opening"><p class="rag-eyebrow">5 candidates &middot; context budget k = 3 &middot; MMR trade-off &lambda; = 0.6</p><p>Suppose an operator asks $q = \text{``How do I enable --west-v2 safely and roll it back?''}$ under a strict context budget of $k = 3$ chunks. After cross-encoder rescoring, the top-$5$ candidate pool $\{P_{1a}, P_{1b}, P_{1c}, P_2, P_3\}$ contains three mirrored documentation snippets describing the enable flag ($P_{1a}, P_{1b}, P_{1c}$, pairwise similarity $0.94$–$0.96$), one chunk describing the rollback command ($P_2$), and one chunk stating the pre-flight safety check ($P_3$).</p></div>
+<figure class="note-figure"><a href="assets/rerank-mmr-pipeline.svg" aria-label="Open the cross-encoder reranking and MMR diversity selection diagram at full size"><img src="assets/rerank-mmr-pipeline.svg" width="960" height="470" loading="lazy" alt="Left panel shows a two-stage funnel where a bi-encoder retrieves top-50 candidates in 4 ms and a cross-encoder rescores them in 35 ms via joint token-to-token attention, demoting a negated warning C1 and promoting the true match C3. Right panel compares naive top-3 selection (P1a, P1b, P1c) against MMR with lambda=0.6, which selects P1a, penalizes P1b and P1c for 0.96 redundancy, and promotes P2 (rollback) and P3 (safety precondition)."></a><figcaption>Left: A cross-encoder evaluates $\text{[CLS]} \Vert q \Vert \text{[SEP]} \Vert d \Vert \text{[SEP]}$ with full self-attention to demote negated warnings (`C1`) and promote exact procedural answers (`C3`). Right: Naive top-$3$ selection picks three copies of the enable command ($P_{1a}, P_{1b}, P_{1c}$), whereas MMR ($\lambda = 0.6$) penalizes $P_{1b}, P_{1c}$ after selecting $P_{1a}$ and promotes the rollback ($P_2$) and safety check ($P_3$) chunks.</figcaption></figure>
+<p>A naive top-$3$ cutoff sorts purely by $\operatorname{sim}_1(d_i, q)$ and returns $\{P_{1a}, P_{1b}, P_{1c}\}$ (scores $0.92, 0.90, 0.88$). The generator receives three paraphrases of <code>--west-v2=true</code> and zero evidence on how to verify safety or roll the flag back. Applying MMR with $\lambda = 0.6$ selects $P_{1a}$ in step $1$ ($0.6 \times 0.92 = 0.552$), then subtracts $0.4 \times \operatorname{sim}_2(d_i, P_{1a})$ in step $2$—Slashing $P_{1b}$ from $0.540$ down to $0.540 - 0.4(0.96) = 0.156$ and promoting $P_2$ ($0.492 - 0.4(0.25) = 0.392$) and $P_3$ ($0.474 - 0.4(0.22) = 0.386$) into the $3$-slot budget.</p>
+<div class="note-table rag-table-data"><p class="rag-table-caption" id="table-caption-0">Step-by-step comparison of Bi-Encoder scores, Cross-Encoder scores, and greedy MMR selection (lambda = 0.6, budget k = 3) across the 5-candidate pool.</p><div class="rag-table-scroll" tabindex="0" role="region" aria-label="Step-by-step comparison of Bi-Encoder scores, Cross-Encoder scores, and greedy MMR selection across the 5-candidate pool."><table aria-labelledby="table-caption-0"><thead><tr><th scope="col">Candidate ID &amp; sub-topic</th><th scope="col">Bi-Enc $\cos$</th><th scope="col">Cross-Enc $\operatorname{sim}_1(d_i, q)$</th><th scope="col">$\operatorname{sim}_2(d_i, P_{1a})$</th><th scope="col">MMR Step 1 ($S_0 = \emptyset$)</th><th scope="col">MMR Step 2 ($S_1 = \{P_{1a}\}$)</th><th scope="col">MMR Step 3 ($S_2 = \{P_{1a}, P_2\}$)</th></tr></thead><tbody>
+<tr><th scope="row">$P_{1a}$: Enable flag syntax (CLI)</th><td>$0.84$</td><td>$0.92$ (Rank 1)</td><td>$1.00$</td><td>$\mathbf{0.552}$ (Pick #1)</td><td>&mdash; (in $S_1$)</td><td>&mdash; (in $S_2$)</td></tr>
+<tr><th scope="row">$P_{1b}$: Enable flag mirror (Runbook)</th><td>$0.83$</td><td>$0.90$ (Rank 2)</td><td>$0.96$</td><td>$0.540$</td><td>$0.156$ (penalized)</td><td>$0.156$ (omitted)</td></tr>
+<tr><th scope="row">$P_{1c}$: Enable flag mirror (FAQ)</th><td>$0.82$</td><td>$0.88$ (Rank 3)</td><td>$0.95$</td><td>$0.528$</td><td>$0.148$ (penalized)</td><td>$0.148$ (omitted)</td></tr>
+<tr><th scope="row">$P_2$: Rollback procedure</th><td>$0.76$</td><td>$0.82$ (Rank 4)</td><td>$0.25$</td><td>$0.492$</td><td>$\mathbf{0.392}$ (Pick #2)</td><td>&mdash; (in $S_2$)</td></tr>
+<tr><th scope="row">$P_3$: Safety precondition</th><td>$0.74$</td><td>$0.79$ (Rank 5)</td><td>$0.22$</td><td>$0.474$</td><td>$0.386$</td><td>$\mathbf{0.386}$ (Pick #3)</td></tr>
+</tbody></table></div><p class="rag-table-hint">Scroll horizontally to compare the columns. Keyboard: focus the table, then use the left and right arrow keys.</p></div>
+
+<h2 id="cross-encoder-mechanics">Cross-encoder self-attention vs. bi-encoder compression</h2>
+<p>A dense <strong>bi-encoder</strong> computes query and passage representations independently via two forward passes, scoring relevance by a single inner product $\langle E_Q(q), E_P(d) \rangle$. Because $E_P(d)$ is precomputed at indexing time without knowledge of $q$, all token-level nuances inside a $256$-token passage must survive compression into a single $d$-dimensional bottleneck vector.</p>
+<p>A <strong>cross-encoder (Nogueira &amp; Cho, 2019)</strong> concatenates the query and candidate passage into a single token sequence separated by special delimiters and passes the joint sequence through an $L$-layer Transformer encoder:</p>
+<div class="note-equation">$$s_{\text{CE}}(q, d) = \sigma\!\left(\mathbf{w}^{\top} \operatorname{Transformer}\!\left(\text{[CLS]} \;\Vert\; q \;\Vert\; \text{[SEP]} \;\Vert\; d \;\Vert\; \text{[SEP]}\right)_{\text{[CLS]}}\right) \in (0, 1),$$</div>
+<p>where $\mathbf{w} \in \mathbb{R}^d$ projects the final-layer $\text{[CLS]}$ representation to a scalar logit and $\sigma(z) = (1 + e^{-z})^{-1}$ calibrates it to a probability. Inside every layer, full multi-head self-attention computes $(|q| + |d|)^2$ pairwise token interactions—allowing query tokens to attend directly to document tokens and vice versa. This resolves three structural blind spots of bi-encoders:</p>
+<ul>
+<li><strong>Negation and modality:</strong> In <code>"Do NOT enable --west-v2 when TLS is off"</code> (`C1`), attention heads directly bind the negation token <code>NOT</code> and condition <code>off</code> to the query verb <code>enable</code>, dropping $s_{\text{CE}}$ from $0.86$ (bi-encoder cosine) to $0.14$.</li>
+<li><strong>Asymmetric directionality:</strong> Cross-attention distinguishes <em>"Service A rate-limits Service B"</em> from <em>"Service B rate-limits Service A"</em>, which share identical bag-of-words and nearly identical pooled bi-encoder embeddings.</li>
+<li><strong>Multi-constraint conjunctions:</strong> When a query specifies multiple attributes (version, region, error code), cross-attention verifies that each modifier attaches to the right entity rather than appearing scattered across unrelated clauses.</li>
+</ul>
+<p>Because a cross-encoder cannot precompute document vectors offline, scoring $K$ candidates requires $K$ forward passes of length $L_q + L_d$ at query time. A two-stage cascade bounds total latency to:</p>
+<div class="note-equation">$$T_{\text{total}}(N, K) = T_{\text{ANN}}(N, K) + \left\lceil \frac{K}{B_{\text{GPU}}} \right\rceil T_{\text{CE}}(L_q + L_d),$$</div>
+<p>where Stage 1 retrieves $K \in [30, 100]$ candidates from $N$ documents in $3$–$8\text{ ms}$, and Stage 2 batches those $K$ pairs on a GPU in $20$–$50\text{ ms}$.</p>
+<div class="note-table rag-table-prose"><table role="table"><caption>Architectural trade-offs across first-stage bi-encoders, second-stage cross-encoders, and late-interaction models.</caption><thead role="rowgroup"><tr><th scope="col">Scoring architecture</th><th scope="col">Query-time complexity (for $K$ candidates)</th><th scope="col">Offline index footprint</th><th scope="col">Token interaction fidelity</th></tr></thead><tbody role="rowgroup">
+<tr role="row"><th scope="row" role="rowheader">Bi-Encoder (DPR, BGE, E5)</th><td data-label="Query-time complexity" role="cell">$1$ query encode $+ O(\log N)$ HNSW dot products ($\sim 4\text{ ms}$)</td><td data-label="Offline index footprint" role="cell">$1$ vector per chunk ($d \times 4\text{ B}$)</td><td data-label="Token interaction fidelity" role="cell">Single pooled vector; misses negation and fine-grained modifier binding</td></tr>
+<tr role="row"><th scope="row" role="rowheader">Late Interaction (ColBERT MaxSim)</th><td data-label="Query-time complexity" role="cell">$1$ query encode $+ |q| \times |d|$ token dot products per candidate ($\sim 12\text{ ms}$)</td><td data-label="Offline index footprint" role="cell">$|d|$ vectors per chunk ($10$–$40\times$ larger even with 2-bit quantization)</td><td data-label="Token interaction fidelity" role="cell">Token-level maximum similarity; strong lexical + phrase alignment</td></tr>
+<tr role="row"><th scope="row" role="rowheader">Cross-Encoder (MiniLM, BGE-Reranker)</th><td data-label="Query-time complexity" role="cell">$K$ full Transformer forward passes of length $L_q + L_d$ ($\sim 35\text{ ms}$)</td><td data-label="Offline index footprint" role="cell">Zero vector overhead (operates on raw text of top-$K$ pool)</td><td data-label="Token interaction fidelity" role="cell">Full $(|q| + |d|)^2$ cross-attention across all layers; highest precision</td></tr>
+</tbody></table></div>
+
+<h2 id="mmr-diversity">Maximal Marginal Relevance (MMR) and the novelty-relevance threshold</h2>
+<p>Given a candidate pool $R$ of size $K$, a relevance function $\operatorname{sim}_1(d_i, q) \in [0, 1]$ (such as the calibrated cross-encoder score $s_{\text{CE}}(q, d_i)$), and an inter-document similarity metric $\operatorname{sim}_2(d_i, d_j) \in [0, 1]$ (typically the cosine similarity between their bi-encoder vectors), <strong>Maximal Marginal Relevance (Carbonell &amp; Goldstein, 1998)</strong> builds the selected context set $S_k$ greedily over $t = 1, \dots, k$ steps:</p>
+<div class="note-equation">$$d^{(t)} = \arg\max_{d_i \in R \setminus S_{t-1}} \left[\lambda\,\operatorname{sim}_1(d_i, q) \;-\; (1 - \lambda)\,\max_{d_j \in S_{t-1}} \operatorname{sim}_2(d_i, d_j)\right],$$</div>
+<p>with $S_0 = \emptyset$ (where the $\max$ over an empty set is defined as $0$) and $S_t = S_{t-1} \cup \{d^{(t)}\}$. The parameter $\lambda \in [0, 1]$ governs the trade-off: $\lambda = 1$ reduces to standard relevance sorting, while $\lambda = 0$ selects maximally distant passages regardless of query relevance.</p>
+<p>When does MMR prefer a slightly lower-relevance novel passage $d_{\text{new}}$ over a higher-relevance near-duplicate $d_{\text{dup}}$? Let $\Delta_{\text{rel}} = \operatorname{sim}_1(d_{\text{dup}}, q) - \operatorname{sim}_1(d_{\text{new}}, q) \ge 0$ be the relevance gap, and let $\Delta_{\text{sim}} = \max_{d_j \in S} \operatorname{sim}_2(d_{\text{dup}}, d_j) - \max_{d_j \in S} \operatorname{sim}_2(d_{\text{new}}, d_j) &gt; 0$ be the reduction in redundancy. Then $d_{\text{new}}$ strictly outscores $d_{\text{dup}}$ in MMR if and only if:</p>
+<div class="note-equation">$$\Delta_{\text{rel}} &lt; \frac{1 - \lambda}{\lambda}\,\Delta_{\text{sim}}.$$</div>
+<p>In the opening puzzle ($\lambda = 0.6$, so $\frac{1-\lambda}{\lambda} = \frac{2}{3}$), comparing the duplicate $P_{1b}$ ($\operatorname{sim}_1 = 0.90$, $\operatorname{sim}_2 = 0.96$) against the rollback passage $P_2$ ($\operatorname{sim}_1 = 0.82$, $\operatorname{sim}_2 = 0.25$) gives $\Delta_{\text{rel}} = 0.08$, which is far below the novelty threshold $\frac{2}{3}(0.96 - 0.25) = 0.473$—so $P_2$ wins by a wide margin ($0.392$ vs. $0.156$).</p>
+<p><strong>Guarding against irrelevant outliers:</strong> If the candidate pool $R$ contains only $1$ or $2$ truly relevant documents and $48$ irrelevant noise chunks, pure MMR with $\lambda \le 0.7$ will actively select off-topic noise in steps $2\dots k$ because irrelevant chunks have near-zero similarity ($\operatorname{sim}_2 \approx 0$) to the first selected passage. Production pipelines therefore apply a hard <strong>relevance floor</strong> $\tau_{\text{min}}$ (for example, $s_{\text{CE}}(q, d_i) \ge 0.35$) to prune $R$ <em>before</em> running greedy MMR selection.</p>
+
+<h2 id="context-ordering-and-code">Prompt ordering and the "Lost in the Middle" U-curve</h2>
+<p>Once Cross-Encoder reranking and MMR produce the final $k$ passages $(d^{(1)}, d^{(2)}, \dots, d^{(k)})$, the order in which they are concatenated into the LLM prompt still affects generation accuracy. <strong>Liu et al. (2024)</strong> demonstrated that causal Transformer language models exhibit a strong U-shaped position bias when extracting facts from multi-document contexts: recall is highest when the critical evidence sits at the <strong>very beginning</strong> (primacy) or <strong>very end</strong> (recency, immediately adjacent to the user question and generation cursor) of the context block, and drops by $10$–$25$ percentage points when buried in the middle slots.</p>
+<p>Instead of appending passages in monotonic descending order $[d^{(1)}, d^{(2)}, d^{(3)}, d^{(4)}, d^{(5)}]$—which pushes the $3$rd and $4$th passages into the attention trough—a <strong>sides-first (alternating outer-in) interleaving</strong> places the highest-scoring passage at index $0$, the second-highest at index $k-1$ (closest to the final prompt instruction), the third at index $1$, and the lowest-scoring passages in the center.</p>
+<pre><code class="language-python"># Verify the 5-candidate Cross-Encoder + MMR puzzle and Lost-in-the-Middle ordering
+
+candidates = {
+    "P1a": {"bi": 0.84, "ce": 0.92, "topic": "Enable flag syntax (CLI)"},
+    "P1b": {"bi": 0.83, "ce": 0.90, "topic": "Enable flag mirror (Runbook)"},
+    "P1c": {"bi": 0.82, "ce": 0.88, "topic": "Enable flag mirror (FAQ)"},
+    "P2":  {"bi": 0.76, "ce": 0.82, "topic": "Rollback procedure"},
+    "P3":  {"bi": 0.74, "ce": 0.79, "topic": "Safety precondition"},
+    "P_noise": {"bi": 0.71, "ce": 0.12, "topic": "Unrelated billing FAQ"},
+}
+
+# Symmetric pairwise similarity matrix sim_2(d_i, d_j)
+sim2_pairs = {
+    ("P1a", "P1b"): 0.96, ("P1a", "P1c"): 0.95, ("P1b", "P1c"): 0.94,
+    ("P1a", "P2"):  0.25, ("P1b", "P2"):  0.24, ("P1c", "P2"):  0.23,
+    ("P1a", "P3"):  0.22, ("P1b", "P3"):  0.21, ("P1c", "P3"):  0.20,
+    ("P2",  "P3"):  0.20,
+}
+
+def get_sim2(a, b):
+    if a == b:
+        return 1.0
+    return sim2_pairs.get((a, b), sim2_pairs.get((b, a), 0.05))
+
+def select_mmr(pool, k=3, lam=0.6, tau_min=0.35):
+    # 1. Apply calibrated cross-encoder relevance floor tau_min
+    valid_ids = [cid for cid, meta in pool.items() if meta["ce"] &gt;= tau_min]
+    selected = []
+    trace = []
+    while len(selected) &lt; k and len(selected) &lt; len(valid_ids):
+        best_id, best_score = None, -float("inf")
+        step_scores = {}
+        for cid in valid_ids:
+            if cid in selected:
+                continue
+            rel = pool[cid]["ce"]
+            max_red = max((get_sim2(cid, s) for s in selected), default=0.0)
+            mmr_score = round(lam * rel - (1.0 - lam) * max_red, 3)
+            step_scores[cid] = mmr_score
+            if mmr_score &gt; best_score:
+                best_id, best_score = cid, mmr_score
+        selected.append(best_id)
+        trace.append((best_id, best_score, step_scores))
+    return selected, trace
+
+# Verify Naive Top-3 vs MMR Top-3 (lambda = 0.6)
+naive_top3 = sorted(
+    [cid for cid, m in candidates.items() if m["ce"] &gt;= 0.35],
+    key=lambda cid: candidates[cid]["ce"],
+    reverse=True,
+)[:3]
+assert naive_top3 == ["P1a", "P1b", "P1c"]  # All 3 slots wasted on flag syntax!
+
+mmr_top3, mmr_trace = select_mmr(candidates, k=3, lam=0.6, tau_min=0.35)
+assert mmr_top3 == ["P1a", "P2", "P3"]
+assert mmr_trace[0][1] == 0.552  # Step 1: P1a (0.6 * 0.92)
+assert mmr_trace[1][2] == {"P1b": 0.156, "P1c": 0.148, "P2": 0.392, "P3": 0.386}
+assert mmr_trace[2][2] == {"P1b": 0.156, "P1c": 0.148, "P3": 0.386}
+
+# Ordering for LLM context assembly (sides-first U-curve placement)
+def order_outer_in(ranked_docs):
+    left, right = [], []
+    for idx, doc_id in enumerate(ranked_docs):
+        if idx % 2 == 0:
+            left.append(doc_id)
+        else:
+            right.append(doc_id)
+    return left + list(reversed(right))
+
+prompt_order = order_outer_in(mmr_top3)
+assert prompt_order == ["P1a", "P3", "P2"]  # Top-1 at start, Top-2 at end adjacent to query
+print("Naive Top-3:", naive_top3)
+print("MMR Top-3 (lambda=0.6):", [(cid, score) for cid, score, _ in mmr_trace])
+print("U-curve prompt order:", prompt_order)</code></pre>
+
+<h2 id="reasoning">Check the operating assumptions</h2>
+<details class="note-check"><summary>Why can a cross-encoder detect that "Do NOT enable --west-v2 when TLS is off" is a warning rather than an enablement instruction, while a bi-encoder ranks it #1?</summary><p>A bi-encoder pools the entire chunk into a single static vector before seeing the query, so high lexical and semantic overlap on "--west-v2", "enable", and "TLS" produces a high cosine score (0.86). A cross-encoder concatenates [CLS] q [SEP] d [SEP] and computes token-to-token self-attention across all layers, binding the negation token "NOT" directly to the query intent.</p></details>
+<details class="note-check"><summary>In the opening puzzle, what is the largest value of lambda in (0, 1) for which MMR still selects the rollback passage P2 (sim_1 = 0.82, sim_2 = 0.25) ahead of the near-duplicate P1b (sim_1 = 0.90, sim_2 = 0.96) in Step 2?</summary><p>By the exact threshold condition Delta_rel &lt; ((1 - lambda) / lambda) * Delta_sim, we need 0.08 &lt; ((1 - lambda) / lambda) * (0.96 - 0.25) = 0.71 * (1 - lambda) / lambda. Solving 0.79 * lambda &lt; 0.71 yields lambda &lt; 0.71 / 0.79 = 0.8987. Thus any lambda up to 0.89 still promotes P2 over the duplicate P1b.</p></details>
+<details class="note-check"><summary>Why must a relevance floor tau_min be applied before running greedy MMR on a top-50 candidate pool?</summary><p>MMR subtracts (1 - lambda) * max_sim(d_i, d_j). Completely irrelevant noise chunks in the tail of a top-50 pool have near-zero similarity (sim_2 approx 0) to the first selected passage, so they suffer zero diversity penalty and can beat moderately similar relevant passages unless filtered out by s_CE(q, d_i) &gt;= tau_min first.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul class="note-sources">
+<li><a href="https://dl.acm.org/doi/10.1145/290941.291025">Carbonell &amp; Goldstein: The Use of MMR, Diversity-Based Reranking for Reordering Documents and Producing Summaries</a>, SIGIR 1998 (original Maximal Marginal Relevance formulation).</li>
+<li><a href="https://arxiv.org/abs/1901.04085">Nogueira &amp; Cho: Passage Re-ranking with BERT</a>, arXiv 2019 (cross-encoder `[CLS] q [SEP] d [SEP]` passage rescoring architecture).</li>
+<li><a href="https://arxiv.org/abs/2307.03172">Liu et al.: Lost in the Middle: How Language Models Use Long Contexts</a>, TACL 2024 (U-shaped primacy and recency utilization curve across retrieved document positions).</li>
+</ul>
+<!-- RETRIEVAL-NAV:START -->
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../query-rewriting-and-hyde/index.html"><span>Previous</span><span>Query transformation and HyDE: bridge the question-to-document representation gap</span></a></nav>
+<!-- RETRIEVAL-NAV:END -->
+</article></div><footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+<script src="../../../../script.js"></script><script src="../../../../blog-posts.js?v=rag-hnsw-20261007"></script><script src="../../../../blog.js?v=rag-hnsw-20261007"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body></html>
