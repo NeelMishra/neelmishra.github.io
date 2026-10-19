@@ -284,10 +284,10 @@ var BLOG_TREE = [
                 name: 'gradient-boosted-machines',
                 label: 'Gradient Boosted Machines',
                 children: [
-                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', links: ['ml/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html'] },
+                  { title: 'Overview', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', links: ['ml/boosting/gradient-boosting/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html'] },
                   { title: 'Regression GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/index.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html'] },
                   { title: 'Binary Classification GBM', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/regression-gbm.html', 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html'] },
-                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/xgboost/index.html'] }
+                  { title: 'Regularization & Evaluation', file: 'from-scratch/cpp/machine-learning/gradient-boosted-machines/regularization-and-evaluation.html', links: ['from-scratch/cpp/machine-learning/gradient-boosted-machines/binary-classification.html', 'ml/boosting/xgboost/index.html'] }
                 ]
               },
               {
@@ -8596,46 +8596,127 @@ var BLOG_TREE = [
             "title": "Boosting: Build a Model One Correction at a Time",
             "file": "ml/boosting/index.html",
             "links": [
-              "ml/boosting/adaboost.html"
+              "ml/boosting/functional-gradient-descent.html"
             ]
           },
           {
-            "title": "AdaBoost: Weights, Votes & the Proof",
-            "file": "ml/boosting/adaboost.html",
+            "title": "Functional Gradient Descent: Why Boosting Fits the Negative Gradient",
+            "file": "ml/boosting/functional-gradient-descent.html",
             "links": [
               "ml/boosting/index.html",
-              "ml/boosting/gradient-boosting.html"
+              "ml/boosting/adaboost/index.html",
+              "ml/boosting/gradient-boosting/index.html"
             ]
           },
           {
-            "title": "Gradient Boosting: Fit the Remaining Error",
-            "file": "ml/boosting/gradient-boosting.html",
-            "links": [
-              "ml/boosting/adaboost.html",
-              "ml/boosting/classification-losses.html"
+            "name": "adaboost",
+            "label": "AdaBoost",
+            "children": [
+              {
+                "title": "AdaBoost: Weights, Votes & the Proof",
+                "file": "ml/boosting/adaboost/index.html",
+                "links": [
+                  "ml/boosting/functional-gradient-descent.html",
+                  "ml/boosting/gradient-boosting/index.html"
+                ]
+              }
             ]
           },
           {
-            "title": "Classification & Losses: From Scores to Probabilities",
-            "file": "ml/boosting/classification-losses.html",
-            "links": [
-              "ml/boosting/gradient-boosting.html",
-              "ml/boosting/regularization.html"
+            "name": "gradient-boosting",
+            "label": "Gradient Boosting · StatQuest",
+            "children": [
+              {
+                "title": "Series overview",
+                "file": "ml/boosting/gradient-boosting/index.html",
+                "links": [
+                  "ml/boosting/gradient-boosting/regression-main-ideas.html"
+                ]
+              },
+              {
+                "title": "1 · Regression: Main Ideas",
+                "file": "ml/boosting/gradient-boosting/regression-main-ideas.html",
+                "links": [
+                  "ml/boosting/gradient-boosting/index.html",
+                  "ml/boosting/gradient-boosting/regression-details.html"
+                ]
+              },
+              {
+                "title": "2 · Regression: The Derivation",
+                "file": "ml/boosting/gradient-boosting/regression-details.html",
+                "links": [
+                  "ml/boosting/gradient-boosting/index.html",
+                  "ml/boosting/gradient-boosting/classification-main-ideas.html"
+                ]
+              },
+              {
+                "title": "3 · Classification: Main Ideas",
+                "file": "ml/boosting/gradient-boosting/classification-main-ideas.html",
+                "links": [
+                  "ml/boosting/gradient-boosting/index.html",
+                  "ml/boosting/gradient-boosting/classification-details.html"
+                ]
+              },
+              {
+                "title": "4 · Classification: The Derivation",
+                "file": "ml/boosting/gradient-boosting/classification-details.html",
+                "links": [
+                  "ml/boosting/gradient-boosting/index.html",
+                  "ml/boosting/xgboost/index.html"
+                ]
+              }
             ]
           },
           {
-            "title": "Regularization, Early Stopping & Model Selection",
-            "file": "ml/boosting/regularization.html",
-            "links": [
-              "ml/boosting/classification-losses.html",
-              "ml/boosting/interview-guide.html"
-            ]
-          },
-          {
-            "title": "Boosting: Interview Derivations, Coding & Case Studies",
-            "file": "ml/boosting/interview-guide.html",
-            "links": [
-              "ml/boosting/regularization.html"
+            "name": "xgboost",
+            "label": "XGBoost · StatQuest",
+            "children": [
+              {
+                "title": "Series overview",
+                "file": "ml/boosting/xgboost/index.html",
+                "links": [
+                  "ml/boosting/xgboost/regression.html"
+                ]
+              },
+              {
+                "title": "1 · Regression: Build the First Tree",
+                "file": "ml/boosting/xgboost/regression.html",
+                "links": [
+                  "ml/boosting/xgboost/index.html",
+                  "ml/boosting/xgboost/classification.html"
+                ]
+              },
+              {
+                "title": "2 · Classification: From Corrections to Probabilities",
+                "file": "ml/boosting/xgboost/classification.html",
+                "links": [
+                  "ml/boosting/xgboost/index.html",
+                  "ml/boosting/xgboost/mathematical-details.html"
+                ]
+              },
+              {
+                "title": "3 · The Mathematics: Where the Formulas Come From",
+                "file": "ml/boosting/xgboost/mathematical-details.html",
+                "links": [
+                  "ml/boosting/xgboost/index.html",
+                  "ml/boosting/xgboost/optimizations.html"
+                ]
+              },
+              {
+                "title": "4 · Optimizations: Search Less, Move Data Faster",
+                "file": "ml/boosting/xgboost/optimizations.html",
+                "links": [
+                  "ml/boosting/xgboost/index.html",
+                  "ml/boosting/xgboost/python-walkthrough.html"
+                ]
+              },
+              {
+                "title": "5 · Python: Train, Tune, and Inspect XGBoost",
+                "file": "ml/boosting/xgboost/python-walkthrough.html",
+                "links": [
+                  "ml/boosting/xgboost/index.html"
+                ]
+              }
             ]
           }
         ],
@@ -8646,120 +8727,7 @@ var BLOG_TREE = [
             "regression"
           ],
           "start": "ml/boosting/index.html",
-          "note": "Build weighted votes, residual corrections, and modern boosted trees."
-        }
-      },
-      {
-        "name": "gradient-boosted-machines",
-        "label": "Gradient Boosting · StatQuest",
-        "children": [
-          {
-            "title": "Series overview",
-            "file": "ml/gradient-boosted-machines/index.html",
-            "links": [
-              "ml/gradient-boosted-machines/regression-main-ideas.html"
-            ]
-          },
-          {
-            "title": "1 · Regression: Main Ideas",
-            "file": "ml/gradient-boosted-machines/regression-main-ideas.html",
-            "links": [
-              "ml/gradient-boosted-machines/index.html",
-              "ml/gradient-boosted-machines/regression-details.html"
-            ]
-          },
-          {
-            "title": "2 · Regression: The Derivation",
-            "file": "ml/gradient-boosted-machines/regression-details.html",
-            "links": [
-              "ml/gradient-boosted-machines/index.html",
-              "ml/gradient-boosted-machines/classification-main-ideas.html"
-            ]
-          },
-          {
-            "title": "3 · Classification: Main Ideas",
-            "file": "ml/gradient-boosted-machines/classification-main-ideas.html",
-            "links": [
-              "ml/gradient-boosted-machines/index.html",
-              "ml/gradient-boosted-machines/classification-details.html"
-            ]
-          },
-          {
-            "title": "4 · Classification: The Derivation",
-            "file": "ml/gradient-boosted-machines/classification-details.html",
-            "links": [
-              "ml/gradient-boosted-machines/index.html"
-            ]
-          }
-        ],
-        "learning": {
-          "title": "Gradient boosting · StatQuest",
-          "requires": [
-            "regression",
-            "boosting"
-          ],
-          "start": "ml/gradient-boosted-machines/index.html",
-          "note": "Follow all four StatQuest lectures: regression and classification, intuition and derivation."
-        }
-      },
-      {
-        "name": "xgboost",
-        "label": "XGBoost · StatQuest",
-        "children": [
-          {
-            "title": "Series overview",
-            "file": "ml/xgboost/index.html",
-            "links": [
-              "ml/xgboost/regression.html"
-            ]
-          },
-          {
-            "title": "1 · Regression: Build the First Tree",
-            "file": "ml/xgboost/regression.html",
-            "links": [
-              "ml/xgboost/index.html",
-              "ml/xgboost/classification.html"
-            ]
-          },
-          {
-            "title": "2 · Classification: From Corrections to Probabilities",
-            "file": "ml/xgboost/classification.html",
-            "links": [
-              "ml/xgboost/index.html",
-              "ml/xgboost/mathematical-details.html"
-            ]
-          },
-          {
-            "title": "3 · The Mathematics: Where the Formulas Come From",
-            "file": "ml/xgboost/mathematical-details.html",
-            "links": [
-              "ml/xgboost/index.html",
-              "ml/xgboost/optimizations.html"
-            ]
-          },
-          {
-            "title": "4 · Optimizations: Search Less, Move Data Faster",
-            "file": "ml/xgboost/optimizations.html",
-            "links": [
-              "ml/xgboost/index.html",
-              "ml/xgboost/python-walkthrough.html"
-            ]
-          },
-          {
-            "title": "5 · Python: Train, Tune, and Inspect XGBoost",
-            "file": "ml/xgboost/python-walkthrough.html",
-            "links": [
-              "ml/xgboost/index.html"
-            ]
-          }
-        ],
-        "learning": {
-          "title": "XGBoost · StatQuest",
-          "requires": [
-            "gradient-boosted-machines"
-          ],
-          "start": "ml/xgboost/index.html",
-          "note": "Four core StatQuest lectures and a runnable Python walkthrough: corrections, scores, curvature, efficient search, and model fitting."
+          "note": "Functional gradient descent, AdaBoost, Gradient Boosting, and XGBoost."
         }
       },
       {
@@ -9051,7 +9019,7 @@ var BLOG_TREE = [
           {"title": "From Neighborhood Evidence to a Risk Score", "file": "ml/graph-ml/neighborhood-evidence-and-propagation.html", "links": ["ml/graph-ml/build-an-application-graph.html", "ml/graph-ml/evaluate-graph-risk.html"]},
           {"title": "Evaluate Graph Risk at a Fixed Precision and a Realistic Time Cutoff", "file": "ml/graph-ml/evaluate-graph-risk.html", "links": ["ml/graph-ml/neighborhood-evidence-and-propagation.html"]}
         ],
-        "learning": {"title": "Graph ML", "requires": ["gradient-boosted-machines"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
+        "learning": {"title": "Graph ML", "requires": ["boosting"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
         "name": "recommended-papers",
