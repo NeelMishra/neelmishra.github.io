@@ -11366,7 +11366,8 @@ var BLOG_TREE = [
         name: 'dense-retrieval-and-ann-indexing',
         label: 'Dense Retrieval & ANN Indexing',
         children: [
-          { title: '1. Two-Tower Bi-Encoders, InfoNCE Loss &amp; Hard Negative Mining', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html'] }
+          { title: '1. Two-Tower Bi-Encoders, InfoNCE Loss &amp; Hard Negative Mining', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html'] },
+          { title: '2. Approximate Nearest Neighbors: IVF, Product Quantization (PQ) &amp; HNSW Graphs', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html', links: ['search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/hybrid-retrieval-and-late-interaction-colbert.html'] }
         ]
       },
       {
