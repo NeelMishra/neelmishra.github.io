@@ -33,14 +33,34 @@
 <p>The authors' <code>add_batch</code> transposes linear inputs before accumulating <code>inp @ inp.T</code>. It also normalizes its accumulation by the number of calibration examples seen. Below we use the unnormalized sum $H=2A^{\mathsf T}A$ so the numerical costs are easy to check.</p>
 
 <h2 id="why-hessian">The quadratic is exact here</h2>
-<p>Let $v$ be the current length-$d$ weight vector and keep $y=Aw$ as the original target. The output residual is $r=Av-y$, a length-$n$ vector. The reconstruction cost is $C(v)=r^{\mathsf T}r$, the sum of squared residuals.</p>
-<p>Let $F$ be the set of unfixed input columns. $A_F$ contains just those columns, and $\delta_F$ is a length-$|F|$ vector of changes to their weights. $H_F$ is the Hessian restricted to these free coordinates. Expanding the square gives:</p>
+<p>Because GPTQ quantizes weights one column at a time, partway through the loop some columns are already rounded and frozen while the remaining columns are still free to move:</p>
+<ul>
+<li><strong>Current weight vector $v \in \mathbb{R}^d$:</strong> holds the already-rounded grid values on frozen coordinates and the latest compensated values on free coordinates (at the very beginning, $v = w$).</li>
+<li><strong>Current output residual $r = Av - y \in \mathbb{R}^n$:</strong> measures how far the current partially quantized output $Av$ has drifted from the original full-precision target $y = Aw$ across all $n$ calibration tokens.</li>
+<li><strong>Reconstruction cost $C(v) = \lVert Av - y\rVert_2^2 = r^{\mathsf T}r$:</strong> the current sum of squared output errors.</li>
+</ul>
+<p>Now let $F \subseteq \{1, \dots, d\}$ be the index set of <strong>unfixed (free) input columns</strong> that have not been quantized yet. When we apply a further weight update $\delta \in \mathbb{R}^d$, already-quantized coordinates outside $F$ cannot move ($\delta_i = 0$ for $i \notin F$), so the output change $A\delta$ depends only on the $|F|$ free columns:</p>
+<div class="note-equation">$$A\delta = A_F \delta_F, \qquad A_F \in \mathbb{R}^{n \times |F|}, \quad \delta_F \in \mathbb{R}^{|F|},$$</div>
+<p>where $A_F$ slices just the free columns of $A$ and $\delta_F$ stacks the changes to those free weights. Substituting $A(v+\delta) - y = (Av - y) + A\delta = r + A_F\delta_F$ into $C(v+\delta)$ and expanding the square step by step gives:</p>
+<div class="note-equation">$$\begin{aligned}
+C(v+\delta) &= \lVert r + A_F\delta_F \rVert_2^2 = (r + A_F\delta_F)^{\mathsf T}(r + A_F\delta_F) \\
+&= \underbrace{r^{\mathsf T}r}_{C(v)} + r^{\mathsf T}A_F\delta_F + \delta_F^{\mathsf T}A_F^{\mathsf T}r + \delta_F^{\mathsf T}(A_F^{\mathsf T}A_F)\delta_F \\
+&= C(v) + 2r^{\mathsf T}A_F\delta_F + \delta_F^{\mathsf T}(A_F^{\mathsf T}A_F)\delta_F,
+\end{aligned}$$</div>
+<p>since $r^{\mathsf T}A_F\delta_F$ is a scalar and equals its own transpose $\delta_F^{\mathsf T}A_F^{\mathsf T}r$. Defining the restricted $|F|\times|F|$ Hessian on the free coordinates as $H_F = 2A_F^{\mathsf T}A_F$ (so $A_F^{\mathsf T}A_F = \tfrac12 H_F$) and subtracting $C(v)$ yields:</p>
 <div class="note-equation">$$C(v+\delta)-C(v)
  =2r^{\mathsf T}A_F\delta_F+\frac12\delta_F^{\mathsf T}H_F\delta_F,
- \qquad H_F=2A_F^{\mathsf T}A_F.$$</div>
-<p>Here $\delta$ is zero outside $F$. The active Hessian $H_F$ has shape $|F|\times|F|$, not always $d\times d$. No Taylor remainder is being dropped: a linear layer with fixed inputs and squared error is exactly quadratic in its weights.</p>
-<p>Initially $v=w$, so $r=0$. After earlier weights are fixed, optimal compensation makes the remaining coordinates a least-squares optimum. That gives $A_F^{\mathsf T}r=0$, even though $r$ itself need not be zero.</p>
-<p>At such a point the linear term vanishes. The extra cost of the next constraint is therefore $\tfrac12\delta_F^{\mathsf T}H_F\delta_F$. It is an <em>increment</em> on top of error from earlier steps, not the layer's total error. This statement assumes the remaining coordinates have been optimized; it is not valid for an arbitrary partially rounded vector.</p>
+ \qquad H_F=2A_F^{\mathsf T}A_F \in \mathbb{R}^{|F|\times|F|}.$$</div>
+<p>Notice that no higher-order Taylor remainder was dropped: because $Av$ is linear in $v$, the squared error $C(v+\delta)$ is an <strong>exact quadratic</strong> in $\delta_F$.</p>
+<p>Even better, the linear term $2r^{\mathsf T}A_F\delta_F$ vanishes at the start of every step:</p>
+<ul>
+<li><strong>On the first step ($v = w$):</strong> no weight has been rounded yet, so $r = Aw - y = 0$ and $2r^{\mathsf T}A_F\delta_F = 0$.</li>
+<li><strong>On every subsequent step:</strong> even though $r \ne 0$, the previous step chose the free weights $v_F$ to minimize $C(v) = \lVert Av - y\rVert_2^2$ over all remaining free coordinates $F$. By the least-squares normal equations, the gradient with respect to the free coordinates is zero at that optimum:
+$$\frac{\partial C(v)}{\partial v_F} = 2A_F^{\mathsf T}r = 0 \quad \Longrightarrow \quad r^{\mathsf T}A_F = 0^{\mathsf T}.$$
+Geometrically, the residual $r$ from earlier roundings is already orthogonal to the column space of the remaining free features $A_F$.</li>
+</ul>
+<p>With $2r^{\mathsf T}A_F\delta_F = 0$, the <em>incremental</em> squared error added by rounding the next column in $F$ and compensating the rest of $F$ simplifies to a pure quadratic form:</p>
+<div class="note-equation">$$\Delta C(\delta_F) = C(v+\delta) - C(v) = \frac12\delta_F^{\mathsf T}H_F\delta_F.$$</div>
 
 <h2 id="obs">Derive the quantization constraint</h2>
 <p>Choose an unfixed column index $q\in F$. Let $t=\operatorname{quant}(v_q)$ be its target grid value and $a=v_q-t$ its current rounding discrepancy. The coordinate must change by $-a$.</p>
