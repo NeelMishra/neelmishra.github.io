@@ -11374,7 +11374,9 @@ var BLOG_TREE = [
       {
         name: 'learning-to-rank-and-reranking',
         label: 'Learning to Rank & Multi-Stage Cascade',
-        children: []
+        children: [
+          { title: '1. The Multi-Stage Ranking Cascade: Candidate Generation, L1/L2 Ranking &amp; Re-Ranking', file: 'search-ranking-and-retrieval/learning-to-rank-and-reranking/multi-stage-retrieval-and-ranking-cascade.html', links: ['search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/hybrid-retrieval-and-late-interaction-colbert.html', 'search-ranking-and-retrieval/learning-to-rank-and-reranking/pointwise-pairwise-listwise-ranknet-lambdamart.html'] }
+        ]
       },
       {
         name: 'recommender-systems-and-collaborative-filtering',
