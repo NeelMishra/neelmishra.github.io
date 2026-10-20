@@ -10920,28 +10920,8 @@ var BLOG_TREE = [
             "label": "HNSW",
             "children": [
               {
-                "title": "HNSW: take a detour to find the nearest neighbor",
+                "title": "HNSW paper walkthrough: trace a 17-node search and build step by step",
                 "file": "rag/ann-methods/hnsw/index.html"
-              },
-              {
-                "title": "HNSW graphs: why the hierarchy changes the route",
-                "file": "rag/ann-methods/hnsw/graph-and-hierarchy.html"
-              },
-              {
-                "title": "HNSW search: trace both heaps before changing ef",
-                "file": "rag/ann-methods/hnsw/search-layer.html"
-              },
-              {
-                "title": "Build HNSW: choose routes, not just nearby neighbors",
-                "file": "rag/ann-methods/hnsw/construction-and-diversity.html"
-              },
-              {
-                "title": "Tune HNSW: recall, latency, and memory under one workload",
-                "file": "rag/ann-methods/hnsw/tuning-and-benchmarks.html"
-              },
-              {
-                "title": "HNSW in RAG: filters, updates, and evidence quality",
-                "file": "rag/ann-methods/hnsw/filtered-retrieval-and-rag.html"
               }
             ]
           },
