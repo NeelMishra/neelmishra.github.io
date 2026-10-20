@@ -17,54 +17,41 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../../../blog.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 1</span></div>
-<h1>GPTQ: the layer objective and compensation loop</h1><p class="post-meta">October 2026 &middot; 5 min read</p>
-<p>A trained layer contains floating-point weights. Quantization replaces them with values from a much smaller grid. Simple rounding does this independently for every weight. GPTQ adds a second step: after rounding, change the weights still free to move so that the layer's output changes less.</p>
+<h1>GPTQ: the layer objective and compensation loop</h1><p class="post-meta">October 2026 &middot; 3 min read</p>
 
-<h2 id="memory">Why shrink the weights?</h2>
-<p>Low-bit weights take less space to store and transfer. A 4-bit weight needs one quarter of the raw storage of a 16-bit weight, before accounting for scales, zero points, and packing overhead.</p>
-<p>That can help inference when moving weights from memory is the bottleneck. It does not promise a particular speedup. The serving kernel must use the compressed format effectively; unpacking and other work can offset the savings. A compute-bound workload may benefit differently from a memory-bound one.</p>
-<p>GPTQ is the offline procedure that builds the low-bit weights. Its own runtime and the finished model's inference runtime are separate measurements.</p>
+<h2 id="scale">Quantization grid vs. layer compensation</h2>
+<p>A $b$-bit quantizer with scale $s$ and zero-point $z$ maps a floating-point weight $w_q$ onto a discrete grid:</p>
+<div class="note-equation">$$t = Q(w_q) = s \cdot \Bigl(\operatorname{clip}\bigl(\lfloor w_q / s \rceil + z,\, 0,\, 2^b - 1\bigr) - z\Bigr).$$</div>
+<p>Round-to-nearest applies $Q(\cdot)$ independently to every weight (using per-row or per-<code>groupsize</code> parameters $s, z$). GPTQ uses the same grid, but after rounding $w_q \to t$, it adjusts the remaining unquantized weights so the layer output changes as little as possible. Note that <code>groupsize</code> (columns sharing $s, z$) is independent of <code>blocksize</code> (columns batched together for solver updates).</p>
 
-<h2 id="scale">The grid decides where a weight can land</h2>
-<p>A quantizer maps a real number to a legal grid point. A scale determines the spacing; a zero point can shift the grid. More bits allow more points. A narrow range gives finer spacing but may clip values outside that range.</p>
-<p>One grid for a whole tensor can be too coarse if different output channels have different ranges. Per-output-channel grids fit each weight row separately. Group-wise quantization can use a separate grid for a smaller group of input columns within each row.</p>
-<p>These choices reduce rounding error before any compensation. They are not GPTQ by themselves: round-to-nearest can use exactly the same grids.</p>
-<p>Also distinguish <code>groupsize</code> from <code>blocksize</code>. Groups share scale and zero-point parameters. Update blocks collect correction writes to make the solver more efficient. Both may be 128 columns, but changing one does not automatically change the other.</p>
+<h2 id="compensate">The layer output objective</h2>
+<p>For one output channel $w \in \mathbb{R}^d$ and calibration activations $A \in \mathbb{R}^{n \times d}$, the original output across $n$ tokens is $y = Aw$. Rounding coordinate $q$ to $t = Q(w_q)$ without touching other weights shifts the output by:</p>
+<div class="note-equation">$$\Delta y = (t - w_q) A_{:,q}.$$</div>
+<p>Let $\delta \in \mathbb{R}^d$ be the full weight update on the remaining free coordinates, holding $\delta_q = t - w_q$ fixed and keeping already-quantized coordinates at zero change. GPTQ chooses $\delta$ to minimize the squared output reconstruction error over the calibration set:</p>
+<div class="note-equation">$$\min_{\delta:\,\delta_q = t - w_q}\;\lVert A\delta\rVert_2^2 = \sum_{s=1}^{n}\bigl((A\delta)_s\bigr)^2.$$</div>
+<p>When input columns in $A$ are correlated, adjusting the remaining free weights partially cancels $(t - w_q) A_{:,q}$. The closed-form constrained least-squares update is derived in <a href="hessian-and-the-update.html#obs">Part 2</a>.</p>
 
-<h2 id="compensate">One rounded weight changes every sample's output</h2>
-<p>Consider one output channel. Its weights form a column vector $w$ of length $d$. The calibration table $A$ has $n$ rows of samples and $d$ input columns, so the original output vector is $y=Aw$, of length $n$.</p>
-<p>If weight $w_q$ is rounded to $t$, its change is $t-w_q$. Column $A_{:,q}$ contains the value of that input feature in every sample. With all other weights unchanged, the new output minus the original output is:</p>
-<div class="note-equation">$$\Delta y=(t-w_q)A_{:,q}.$$</div>
-<p>This is a vector of $n$ output errors, not just one weight error. A small weight change can matter a lot if that input feature has large values.</p>
-<p>Now let $\delta$ be the full vector of weight changes, including the rounded coordinate and any compensation. We keep $\delta_q=t-w_q$ and choose the other entries to reduce:</p>
-<div class="note-equation">$$\lVert A\delta\rVert_2^2
- =\sum_{s=1}^{n}\bigl((A\delta)_s\bigr)^2.$$</div>
-<p>The expression is the sum of squared output changes over the calibration samples. If two input columns are related, changing one weight can partly cancel the output error caused by changing the other. The best compensation is a constrained least-squares solution, derived in <a href="hessian-and-the-update.html#obs">Part 2</a>.</p>
-<p>Already rounded weights stay fixed. As the process continues, fewer weights remain available to compensate. The final column has no later column to help it.</p>
+<h2 id="lineage">OBQ vs. GPTQ: why fixed column order matters</h2>
+<p>Optimal Brain Quantization (OBQ) greedily selects whichever remaining weight in a row incurs the smallest compensated error, so each output row quantizes columns in a different order and requires its own inverse-Hessian updates. GPTQ quantizes all output rows in the <strong>same fixed column order</strong>: because every output row receives the same calibration input matrix $A$, all rows share one Hessian $H = 2A^{\mathsf T}A$ and one Cholesky factorization (<a href="fixed-order-cholesky.html#order">Part 3</a>).</p>
 
-<h2 id="lineage">The update and the order are different choices</h2>
-<p>Optimal Brain Quantization (OBQ), described in Optimal Brain Compression, uses this compensation idea. Within each output row, it estimates the extra compensated error of rounding each remaining weight and chooses the smallest. Different rows can therefore choose different columns next.</p>
-<p>GPTQ keeps the compensation but drops that repeated greedy search. It chooses an order once and rounds the same input column across every output row at each step. Because those rows saw the same inputs, they share the matrix needed for the correction.</p>
-<p>The constrained-update algebra also appears in Optimal Brain Surgeon, where the target value is zero for pruning. That connection is useful, but GPTQ's objective here is linear-layer reconstruction, not a Taylor approximation to the whole model's training loss.</p>
-
-<h2 id="loop">The GPTQ loop, step by step</h2>
+<h2 id="loop">The GPTQ loop</h2>
 <ol>
-<li><strong>Collect calibration inputs.</strong> Run representative data through the model and retain the inputs to the layer. They tell the solver which output changes matter.</li>
-<li><strong>Prepare the correction matrix and grids.</strong> Compute input correlations, add damping for numerical stability, and prepare the triangular factor used for updates.</li>
-<li><strong>Round the next column.</strong> Use the current, already-compensated weight values. Each output row rounds its entry in this same input column to its grid.</li>
-<li><strong>Compensate later columns.</strong> Adjust the unfixed weights using the input correlations. Keep every rounded column on its chosen grid point.</li>
-<li><strong>Continue in the chosen order.</strong> Inside an update block, corrections are applied immediately to columns that will be rounded next. Corrections to columns beyond the block can wait until its end.</li>
+<li><strong>Collect calibration inputs $A \in \mathbb{R}^{n \times d}$</strong> from a forward pass on representative tokens.</li>
+<li><strong>Factor the shared Hessian</strong> $H = 2A^{\mathsf T}A + \lambda I$ once for the layer.</li>
+<li><strong>Round column $q$:</strong> set $\widehat w_q = Q(w_q)$ across all output rows using the current compensated weights.</li>
+<li><strong>Compensate remaining columns:</strong> update unquantized columns $j &gt; q$ inside the current block to minimize $\lVert A\delta \rVert_2^2$.</li>
+<li><strong>Advance across blocks:</strong> apply deferred outer updates at each block boundary until all $d$ columns are quantized.</li>
 </ol>
-<p>There is no GPTQ step that selects the “easiest row.” The greedy candidate scores belong to OBQ. GPTQ's fixed order is what makes one shared precomputation possible; <a href="fixed-order-cholesky.html#order">Part 3</a> explains the savings.</p>
-<p>For a concrete check, <a href="hessian-and-the-update.html#example">Part 2</a> rounds $-0.85$ to $-1$ in a three-weight layer. Moving the other two weights lowers output squared error from $0.05265$ to about $0.003090$. It demonstrates one update; it does not yet quantize the whole layer.</p>
-<details class="note-check"><summary>Does calibration retrain the model?</summary><p>No. GPTQ uses calibration activations to reconstruct layer outputs. It does not run the original pretraining objective or update weights by backpropagation through the whole model.</p></details>
-<details class="note-check"><summary>What if calibration data is unrepresentative?</summary><p>The correction can fit the observed inputs well and still be poor on different inputs. Evaluate the finished quantized model on the workloads you actually need.</p></details>
+<p>In <a href="hessian-and-the-update.html#example">Part 2&rsquo;s 3-weight check</a>, rounding $w_1 = -0.85 \to -1$ alone gives $\lVert A\delta \rVert_2^2 = 0.05265$; compensating the other two weights drops the error to $0.003090$.</p>
+
+<details class="note-check"><summary>Does calibration retrain the model?</summary><p>No. GPTQ solves a local layer-output least-squares problem without backpropagation or gradient descent on the training loss.</p></details>
+
 <h2 id="sources">Sources</h2>
 <ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, the layer reconstruction objective and shared fixed-order algorithm.</li>
-<li><a href="https://arxiv.org/abs/2208.11580">Frantar, Singh, and Alistarh, Optimal Brain Compression</a>, greedy OBQ and compensated quantization.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>add_batch</code> and <code>fasterquant</code>.</li>
-<li>Hassibi, Stork, and Wolff, <a href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html">Optimal Brain Surgeon and general network pruning</a>, the zero-target special case.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a> &mdash; layer reconstruction objective and fixed-order blocked algorithm.</li>
+<li><a href="https://arxiv.org/abs/2208.11580">Frantar, Singh, and Alistarh, Optimal Brain Compression</a> &mdash; greedy OBQ and compensated quantization.</li>
+<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors&rsquo; <code>gptq.py</code></a> &mdash; <code>add_batch</code> and <code>fasterquant</code>.</li>
+<li>Hassibi, Stork, and Wolff, <a href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html">Optimal Brain Surgeon</a> &mdash; the $t = 0$ pruning special case.</li>
 </ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="index.html"><span>Previous</span><span>GPTQ: quantize the layer, then compensate</span></a><a class="next" href="hessian-and-the-update.html"><span>Next</span><span>GPTQ: derive and check the Hessian update</span></a></nav>
 </article></div>
