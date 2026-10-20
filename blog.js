@@ -11365,7 +11365,9 @@ var BLOG_TREE = [
       {
         name: 'dense-retrieval-and-ann-indexing',
         label: 'Dense Retrieval & ANN Indexing',
-        children: []
+        children: [
+          { title: '1. Two-Tower Bi-Encoders, InfoNCE Loss &amp; Hard Negative Mining', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html'] }
+        ]
       },
       {
         name: 'learning-to-rank-and-reranking',
