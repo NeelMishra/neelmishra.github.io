@@ -11384,7 +11384,8 @@ var BLOG_TREE = [
         name: 'recommender-systems-and-collaborative-filtering',
         label: 'Collaborative Filtering & Recommenders',
         children: [
-          { title: '1. Matrix Factorization, Implicit Feedback (iALS) &amp; Bayesian Personalized Ranking (BPR)', file: 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/matrix-factorization-bpr-and-ials.html', links: ['search-ranking-and-retrieval/learning-to-rank-and-reranking/unbiased-learning-to-rank-and-position-debiasing.html', 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/graph-collaborative-filtering-lightgcn-pinsage.html'] }
+          { title: '1. Matrix Factorization, Implicit Feedback (iALS) &amp; Bayesian Personalized Ranking (BPR)', file: 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/matrix-factorization-bpr-and-ials.html', links: ['search-ranking-and-retrieval/learning-to-rank-and-reranking/unbiased-learning-to-rank-and-position-debiasing.html', 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/graph-collaborative-filtering-lightgcn-pinsage.html'] },
+          { title: '2. Graph-Based Collaborative Filtering: LightGCN &amp; PinSage', file: 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/graph-collaborative-filtering-lightgcn-pinsage.html', links: ['search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/matrix-factorization-bpr-and-ials.html', 'search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/deep-ctr-and-sequential-recommenders-din-sasrec.html'] }
         ]
       },
       {
