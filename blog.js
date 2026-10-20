@@ -11358,7 +11358,8 @@ var BLOG_TREE = [
         label: 'Foundations & Lexical Retrieval',
         children: [
           { title: '1. Inverted Indexes, Postings Lists &amp; WAND / Block-Max WAND Pruning', file: 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/inverted-index-and-boolean-retrieval.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/tf-idf-and-bm25-derivation.html'] },
-          { title: '2. From TF-IDF to BM25: Term Saturation (k1) and Document Length Normalization (b)', file: 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/tf-idf-and-bm25-derivation.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/inverted-index-and-boolean-retrieval.html', 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html'] }
+          { title: '2. From TF-IDF to BM25: Term Saturation (k1) and Document Length Normalization (b)', file: 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/tf-idf-and-bm25-derivation.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/inverted-index-and-boolean-retrieval.html', 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html'] },
+          { title: '3. Query Understanding, Synonym Expansion &amp; Learned Sparse Retrieval (SPLADE)', file: 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/tf-idf-and-bm25-derivation.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html'] }
         ]
       },
       {
