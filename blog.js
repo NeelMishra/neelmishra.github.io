@@ -9927,23 +9927,90 @@ var BLOG_TREE = [
     label: 'Speculative Decoding',
     children: [
       {
-        name: 'blogs',
-        label: 'Blogs',
+        name: 'foundations-and-draft-target',
+        label: 'Foundations & Draft-Target Verification',
         children: [
           {
-            name: 'difficulty-level-1-basics',
-            label: 'Difficulty Level 1 · Basics',
-            children: [
-              {
-                title: 'An Introduction to Speculative Decoding for Reducing Latency in AI Inference',
-                file: 'speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html',
-                links: ['speculative-decoding/blogs/difficulty-level-1-basics/assisted-generation-low-latency-text-generation.html', 'dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
-              },
-              {
-                title: 'Assisted Generation: A New Direction Toward Low-Latency Text Generation',
-                file: 'speculative-decoding/blogs/difficulty-level-1-basics/assisted-generation-low-latency-text-generation.html',
-                links: ['speculative-decoding/blogs/difficulty-level-1-basics/an-introduction-to-speculative-decoding.html', 'dl/architectures/transformers/variants/speculative-decoding.html', 'mlops/llm-inference/speculative-decoding.html']
-              }
+            title: 'An Introduction to Speculative Decoding for Reducing Latency in AI Inference',
+            file: 'speculative-decoding/foundations-and-draft-target/introduction-to-speculative-decoding.html',
+            links: [
+              'speculative-decoding/foundations-and-draft-target/assisted-generation-and-parallel-verification.html',
+              'speculative-decoding/foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html',
+              'dl/architectures/transformers/variants/speculative-decoding.html',
+              'mlops/llm-inference/speculative-decoding.html'
+            ]
+          },
+          {
+            title: 'Assisted Generation and Parallel Target Verification: Exact Matrix & KV-Cache Mechanics',
+            file: 'speculative-decoding/foundations-and-draft-target/assisted-generation-and-parallel-verification.html',
+            links: [
+              'speculative-decoding/foundations-and-draft-target/introduction-to-speculative-decoding.html',
+              'speculative-decoding/foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html',
+              'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html'
+            ]
+          },
+          {
+            title: 'Lossless Rejection Sampling, Total Variation Distance, and Exact Speedup Mathematics',
+            file: 'speculative-decoding/foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html',
+            links: [
+              'speculative-decoding/foundations-and-draft-target/assisted-generation-and-parallel-verification.html',
+              'speculative-decoding/single-model-and-feature-drafting/medusa-and-deepseek-multi-token-prediction.html',
+              'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html'
+            ]
+          }
+        ]
+      },
+      {
+        name: 'single-model-and-feature-drafting',
+        label: 'Single-Model & Feature-Level Drafting',
+        children: [
+          {
+            title: 'Medusa Parallel Decoding Heads and DeepSeek Multi-Token Prediction (MTP)',
+            file: 'speculative-decoding/single-model-and-feature-drafting/medusa-and-deepseek-multi-token-prediction.html',
+            links: [
+              'speculative-decoding/foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html',
+              'speculative-decoding/single-model-and-feature-drafting/eagle-feature-extrapolation-and-dynamic-trees.html',
+              'mlops/sota-frontiers/inference-innovations.html'
+            ]
+          },
+          {
+            title: 'EAGLE-1, EAGLE-2, and EAGLE-3: Feature-Level Autoregression and Dynamic Draft Trees',
+            file: 'speculative-decoding/single-model-and-feature-drafting/eagle-feature-extrapolation-and-dynamic-trees.html',
+            links: [
+              'speculative-decoding/single-model-and-feature-drafting/medusa-and-deepseek-multi-token-prediction.html',
+              'speculative-decoding/single-model-and-feature-drafting/lookahead-jacobi-and-ngram-prompt-lookup.html',
+              'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html'
+            ]
+          },
+          {
+            title: 'Lookahead Decoding, Jacobi Fixed-Point Iteration, and N-Gram Prompt Lookup',
+            file: 'speculative-decoding/single-model-and-feature-drafting/lookahead-jacobi-and-ngram-prompt-lookup.html',
+            links: [
+              'speculative-decoding/single-model-and-feature-drafting/eagle-feature-extrapolation-and-dynamic-trees.html',
+              'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html'
+            ]
+          }
+        ]
+      },
+      {
+        name: 'tree-attention-and-production-serving',
+        label: 'Tree Attention & Production Serving',
+        children: [
+          {
+            title: 'Tree Attention Masks, RoPE Depth Offsets, and Multi-Path Verification',
+            file: 'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html',
+            links: [
+              'speculative-decoding/single-model-and-feature-drafting/eagle-feature-extrapolation-and-dynamic-trees.html',
+              'speculative-decoding/tree-attention-and-production-serving/kv-cache-rollback-continuous-batching-and-serving.html'
+            ]
+          },
+          {
+            title: 'KV-Cache Rollback, Continuous Batching, and Production Serving',
+            file: 'speculative-decoding/tree-attention-and-production-serving/kv-cache-rollback-continuous-batching-and-serving.html',
+            links: [
+              'speculative-decoding/tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html',
+              'speculative-decoding/foundations-and-draft-target/introduction-to-speculative-decoding.html',
+              'mlops/llm-inference/speculative-decoding.html'
             ]
           }
         ]

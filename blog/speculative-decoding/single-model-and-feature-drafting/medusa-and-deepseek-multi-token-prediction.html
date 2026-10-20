@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Deep dive into single-model multi-head speculative decoding: Medusa parallel residual MLP heads, Medusa-2 self-distillation and typical acceptance, and DeepSeek-V3/R1 chained causal Multi-Token Prediction (MTP) modules.">
+  <title>1. Multi-Head &amp; Multi-Token Prediction: Medusa, Medusa-2 Self-Distillation &amp; DeepSeek-V3/R1 MTP | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/speculative-decoding/single-model-and-feature-drafting/medusa-and-deepseek-multi-token-prediction.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../speculative-decoding.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout" data-mobile-sidebar>
+    <aside class="blog-sidebar">
+      <nav class="blog-nav" aria-label="Blog explorer"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal spec-article">
+      <a class="back-to-blog" href="../../../blog.html#speculative-decoding">&#8592; Speculative Decoding</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html#speculative-decoding">Speculative Decoding</a>
+        <span>&middot;</span>
+        <a href="../../../blog.html#folder-speculative-decoding--single-model-and-feature-drafting">Single-Model, Multi-Head &amp; Feature Drafting</a>
+        <span>&middot;</span>
+        <span>Chapter 1</span>
+      </div>
+
+      <h1>1. Multi-Head &amp; Multi-Token Prediction: Medusa, Medusa-2 Self-Distillation &amp; DeepSeek-V3/R1 MTP</h1>
+      <p class="post-meta">Single-Model, Multi-Head &amp; Feature Drafting &middot; 14 min read &middot; Architectural Deep Dive</p>
+
+      <p>
+        Classic draft&ndash;target speculative decoding (<a href="../foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html">Module 1</a>) requires hosting, memory-managing, and serving two distinct language models that share an identical tokenizer. In distributed Tensor-Parallel (TP) or Expert-Parallel (EP) deployments (such as DeepSeek-V3/R1 with 671B parameters across 64 GPUs), a small standalone draft model often becomes an engineering bottleneck: either it is under-sharded (wasting GPU cores) or over-sharded (dominated by AllReduce communication latency), and maintaining two separate paged KV caches fragments high-bandwidth memory.
+      </p>
+      <p>
+        <strong>Single-model multi-head architectures</strong> eliminate the external draft model altogether by attaching lightweight auxiliary prediction heads directly onto the target model's hidden states. In this chapter we dissect the evolution from <strong>Medusa</strong> (<a href="https://arxiv.org/abs/2401.10774" target="_blank" rel="noopener">Cai et al., ICML 2024</a>) to <strong>DeepSeek-V3 / R1 Multi-Token Prediction (MTP)</strong> (<a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">DeepSeek-AI, 2024</a>), proving why parallel independent heads suffer from joint-token incompatibility and how DeepSeek's chained causal MTP modules solve it.
+      </p>
+
+      <figure class="spec-figure">
+        <img src="assets/medusa-and-deepseek-multi-token-prediction.svg" width="760" height="300" alt="Three-panel diagram comparing Medusa Parallel MLP Heads, Medusa-2 Self-Distillation & Typical Acceptance, and DeepSeek Chained MTP Modules.">
+        <figcaption><strong>Architectural Comparison.</strong> Left: Medusa attaches $K$ parallel SiLU residual heads to $h_t$, predicting $x_{t+k+1}$ marginally without conditioning on intermediate choices. Center: Medusa-2 trains heads via KL self-distillation and verifies pruned Cartesian trees. Right: DeepSeek MTP chains sequential 1-layer Transformer blocks conditioned on both $h_t^{(k-1)}$ and $\operatorname{Emb}(x_{t+k})$.</figcaption>
+      </figure>
+
+      <h2 id="medusa-architecture">1. Medusa: Parallel Residual MLP Heads on Top of $h_t$</h2>
+      <p>
+        Let $h_t \in \mathbb{R}^d$ denote the final-layer hidden state of the target Transformer at token position $t$. Standard autoregressive decoding computes next-token logits $z_t^{(0)} = W_{\text{LM}} h_t \in \mathbb{R}^{|V|}$ to predict token $x_{t+1}$.
+      </p>
+      <p>
+        <strong>Medusa</strong> augments the model with $K$ lightweight feed-forward heads (typically $K = 4$ or $5$), where the $k$-th Medusa head predicts the token at offset $t + k + 1$ directly from the <em>same</em> hidden state $h_t$ via a single residual SiLU block followed by a dedicated unembedding projection $W_{2}^{(k)} \in \mathbb{R}^{|V| \times d}$:
+      </p>
+      <div class="spec-math">
+        $$z_t^{(k)} = W_{2}^{(k)} \Big(h_t + \operatorname{SiLU}\!\big(W_{1}^{(k)} h_t + b_{1}^{(k)}\big)\Big), \qquad p_t^{(k)}(v) = \operatorname{softmax}\!\big(z_t^{(k)}\big)_v \quad (k = 1, \dots, K).$$
+      </div>
+      <p>
+        Here $W_{1}^{(k)} \in \mathbb{R}^{d \times d}$ is initialized to zero so that at initialization, $h_t + \operatorname{SiLU}(W_{1}^{(k)} h_t) = h_t$, and $W_{2}^{(k)}$ is initialized as a copy of the base model's LM head $W_{\text{LM}}$.
+      </p>
+
+      <h3 id="marginal-vs-joint-bottleneck">The Marginal vs. Joint Distribution Bottleneck ("Cartesian Mismatch")</h3>
+      <p>
+        Because all $K$ Medusa heads read only $h_t$ (which encodes context $x_{\le t}$) and never see which token $x_{t+1}$ was actually sampled from the base LM head, Head $k$ learns the <strong>marginal distribution</strong> over $k$-step paths rather than the conditional distribution given $x_{t+1}, \dots, x_{t+k}$:
+      </p>
+      <div class="spec-math">
+        $$p_t^{(k)}(x_{t+k+1}) \approx \sum_{x_{t+1}, \dots, x_{t+k}} p_{\text{target}}\!\big(x_{t+1}, \dots, x_{t+k}, x_{t+k+1} \mid x_{\le t}\big) \;\ne\; p_{\text{target}}\!\big(x_{t+k+1} \mid x_{\le t}, x_{t+1:t+k}\big).$$
+      </div>
+      <p>
+        <strong>Concrete Failure Mode:</strong> Suppose after the prefix <code>"I live in New"</code>, the target model places $50\%$ probability on the two-word phrase <code>"York City"</code> and $50\%$ probability on <code>"Jersey Shore"</code>:
+      </p>
+      <ul>
+        <li>The base LM head ($t+1$) assigns $p^{(0)}(\texttt{"York"}) = 0.50$ and $p^{(0)}(\texttt{"Jersey"}) = 0.50$.</li>
+        <li>Medusa Head 1 ($t+2$), knowing only <code>"I live in New"</code>, assigns $p^{(1)}(\texttt{"City"}) = 0.50$ and $p^{(1)}(\texttt{"Shore"}) = 0.50$.</li>
+        <li>If we take only a single greedy draft sequence $(x_{t+1}, x_{t+2})$, an arbitrary tie-break can easily pair <code>"York"</code> with <code>"Shore"</code> ($\to$ <code>"New York Shore"</code>, which has $0\%$ target probability!) or <code>"Jersey"</code> with <code>"City"</code>.</li>
+      </ul>
+      <p>
+        To overcome this marginal independence, Medusa extracts the <strong>top-$s_k$ candidates</strong> from each head $k$ and forms their <strong>Cartesian product tree</strong> (pruned to the $M \approx 64$ highest-scoring calibration paths), verifying all $M$ branches simultaneously in one target pass via tree attention (<a href="../tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html">Module 3, Chapter 1</a>).
+      </p>
+
+      <h2 id="medusa-1-vs-medusa-2">2. Medusa-1 vs. Medusa-2: Self-Distillation &amp; Typical Acceptance</h2>
+      <p>
+        Medusa offers two training recipes depending on your compute budget and access to the base model's training distribution:
+      </p>
+      <ol>
+        <li><strong>Medusa-1 (Frozen Backbone):</strong> Freezes all base Transformer weights $\theta_{\text{base}}$ and trains only the $K$ Medusa heads on a small SFT corpus using cross-entropy loss weighted by exponential decay $\lambda_k = 0.8^k$:
+          <div class="spec-math">
+            $$\mathcal{L}_{\text{Medusa-1}} = \sum_{k=1}^{K} \lambda_k \cdot \big(-\log p_t^{(k)}(x_{t+k+1})\big).$$
+          </div>
+          Because the backbone is frozen, Medusa-1 is guaranteed never to degrade the base model's perplexity and can be trained in a few hours on a single GPU using LoRA/QLoRA.
+        </li>
+        <li><strong>Medusa-2 (Joint Training with Self-Distillation):</strong> Unfreezes the backbone together with the heads. To prevent uninitialized head gradients from corrupting the pretrained backbone, Medusa-2 uses (a) a two-stage warmup (train heads first, then joint fine-tuning), (b) separate optimizer learning rates ($\eta_{\text{backbone}} \ll \eta_{\text{heads}}$), and (c) a <strong>self-distillation KL loss</strong> against a frozen reference copy $p_{\text{orig}}^{(0)}$ of the base model:
+          <div class="spec-math">
+            $$\mathcal{L}_{\text{Medusa-2}} = D_{\text{KL}}\!\big(p_{\text{orig}, t}^{(0)} \,\big\|\, p_t^{(0)}\big) + \sum_{k=1}^{K} \lambda_k \Big[\alpha_{\text{sd}} \mathcal{L}_{\text{CE}}^{(k)} + (1 - \alpha_{\text{sd}}) D_{\text{KL}}\!\big(p_{\text{orig}, t+k}^{(0)} \,\big\|\, p_t^{(k)}\big)\Big].$$
+          </div>
+        </li>
+      </ol>
+
+      <h3 id="typical-acceptance">Typical Acceptance for Higher-Temperature Decoding</h3>
+      <p>
+        Because Medusa heads output marginal approximations rather than calibrated conditional draft probabilities $q(x_{t+k} \mid x_{&lt;t+k})$, standard rejection sampling at temperature $\tau &gt; 0$ can be overly conservative. Medusa introduces an optional <strong>Typical Acceptance</strong> scheme inspired by Locally Typical Sampling: given the target distribution $p(v)$ at a candidate node with Shannon entropy $H(p) = -\sum_{v} p(v) \log p(v)$, a candidate token $x_k$ is accepted if its target probability exceeds an entropy-adaptive threshold:
+      </p>
+      <div class="spec-math">
+        $$\text{Accept } x_k \iff p(x_k) \ge \min\!\big(\varepsilon,\, \delta \cdot \exp(-H(p))\big), \qquad \text{typically } \varepsilon = 0.09,\; \delta = 0.30.$$
+      </div>
+      <p>
+        When the target distribution is peaked (low entropy $H(p) \approx 0$), $\delta \exp(-H(p)) \approx 0.30$ is high, enforcing strict agreement with the mode; when the target distribution is flat (high entropy $H(p)$), the threshold drops to $\varepsilon = 0.09$, accepting any plausible continuation.
+      </p>
+
+      <h2 id="deepseek-mtp">3. DeepSeek-V3 &amp; DeepSeek-R1 Multi-Token Prediction (MTP)</h2>
+      <p>
+        Whereas Gloeckle et al. (Meta AI, 2024) proposed parallel multi-token prediction heads primarily as a pretraining auxiliary loss, <strong>DeepSeek-V3 and DeepSeek-R1</strong> re-engineered Multi-Token Prediction (MTP) by making the prediction heads <strong>sequentially causal across depths $k = 1, \dots, D$</strong>.
+      </p>
+      <p>
+        Instead of predicting $x_{t+k+1}$ from $h_t$ alone, DeepSeek's $k$-th MTP module explicitly ingests both (1) the representation $h_t^{(k-1)} \in \mathbb{R}^d$ from the previous depth ($h_t^{(0)}$ being the main Transformer's final hidden state) and (2) the <strong>token embedding $\operatorname{Emb}(x_{t+k}) \in \mathbb{R}^d$ of the token at offset $t+k$</strong>:
+      </p>
+      <div class="spec-math">
+        $$h_t^{\prime(k)} = M_k \Big[\operatorname{RMSNorm}\!\big(h_t^{(k-1)}\big) \;;\; \operatorname{RMSNorm}\!\big(\operatorname{Emb}(x_{t+k})\big)\Big] \in \mathbb{R}^d, \qquad M_k \in \mathbb{R}^{d \times 2d}.$$
+      </div>
+      <p>
+        This fused vector $h_t^{\prime(k)}$ is then passed through a single dedicated Transformer decoder block $\operatorname{TRM}_k$ followed by the <strong>shared main-model output head $W_{\text{LM}}$</strong>:
+      </p>
+      <div class="spec-math">
+        $$h_{1:T-k}^{(k)} = \operatorname{TRM}_k\!\big(h_{1:T-k}^{\prime(k)}\big), \qquad p_{t+k+1}^{(k)}(v) = \operatorname{softmax}\!\big(W_{\text{LM}}\, h_t^{(k)}\big)_v.$$
+      </div>
+
+      <div class="spec-callout">
+        <strong>Why DeepSeek MTP Solves Medusa's Parameter &amp; Independence Limits:</strong>
+        <ul>
+          <li><strong>Zero vocabulary-matrix duplication:</strong> For a large vocabulary ($|V| = 129{,}280$ in DeepSeek-V3 with $d = 7168$), a single unshared LM head $W_2^{(k)} \in \mathbb{R}^{|V| \times d}$ costs $926\text{M}$ parameters! By sharing both $\operatorname{Emb}(\cdot)$ and $W_{\text{LM}}$ with the main backbone, each DeepSeek MTP module adds only one Transformer layer plus $M_k \in \mathbb{R}^{d \times 2d}$.</li>
+          <li><strong>True conditional drafting:</strong> At inference time, the main model samples $\hat x_{t+1} \sim p_t^{(0)}$. That exact sampled token ID $\hat x_{t+1}$ is embedded and concatenated with $h_t^{(0)}$ into MTP Module 1 to predict $\hat x_{t+2}$, completely eliminating Cartesian mismatch ($85\%\text{--}90\%$ acceptance rate on DeepSeek-V3/R1).</li>
+        </ul>
+      </div>
+
+      <h2 id="worked-comparison">4. Worked Numerical Comparison: Parallel Medusa vs. Chained MTP</h2>
+      <p>
+        Return to our prefix $x_{\le t} = \texttt{"I live in New"}$, where the true target language model places probability $0.50$ on $(\texttt{"York"}, \texttt{"City"})$ and $0.50$ on $(\texttt{"Jersey"}, \texttt{"Shore"})$, with $0.00$ on cross-combinations:
+      </p>
+
+      <div class="spec-table-wrap">
+        <table class="spec-table">
+          <thead>
+            <tr>
+              <th>Architecture</th>
+              <th>Step 1 Proposal $\hat x_{t+1}$</th>
+              <th>Step 2 Head Input</th>
+              <th>Step 2 Distribution $p^{(1)}(x_{t+2})$</th>
+              <th>Single-Path Draft $(\hat x_{t+1}, \hat x_{t+2})$ Acceptance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Medusa (Parallel MLP)</strong></td>
+              <td>$\hat x_{t+1} = \texttt{"York"}$ ($p=0.50$)</td>
+              <td>$h_t$ only (blind to $\hat x_{t+1}$)</td>
+              <td>$0.50\,\texttt{"City"} + 0.50\,\texttt{"Shore"}$</td>
+              <td>$50\%$ chance of drafting invalid <code>"York Shore"</code> ($\alpha_2 = 0.50$)</td>
+            </tr>
+            <tr>
+              <td><strong>Medusa + Tree ($2 \times 2$)</strong></td>
+              <td>Top-2: $\{\texttt{"York"}, \texttt{"Jersey"}\}$</td>
+              <td>$h_t$ only (builds $4$ tree paths)</td>
+              <td>Verifies all $4$ Cartesian pairs in 1 pass</td>
+              <td>$100\%$ acceptance, but costs $4$ tree verification tokens</td>
+            </tr>
+            <tr>
+              <td><strong>DeepSeek Chained MTP</strong></td>
+              <td>$\hat x_{t+1} = \texttt{"York"}$ ($p=0.50$)</td>
+              <td>$M_1[\operatorname{Norm}(h_t);\, \operatorname{Norm}(e(\texttt{"York"}))]$</td>
+              <td>$1.00\,\texttt{"City"} + 0.00\,\texttt{"Shore"}$</td>
+              <td><strong>$100\%$ acceptance on a single linear path!</strong> ($\alpha_2 = 1.00$)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="pytorch-implementation">5. Reference PyTorch Implementation: Medusa Head &amp; DeepSeek MTP Module</h2>
+      <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MedusaResidualHead(nn.Module):
+    """Medusa parallel head: SiLU residual block + dedicated vocabulary projection."""
+    def __init__(self, hidden_dim: int, vocab_size: int):
+        super().__init__()
+        self.linear = nn.Linear(hidden_dim, hidden_dim)
+        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+        # Zero-init residual layer so head starts as identity + base lm_head
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, h_t: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(h_t + F.silu(self.linear(h_t)))
+
+
+class DeepSeekMTPModule(nn.Module):
+    """
+    DeepSeek-V3/R1 Chained Multi-Token Prediction (MTP) Module for depth k.
+    Shares token_emb and shared_lm_head with the main backbone.
+    """
+    def __init__(self, hidden_dim: int, num_heads: int = 8):
+        super().__init__()
+        self.norm_h = nn.RMSNorm(hidden_dim)
+        self.norm_emb = nn.RMSNorm(hidden_dim)
+        self.proj_m = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
+        self.trm_block = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=num_heads, dim_feedforward=4 * hidden_dim,
+            batch_first=True, norm_first=True
+        )
+
+    def forward(
+        self,
+        h_prev: torch.Tensor,          # (B, L, d) from depth k-1
+        next_token_ids: torch.Tensor,  # (B, L) token IDs at offset t+k
+        shared_emb: nn.Embedding,
+        shared_lm_head: nn.Linear,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        tok_emb = shared_emb(next_token_ids)
+        fused = torch.cat([self.norm_h(h_prev), self.norm_emb(tok_emb)], dim=-1)
+        h_prime = self.proj_m(fused)
+        L = h_prime.size(1)
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(L, device=h_prime.device)
+        h_k = self.trm_block(h_prime, src_mask=causal_mask, is_causal=True)
+        logits_k = shared_lm_head(h_k)
+        return h_k, logits_k
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    B, L, d, V = 1, 4, 64, 500
+    shared_emb = nn.Embedding(V, d)
+    shared_lm_head = nn.Linear(d, V, bias=False)
+    mtp1 = DeepSeekMTPModule(hidden_dim=d, num_heads=4)
+
+    h_main = torch.randn(B, L, d)
+    sampled_t_plus_1 = torch.randint(0, V, (B, L))
+    h_1, logits_t_plus_2 = mtp1(h_main, sampled_t_plus_1, shared_emb, shared_lm_head)
+    print("Main hidden shape :", tuple(h_main.shape))
+    print("MTP-1 hidden shape:", tuple(h_1.shape))
+    print("MTP-1 logits shape:", tuple(logits_t_plus_2.shape))</code></pre>
+
+      <h2 id="references">6. Primary References</h2>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2401.10774" target="_blank" rel="noopener">Tianle Cai et al., <em>Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads</em> (ICML 2024)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">DeepSeek-AI, <em>DeepSeek-V3 Technical Report</em> (Section 2.2: Multi-Token Prediction, December 2024)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2404.19737" target="_blank" rel="noopener">Fabian Gloeckle et al., <em>Better &amp; Faster Large Language Models via Multi-token Prediction</em> (ICML 2024)</a>.</li>
+      </ul>
+
+      <nav class="post-nav" aria-label="Post navigation">
+        <a href="../foundations-and-draft-target/lossless-rejection-sampling-and-speedup-math.html" class="post-nav-link prev">
+          <span class="post-nav-label">&larr; Previous Module</span>
+          <span class="post-nav-title">3. Lossless Modified Rejection Sampling, TV Distance &amp; Expected Speedup</span>
+        </a>
+        <a href="eagle-feature-extrapolation-and-dynamic-trees.html" class="post-nav-link next">
+          <span class="post-nav-label">Next Chapter &rarr;</span>
+          <span class="post-nav-title">2. EAGLE, EAGLE-2 &amp; EAGLE-3: Feature Extrapolation &amp; Dynamic Draft Trees</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Complete technical guide to EAGLE, EAGLE-2, and EAGLE-3 speculative decoding: token-conditioned feature autoregression, context-aware dynamic draft trees, multi-layer feature fusion, and Training-Time Test (TTT).">
+  <title>2. EAGLE, EAGLE-2 &amp; EAGLE-3: Feature-Level Autoregression, Multi-Layer Fusion &amp; Dynamic Draft Trees | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/speculative-decoding/single-model-and-feature-drafting/eagle-feature-extrapolation-and-dynamic-trees.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../speculative-decoding.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout" data-mobile-sidebar>
+    <aside class="blog-sidebar">
+      <nav class="blog-nav" aria-label="Blog explorer"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal spec-article">
+      <a class="back-to-blog" href="../../../blog.html#speculative-decoding">&#8592; Speculative Decoding</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html#speculative-decoding">Speculative Decoding</a>
+        <span>&middot;</span>
+        <a href="../../../blog.html#folder-speculative-decoding--single-model-and-feature-drafting">Single-Model, Multi-Head &amp; Feature Drafting</a>
+        <span>&middot;</span>
+        <span>Chapter 2</span>
+      </div>
+
+      <h1>2. EAGLE, EAGLE-2 &amp; EAGLE-3: Feature-Level Autoregression, Multi-Layer Fusion &amp; Dynamic Draft Trees</h1>
+      <p class="post-meta">Single-Model, Multi-Head &amp; Feature Drafting &middot; 15 min read &middot; EAGLE Trilogy Deep Dive</p>
+
+      <p>
+        Among all lossless speculative decoding methods deployed in modern serving engines (vLLM, SGLang, TensorRT-LLM), the <strong>EAGLE family</strong> (<em>Extrapolation Algorithm for Greater Language-Model Efficiency</em>; <a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener">Li et al., ICML 2024</a>, <a href="https://arxiv.org/abs/2406.16858" target="_blank" rel="noopener">EMNLP 2024</a>, <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">2025</a>) consistently delivers the highest wall-clock speedups ($2.8\times\text{--}4.5\times$) with less than $1\%$ parameter overhead.
+      </p>
+      <p>
+        Why is extrapolating in <em>feature space</em> so much more accurate than either a small token-level draft model or parallel Medusa heads? And why did EAGLE-3 abandon EAGLE-1's feature-regression loss in favor of multi-layer feature fusion and Training-Time Test (TTT)? In this chapter we trace all three generations of EAGLE from first principles.
+      </p>
+
+      <figure class="spec-figure">
+        <img src="assets/eagle-feature-extrapolation-and-dynamic-trees.svg" width="760" height="300" alt="Three-panel diagram comparing EAGLE-1 Token-Conditioned Feature Autoregression, EAGLE-2 Context-Aware Dynamic Draft Trees, and EAGLE-3 Multi-Layer Feature Fusion with Training-Time Test.">
+        <figcaption><strong>The EAGLE Trilogy.</strong> Left: EAGLE-1 resolves sampling bifurcation by concatenating feature $f_t$ with the 1-step-ahead sampled token embedding $\operatorname{Emb}(x_{t+1})$. Center: EAGLE-2 replaces static tree templates with dynamic global path-confidence pruning $V(u_m) = \prod \hat q(v)$. Right: EAGLE-3 drops the Smooth-$L_1$ feature constraint, fuses low/middle/high target layers, and trains with multi-step rollouts (TTT).</figcaption>
+      </figure>
+
+      <h2 id="eagle-1">1. EAGLE-1: Why Naive Feature Autoregression Fails &amp; How Shifted Token Conditioning Fixes It</h2>
+      <p>
+        Let $f_t \in \mathbb{R}^d$ denote the second-to-top hidden state of the target LLM (immediately before the final unembedding matrix $W_{\text{LM}} \in \mathbb{R}^{|V| \times d}$), so that target token probabilities at step $t$ are $p_{t+1} = \operatorname{softmax}(W_{\text{LM}} f_t)$.
+      </p>
+      <p>
+        At first glance, since sequence dynamics in continuous hidden space $(f_1, f_2, \dots, f_t)$ are much smoother and lower-dimensional than discrete token IDs in $V$, one might try to train a single-layer draft Transformer $\mathcal{G}$ to predict $\hat f_{t+1} = \mathcal{G}(f_{1:t})$ directly from past features. However, Li et al. (2024) discovered that <strong>pure feature autoregression fails catastrophically under stochastic sampling</strong> due to <em>sampling uncertainty bifurcation</em>:
+      </p>
+      <ul>
+        <li>From feature $f_t$ (say after prompt <code>"I"</code>), the target distribution $p_{t+1} = \operatorname{softmax}(W_{\text{LM}} f_t)$ might assign $0.45$ to <code>"am"</code> and $0.45$ to <code>"always"</code>.</li>
+        <li>In the true target model, the next feature $f_{t+1}$ depends deterministically on <strong>which discrete token $x_{t+1}$ was actually sampled</strong>: if $x_{t+1} = \texttt{"am"}$, $f_{t+1} = f_{t+1}^{(\text{am})}$ predicts <code>"happy"</code>; if $x_{t+1} = \texttt{"always"}$, $f_{t+1} = f_{t+1}^{(\text{always})}$ predicts <code>"try"</code>.</li>
+        <li>A drafter $\mathcal{G}(f_{1:t})$ that only sees $f_t$ does not know whether <code>"am"</code> or <code>"always"</code> was sampled! Forced to minimize regression error across both outcomes, it predicts the <strong>blurry average</strong> $\frac{1}{2}\big(f_{t+1}^{(\text{am})} + f_{t+1}^{(\text{always})}\big)$, which projects to nonsense logits when multiplied by $W_{\text{LM}}$.</li>
+      </ul>
+
+      <h3 id="shifted-feature-token-fusion">The Shifted Feature + Token Fusion Rule</h3>
+      <p>
+        EAGLE-1 eliminates sampling ambiguity by feeding the draft layer the feature sequence $f_{1:t}$ <strong>paired with the 1-step-advanced token embedding sequence $e_{2:t+1} = (\operatorname{Emb}(x_2), \dots, \operatorname{Emb}(x_{t+1}))$</strong> via a linear compression layer $W_{\text{fc}} \in \mathbb{R}^{d \times 2d}$:
+      </p>
+      <div class="spec-math">
+        $$z_t = W_{\text{fc}} \Big[f_t \;;\; \operatorname{Emb}(x_{t+1})\Big] \in \mathbb{R}^d, \qquad \hat f_{t+1} = \operatorname{DraftAutoregLayer}(z_{1:t}), \qquad q_{t+2}(v) = \operatorname{softmax}\!\big(W_{\text{LM}}\,\hat f_{t+1}\big)_v.$$
+      </div>
+      <p>
+        Because $x_{t+1}$ has <em>already been sampled</em> from $\operatorname{softmax}(W_{\text{LM}} f_t)$ before we need to predict $\hat f_{t+1}$, conditioning on $\operatorname{Emb}(x_{t+1})$ incurs zero latency delay and tells the draft layer the exact branch taken!
+      </p>
+
+      <h3 id="eagle1-training-loss">EAGLE-1 Training Objective &amp; Feature Noise Augmentation</h3>
+      <p>
+        During multi-step drafting, the draft model feeds its own predicted features $\hat f_{t+1}$ back as input at step $t+2$. To prevent compounding exposure bias without unrolling expensive multi-step gradients in EAGLE-1, uniform noise $\epsilon \sim \mathcal{U}(-0.1, 0.1)$ is added to training inputs $f_t$, and the draft head minimizes a joint Smooth-$L_1$ feature loss plus token cross-entropy distillation loss ($w_{\text{cls}} = 0.1$):
+      </p>
+      <div class="spec-math">
+        $$\mathcal{L}_{\text{EAGLE-1}} = \operatorname{SmoothL1}\!\big(f_{t+1},\, \hat f_{t+1}\big) + w_{\text{cls}} \cdot \operatorname{CE}\!\big(p_{t+2},\, q_{t+2}\big), \qquad \text{where } p_{t+2} = \operatorname{softmax}(W_{\text{LM}} f_{t+1}).$$
+      </div>
+
+      <h2 id="eagle-2">2. EAGLE-2: Context-Aware Dynamic Draft Trees</h2>
+      <p>
+        EAGLE-1 and Medusa-1/2 use a <strong>static tree topology</strong> (e.g., always branching into $4$ children at depth $1$, $2$ children at depth $2$, etc.) regardless of whether the current context is deterministic boilerplate code or high-entropy creative text.
+      </p>
+      <p>
+        In <a href="https://arxiv.org/abs/2406.16858" target="_blank" rel="noopener">EAGLE-2 (Li et al., EMNLP 2024)</a>, the authors observed empirically that the EAGLE draft head's token probability $\hat q(x_i)$ is strongly calibrated with the target model's empirical acceptance probability $\alpha(x_i)$ (Pearson correlation $r &gt; 0.85$). Moreover, a candidate node $u_m$ at depth $d$ is accepted by the target model if and only if <em>every ancestor along its root-to-$u_m$ path is accepted</em>.
+      </p>
+      <p>
+        Therefore, EAGLE-2 defines the <strong>Global Acceptance Confidence Score $V(u_m)$</strong> of any node $u_m$ in the draft tree as the product of draft probabilities along its ancestor path $\operatorname{Path}(u_m)$:
+      </p>
+      <div class="spec-math">
+        $$V(u_m) = \prod_{v \in \operatorname{Path}(u_m)} \hat q(v) = \exp\!\left(\sum_{v \in \operatorname{Path}(u_m)} \ln \hat q(v)\right).$$
+      </div>
+
+      <h3 id="eagle2-two-phase-tree">Two-Phase Dynamic Tree Construction (Expand + Rerank)</h3>
+      <ol>
+        <li><strong>Expansion Phase (Depths $d = 1, \dots, D$):</strong> At each depth $d$, select the top-$k$ highest-scoring leaf nodes from depth $d-1$ (sorted by $V(u)$) and run all $k$ leaves in a single batched forward pass through the EAGLE head, expanding each into its top-$k$ token children ($k^2$ new candidates).</li>
+        <li><strong>Post-Expansion Reranking &amp; Pruning:</strong> Across all expanded nodes accumulated over all $D$ depths, sort every node globally by $V(u_m)$ and keep the top-$M$ nodes (e.g., $M = 60$). Because $V(\text{parent}) \ge V(\text{child})$ always holds (since $\hat q(v) \in [0, 1]$), taking the top-$M$ nodes by $V(u_m)$ is <strong>guaranteed to form a valid connected prefix tree</strong> without orphaned nodes!</li>
+      </ol>
+
+      <h2 id="eagle-3">3. EAGLE-3: Dropping Feature Regression, Multi-Layer Fusion &amp; Training-Time Test (TTT)</h2>
+      <p>
+        When scaling training datasets from $68\text{K}$ ShareGPT conversations ($1\times$) to $8\times\text{--}16\times$ larger corpora, <a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">EAGLE-3 (Li et al., 2025)</a> uncovered a fundamental scaling bottleneck in EAGLE-1/2:
+      </p>
+      <div class="spec-callout warn">
+        <strong>Why Feature Regression Limits Scaling:</strong> A 1-layer draft Transformer does not have the representational capacity to reconstruct the exact 32-layer or 80-layer target vector $f_{t+1} \in \mathbb{R}^d$ in Smooth-$L_1$ norm. Worse, forcing $\hat f_{t+1} \approx f_{t+1}$ restricts the draft model to only predicting the 1-step-ahead feature rather than learning hidden representations optimized for multi-step token prediction!
+      </div>
+      <p>
+        EAGLE-3 introduces two architectural breakthroughs that unlock monotonous speedup improvements as training data scales:
+      </p>
+      <ol>
+        <li><strong>Multi-Layer Feature Fusion ($3d \to d$) instead of Top-Layer Feature Regression:</strong> Instead of feeding the top-layer pre-logit vector $f_t$ (which is already heavily specialized for the immediate next token $x_{t+1}$ and discards lower-level syntactic context), EAGLE-3 extracts target hidden states from <strong>three internal depths</strong>&mdash;a low layer $h_t^{(\text{low})}$, a middle layer $h_t^{(\text{mid})}$, and a high layer $h_t^{(\text{high})}$&mdash;concatenates them into a $3d$-dimensional vector, and projects them to $d$ via $W_{\text{fuse}} \in \mathbb{R}^{d \times 3d}$:
+          <div class="spec-math">
+            $$g_t = W_{\text{fuse}} \Big[h_t^{(\text{low})} \;;\; h_t^{(\text{mid})} \;;\; h_t^{(\text{high})}\Big] \in \mathbb{R}^d.$$
+          </div>
+        </li>
+        <li><strong>Training-Time Test (TTT) with Pure Token Cross-Entropy:</strong> EAGLE-3 removes the Smooth-$L_1$ feature loss completely ($\mathcal{L}_{\text{reg}} = 0$). Instead, during training itself, EAGLE-3 unrolls the draft head autoregressively for multiple steps $s = 1, 2, \dots, S$: at step $s=1$ it consumes fused target features $g_t$ and $\operatorname{Emb}(x_{t+1})$ to output draft hidden state $a_{t+1}$; at step $s=2$ it consumes its <em>own generated state</em> $a_{t+1}$ and $\operatorname{Emb}(\hat x_{t+2})$ to output $a_{t+2}$, and backpropagates KL/cross-entropy loss $\mathcal{L}_{\text{TTT}} = \sum_{s=1}^{S} D_{\text{KL}}\!\big(p_{t+s+1} \,\big\|\, \operatorname{softmax}(W_{\text{LM}} a_{t+s})\big)$ through the multi-step self-generated attention cache.</li>
+      </ol>
+
+      <h2 id="worked-example-eagle2-tree">4. Worked Numerical Trace: EAGLE-2 Dynamic Tree Pruning ($k=2, M=5$)</h2>
+      <p>
+        Suppose at the root prefix <code>"import"</code>, we expand a dynamic EAGLE tree with branching factor $k=2$ over $D=2$ depths and prune to budget $M=4$ total candidate nodes using $V(u) = \prod_{v \in \operatorname{Path}(u)} \hat q(v)$:
+      </p>
+
+      <div class="spec-table-wrap">
+        <table class="spec-table">
+          <thead>
+            <tr>
+              <th>Node ID</th>
+              <th>Depth $d$</th>
+              <th>Candidate Path</th>
+              <th>Local Conditional $\hat q(v)$</th>
+              <th>Global Path Score $V(u_m) = \prod \hat q$</th>
+              <th>Rank &amp; Keep Decision ($M=4$)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>$u_1$</td>
+              <td>$1$</td>
+              <td><code>["torch"]</code></td>
+              <td>$0.80$</td>
+              <td>$0.800$</td>
+              <td><strong>Rank 1 &mdash; KEEP</strong></td>
+            </tr>
+            <tr>
+              <td>$u_2$</td>
+              <td>$1$</td>
+              <td><code>["numpy"]</code></td>
+              <td>$0.15$</td>
+              <td>$0.150$</td>
+              <td><strong>Rank 3 &mdash; KEEP</strong></td>
+            </tr>
+            <tr>
+              <td>$u_3$ (child of $u_1$)</td>
+              <td>$2$</td>
+              <td><code>["torch", ".nn"]</code></td>
+              <td>$0.70$</td>
+              <td>$0.80 \times 0.70 = \mathbf{0.560}$</td>
+              <td><strong>Rank 2 &mdash; KEEP</strong></td>
+            </tr>
+            <tr>
+              <td>$u_4$ (child of $u_1$)</td>
+              <td>$2$</td>
+              <td><code>["torch", "\n"]</code></td>
+              <td>$0.20$</td>
+              <td>$0.80 \times 0.20 = \mathbf{0.160}$</td>
+              <td><strong>Rank 3 (tie/above $u_2$) &mdash; KEEP</strong></td>
+            </tr>
+            <tr>
+              <td>$u_5$ (child of $u_2$)</td>
+              <td>$2$</td>
+              <td><code>["numpy", "as"]</code></td>
+              <td>$0.90$</td>
+              <td>$0.15 \times 0.90 = \mathbf{0.135}$</td>
+              <td><em>Rank 5 &mdash; PRUNED ($0.135 &lt; 0.150$)</em></td>
+            </tr>
+            <tr>
+              <td>$u_6$ (child of $u_2$)</td>
+              <td>$2$</td>
+              <td><code>["numpy", "\n"]</code></td>
+              <td>$0.05$</td>
+              <td>$0.15 \times 0.05 = \mathbf{0.0075}$</td>
+              <td><em>Rank 6 &mdash; PRUNED</em></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        Notice how EAGLE-2 automatically adapts tree shape to context confidence: because $u_1$ (<code>"torch"</code>) had high initial confidence ($0.80$), both of its depth-$2$ children ($u_3, u_4$) survive into the top-$4$ verification budget, whereas $u_2$ (<code>"numpy"</code>, $0.15$) is verified only at depth $1$ without wasting target compute on its low-prior descendants.
+      </p>
+
+      <h2 id="pytorch-implementation">5. Reference PyTorch Implementation: EAGLE-3 Fused Drafter &amp; Dynamic Tree Pruner</h2>
+      <pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class EAGLE3DraftHead(nn.Module):
+    """
+    EAGLE-3 Draft Head:
+      1. Fuses low, middle, and high target hidden states (3d -> d).
+      2. Concatenates current feature state with 1-step-ahead token embedding (2d -> d).
+      3. Runs a single lightweight causal Transformer block and reuses frozen W_LM.
+    """
+    def __init__(self, hidden_dim: int, num_heads: int = 8):
+        super().__init__()
+        self.layer_fusion = nn.Linear(3 * hidden_dim, hidden_dim, bias=False)
+        self.fc_input = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
+        self.norm = nn.RMSNorm(hidden_dim)
+        self.decoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=num_heads, dim_feedforward=4 * hidden_dim,
+            batch_first=True, norm_first=True
+        )
+
+    def fuse_target_layers(
+        self, h_low: torch.Tensor, h_mid: torch.Tensor, h_high: torch.Tensor
+    ) -> torch.Tensor:
+        return self.layer_fusion(torch.cat([h_low, h_mid, h_high], dim=-1))
+
+    def forward_step(
+        self,
+        feat_seq: torch.Tensor,       # (B, L, d): g_t at step 1, or [g_t, a_{t+1}, ...] at step >1
+        shifted_tokens: torch.Tensor, # (B, L): token IDs [x_2, ..., x_{t+1}, ...]
+        shared_emb: nn.Embedding,
+        shared_lm_head: nn.Linear,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        emb = shared_emb(shifted_tokens)
+        z = self.fc_input(torch.cat([self.norm(feat_seq), emb], dim=-1))
+        L = z.size(1)
+        mask = nn.Transformer.generate_square_subsequent_mask(L, device=z.device)
+        a_out = self.decoder_layer(z, src_mask=mask, is_causal=True)
+        logits = shared_lm_head(a_out[:, -1, :])  # (B, V) next draft step logits
+        return a_out[:, -1:, :], logits
+
+
+def eagle2_prune_dynamic_tree(
+    nodes: list[dict], max_nodes: int
+) -> list[dict]:
+    """
+    Given candidate tree nodes with 'id', 'parent_id', and 'path_prob' V(u_m),
+    returns the top-M nodes sorted in topological order.
+    Because V(parent) >= V(child), the top-M subset is always a connected prefix tree.
+    """
+    ranked = sorted(nodes, key=lambda n: n["path_prob"], reverse=True)[:max_nodes]
+    kept_ids = {n["id"] for n in ranked}
+    assert all(n["parent_id"] is None or n["parent_id"] in kept_ids for n in ranked), (
+        "Monotonicity guarantees every kept node's parent is also kept!"
+    )
+    return sorted(ranked, key=lambda n: n["id"])
+
+
+if __name__ == "__main__":
+    candidate_tree = [
+        {"id": 1, "parent_id": None, "tok": "torch", "path_prob": 0.800},
+        {"id": 2, "parent_id": None, "tok": "numpy", "path_prob": 0.150},
+        {"id": 3, "parent_id": 1,    "tok": ".nn",   "path_prob": 0.560},
+        {"id": 4, "parent_id": 1,    "tok": "\\n",   "path_prob": 0.160},
+        {"id": 5, "parent_id": 2,    "tok": "as",    "path_prob": 0.135},
+        {"id": 6, "parent_id": 2,    "tok": "\\n",   "path_prob": 0.0075},
+    ]
+    pruned = eagle2_prune_dynamic_tree(candidate_tree, max_nodes=4)
+    print("Pruned M=4 dynamic tree nodes:", [(n["id"], n["tok"], n["path_prob"]) for n in pruned])</code></pre>
+
+      <h2 id="references">6. Primary References</h2>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener">Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang, <em>EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty</em> (ICML 2024)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2406.16858" target="_blank" rel="noopener">Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang, <em>EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees</em> (EMNLP 2024)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2503.01840" target="_blank" rel="noopener">Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang, <em>EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test</em> (2025)</a>.</li>
+      </ul>
+
+      <nav class="post-nav" aria-label="Post navigation">
+        <a href="medusa-and-deepseek-multi-token-prediction.html" class="post-nav-link prev">
+          <span class="post-nav-label">&larr; Previous Chapter</span>
+          <span class="post-nav-title">1. Multi-Head &amp; Multi-Token Prediction: Medusa, Medusa-2 &amp; DeepSeek MTP</span>
+        </a>
+        <a href="lookahead-jacobi-and-ngram-prompt-lookup.html" class="post-nav-link next">
+          <span class="post-nav-label">Next Chapter &rarr;</span>
+          <span class="post-nav-title">3. Model-Free Speculation: Jacobi Iteration, Lookahead Decoding &amp; PLD</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

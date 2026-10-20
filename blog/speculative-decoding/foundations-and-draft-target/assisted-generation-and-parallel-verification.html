@@ -1,0 +1,811 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Assisted Generation: a new direction toward low-latency text generation. Complete Hugging Face walkthrough with interactive Transformer matrix visualizations showing why feeding L tokens produces L next-token logit vectors in parallel.">
+  <title>2. Assisted Generation &amp; Parallel Forward Confirmation: Exact Transformer Matrix Shapes (L=5 vs. L=1) | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/speculative-decoding/foundations-and-draft-target/assisted-generation-and-parallel-verification.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../speculative-decoding.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout" data-mobile-sidebar>
+    <aside class="blog-sidebar">
+      <nav class="blog-nav" aria-label="Blog explorer"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal spec-article">
+      <a class="back-to-blog" href="../../../blog.html#speculative-decoding">&#8592; Speculative Decoding</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html#speculative-decoding">Speculative Decoding</a>
+        <span>&middot;</span>
+        <a href="../../../blog.html#folder-speculative-decoding--foundations-and-draft-target">Foundations &amp; Draft&ndash;Target Verification</a>
+        <span>&middot;</span>
+        <span>Chapter 2</span>
+      </div>
+
+      <h1>2. Assisted Generation &amp; Parallel Forward Confirmation: Exact Transformer Matrix Shapes ($L=5$ vs. $L=1$)</h1>
+      <p class="post-meta">Foundations &amp; Draft&ndash;Target Verification &middot; 15 min read &middot; Hugging Face Blog Companion + Matrix Deep Dive</p>
+
+      <p class="spec-credit">
+        Based on the Hugging Face blog post <a href="https://huggingface.co/blog/assisted-generation" target="_blank" rel="noopener"><em>Assisted Generation: a new direction toward low-latency text generation</em></a> by Jo&atilde;o Gante (May 2023; DOI: <code>10.57967/hf/0638</code>), augmented with a step-by-step Transformer matrix visualization and interactive tensor-shape simulator showing exactly why feeding $L$ tokens into a causal decoder produces $L$ next-token logit distributions in a single forward pass.
+      </p>
+
+      <figure class="spec-figure">
+        <img src="assets/assisted-generation-and-parallel-verification.svg" width="760" height="300" alt="Three-panel diagram comparing Cached Decode (L=1), Parallel Causal Verification (L=5), and the Hugging Face Dynamic Speculation Window K heuristic.">
+        <figcaption><strong>Core Mechanism.</strong> Left: Standard KV-cached decoding streams all model weights $W \in \mathbb{R}^{d \times d}$ from HBM just to project $L=1$ row. Center: Passing $L=5$ candidate tokens reuses the loaded weights across $5$ rows while the lower-triangular causal mask $A \in \mathbb{R}^{5 \times 5}$ isolates each prefix. Right: The dynamic window $K$ expands by $+2$ on full match and contracts by $-1$ on mismatch.</figcaption>
+      </figure>
+
+      <figure class="spec-figure">
+        <a href="figures/hf-assisted-gen-thumbnail.png" target="_blank" rel="noopener">
+          <img src="figures/hf-assisted-gen-thumbnail.png" width="1200" height="630" alt="Assisted Generation cover illustration from the Hugging Face blog.">
+        </a>
+        <figcaption>Assisted Generation in Hugging Face Transformers: pairing a large target model with a fast assistant model to turn memory-bound sequential steps into parallel verification.</figcaption>
+      </figure>
+
+      <p>Large language models are all the rage these days, with many companies investing significant resources to scale them up and unlock new capabilities. However, as humans with ever-decreasing attention spans, we also dislike their slow response times. Latency is critical for a good user experience, and smaller models are often used despite their lower quality (for example, in <a href="https://research.google/blog/ml-enhanced-code-completion-improves-developer-productivity/" target="_blank" rel="noopener">interactive code completion</a>).</p>
+
+      <p>Why is text generation so slow? What is preventing you from deploying low-latency large language models without going bankrupt? In this post, we revisit the bottlenecks for autoregressive text generation, trace the exact matrix multiplications inside a causal Transformer forward pass, and introduce <strong>assisted generation</strong>&mdash;a decoding method that reduces latency by up to $10\times$ on commodity hardware.</p>
+
+      <h2 id="understanding-latency">1. Understanding Text Generation Latency</h2>
+
+      <p>The core of modern text generation is straightforward to understand. Let's look at the central piece, the ML model. Its input contains a text sequence, which includes the text generated so far, and potentially other model-specific components (for instance, Whisper also has an audio input). The model takes the input and runs a <strong>forward pass</strong>: the input is fed to the model and passed sequentially along its layers until the unnormalized log probabilities for the next token are predicted (also known as <em>logits</em>). A token may consist of entire words, sub-words, or even individual characters, depending on the model. Jay Alammar's <a href="https://jalammar.github.io/illustrated-gpt2/" target="_blank" rel="noopener">Illustrated GPT-2</a> is a great reference if you'd like to dive deeper into this part of text generation.</p>
+
+      <figure class="spec-figure">
+        <video autoplay loop muted playsinline controls src="figures/hf-gif-1-fwd-pass.mp4"></video>
+        <figcaption><strong>Animation 1.</strong> A single decoder forward pass takes the current input token sequence and produces the next-token logits at the output of the final layer.</figcaption>
+      </figure>
+
+      <p>A model forward pass gets you the logits for the next token, which you can freely manipulate (e.g., set the probability of undesirable words or sequences to $0$). The following step in text generation is to select the next token from these logits. Common strategies include picking the most likely token, known as <strong>greedy decoding</strong>, or sampling from their distribution, also called <strong>multinomial sampling</strong>. Chaining model forward passes with next-token selection iteratively gets you text generation.</p>
+
+      <figure class="spec-figure">
+        <video autoplay loop muted playsinline controls src="figures/hf-gif-2-text-generation.mp4"></video>
+        <figcaption><strong>Animation 2.</strong> Autoregressive text generation: each newly selected token is appended to the sequence (with previous states saved in the KV cache) to predict one token per forward pass.</figcaption>
+      </figure>
+
+      <p>From the description above, the latency bottleneck in text generation is clear: running a model forward pass for large models is slow, and you may need to do hundreds of them in a sequence. But let's dive deeper: <em>why</em> are forward passes slow? Forward passes are typically dominated by matrix multiplications and, as communication-avoiding matrix multiplication analysis shows, <strong>memory bandwidth is the limitation in this operation</strong> (e.g., moving bytes from GPU HBM/VRAM to the GPU's compute cores). In other words:</p>
+
+      <div class="spec-callout">
+        <strong>The Memory Bandwidth Wall:</strong> The bottleneck in an autoregressive forward pass comes from <em>loading the model layer weights into the computation cores of your device</em>, not from performing the floating-point computations themselves.
+      </div>
+
+      <p>Traditionally, you have three main avenues to get the most out of text generation, all tackling the performance of the model forward pass:</p>
+
+      <ol>
+        <li><strong>Hardware-specific model optimizations:</strong> Your device may be compatible with <a href="https://github.com/Dao-AILab/flash-attention" target="_blank" rel="noopener">FlashAttention</a>, which speeds up the attention layer through an SRAM-aware reorder of operations, or <a href="https://huggingface.co/blog/hf-bitsandbytes-integration" target="_blank" rel="noopener">INT8 quantization</a>, which reduces the byte footprint of the model weights.</li>
+        <li><strong>Batching concurrent requests:</strong> When you have concurrent text generation requests, you can batch the inputs and massively increase throughput with only a small latency penalty. The model layer weights loaded into the device are now reused across several input rows in parallel, which means you get many more tokens out for approximately the same memory bandwidth burden. The catch with batching is that you need additional device memory (or to offload memory somewhere)&mdash;at the extreme end of this spectrum, projects like <a href="https://github.com/FMInference/FlexGen" target="_blank" rel="noopener">FlexGen</a> optimize throughput at the expense of latency.</li>
+      </ol>
+
+      <pre><code class="language-python"># Example showcasing the impact of batched generation. Measurement device: RTX 3090
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import time
+
+tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
+model = AutoModelForCausalLM.from_pretrained("distilgpt2").to("cuda")
+inputs = tokenizer(["Hello world"], return_tensors="pt").to("cuda")
+
+def print_tokens_per_second(batch_size):
+    new_tokens = 100
+    cumulative_time = 0
+
+    # warmup
+    model.generate(
+        **inputs, do_sample=True, max_new_tokens=new_tokens, num_return_sequences=batch_size
+    )
+
+    for _ in range(10):
+        start = time.time()
+        model.generate(
+            **inputs, do_sample=True, max_new_tokens=new_tokens, num_return_sequences=batch_size
+        )
+        cumulative_time += time.time() - start
+    print(f"Tokens per second: {new_tokens * batch_size * 10 / cumulative_time:.1f}")
+
+print_tokens_per_second(1)   # Tokens per second: 418.3
+print_tokens_per_second(64)  # Tokens per second: 16266.2 (~39x more tokens per second)</code></pre>
+
+      <ol start="3">
+        <li><strong>Tensor Parallelism across multiple devices:</strong> If you have multiple GPUs available, you can distribute the workload using <a href="https://huggingface.co/docs/transformers/main/en/perf_train_gpu_many#tensor-parallelism" target="_blank" rel="noopener">Tensor Parallelism</a> to obtain lower latency. With Tensor Parallelism, you split the memory bandwidth burden across multiple devices, at the cost of inter-device communication bottlenecks and running multiple GPUs (e.g., spreading a 17B parameter model across 4 GPUs reduces latency by $\sim 1.5\times$).</li>
+      </ol>
+
+      <p>These three types of improvements can be used in tandem, resulting in high-throughput serving systems like <a href="https://github.com/huggingface/text-generation-inference" target="_blank" rel="noopener">Text Generation Inference (TGI)</a>. However, for a single stream (batch size $1$), after applying hardware-specific optimizations, there are limited options to reduce latency&mdash;and the existing hardware options are expensive. Let's fix that!</p>
+
+      <h2 id="forward-pass-revisited">2. Language Decoder Forward Pass, Revisited</h2>
+
+      <p>You read above that each model forward pass yields the logits for the next token, but that is actually an incomplete description. During text generation, the typical iteration consists of the model receiving as input the <em>latest generated token</em>, plus cached internal key/value computations for all previous inputs, returning only the next token's logits. Caching is used to avoid redundant computations, resulting in faster single-token forward passes, but it is not mandatory (and can be used partially).</p>
+
+      <p>When caching is disabled (or when you feed a multi-token chunk on top of a cached prefix), <strong>the input contains a sequence of tokens and the output contains the logits corresponding to the next token for <em>all positions</em> in the sequence simultaneously!</strong> The logits at position $N$ correspond to the distribution for the next token as if the input consisted only of the first $N$ tokens, ignoring all subsequent tokens in the sequence. In the particular case of greedy decoding, if you pass a generated sequence as input and apply the <code>argmax</code> operator to the resulting logits, you will obtain the exact generated sequence back:</p>
+
+      <pre><code class="language-python">from transformers import AutoModelForCausalLM, AutoTokenizer
+
+tok = AutoTokenizer.from_pretrained("distilgpt2")
+model = AutoModelForCausalLM.from_pretrained("distilgpt2")
+
+inputs = tok(["The"], return_tensors="pt")
+generated = model.generate(**inputs, do_sample=False, max_new_tokens=10)
+forward_confirmation = model(generated).logits.argmax(-1)
+
+# We exclude the opposing tips from each sequence: the forward pass returns
+# the logits for the next token, so it is shifted by one position.
+print(generated[0, 1:].tolist() == forward_confirmation[0, :-1].tolist())  # True</code></pre>
+
+      <p>This means that you can use a model forward pass for a completely different purpose: in addition to feeding some tokens to predict a single next token, <strong>you can pass a candidate sequence to the model and verify in one pass whether the model would generate that same sequence (or part of it)</strong>.</p>
+
+      <figure class="spec-figure">
+        <video autoplay loop muted playsinline controls src="figures/hf-gif-3-fwd-confirmation.mp4"></video>
+        <figcaption><strong>Animation 3.</strong> Forward confirmation: passing a multi-token candidate continuation into the model evaluates the next-token distribution at every prefix position in a single pass.</figcaption>
+      </figure>
+
+      <!-- ================================================================ -->
+      <!-- MATRIX VISUALIZATION & EXACT SHAPE DEEP DIVE                      -->
+      <!-- ================================================================ -->
+      <section class="matrix-deep-dive" id="matrix-math-deep-dive">
+        <h2 id="why-l-tokens-yield-l-logits" style="margin-top:0">3. Matrix Deep Dive: Why Feeding $L$ Tokens Produces $L$ Next-Token Logits Simultaneously</h2>
+
+        <p>In a Transformer, the reason feeding $L$ tokens into the model produces $L$ sets of next-token logits simultaneously comes down to <strong>matrix multiplication dimensions</strong>: every linear projection, MLP, and the final Language Modeling (LM) head operates <strong>row-by-row (token-by-token) in parallel</strong>, while only the Attention matrix mixes tokens&mdash;and <strong>strictly backward in time</strong>.</p>
+
+        <p>Let's trace the exact math and matrix shapes through a Transformer for a sequence of $L=5$ tokens (<code>["The", "cat", "sat", "on", "the"]</code>), with hidden dimension $d$ and vocabulary size $V$.</p>
+
+        <h3 id="step-1-embedding-matrix">Step 1: The Input Embedding Matrix ($X$)</h3>
+        <p>When caching is disabled, you pass all $L=5$ token IDs at once. Looking up their embeddings yields a 2D matrix $X \in \mathbb{R}^{L \times d}$ (ignoring $\text{batch size} = 1$), where each row $x_i \in \mathbb{R}^{1 \times d}$ is the embedding vector for token $i$:</p>
+
+        <div class="matrix-eq-scroll" role="region" aria-label="Input embedding matrix X">
+          <div class="matrix-eq">
+            <span class="matrix-op">$X =$</span>
+            <div class="matrix-box">
+              <div class="matrix-title">Input Embeddings $X$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $x_1$ (<code>"The"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_2$ (<code>"cat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_3$ (<code>"sat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_4$ (<code>"on"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_5$ (<code>"the"</code>) &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+          </div>
+        </div>
+
+        <h3 id="step-2-qkv-projections">Step 2: $Q, K, V$ Projections (Row-Independent Math)</h3>
+        <p>Next, we multiply $X$ by the learned weight matrices $W_Q, W_K, W_V \in \mathbb{R}^{d \times d}$:</p>
+        <div class="spec-math">
+          $$Q = X W_Q,\qquad K = X W_K,\qquad V = X W_V \in \mathbb{R}^{5 \times d}.$$
+        </div>
+        <p>Because of how matrix multiplication works ($(5 \times d) \times (d \times d) = (5 \times d)$), <strong>Row $n$ of $Q$ depends only on Row $n$ of $X$</strong>:</p>
+
+        <div class="matrix-eq-scroll" role="region" aria-label="Q = X times W_Q matrix multiplication">
+          <div class="matrix-eq">
+            <div class="matrix-box">
+              <div class="matrix-title">$Q\ (5 \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $q_1 = x_1 W_Q$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $q_2 = x_2 W_Q$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $q_3 = x_3 W_Q$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $q_4 = x_4 W_Q$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $q_5 = x_5 W_Q$ &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+
+            <span class="matrix-op">$=$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$X\ (5 \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $x_1$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_2$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_3$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_4$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $x_5$ &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+
+            <span class="matrix-op">$\times$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$W_Q\ (d \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr>
+                    <td class="col-vec">$\big|$<br>$W_{Q,:,1}$<br>$\big|$</td>
+                    <td class="col-vec">$\big|$<br>$\cdots$<br>$\big|$</td>
+                    <td class="col-vec">$\big|$<br>$W_{Q,:,d}$<br>$\big|$</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$d \times d$</div>
+            </div>
+          </div>
+        </div>
+
+        <p>Tokens haven't interacted at all yet. Every token row is simply projected in parallel, reusing the loaded weight matrix $W_Q$ across all $5$ rows at once.</p>
+
+        <h3 id="step-3-causal-attention">Step 3: Causal Self-Attention (Where Prefix Isolation Happens)</h3>
+        <p>Now comes the <strong>only place in the entire Transformer where rows talk to each other</strong>:</p>
+        <div class="spec-math">
+          $$\operatorname{Attention}(Q, K, V) = \operatorname{softmax}\!\left(\frac{QK^T}{\sqrt{d}} + M\right) V.$$
+        </div>
+        <p>First, multiplying $Q \in \mathbb{R}^{5 \times d}$ by $K^T \in \mathbb{R}^{d \times 5}$ produces a $5 \times 5$ pairwise score matrix. We add the <strong>Causal Mask $M$</strong>, which puts $0$ on and below the diagonal and $-\infty$ above the diagonal:</p>
+
+        <div class="matrix-eq-scroll" role="region" aria-label="Causal masked attention score matrix">
+          <div class="matrix-eq">
+            <span class="matrix-op">$\dfrac{QK^T}{\sqrt{d}} + M =$</span>
+            <div class="matrix-box">
+              <div class="matrix-title">Masked Attention Logits ($5 \times 5$)</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr>
+                    <td class="cell-causal-ok">$\frac{q_1 k_1^T}{\sqrt{d}}$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$\frac{q_2 k_1^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_2 k_2^T}{\sqrt{d}}$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$\frac{q_3 k_1^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_3 k_2^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_3 k_3^T}{\sqrt{d}}$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$\frac{q_4 k_1^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_4 k_2^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_4 k_3^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_4 k_4^T}{\sqrt{d}}$</td>
+                    <td class="cell-masked">$-\infty$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$\frac{q_5 k_1^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_5 k_2^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_5 k_3^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_5 k_4^T}{\sqrt{d}}$</td>
+                    <td class="cell-causal-ok">$\frac{q_5 k_5^T}{\sqrt{d}}$</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times 5$</div>
+            </div>
+          </div>
+        </div>
+
+        <p>When we apply $\operatorname{softmax}$ row-by-row, $e^{-\infty} = 0$. This gives our lower-triangular attention weight matrix $A \in \mathbb{R}^{5 \times 5}$, which we multiply by $V \in \mathbb{R}^{5 \times d}$ to get the output hidden states $H \in \mathbb{R}^{5 \times d}$:</p>
+
+        <div class="matrix-eq-scroll" role="region" aria-label="H = A times V matrix multiplication">
+          <div class="matrix-eq">
+            <div class="matrix-box">
+              <div class="matrix-title">$H\ (5 \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $h_1$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_2$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_3$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_4$ &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_5$ &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+
+            <span class="matrix-op">$=$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$A\ (5 \times 5)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr>
+                    <td class="cell-causal-ok">$1.0$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$a_{2,1}$</td>
+                    <td class="cell-causal-ok">$a_{2,2}$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$a_{3,1}$</td>
+                    <td class="cell-causal-ok">$a_{3,2}$</td>
+                    <td class="cell-causal-ok">$a_{3,3}$</td>
+                    <td class="cell-zero">$0$</td>
+                    <td class="cell-zero">$0$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$a_{4,1}$</td>
+                    <td class="cell-causal-ok">$a_{4,2}$</td>
+                    <td class="cell-causal-ok">$a_{4,3}$</td>
+                    <td class="cell-causal-ok">$a_{4,4}$</td>
+                    <td class="cell-zero">$0$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$a_{5,1}$</td>
+                    <td class="cell-causal-ok">$a_{5,2}$</td>
+                    <td class="cell-causal-ok">$a_{5,3}$</td>
+                    <td class="cell-causal-ok">$a_{5,4}$</td>
+                    <td class="cell-causal-ok">$a_{5,5}$</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times 5$</div>
+            </div>
+
+            <span class="matrix-op">$\times$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$V\ (5 \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $v_1$ (<code>"The"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $v_2$ (<code>"cat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $v_3$ (<code>"sat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $v_4$ (<code>"on"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $v_5$ (<code>"the"</code>) &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+          </div>
+        </div>
+
+        <p>Look closely at what each row $h_N$ actually equals when you expand the matrix multiplication:</p>
+        <ul class="row-trace-list">
+          <li><strong>Row 1 ($h_1$):</strong> $1.0 v_1 + 0 v_2 + 0 v_3 + 0 v_4 + 0 v_5 = v_1 \longrightarrow$ Exact same result as if you only fed <code>["The"]</code>.</li>
+          <li><strong>Row 2 ($h_2$):</strong> $a_{2,1} v_1 + a_{2,2} v_2 \longrightarrow$ Exact same result as if you only fed <code>["The", "cat"]</code>.</li>
+          <li><strong>Row 3 ($h_3$):</strong> $a_{3,1} v_1 + a_{3,2} v_2 + a_{3,3} v_3 \longrightarrow$ Exact same result as if you only fed <code>["The", "cat", "sat"]</code>.</li>
+          <li><strong>Row $N$ ($h_N$):</strong> $\sum_{j=1}^{N} a_{N,j} v_j \longrightarrow$ <strong>Mathematically identical to running a separate forward pass on just the first $N$ tokens!</strong></li>
+        </ul>
+
+        <h3 id="step-4-lm-head">Step 4: The Final LM Head (Why You Get $L$ Logit Vectors Out)</h3>
+        <p>After passing $H \in \mathbb{R}^{5 \times d}$ through the feed-forward layers (which also operate independently on each row), we reach the final <strong>Language Modeling Head</strong>, which multiplies $H$ by the unembedding matrix $W_{\text{LM}} \in \mathbb{R}^{d \times V}$ (where $V$ is the vocabulary size, e.g., $50{,}257$):</p>
+        <div class="spec-math">
+          $$\text{Logits } Z = H \times W_{\text{LM}} \implies (5 \times d) \times (d \times V) = (5 \times V).$$
+        </div>
+        <p>Written out as matrices:</p>
+
+        <div class="matrix-eq-scroll" role="region" aria-label="Logits Z = H times W_LM matrix multiplication">
+          <div class="matrix-eq">
+            <div class="matrix-box">
+              <div class="matrix-title">Logits $Z\ (5 \times V)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr>
+                    <td class="cell-causal-ok">$z_{1,1}$</td>
+                    <td class="cell-causal-ok">$z_{1,2}$</td>
+                    <td class="cell-causal-ok">$\cdots$</td>
+                    <td class="cell-causal-ok">$z_{1,V}$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$z_{2,1}$</td>
+                    <td class="cell-causal-ok">$z_{2,2}$</td>
+                    <td class="cell-causal-ok">$\cdots$</td>
+                    <td class="cell-causal-ok">$z_{2,V}$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$z_{3,1}$</td>
+                    <td class="cell-causal-ok">$z_{3,2}$</td>
+                    <td class="cell-causal-ok">$\cdots$</td>
+                    <td class="cell-causal-ok">$z_{3,V}$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$z_{4,1}$</td>
+                    <td class="cell-causal-ok">$z_{4,2}$</td>
+                    <td class="cell-causal-ok">$\cdots$</td>
+                    <td class="cell-causal-ok">$z_{4,V}$</td>
+                  </tr>
+                  <tr>
+                    <td class="cell-causal-ok">$z_{5,1}$</td>
+                    <td class="cell-causal-ok">$z_{5,2}$</td>
+                    <td class="cell-causal-ok">$\cdots$</td>
+                    <td class="cell-causal-ok">$z_{5,V}$</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times V$</div>
+            </div>
+
+            <span class="matrix-op">$=$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$H\ (5 \times d)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr><td class="row-vec">&mdash; $h_1$ (context: <code>"The"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_2$ (context: <code>"The cat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_3$ (context: <code>"The cat sat"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_4$ (context: <code>"The cat sat on"</code>) &mdash;</td></tr>
+                  <tr><td class="row-vec">&mdash; $h_5$ (context: <code>"The cat sat on the"</code>) &mdash;</td></tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$5 \times d$</div>
+            </div>
+
+            <span class="matrix-op">$\times$</span>
+
+            <div class="matrix-box">
+              <div class="matrix-title">$W_{\text{LM}}\ (d \times V)$</div>
+              <div class="matrix-bracket">
+                <table class="matrix-grid">
+                  <tr>
+                    <td class="col-vec">$\big|$<br>$w_1$<br>$\big|$</td>
+                    <td class="col-vec">$\big|$<br>$w_2$<br>$\big|$</td>
+                    <td class="col-vec">$\big|$<br>$\cdots$<br>$\big|$</td>
+                    <td class="col-vec">$\big|$<br>$w_V$<br>$\big|$</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="matrix-dim">$d \times V$</div>
+            </div>
+          </div>
+        </div>
+
+        <p>Now look at the output matrix $Z \in \mathbb{R}^{5 \times V}$:</p>
+        <ul class="row-trace-list">
+          <li><strong>Row 1 ($z_1 \in \mathbb{R}^{1 \times V}$)</strong> is $h_1 W_{\text{LM}}$: the vocabulary logits predicting <strong>Token 2</strong> (given Token 1). $\operatorname{argmax}(z_1) \to \text{"cat"}$.</li>
+          <li><strong>Row 2 ($z_2 \in \mathbb{R}^{1 \times V}$)</strong> is $h_2 W_{\text{LM}}$: the vocabulary logits predicting <strong>Token 3</strong> (given Tokens $1\dots 2$). $\operatorname{argmax}(z_2) \to \text{"sat"}$.</li>
+          <li><strong>Row 3 ($z_3 \in \mathbb{R}^{1 \times V}$)</strong> is $h_3 W_{\text{LM}}$: the vocabulary logits predicting <strong>Token 4</strong> (given Tokens $1\dots 3$). $\operatorname{argmax}(z_3) \to \text{"on"}$.</li>
+          <li><strong>Row 4 ($z_4 \in \mathbb{R}^{1 \times V}$)</strong> is $h_4 W_{\text{LM}}$: the vocabulary logits predicting <strong>Token 5</strong> (given Tokens $1\dots 4$). $\operatorname{argmax}(z_4) \to \text{"the"}$.</li>
+          <li><strong>Row 5 ($z_5 \in \mathbb{R}^{1 \times V}$)</strong> is $h_5 W_{\text{LM}}$: the vocabulary logits predicting <strong>Token 6</strong> (given Tokens $1\dots 5$). $\operatorname{argmax}(z_5) \to \text{"mat"}$.</li>
+        </ul>
+
+        <h3 id="step-5-cached-contrast">Step 5: Contrast &mdash; Why Cached Generation Only Outputs 1 Row</h3>
+        <p>When KV caching is enabled on step 5 of standard single-token generation:</p>
+        <ul>
+          <li>You already computed and saved $h_1, h_2, h_3, h_4$ (and their keys/values $k_{1\dots 4}, v_{1\dots 4}$) in previous steps.</li>
+          <li>So you only pass the 5th row $x_5 \in \mathbb{R}^{1 \times d}$ (<code>["the"]</code>) as input.</li>
+          <li>This computes only the 5th row of Queries $q_5 \in \mathbb{R}^{1 \times d}$, which multiplies against the cached $K^T \in \mathbb{R}^{d \times 5}$ to produce only the 5th row of the attention matrix $A_5 \in \mathbb{R}^{1 \times 5}$, yielding only the 5th hidden state $h_5 \in \mathbb{R}^{1 \times d}$.</li>
+          <li>At the LM head, $(1 \times d) \times (d \times V) = (1 \times V)$&mdash;you get <strong>only Row 5 of the logits ($z_5$)</strong>.</li>
+        </ul>
+        <p>In normal generation, throwing away Rows $1\dots 4$ before the LM head makes sense because you already generated tokens $2\dots 5$. <strong>In Assisted Generation, however, tokens $2\dots 5$ are unverified guesses from a small draft model&mdash;so computing all $5$ rows in parallel lets the big model evaluate every single guess in one shot!</strong></p>
+
+        <!-- INTERACTIVE SIMULATOR -->
+        <div class="matrix-sim" id="matrix-shape-simulator">
+          <div class="matrix-sim-header">
+            <div class="matrix-sim-title">Interactive Matrix &amp; Tensor Shape Visualizer</div>
+            <div class="sim-controls" role="group" aria-label="Select forward pass mode">
+              <button type="button" class="sim-btn" id="sim-mode-full" aria-pressed="true">Uncached / Assisted Verify ($L=5$)</button>
+              <button type="button" class="sim-btn" id="sim-mode-cached" aria-pressed="false">KV-Cached Single-Token ($L=1$)</button>
+            </div>
+          </div>
+
+          <div class="sim-row-bar" id="sim-row-selector" role="group" aria-label="Inspect sequence row N">
+            <span>Trace Row $N$:</span>
+            <button type="button" class="sim-btn" data-row="0" aria-pressed="false">Row 1 ("The")</button>
+            <button type="button" class="sim-btn" data-row="1" aria-pressed="false">Row 2 ("cat")</button>
+            <button type="button" class="sim-btn" data-row="2" aria-pressed="true">Row 3 ("sat")</button>
+            <button type="button" class="sim-btn" data-row="3" aria-pressed="false">Row 4 ("on")</button>
+            <button type="button" class="sim-btn" data-row="4" aria-pressed="false">Row 5 ("the")</button>
+          </div>
+
+          <div class="sim-stage-grid" id="sim-stages"></div>
+          <div class="sim-status-banner" id="sim-status" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <h3 id="from-oracle-to-assistant">From a Latency-Free Oracle to a Small Assistant Model</h3>
+
+      <p>Let's consider for a second that you have access to a magical latency-free oracle model that generates the same sequence as your model, for any given input. For argument's sake, it can't be used directly; it is limited to being an assistant to your generation procedure. Using the forward-confirmation property proved above, you could use this assistant model to get candidate output tokens followed by a single forward pass with your large model to confirm that they are indeed correct. In this utopian scenario, the latency of text generation would be reduced from $\mathcal{O}(n)$ to $\mathcal{O}(1)$, with $n$ being the number of generated tokens. For long generations, we're talking about several orders of magnitude.</p>
+
+      <p>Walking a step towards reality, let's assume the assistant model has lost its oracle properties. Now it's a latency-free model that gets some of the candidate tokens wrong, according to your model. Due to the causal, left-to-right nature of the task, as soon as the assistant gets a token wrong at position $k$, all subsequent candidates ($>k$) must be invalidated because their context included the rejected token. However, that does not prevent you from querying the assistant again, after correcting the wrong token using your large model's Row-$k$ logits, and repeating this process iteratively. Even if the assistant fails a few tokens, text generation still achieves a dramatic reduction in total forward passes.</p>
+
+      <p>Obviously, there are no latency-free assistant models. Nevertheless, it is relatively easy to find a model that approximates another model's text generation outputs&mdash;smaller versions of the same model family trained on the same data distribution often fit this property naturally (e.g., OPT-125M assisting OPT-66B, or Pythia-160M assisting Pythia-1.4B/12B). Moreover, when the difference in model sizes is an order of magnitude or more, the cost of running the smaller assistant becomes an afterthought compared to the bandwidth saved by skipping multiple large-model forward passes. You now understand the core of <em>assisted generation</em>.</p>
+
+      <h2 id="greedy-assisted-generation">4. Greedy Decoding with Assisted Generation</h2>
+
+      <p>Assisted generation is a balancing act. You want the assistant to quickly generate a candidate sequence while being as accurate as possible. If the assistant has poor quality, you pay the cost of running the assistant model with little to no benefit. On the other hand, optimizing the quality of the candidate sequences by picking a large assistant results in a slow drafter and a net slowdown. While we cannot automate the selection of the assistant model for every task, Hugging Face Transformers enforces one hard requirement and one dynamic heuristic to keep assistant overhead in check:</p>
+
+      <ol>
+        <li><strong>The requirement (Shared Tokenizer):</strong> The assistant <em>must</em> share the exact same tokenizer as your target model. Without an identical vocabulary and token-to-ID mapping, expensive string decoding and re-encoding steps would have to run on the CPU at every speculation step, triggering device-to-host synchronization and wiping out the latency gains.</li>
+        <li><strong>The heuristic (Adaptive Candidate Length):</strong> Running text generation inside text generation ("Inception-style") requires one assistant forward pass per candidate token. Since some spans of output are much easier to predict than others (e.g., boilerplate code or copied entities vs. open-ended reasoning), Hugging Face tracks how many candidate tokens matched in the current step to dynamically adjust the speculation window $K$ for the next step.</li>
+      </ol>
+
+      <p>Wrapping it all up, here is the original 6-step Assisted Generation loop (<a href="https://github.com/huggingface/transformers/blob/849367ccf741d8c58aa88ccfe1d52d8636eaf2b7/src/transformers/generation/utils.py#L4064" target="_blank" rel="noopener">source code in <code>transformers</code></a>):</p>
+
+      <ol>
+        <li>Use greedy decoding to generate a certain number of candidate tokens with the assistant model, producing <code>candidates</code>. The number of produced candidate tokens is initialized to <code>5</code> the first time assisted generation is called.</li>
+        <li>Using the target model, run a single forward pass with <code>candidates</code>, obtaining next-token <code>logits</code> for every candidate prefix.</li>
+        <li>Use the token selection method (<code>.argmax()</code> for greedy search or <code>.multinomial()</code> / rejection sampling for sampling) to get the <code>next_tokens</code> from <code>logits</code>.</li>
+        <li>Compare <code>next_tokens</code> to <code>candidates</code> and count the number of matching tokens from left to right: after the first mismatch, all subsequent candidates are invalidated.</li>
+        <li>Use the number of matches to slice the sequence and discard KV-cache entries related to unconfirmed candidate tokens. In <code>next_tokens</code>, keep all matching tokens <strong>plus the first divergent token</strong> (which the target model just generated from a valid confirmed prefix!).</li>
+        <li><strong>Adjust the number of candidate tokens</strong> to be produced in the next iteration: the heuristic <strong>increases it by <code>2</code> if ALL candidate tokens matched</strong>, and <strong>decreases it by <code>1</code> otherwise</strong> (bounded below by $1$).</li>
+      </ol>
+
+      <figure class="spec-figure">
+        <video autoplay loop muted playsinline controls src="figures/hf-gif-4-assisted-generation.mp4"></video>
+        <figcaption><strong>Animation 4.</strong> The complete Assisted Generation loop in action: the assistant drafts candidate tokens, the target model verifies them in one forward pass, keeps the matching prefix plus one corrected token, rolls back unconfirmed KV cache entries, and adapts the next draft length.</figcaption>
+      </figure>
+
+      <p>In Hugging Face <code>transformers</code>, using assisted generation requires only passing the assistant model via the <code>assistant_model</code> keyword argument in <code>model.generate()</code>:</p>
+
+      <pre><code class="language-python">from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+prompt = "Alice and Bob"
+checkpoint = "EleutherAI/pythia-1.4b-deduped"
+assistant_checkpoint = "EleutherAI/pythia-160m-deduped"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
+assistant_model = AutoModelForCausalLM.from_pretrained(assistant_checkpoint).to(device)
+outputs = model.generate(**inputs, assistant_model=assistant_model)
+print(tokenizer.batch_decode(outputs, skip_special_tokens=True))
+# ['Alice and Bob are sitting in a bar. Alice is drinking a beer and Bob is drinking a']</code></pre>
+
+      <h3 id="benchmark-takeaways">Greedy Decoding Benchmark Takeaways</h3>
+
+      <p>From extensive latency benchmarks across OPT (1.3B to 66B), Whisper (Large-v2 with Tiny assistant), LLaMA, and T5 models at batch size $1$, Assisted Generation demonstrates four clear empirical rules:</p>
+
+      <div class="spec-grid">
+        <div class="spec-card">
+          <h4>1. Assistant Size Ratio ($\ge 10\times$)</h4>
+          <p>Requires access to an assistant model that is at least <strong>an order of magnitude smaller</strong> than your target model (the larger the parameter gap, the lower the relative drafting overhead).</p>
+        </div>
+        <div class="spec-card">
+          <h4>2. GPU Memory Speedups ($2\times$&ndash;$3\times$)</h4>
+          <p>Delivers up to <strong>$3\times$ speedup in the presence of INT8 quantization</strong> and up to <strong>$2\times$ in FP16/BF16</strong> when both models fit in GPU VRAM.</p>
+        </div>
+        <div class="spec-card">
+          <h4>3. Offloading Speedups (Up to $10\times$)</h4>
+          <p>When running large models that do not fit in GPU VRAM and rely on CPU/RAM weight offloading, skipping target forward passes yields up to <strong>$10\times$ wall-clock speedups</strong>.</p>
+        </div>
+        <div class="spec-card">
+          <h4>4. Input-Grounded Tasks Shine</h4>
+          <p>Achieves the highest acceptance rates on <strong>input-grounded tasks</strong> such as Automatic Speech Recognition (Whisper) and summarization, where token trajectories are strongly constrained by the input.</p>
+        </div>
+      </div>
+
+      <h2 id="sampling-with-assisted-generation">5. Sampling with Assisted Generation</h2>
+
+      <p>Greedy decoding is ideal for input-grounded tasks (automatic speech recognition, translation, summarization) or factual knowledge-seeking. Open-ended tasks requiring creativity, such as conversational chatbots, typically use multinomial sampling instead. Assisted generation naturally supports multinomial sampling (via speculative rejection sampling) while preserving the exact target distribution.</p>
+
+      <p>However, drawing stochastic samples from a probability distribution causes a greedy assistant to disagree with the sampled trajectory more often, reducing the average number of accepted tokens per pass. You can control how sharp the probability distribution is via the <strong>temperature ($\tau$)</strong> coefficient:</p>
+      <ul>
+        <li><strong>Low temperature ($\tau \to 0$):</strong> The distribution concentrates sharply on the mode, approximating greedy decoding and retaining the full latency benefits of assisted generation.</li>
+        <li><strong>High temperature ($\tau \gg 1$):</strong> The distribution flattens toward uniform, making next-token draws chaotic and reducing the assistant's match rate.</li>
+      </ul>
+
+      <figure class="spec-figure">
+        <a href="figures/hf-temperature.png" target="_blank" rel="noopener">
+          <img src="figures/hf-temperature.png" width="1200" height="700" loading="lazy" alt="Plot of Assisted Generation latency vs sampling temperature showing latency increasing smoothly as temperature rises from 0 to 1, while remaining significantly faster than baseline generation.">
+        </a>
+        <figcaption><strong>Figure 1.</strong> Impact of sampling temperature on Assisted Generation latency: lower temperatures retain nearly the full greedy speedup, and even at $\tau = 1.0$ assisted generation remains substantially faster than baseline autoregressive sampling.</figcaption>
+      </figure>
+
+      <h2 id="future-directions">6. Related Work &amp; Citation</h2>
+
+      <p>Assisted generation highlights a foundational shift in how we think about LLM inference: because autoregressive generation is <strong>memory-bandwidth bound rather than compute bound</strong>, we do not need to spend a full homogeneous forward pass of a massive model to discover every single token. Large subsections of generated text can be drafted by models that are a small fraction of the size and verified in parallel through the causal attention matrix.</p>
+
+      <h3 id="related-work">Related Foundational Papers</h3>
+      <ul>
+        <li><a href="https://proceedings.neurips.cc/paper/2018/file/c4127b9194fe8562c64dc0f5bf2c93bc-Paper.pdf" target="_blank" rel="noopener"><strong>Blockwise Parallel Decoding for Deep Autoregressive Models</strong></a> (Stern et al., Google Brain, NeurIPS 2018) &mdash; Early exploration of parallel multi-token proposal and single-pass verification.</li>
+        <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener"><strong>Fast Inference from Transformers via Speculative Decoding</strong></a> (Leviathan et al., Google Research, ICML 2023) &amp; <a href="https://arxiv.org/abs/2302.01318" target="_blank" rel="noopener"><strong>Accelerating Large Language Model Decoding with Speculative Sampling</strong></a> (Chen et al., DeepMind, 2023) &mdash; Introduced lossless modified rejection sampling for stochastic decoding.</li>
+        <li><a href="lossless-rejection-sampling-and-speedup-math.html"><strong>Next Chapter: Lossless Modified Rejection Sampling, Total Variation Distance &amp; Expected Speedup Analysis</strong></a> &mdash; Exact proof of the residual distribution and closed-form speedup equations.</li>
+      </ul>
+
+      <h3 id="citation">Citation</h3>
+      <pre><code class="language-bibtex">@misc{gante2023assisted,
+  author    = {Joao Gante},
+  title     = {Assisted Generation: a new direction toward low-latency text generation},
+  year      = {2023},
+  url       = {https://huggingface.co/blog/assisted-generation},
+  doi       = {10.57967/hf/0638},
+  publisher = {Hugging Face Blog}
+}</code></pre>
+
+      <nav class="post-nav" aria-label="Post navigation">
+        <a href="introduction-to-speculative-decoding.html" class="post-nav-link prev">
+          <span class="post-nav-label">&larr; Previous Chapter</span>
+          <span class="post-nav-title">1. An Introduction to Speculative Decoding: Draft&ndash;Target, EAGLE-3 &amp; MTP</span>
+        </a>
+        <a href="lossless-rejection-sampling-and-speedup-math.html" class="post-nav-link next">
+          <span class="post-nav-label">Next Chapter &rarr;</span>
+          <span class="post-nav-title">3. Lossless Modified Rejection Sampling, TV Distance &amp; Expected Speedup</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script>
+    (function initMatrixSimulator() {
+      var tokens = ['"The"', '"cat"', '"sat"', '"on"', '"the"'];
+      var nextPreds = ['"cat"', '"sat"', '"on"', '"the"', '"mat"'];
+      var mode = 'full'; // 'full' (L=5) or 'cached' (L=1)
+      var selectedRow = 2; // 0-indexed (Row 3 by default)
+
+      var btnFull = document.getElementById('sim-mode-full');
+      var btnCached = document.getElementById('sim-mode-cached');
+      var rowBar = document.getElementById('sim-row-selector');
+      var stagesEl = document.getElementById('sim-stages');
+      var statusEl = document.getElementById('sim-status');
+      if (!btnFull || !stagesEl) return;
+
+      var rowButtons = Array.prototype.slice.call(rowBar.querySelectorAll('button[data-row]'));
+
+      function render() {
+        var activeRow = mode === 'cached' ? 4 : selectedRow;
+        btnFull.setAttribute('aria-pressed', mode === 'full' ? 'true' : 'false');
+        btnCached.setAttribute('aria-pressed', mode === 'cached' ? 'true' : 'false');
+
+        rowButtons.forEach(function(btn, idx) {
+          btn.disabled = (mode === 'cached' && idx < 4);
+          btn.style.opacity = btn.disabled ? '0.45' : '1';
+          btn.setAttribute('aria-pressed', idx === activeRow ? 'true' : 'false');
+        });
+
+        var shapePrefix = mode === 'full' ? '5' : '1';
+
+        // Stage 1: Input X & Q
+        var html1 = '<div class="sim-stage-card">' +
+          '<h5>1&ndash;2. Input $X$ &amp; Query $Q = X W_Q$</h5>' +
+          '<div class="sim-stage-shape">Shape: $(' + shapePrefix + ' \\times d)$</div>' +
+          '<table class="sim-mini-table">';
+        tokens.forEach(function(tok, r) {
+          var cls = r === activeRow ? 'sim-row-active' : (mode === 'cached' ? 'sim-row-cached' : '');
+          var label = mode === 'cached' && r < 4
+            ? 'Row ' + (r + 1) + ': skipped (cached)'
+            : 'Row ' + (r + 1) + ': $q_' + (r + 1) + '$ (' + tok + ')';
+          html1 += '<tr class="' + cls + '" data-click-row="' + r + '"><td>' + label + '</td></tr>';
+        });
+        html1 += '</table></div>';
+
+        // Stage 2: Causal Attention A
+        var html2 = '<div class="sim-stage-card">' +
+          '<h5>3. Causal Attention $A = \\text{softmax}(QK^T/\\sqrt{d}+M)$</h5>' +
+          '<div class="sim-stage-shape">Shape: $(' + shapePrefix + ' \\times 5)$</div>' +
+          '<table class="sim-mini-table">';
+        tokens.forEach(function(_, r) {
+          var cls = r === activeRow ? 'sim-row-active' : (mode === 'cached' ? 'sim-row-cached' : '');
+          html2 += '<tr class="' + cls + '" data-click-row="' + r + '">';
+          for (var c = 0; c < 5; c++) {
+            if (c <= r) {
+              html2 += '<td>$a_{' + (r + 1) + ',' + (c + 1) + '}$</td>';
+            } else {
+              html2 += '<td class="sim-cell-masked">$0$</td>';
+            }
+          }
+          html2 += '</tr>';
+        });
+        html2 += '</table></div>';
+
+        // Stage 3: Hidden State H = A V
+        var html3 = '<div class="sim-stage-card">' +
+          '<h5>3b. Hidden State $H = A \\times V$</h5>' +
+          '<div class="sim-stage-shape">Shape: $(' + shapePrefix + ' \\times d)$</div>' +
+          '<table class="sim-mini-table">';
+        tokens.forEach(function(_, r) {
+          var cls = r === activeRow ? 'sim-row-active' : (mode === 'cached' ? 'sim-row-cached' : '');
+          var sumTerms = [];
+          for (var j = 1; j <= r + 1; j++) sumTerms.push('a_{' + (r + 1) + ',' + j + '}v_' + j);
+          var text = mode === 'cached' && r < 4
+            ? '$h_' + (r + 1) + '$ (not recomputed)'
+            : '$h_' + (r + 1) + ' = ' + sumTerms.join(' + ') + '$';
+          html3 += '<tr class="' + cls + '" data-click-row="' + r + '"><td>' + text + '</td></tr>';
+        });
+        html3 += '</table></div>';
+
+        // Stage 4: Logits Z = H W_LM
+        var html4 = '<div class="sim-stage-card">' +
+          '<h5>4. LM Head Logits $Z = H W_{\\text{LM}}$</h5>' +
+          '<div class="sim-stage-shape">Shape: $(' + shapePrefix + ' \\times V)$</div>' +
+          '<table class="sim-mini-table">';
+        tokens.forEach(function(_, r) {
+          var cls = r === activeRow ? 'sim-row-active' : (mode === 'cached' ? 'sim-row-cached' : '');
+          var text = mode === 'cached' && r < 4
+            ? '$z_' + (r + 1) + '$ (omitted)'
+            : '$z_' + (r + 1) + '$ &rarr; argmax = <code>' + nextPreds[r] + '</code>';
+          html4 += '<tr class="' + cls + '" data-click-row="' + r + '"><td>' + text + '</td></tr>';
+        });
+        html4 += '</table></div>';
+
+        stagesEl.innerHTML = html1 + html2 + html3 + html4;
+
+        Array.prototype.forEach.call(stagesEl.querySelectorAll('tr[data-click-row]'), function(tr) {
+          tr.addEventListener('click', function() {
+            var r = parseInt(tr.getAttribute('data-click-row'), 10);
+            if (mode === 'cached' && r < 4) {
+              mode = 'full';
+            }
+            selectedRow = r;
+            render();
+          });
+        });
+
+        var prefixTokens = tokens.slice(0, activeRow + 1).join(', ');
+        var maskedNote = activeRow < 4
+          ? ' because columns $' + (activeRow + 2) + '\\dots 5$ are masked to $-\\infty \\to 0$'
+          : ' (all 5 columns are causal predecessors)';
+        if (mode === 'full') {
+          statusEl.innerHTML =
+            '<strong>Uncached / Assisted Verification Mode ($L = 5$) &middot; Tracing Row ' + (activeRow + 1) + ':</strong> ' +
+            'Row ' + (activeRow + 1) + ' inputs token <code>' + tokens[activeRow] + '</code>, attends <em>only</em> to columns $1\\dots' + (activeRow + 1) + '$ (tokens <code>[' + prefixTokens + ']</code>)' + maskedNote + '. ' +
+            'Its hidden state $h_' + (activeRow + 1) + ' = \\sum_{j=1}^{' + (activeRow + 1) + '} a_{' + (activeRow + 1) + ',j} v_j$ is multiplied by $W_{\\text{LM}}$ to produce logit row $z_' + (activeRow + 1) + ' \\in \\mathbb{R}^{1 \\times V}$, which verifies whether Token ' + (activeRow + 2) + ' should be <code>' + nextPreds[activeRow] + '</code>&mdash;simultaneously with all other rows!';
+        } else {
+          statusEl.innerHTML =
+            '<strong>KV-Cached Single-Token Mode ($L = 1$) &middot; Only Row 5 Computed:</strong> ' +
+            'Because keys and values $k_{1\\dots 4}, v_{1\\dots 4}$ are cached from prior steps, only the 5th token <code>' + tokens[4] + '</code> ($x_5 \\in \\mathbb{R}^{1 \\times d}$) enters the network. ' +
+            'The LM head multiplies $(1 \\times d) \\times (d \\times V) = (1 \\times V)$ and outputs only $z_5 \\to$ <code>' + nextPreds[4] + '</code>. ' +
+            'Click any earlier row or switch to <strong>Uncached / Assisted Verify ($L = 5$)</strong> to see how Assisted Generation evaluates all 5 candidate positions in one pass.';
+        }
+
+        if (window.renderMathInElement) {
+          window.renderMathInElement(stagesEl, {
+            delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}],
+            throwOnError: false
+          });
+          window.renderMathInElement(statusEl, {
+            delimiters: [{left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false}],
+            throwOnError: false
+          });
+        }
+      }
+
+      btnFull.addEventListener('click', function() { mode = 'full'; render(); });
+      btnCached.addEventListener('click', function() { mode = 'cached'; render(); });
+      rowButtons.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var r = parseInt(btn.getAttribute('data-row'), 10);
+          if (mode === 'cached' && r < 4) mode = 'full';
+          selectedRow = r;
+          render();
+        });
+      });
+
+      window.addEventListener('load', render);
+      render();
+    })();
+  </script>
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Zero-parameter, training-free speculative decoding: formulating autoregressive greedy decoding as a triangular nonlinear system solved via Jacobi fixed-point iteration, Lookahead Decoding 2D n-gram windows, and Prompt Lookup Decoding (PLD / REST).">
+  <title>3. Model-Free Speculation: Jacobi Fixed-Point Iteration, Lookahead Decoding &amp; Prompt Lookup (PLD) | Neel Mishra</title>
+  <link rel="canonical" href="https://neelmishra.github.io/blog/speculative-decoding/single-model-and-feature-drafting/lookahead-jacobi-and-ngram-prompt-lookup.html">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../../styles.css">
+  <link rel="stylesheet" href="../../../blog.css">
+  <link rel="stylesheet" href="../speculative-decoding.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\[',right:'\\]',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]})"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../../../index.html">Neel Mishra</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="../../../index.html">Home</a>
+      <a href="../../../experience.html">Experience</a>
+      <a href="../../../projects.html">Projects</a>
+      <a href="../../../blog.html" class="active">Blog</a>
+      <a href="../../../index.html#contact">Contact</a>
+    </nav>
+  </header>
+
+  <div class="blog-post-layout" data-mobile-sidebar>
+    <aside class="blog-sidebar">
+      <nav class="blog-nav" aria-label="Blog explorer"></nav>
+      <div class="toc-section">
+        <h4>Table of Contents</h4>
+        <ul></ul>
+      </div>
+    </aside>
+
+    <article class="blog-post-content reveal spec-article">
+      <a class="back-to-blog" href="../../../blog.html#speculative-decoding">&#8592; Speculative Decoding</a>
+      <div class="post-series-nav">
+        <a href="../../../blog.html#speculative-decoding">Speculative Decoding</a>
+        <span>&middot;</span>
+        <a href="../../../blog.html#folder-speculative-decoding--single-model-and-feature-drafting">Single-Model, Multi-Head &amp; Feature Drafting</a>
+        <span>&middot;</span>
+        <span>Chapter 3</span>
+      </div>
+
+      <h1>3. Model-Free Speculation: Jacobi Fixed-Point Iteration, Lookahead Decoding &amp; Prompt Lookup (PLD)</h1>
+      <p class="post-meta">Single-Model, Multi-Head &amp; Feature Drafting &middot; 13 min read &middot; Training-Free Methods</p>
+
+      <p>
+        What if you need to accelerate a newly released foundation model immediately in production, without a compatible small draft model and without spending GPU hours training Medusa or EAGLE heads? <strong>Model-free (training-free) speculative decoding</strong> achieves $1.5\times\text{--}3.5\times$ latency reductions using <em>zero additional weights</em> and <em>zero fine-tuning</em>.
+      </p>
+      <p>
+        In this chapter we derive three foundational model-free paradigms: (1) <strong>Jacobi Fixed-Point Decoding</strong> (<a href="https://arxiv.org/abs/2305.10427" target="_blank" rel="noopener">Santilli et al., ACL 2023</a>), which casts autoregressive greedy decoding as a lower-triangular system of nonlinear equations; (2) <strong>Lookahead Decoding</strong> (<a href="https://arxiv.org/abs/2402.02057" target="_blank" rel="noopener">Fu et al., ICML 2024</a>), which harvests off-diagonal Jacobi trajectories into an $N$-gram pool verified in the same forward pass; and (3) <strong>Prompt Lookup Decoding (PLD) &amp; Retrieval-Based Speculation (REST)</strong>, which mine candidate spans directly from the input prompt or a suffix-array datastore.
+      </p>
+
+      <figure class="spec-figure">
+        <img src="assets/lookahead-jacobi-and-ngram-prompt-lookup.svg" width="760" height="300" alt="Three-panel diagram comparing Jacobi Fixed-Point System, Lookahead Decoding 2D Window + Verification Branch, and Prompt Lookup Decoding (PLD / REST).">
+        <figcaption><strong>Model-Free Paradigms.</strong> Left: Jacobi iteration updates $W$ future positions in parallel until fixed-point convergence. Center: Lookahead Decoding runs a $W \times (N-1)$ 2D Jacobi lookahead grid alongside a $G \times (N-1)$ $N$-gram verification branch in one pass. Right: Prompt Lookup Decoding (PLD) matches the trailing suffix against the input prompt in $\mathcal{O}(1)$ CPU time.</figcaption>
+      </figure>
+
+      <h2 id="jacobi-decoding">1. Autoregressive Greedy Decoding as a Triangular Nonlinear System</h2>
+      <p>
+        Given a prompt $x = (x_1, \dots, x_t)$, deterministic greedy decoding of the next $W$ tokens $Y^\star = (y_1^\star, y_2^\star, \dots, y_W^\star)$ is defined sequentially by:
+      </p>
+      <div class="spec-math">
+        $$y_i^\star = f_i(y_1^\star, \dots, y_{i-1}^\star) \triangleq \arg\max_{v \in V} P_{\text{target}}\!\big(v \mid x, y_1^\star, \dots, y_{i-1}^\star\big), \qquad i = 1, \dots, W.$$
+      </div>
+      <p>
+        Notice that this is a <strong>strictly lower-triangular system of $W$ nonlinear equations</strong> in $W$ unknowns $(y_1, \dots, y_W)$:
+      </p>
+      <div class="spec-math">
+        $$\begin{cases}
+        y_1 - f_1(\varnothing) = 0, \\
+        y_2 - f_2(y_1) = 0, \\
+        y_3 - f_3(y_1, y_2) = 0, \\
+        \;\;\vdots \\
+        y_W - f_W(y_1, \dots, y_{W-1}) = 0.
+        \end{cases}$$
+      </div>
+      <p>
+        Standard autoregressive decoding solves this system via <strong>forward substitution (Gauss&ndash;Seidel)</strong> in exactly $W$ sequential passes. Instead, <strong>Jacobi iteration</strong> initializes an arbitrary guess vector $Y^{(0)} = (y_1^{(0)}, \dots, y_W^{(0)})$ (for instance, random tokens or repeated tokens from the prompt) and updates all $W$ positions <em>in parallel</em> inside a single causal Transformer forward pass:
+      </p>
+      <div class="spec-math">
+        $$y_i^{(k+1)} = \arg\max_{v \in V} P_{\text{target}}\!\big(v \mid x, y_1^{(k)}, \dots, y_{i-1}^{(k)}\big) \qquad \text{for all } i = 1, \dots, W \text{ simultaneously}.$$
+      </div>
+      <p>
+        Because $y_1^{(1)} = f_1(\varnothing) = y_1^\star$ is guaranteed to be exact after step $k=1$, and by induction $y_{1:k}^{(k)} = y_{1:k}^\star$ after step $k$, Jacobi iteration <strong>never takes more than $W$ passes</strong> to converge to the exact greedy sequence $Y^\star$. Better yet, whenever $y_i^{(k)}$ happens to match $y_i^\star$ ahead of schedule (e.g., predictable function words or idioms like <code>"of the"</code>), position $i+1$ receives the true context a step early and locks into its fixed point on the very next pass!
+      </p>
+
+      <h2 id="lookahead-decoding">2. Lookahead Decoding: Turning Jacobi Trajectories into an $N$-Gram Pool</h2>
+      <p>
+        Pure 1D Jacobi decoding only achieves modest speedups ($\sim 1.15\times$) on natural language because random initial guesses $y_i^{(0)}$ rarely match $y_i^\star$ before the wavefront reaches position $i$, and every un-converged off-diagonal prediction $y_i^{(k)}$ is immediately overwritten and discarded.
+      </p>
+      <p>
+        <strong>Lookahead Decoding</strong> (<a href="https://arxiv.org/abs/2402.02057" target="_blank" rel="noopener">Fu et al., ICML 2024</a>) realizes that even when an off-diagonal Jacobi token $y_i^{(k)}$ is conditioned on an unverified prefix, the multi-step trajectory $\big(y_i^{(k-N+2)}, \dots, y_{i+N-2}^{(k)}\big)$ forms a <strong>valid conditional $N$-gram generated by the target model itself</strong>! Lookahead Decoding captures and reuses these trajectories by splitting each target forward pass into two parallel branches sharing a single custom attention mask:
+      </p>
+      <ol>
+        <li><strong>The 2D Lookahead Branch ($W \times (N-1)$ tokens):</strong> Maintains a 2D grid of width $W$ (lookahead window size, e.g., $W=5$) and depth $N-1$ ($N$-gram size minus $1$, e.g., $N=5 \implies N-1=4$). At each step, row $d \in \{1, \dots, N-1\}$ takes the outputs from row $d-1$ of the previous step, advancing $W$ parallel $N$-gram trajectories by one token and inserting all $W$ newly completed $N$-grams into a hash table $\text{Pool}[g_1]$ keyed by their first token $g_1$.</li>
+        <li><strong>The Verification Branch ($G \times (N-1)$ tokens):</strong> Queries $\text{Pool}[x_t]$ using the last accepted token $x_t$ to retrieve up to $G$ cached $N$-grams starting with $x_t$. All $G$ candidate continuations of length $N-1$ are appended to the input and verified in parallel via tree/block-diagonal attention in the <em>exact same forward pass</em> as the Lookahead Branch.</li>
+      </ol>
+
+      <div class="spec-callout">
+        <strong>Total Tokens per Forward Pass:</strong> One Lookahead Decoding step appends $W(N-2) + (N-1) \approx W(N-1)$ lookahead tokens plus $G(N-1)$ verification tokens. For typical settings $(W=5, N=5, G=5)$, this adds $5(4) + 5(4) = 40$ parallel tokens to the target forward pass&mdash;well inside the GPU's idle arithmetic budget at batch size $1$.
+      </div>
+
+      <h2 id="prompt-lookup-decoding">3. Prompt Lookup Decoding (PLD) &amp; Retrieval-Based Speculation (REST)</h2>
+      <p>
+        In many enterprise LLM workloads&mdash;such as <strong>RAG question answering, document summarization, data extraction, and code refactoring ( Cursor / Copilot edits )</strong>&mdash;a large fraction of output tokens are copied or lightly adapted spans from the input prompt $x_{1:t}$.
+      </p>
+      <p>
+        <strong>Prompt Lookup Decoding (PLD; Saxena, 2023)</strong> replaces the draft model with a simple string/token suffix matcher over the current context $x_{1:t}$:
+      </p>
+      <ol>
+        <li>Take the last $n$ generated tokens $s = x_{t-n+1 : t}$ (trying $n = 3$ down to $n = 1$).</li>
+        <li>Scan the prompt and previously generated text $x_{1 : t-1}$ for the most recent occurrence of suffix $s$ at index $j$ (so $x_{j-n+1 : j} = s$).</li>
+        <li>Propose the $\gamma$ tokens immediately following $j$ in the prompt, $\hat x_{t+1 : t+\gamma} = x_{j+1 : j+\gamma}$, and verify them in one target forward pass!</li>
+      </ol>
+      <p>
+        <strong>REST (Retrieval-Based Speculative Decoding; He et al., NAACL 2024)</strong> generalizes PLD beyond the current prompt by indexing a precomputed code or text corpus (e.g., The Stack or Wikipedia) into a fast <strong>Suffix Array / Suffix Automaton</strong> in CPU RAM, retrieving top-$k$ matching continuations in $< 0.5\text{ ms}$ and verifying them with tree attention.
+      </p>
+
+      <h2 id="worked-trace">4. Worked Step-by-Step Trace: Lookahead $(W=3, N=3)$ &amp; PLD</h2>
+      <p>
+        Suppose a code-editing prompt contains <code>"def compute_norm(vec): return torch.linalg.norm(vec)"</code> and the model has just generated <code>"out = compute_"</code>. Compare how PLD and Lookahead Decoding draft the continuation:
+      </p>
+
+      <div class="spec-table-wrap">
+        <table class="spec-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Trigger / Suffix Match</th>
+              <th>Proposed Draft Tokens ($\gamma = 4$)</th>
+              <th>Extra GPU VRAM</th>
+              <th>Accepted Tokens in 1 Target Pass</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Prompt Lookup (PLD)</strong></td>
+              <td>Matches suffix <code>"compute_"</code> at prompt token index $2$</td>
+              <td><code>["norm", "(", "vec", ")"]</code> (copied from prompt indices $3\dots 6$)</td>
+              <td>$0\text{ MB}$</td>
+              <td>All $4$ accepted + $1$ bonus token $=$ <strong>$5$ tokens</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Lookahead ($W=3, N=3$)</strong></td>
+              <td>Queries $N$-gram pool for key <code>"compute_"</code> populated during prior Jacobi steps</td>
+              <td>Verifies cached 3-gram <code>["compute_", "norm", "("]</code> while advancing $3\times 2$ lookahead grid</td>
+              <td>$< 5\text{ MB}$ ($N$-gram dict)</td>
+              <td>$2$ verified + $1$ bonus token $=$ <strong>$3$ tokens</strong></td>
+            </tr>
+            <tr>
+              <td><strong>1D Jacobi Decoding</strong></td>
+              <td>Initializes window with <code>["(", "x", ")"]</code></td>
+              <td>Step 1 resolves <code>"norm"</code>; Step 2 resolves <code>"("</code></td>
+              <td>$0\text{ MB}$</td>
+              <td>$1\text{--}2$ tokens per pass</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="python-implementation">5. Reference Python Implementation: Prompt Lookup Decoding &amp; Lookahead $N$-Gram Pool</h2>
+      <pre><code class="language-python">from collections import defaultdict
+from typing import Sequence
+
+def prompt_lookup_draft(
+    token_ids: Sequence[int],
+    max_ngram_size: int = 3,
+    num_pred_tokens: int = 5,
+) -> list[int]:
+    """
+    Prompt Lookup Decoding (PLD): searches backwards through token_ids[:-1]
+    for the longest matching trailing n-gram (n = max_ngram_size down to 1)
+    and returns the following `num_pred_tokens` tokens as the speculative draft.
+    """
+    n_total = len(token_ids)
+    for n in range(min(max_ngram_size, n_total - 1), 0, -1):
+        suffix = list(token_ids[n_total - n :])
+        # Search from most recent to oldest in the prefix
+        for end_idx in range(n_total - 1, n - 1, -1):
+            if list(token_ids[end_idx - n : end_idx]) == suffix:
+                start = end_idx
+                stop = min(end_idx + num_pred_tokens, n_total - 1)
+                if stop &gt; start:
+                    return list(token_ids[start:stop])
+    return []
+
+
+class LookaheadNGramPool:
+    """
+    Stores harvested N-grams from the 2D Jacobi lookahead window keyed by their first token.
+    """
+    def __init__(self, n_gram_size: int = 4, max_candidates_per_key: int = 5):
+        self.N = n_gram_size
+        self.G = max_candidates_per_key
+        self.pool: dict[int, list[tuple[int, ...]]] = defaultdict(list)
+
+    def update_from_jacobi_grid(self, rows: list[list[int]]) -> None:
+        """
+        rows: list of (N) rows, each of width W, representing the 2D Jacobi trajectory.
+        Column w across rows 0..N-1 forms a valid target-generated N-gram.
+        """
+        W = len(rows[0])
+        for w in range(W):
+            ngram = tuple(rows[d][w] for d in range(self.N))
+            first_tok, continuation = ngram[0], ngram[1:]
+            bucket = self.pool[first_tok]
+            if continuation not in bucket:
+                if len(bucket) &gt;= self.G:
+                    bucket.pop(0)
+                bucket.append(continuation)
+
+    def get_verification_branches(self, last_accepted_token: int) -> list[tuple[int, ...]]:
+        return list(self.pool.get(last_accepted_token, []))
+
+
+if __name__ == "__main__":
+    # 1. Test Prompt Lookup Decoding (PLD)
+    vocab = ["def", "compute_", "norm", "(", "vec", "):", "return", "out", "=", "compute_"]
+    tok_to_id = {w: i for i, w in enumerate(dict.fromkeys(vocab))}
+    id_to_tok = {i: w for w, i in tok_to_id.items()}
+    seq_ids = [tok_to_id[w] for w in vocab]
+
+    draft_ids = prompt_lookup_draft(seq_ids, max_ngram_size=3, num_pred_tokens=4)
+    print("PLD Drafted Tokens:", [id_to_tok[i] for i in draft_ids])
+
+    # 2. Test Lookahead N-Gram Pool harvesting
+    pool = LookaheadNGramPool(n_gram_size=3, max_candidates_per_key=4)
+    jacobi_rows = [
+        [tok_to_id["compute_"], tok_to_id["norm"]],
+        [tok_to_id["norm"],     tok_to_id["("]],
+        [tok_to_id["("],        tok_to_id["vec"]],
+    ]
+    pool.update_from_jacobi_grid(jacobi_rows)
+    branches = pool.get_verification_branches(tok_to_id["compute_"])
+    print("Lookahead Pool Branches for 'compute_':", [[id_to_tok[i] for i in b] for b in branches])</code></pre>
+
+      <h2 id="references">6. Primary References</h2>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2305.10427" target="_blank" rel="noopener">Andrea Santilli et al., <em>Accelerating Transformer Inference for Translation via Parallel Decoding</em> (ACL 2023)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2402.02057" target="_blank" rel="noopener">Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang, <em>Break the Sequential Dependency of LLM Inference Using Lookahead Decoding</em> (ICML 2024)</a>.</li>
+        <li><a href="https://github.com/apoorvumang/prompt-lookup-decoding" target="_blank" rel="noopener">Apoorv Saxena, <em>Prompt Lookup Decoding</em> (2023; integrated into Hugging Face <code>transformers</code> via <code>prompt_lookup_num_tokens</code>)</a>.</li>
+        <li><a href="https://arxiv.org/abs/2311.08252" target="_blank" rel="noopener">Zhenyu He et al., <em>REST: Retrieval-Based Speculative Decoding</em> (NAACL 2024)</a>.</li>
+      </ul>
+
+      <nav class="post-nav" aria-label="Post navigation">
+        <a href="eagle-feature-extrapolation-and-dynamic-trees.html" class="post-nav-link prev">
+          <span class="post-nav-label">&larr; Previous Chapter</span>
+          <span class="post-nav-title">2. EAGLE, EAGLE-2 &amp; EAGLE-3: Feature Extrapolation &amp; Dynamic Draft Trees</span>
+        </a>
+        <a href="../tree-attention-and-production-serving/tree-attention-masks-and-multi-path-verification.html" class="post-nav-link next">
+          <span class="post-nav-label">Next Module &rarr;</span>
+          <span class="post-nav-title">1. Speculative Tree Attention: Topological Packing &amp; Multi-Path Verification</span>
+        </a>
+      </nav>
+    </article>
+  </div>
+
+  <footer class="site-footer">
+    <p>Copyright 2026 Neel Mishra</p>
+    <p>Built for GitHub Pages</p>
+  </footer>
+
+  <script src="../../../script.js"></script>
+  <script src="../../../blog-posts.js"></script>
+  <script src="../../../blog.js"></script>
+  <script src="../../../code-highlight.js"></script>
+  <script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
