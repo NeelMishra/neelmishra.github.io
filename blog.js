@@ -11348,6 +11348,39 @@ var BLOG_TREE = [
         children: []
       }
     ]
+  },
+  {
+    name: 'search-ranking-and-retrieval',
+    label: 'Search, Ranking & Retrieval',
+    children: [
+      {
+        name: 'foundations-and-lexical-retrieval',
+        label: 'Foundations & Lexical Retrieval',
+        children: [
+          { title: '1. Inverted Indexes, Postings Lists &amp; WAND / Block-Max WAND Pruning', file: 'search-ranking-and-retrieval/foundations-and-lexical-retrieval/inverted-index-and-boolean-retrieval.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/tf-idf-and-bm25-derivation.html'] }
+        ]
+      },
+      {
+        name: 'dense-retrieval-and-ann-indexing',
+        label: 'Dense Retrieval & ANN Indexing',
+        children: []
+      },
+      {
+        name: 'learning-to-rank-and-reranking',
+        label: 'Learning to Rank & Multi-Stage Cascade',
+        children: []
+      },
+      {
+        name: 'recommender-systems-and-collaborative-filtering',
+        label: 'Collaborative Filtering & Recommenders',
+        children: []
+      },
+      {
+        name: 'cold-start-problems',
+        label: 'Cold-Start Problems',
+        children: []
+      }
+    ]
   }
 
 ];
@@ -11413,7 +11446,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11440,13 +11473,14 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
               directoryPath[0] === 'dl' ? 'deep-learning' :
               directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' :
               directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' :
-              directoryPath[0] === 'agentic-harness' ? 'agentic-harness' : 'machine-learning';
+              directoryPath[0] === 'agentic-harness' ? 'agentic-harness' :
+              directoryPath[0] === 'search-ranking-and-retrieval' ? 'search-ranking-and-retrieval' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -11581,6 +11615,7 @@ function flattenBlogTree(nodes, result) {
     'speculative-decoding': { label: 'Speculative Decoding', blurb: 'Accelerating autoregressive LLM inference with draft-target verification, EAGLE-3 feature extrapolation, and multi-token prediction.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },
+    'search-ranking-and-retrieval': { label: 'Search, Ranking & Retrieval', blurb: 'Lexical and dense retrieval, ANN vector indexing, multi-stage learning-to-rank, collaborative filtering, and cold-start systems.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' },
     'agentic-harness': { label: 'Agentic Harness', blurb: 'Autonomous research harnesses, tool loops, verification, and agentic execution systems.' }
@@ -11703,7 +11738,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11730,6 +11765,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'quantization') catSection.id = 'quantization';
     if (code === 'speculative-decoding') catSection.id = 'speculative-decoding';
     if (code === 'agentic-harness') catSection.id = 'agentic-harness';
+    if (code === 'search-ranking-and-retrieval') catSection.id = 'search-ranking-and-retrieval';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11742,7 +11778,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11827,7 +11863,8 @@ function flattenBlogTree(nodes, result) {
       id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' :
       id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' :
       id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' :
-      id === 'agentic-harness' || id.indexOf('folder-agentic-harness--') === 0 ? 'agentic-harness' : '';
+      id === 'agentic-harness' || id.indexOf('folder-agentic-harness--') === 0 ? 'agentic-harness' :
+      id === 'search-ranking-and-retrieval' || id.indexOf('folder-search-ranking-and-retrieval--') === 0 ? 'search-ranking-and-retrieval' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
