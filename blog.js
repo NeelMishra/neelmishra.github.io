@@ -11393,7 +11393,8 @@ var BLOG_TREE = [
         name: 'cold-start-problems',
         label: 'Cold-Start Problems',
         children: [
-          { title: '1. The Cold-Start Taxonomy: New Users, New Items &amp; Metadata-Driven Two-Tower Hybrids', file: 'search-ranking-and-retrieval/cold-start-problems/user-and-item-cold-start-taxonomy-and-metadata-hybrids.html', links: ['search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/deep-ctr-and-sequential-recommenders-din-sasrec.html', 'search-ranking-and-retrieval/cold-start-problems/explore-exploit-bandits-linucb-and-thompson-sampling.html'] }
+          { title: '1. The Cold-Start Taxonomy: New Users, New Items &amp; Metadata-Driven Two-Tower Hybrids', file: 'search-ranking-and-retrieval/cold-start-problems/user-and-item-cold-start-taxonomy-and-metadata-hybrids.html', links: ['search-ranking-and-retrieval/recommender-systems-and-collaborative-filtering/deep-ctr-and-sequential-recommenders-din-sasrec.html', 'search-ranking-and-retrieval/cold-start-problems/explore-exploit-bandits-linucb-and-thompson-sampling.html'] },
+          { title: '2. Explore–Exploit for Cold-Start: Upper Confidence Bound (LinUCB) &amp; Thompson Sampling', file: 'search-ranking-and-retrieval/cold-start-problems/explore-exploit-bandits-linucb-and-thompson-sampling.html', links: ['search-ranking-and-retrieval/cold-start-problems/user-and-item-cold-start-taxonomy-and-metadata-hybrids.html', 'search-ranking-and-retrieval/cold-start-problems/zero-shot-llm-embeddings-and-meta-learning-warm-up.html'] }
         ]
       }
     ]
