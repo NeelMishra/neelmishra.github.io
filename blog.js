@@ -11367,7 +11367,8 @@ var BLOG_TREE = [
         label: 'Dense Retrieval & ANN Indexing',
         children: [
           { title: '1. Two-Tower Bi-Encoders, InfoNCE Loss &amp; Hard Negative Mining', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', links: ['search-ranking-and-retrieval/foundations-and-lexical-retrieval/query-understanding-and-learned-sparse-splade.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html'] },
-          { title: '2. Approximate Nearest Neighbors: IVF, Product Quantization (PQ) &amp; HNSW Graphs', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html', links: ['search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/hybrid-retrieval-and-late-interaction-colbert.html'] }
+          { title: '2. Approximate Nearest Neighbors: IVF, Product Quantization (PQ) &amp; HNSW Graphs', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html', links: ['search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/two-tower-bi-encoders-and-in-batch-negatives.html', 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/hybrid-retrieval-and-late-interaction-colbert.html'] },
+          { title: '3. Hybrid Retrieval (Reciprocal Rank Fusion) &amp; Multi-Vector Late Interaction (ColBERT)', file: 'search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/hybrid-retrieval-and-late-interaction-colbert.html', links: ['search-ranking-and-retrieval/dense-retrieval-and-ann-indexing/ivf-pq-and-hnsw-ann-indexing.html', 'search-ranking-and-retrieval/learning-to-rank-and-reranking/multi-stage-retrieval-and-ranking-cascade.html'] }
         ]
       },
       {
