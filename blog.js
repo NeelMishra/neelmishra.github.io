@@ -10612,6 +10612,20 @@ var BLOG_TREE = [
           { title: 'Convex Hull: Graham Scan &amp; Monotone Chain', file: 'cp/geometry/convex-hull.html', links: ['cp/geometry/cross-product.html', 'cp/geometry/polygon-area.html'] },
           { title: 'Polygon Area: The Shoelace Formula', file: 'cp/geometry/polygon-area.html', links: ['cp/geometry/convex-hull.html'] }
         ]
+      },
+      {
+        name: 'dynamic-programming',
+        label: 'Dynamic Programming',
+        children: [
+          { title: 'DP Patterns by Recurrence Shape: 56 Problems Master Index', file: 'cp/dynamic-programming/index.html', links: ['cp/dynamic-programming/linear-reachability-kadane.html', 'cp/dynamic-programming/state-machine-lis-dag.html', 'cp/dynamic-programming/two-sequence-and-pattern-matching.html', 'cp/dynamic-programming/grid-path-and-2d-shape-dp.html', 'cp/dynamic-programming/palindrome-word-parentheses-dp.html', 'cp/dynamic-programming/knapsack-dp.html', 'cp/dynamic-programming/interval-and-partition-dp.html'] },
+          { title: 'Part 1: Linear, Reachability &amp; Kadane DP', file: 'cp/dynamic-programming/linear-reachability-kadane.html', links: ['cp/dynamic-programming/index.html', 'cp/dynamic-programming/state-machine-lis-dag.html'] },
+          { title: 'Part 2: State-Machine, LIS &amp; DAG DP', file: 'cp/dynamic-programming/state-machine-lis-dag.html', links: ['cp/dynamic-programming/linear-reachability-kadane.html', 'cp/dynamic-programming/two-sequence-and-pattern-matching.html'] },
+          { title: 'Part 3: Two-Sequence &amp; Pattern-Matching DP', file: 'cp/dynamic-programming/two-sequence-and-pattern-matching.html', links: ['cp/dynamic-programming/state-machine-lis-dag.html', 'cp/dynamic-programming/grid-path-and-2d-shape-dp.html'] },
+          { title: 'Part 4: Grid Path &amp; 2D Shape DP', file: 'cp/dynamic-programming/grid-path-and-2d-shape-dp.html', links: ['cp/dynamic-programming/two-sequence-and-pattern-matching.html', 'cp/dynamic-programming/palindrome-word-parentheses-dp.html'] },
+          { title: 'Part 5: Palindrome, Word Break &amp; Parentheses DP', file: 'cp/dynamic-programming/palindrome-word-parentheses-dp.html', links: ['cp/dynamic-programming/grid-path-and-2d-shape-dp.html', 'cp/dynamic-programming/knapsack-dp.html'] },
+          { title: 'Part 6: 0/1 &amp; Unbounded Knapsack DP', file: 'cp/dynamic-programming/knapsack-dp.html', links: ['cp/dynamic-programming/palindrome-word-parentheses-dp.html', 'cp/dynamic-programming/interval-and-partition-dp.html', 'dsa/knapsack-dp/index.html'] },
+          { title: 'Part 7: Interval DP &amp; Partition DP', file: 'cp/dynamic-programming/interval-and-partition-dp.html', links: ['cp/dynamic-programming/knapsack-dp.html', 'cp/dynamic-programming/index.html', 'dsa/partition-dp/index.html'] }
+        ]
       }
     ]
   },
