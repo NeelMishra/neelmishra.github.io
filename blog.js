@@ -9027,7 +9027,8 @@ var BLOG_TREE = [
         "children": [
           {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html", "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html"]},
           {"title": "01 · Pretraining Perplexity, C4, The Pile & Paloma", "file": "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "links": ["nlp/llm-evaluation-datasets/index.html", "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html"]},
-          {"title": "02 · MMLU, MMLU-Pro, ARC & Knowledge Benchmarks", "file": "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html"]}
+          {"title": "02 · MMLU, MMLU-Pro, ARC & Knowledge Benchmarks", "file": "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html"]},
+          {"title": "03 · HellaSwag, WinoGrande, PIQA & Commonsense", "file": "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html", "links": ["nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html"]}
         ]
       },
       {
