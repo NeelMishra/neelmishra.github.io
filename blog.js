@@ -9486,7 +9486,8 @@ var BLOG_TREE = [
             "title": "Contrastive Learning & Multimodal Retrieval: Reading Guide",
             "file": "dl/contrastive-learning/index.html",
             "links": [
-              "dl/contrastive-learning/contrastive-loss-and-clip.html"
+              "dl/contrastive-learning/contrastive-loss-and-clip.html",
+              "dl/clip/index.html"
             ]
           },
           {
@@ -9494,7 +9495,8 @@ var BLOG_TREE = [
             "file": "dl/contrastive-learning/contrastive-loss-and-clip.html",
             "links": [
               "dl/contrastive-learning/index.html",
-              "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html"
+              "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html",
+              "dl/clip/index.html"
             ]
           },
           {
@@ -9502,6 +9504,55 @@ var BLOG_TREE = [
             "file": "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html",
             "links": [
               "dl/contrastive-learning/contrastive-loss-and-clip.html"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "clip",
+        "label": "CLIP (Contrastive Language–Image Pre-training)",
+        "children": [
+          {
+            "title": "CLIP: Contrastive Language–Image Pre-training (Series Reading Guide)",
+            "file": "dl/clip/index.html",
+            "links": [
+              "dl/clip/from-captioning-to-contrastive-pretraining.html",
+              "dl/clip/symmetric-infonce-loss-and-numpy-implementation.html",
+              "dl/clip/vision-and-text-encoders-resnet-vit.html",
+              "dl/clip/zero-shot-prompt-engineering-and-siglip-frontiers.html",
+              "dl/contrastive-learning/index.html"
+            ]
+          },
+          {
+            "title": "01. Why Contrastive Beats Captioning: Data Efficiency (3x -> 12x), WIT-400M & The N x N Alignment Matrix",
+            "file": "dl/clip/from-captioning-to-contrastive-pretraining.html",
+            "links": [
+              "dl/clip/index.html",
+              "dl/clip/symmetric-infonce-loss-and-numpy-implementation.html"
+            ]
+          },
+          {
+            "title": "02. Inside CLIP’s Figure 3 Pseudocode: Linear Projections, L2 Hypersphere Normalization, Learnable Temperature exp(t) & Symmetric Cross-Entropy",
+            "file": "dl/clip/symmetric-infonce-loss-and-numpy-implementation.html",
+            "links": [
+              "dl/clip/from-captioning-to-contrastive-pretraining.html",
+              "dl/clip/vision-and-text-encoders-resnet-vit.html"
+            ]
+          },
+          {
+            "title": "03. CLIP’s Dual-Tower Architecture: Modified ResNet-D + AttentionPool2d, Pre-Norm Vision Transformer (ViT) & Causal Text Transformer",
+            "file": "dl/clip/vision-and-text-encoders-resnet-vit.html",
+            "links": [
+              "dl/clip/symmetric-infonce-loss-and-numpy-implementation.html",
+              "dl/clip/zero-shot-prompt-engineering-and-siglip-frontiers.html"
+            ]
+          },
+          {
+            "title": "04. Zero-Shot Classification, Prompt Ensembling, the Modality Gap & Modern CLIP Frontiers (SigLIP, OpenCLIP, MetaCLIP)",
+            "file": "dl/clip/zero-shot-prompt-engineering-and-siglip-frontiers.html",
+            "links": [
+              "dl/clip/vision-and-text-encoders-resnet-vit.html",
+              "dl/clip/index.html"
             ]
           }
         ]
