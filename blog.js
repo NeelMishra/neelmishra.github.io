@@ -9022,6 +9022,13 @@ var BLOG_TREE = [
         "learning": {"title": "Graph ML", "requires": ["boosting"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
+        "name": "llm-evaluation-datasets",
+        "label": "LLM Evaluation Datasets & Benchmarks",
+        "children": [
+          {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html"]}
+        ]
+      },
+      {
         "name": "recommended-papers",
         "label": "Recommended Papers",
         "children": [
