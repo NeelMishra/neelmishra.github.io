@@ -9022,20 +9022,6 @@ var BLOG_TREE = [
         "learning": {"title": "Graph ML", "requires": ["boosting"], "start": "ml/graph-ml/index.html", "note": "Build relationship features, compare with a tabular baseline and evaluate graph-based risk decisions."}
       },
       {
-        "name": "llm-evaluation-datasets",
-        "label": "LLM Evaluation Datasets & Benchmarks",
-        "children": [
-          {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html", "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html"]},
-          {"title": "01 · Pretraining Perplexity, C4, The Pile & Paloma", "file": "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "links": ["nlp/llm-evaluation-datasets/index.html", "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html"]},
-          {"title": "02 · MMLU, MMLU-Pro, ARC & Knowledge Benchmarks", "file": "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html"]},
-          {"title": "03 · HellaSwag, WinoGrande, PIQA & Commonsense", "file": "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html", "links": ["nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html"]},
-          {"title": "04 · GSM8K, MATH-500, GPQA Diamond & AIME", "file": "nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html", "nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html"]},
-          {"title": "05 · HumanEval+, MBPP+, LiveCodeBench & SWE-bench", "file": "nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html", "links": ["nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html", "nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html"]},
-          {"title": "06 · IFEval, MT-Bench, AlpacaEval 2.0 & Chatbot Arena", "file": "nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html", "links": ["nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html", "nlp/llm-evaluation-datasets/truthfulqa-ruler-and-benchmark-contamination.html"]},
-          {"title": "07 · TruthfulQA, RULER Long-Context & Contamination Audits", "file": "nlp/llm-evaluation-datasets/truthfulqa-ruler-and-benchmark-contamination.html", "links": ["nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html"]}
-        ]
-      },
-      {
         "name": "recommended-papers",
         "label": "Recommended Papers",
         "children": [
@@ -9048,7 +9034,7 @@ var BLOG_TREE = [
     "name": "nlp",
     "label": "NLP",
     "children": [
-      {"title": "NLP: Reading Guide", "file": "nlp/index.html", "links": ["nlp/popular-textbooks/index.html"]},
+      {"title": "NLP: Reading Guide", "file": "nlp/index.html", "links": ["nlp/popular-textbooks/index.html", "nlp/llm-evaluation-datasets/index.html"]},
       {
         "name": "popular-textbooks",
         "label": "Popular Textbooks",
@@ -9100,6 +9086,20 @@ var BLOG_TREE = [
         ]
       },
       {
+        "name": "llm-evaluation-datasets",
+        "label": "LLM Evaluation Datasets & Benchmarks",
+        "children": [
+          {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html", "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html"]},
+          {"title": "01 · Pretraining Perplexity, C4, The Pile & Paloma", "file": "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "links": ["nlp/llm-evaluation-datasets/index.html", "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html"]},
+          {"title": "02 · MMLU, MMLU-Pro, ARC & Knowledge Benchmarks", "file": "nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html"]},
+          {"title": "03 · HellaSwag, WinoGrande, PIQA & Commonsense", "file": "nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html", "links": ["nlp/llm-evaluation-datasets/mmlu-arc-and-knowledge-benchmarks.html", "nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html"]},
+          {"title": "04 · GSM8K, MATH-500, GPQA Diamond & AIME", "file": "nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html", "links": ["nlp/llm-evaluation-datasets/hellaswag-winogrande-and-commonsense.html", "nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html"]},
+          {"title": "05 · HumanEval+, MBPP+, LiveCodeBench & SWE-bench", "file": "nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html", "links": ["nlp/llm-evaluation-datasets/gsm8k-math-gpqa-reasoning-benchmarks.html", "nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html"]},
+          {"title": "06 · IFEval, MT-Bench, AlpacaEval 2.0 & Chatbot Arena", "file": "nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html", "links": ["nlp/llm-evaluation-datasets/humaneval-mbpp-and-swebench-coding.html", "nlp/llm-evaluation-datasets/truthfulqa-ruler-and-benchmark-contamination.html"]},
+          {"title": "07 · TruthfulQA, RULER Long-Context & Contamination Audits", "file": "nlp/llm-evaluation-datasets/truthfulqa-ruler-and-benchmark-contamination.html", "links": ["nlp/llm-evaluation-datasets/ifeval-mtbench-alpacaeval-and-chatbot-arena.html"]}
+        ]
+      },
+      {
         "name": "recommended-papers",
         "label": "Recommended Papers",
         "children": [
@@ -9116,6 +9116,21 @@ var BLOG_TREE = [
           {"title": "GPT-3", "file": "nlp/recommended-papers/brown-2020-gpt3.html"},
           {"title": "Scaling Laws", "file": "nlp/recommended-papers/kaplan-2020-scaling-laws.html"},
           {"title": "Chinchilla", "file": "nlp/recommended-papers/hoffmann-2022-chinchilla.html"}
+        ]
+      }
+    ]
+  },
+  {
+    "name": "llm",
+    "label": "LLM",
+    "children": [
+      {"title": "LLM: Large Language Models Reading Guide", "file": "llm/index.html", "links": ["llm/qlora/index.html"]},
+      {
+        "name": "qlora",
+        "label": "QLoRA",
+        "children": [
+          {"title": "QLoRA: Efficient Finetuning of 4-Bit Quantized LLMs (Overview)", "file": "llm/qlora/index.html", "links": ["llm/index.html", "llm/qlora/understanding-4bit-quantization-qlora-explained.html", "quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html"]},
+          {"title": "Understanding 4-Bit Quantization: QLoRA Explained (with Colab)", "file": "llm/qlora/understanding-4bit-quantization-qlora-explained.html", "links": ["llm/qlora/index.html", "quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html"]}
         ]
       }
     ]
@@ -9909,8 +9924,9 @@ var BLOG_TREE = [
         name: 'qlora',
         label: 'NF4 & QLoRA',
         children: [
-          { title: 'NF4 and QLoRA: storage is not training precision', file: 'quantization/qlora/index.html', links: ['quantization/awq/index.html', 'quantization/qat/index.html'] },
-          { title: 'NF4 and QLoRA: quantization for adapter training', file: 'quantization/qlora/adapter-training.html', links: ['quantization/smoothquant/activation-migration.html', 'quantization/gguf/index.html'] }
+          { title: 'NF4 and QLoRA: storage is not training precision', file: 'quantization/qlora/index.html', links: ['quantization/awq/index.html', 'quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html', 'quantization/qat/index.html'] },
+          { title: 'NormalFloat 4 (NF4) & Double Quantization Explained', file: 'quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html', links: ['quantization/qlora/index.html', 'quantization/qlora/adapter-training.html', 'llm/qlora/understanding-4bit-quantization-qlora-explained.html'] },
+          { title: 'NF4 and QLoRA: quantization for adapter training', file: 'quantization/qlora/adapter-training.html', links: ['quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html', 'quantization/smoothquant/activation-migration.html', 'quantization/gguf/index.html'] }
         ]
       },
       {
@@ -11525,7 +11541,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11552,9 +11568,10 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
+              directoryPath[0] === 'llm' ? 'llm' :
               directoryPath[0] === 'dl' ? 'deep-learning' :
               directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' :
               directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' :
@@ -11687,7 +11704,8 @@ function flattenBlogTree(nodes, result) {
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Follow the prerequisite map: data and loss foundations, model families, then applications.' },
-    nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, and foundational research papers.' },
+    nlp:   { label: 'NLP', blurb: 'Natural language processing: textbook companions, language and speech models, evaluation datasets, and foundational research papers.' },
+    llm:   { label: 'LLM', blurb: 'Large Language Model architectures, parameter-efficient fine-tuning (LoRA, QLoRA), 4-bit NormalFloat quantization, and training walkthroughs.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
     quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, QAT, GGUF, and FP8, with supplementary examples and method comparisons.' },
@@ -11758,7 +11776,7 @@ function flattenBlogTree(nodes, result) {
     return card;
   }
 
-  /* RAG, DL, ML, NLP, RL, diffusion, quantization, and speculative-decoding use the Explorer's hierarchy and reading order. Metadata insertion
+  /* RAG, DL, ML, NLP, LLM, RL, diffusion, quantization, and speculative-decoding use the Explorer's hierarchy and reading order. Metadata insertion
      order and chapter breadcrumbs must not create competing navigation paths. */
   function makeBlogDirectory(node, parentPath) {
     var files = flattenBlogTree(node.children, []).filter(function(leaf) { return !!postByFile[leaf.file]; });
@@ -11817,7 +11835,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'llm' ? 'LLM' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11838,6 +11856,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'rl') catSection.id = 'reinforcement-learning';
     if (code === 'ml') catSection.id = 'machine-learning';
     if (code === 'nlp') catSection.id = 'natural-language-processing';
+    if (code === 'llm') catSection.id = 'llm';
     if (code === 'dl') catSection.id = 'deep-learning';
     if (code === 'rag') catSection.id = 'retrieval-augmented-generation';
     if (code === 'diffusion') catSection.id = 'diffusion-models';
@@ -11857,7 +11876,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'llm' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -11939,6 +11958,7 @@ function flattenBlogTree(nodes, result) {
     var code = id === 'reinforcement-learning' || id.indexOf('folder-rl--') === 0 ? 'rl' :
       id === 'machine-learning' || id.indexOf('folder-ml--') === 0 ? 'ml' :
       id === 'natural-language-processing' || id === 'folder-nlp' || id.indexOf('folder-nlp--') === 0 ? 'nlp' :
+      id === 'llm' || id.indexOf('folder-llm--') === 0 ? 'llm' :
       id === 'deep-learning' || id.indexOf('folder-dl--') === 0 ? 'dl' :
       id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' :
       id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' :
