@@ -17,80 +17,53 @@
 <article class="blog-post-content learning-note">
 <a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
 <div class="post-series-nav"><a href="../../../blog.html">Quantization</a><span>&middot;</span><a href="index.html">GPTQ</a><span>&middot; Part 3</span></div>
-<h1>GPTQ: fixed order, lazy batches, and Cholesky</h1><p class="post-meta">October 2026 &middot; 7 min read</p>
-<p><a href="hessian-and-the-update.html">Part 2</a> derived the compensation after rounding one weight. Applying that update separately to every weight in a large layer would be expensive. GPTQ makes it practical by sharing one column order, preparing a triangular factor once, and delaying writes to columns outside the current block.</p>
+<h1>GPTQ: fixed order, lazy batches, and Cholesky</h1><p class="post-meta">October 2026 &middot; 4 min read</p>
+<p><a href="hessian-and-the-update.html">Part 2</a> derived the single-row compensation step $\delta_F = -\frac{a}{(G_F)_{qq}}(G_F)_{:,q}$ and the rank-one inverse downdate $G_{\mathrm{next}} = G_{R,R} - \frac{G_{R,q}G_{q,R}}{G_{qq}}$. GPTQ turns those equations into a fast full-layer algorithm through three ideas: a shared column order, an inverse-Hessian Cholesky factor $U$, and lazy block updates.</p>
 
-<h2 id="order">Process the same column across every output row</h2>
-<p>Let $W \in \mathbb{R}^{m \times d}$ have $m$ output rows and $d$ input columns. Greedy OBQ chooses the cheapest next weight $q \in F$ independently in each row. After those choices, different rows have different sets of free columns $F$ and need different active inverses $G_F = H_F^{-1}$.</p>
-<p>GPTQ chooses a column order in advance and shares it across all output rows. In left-to-right order, step $q$ rounds column $q$ in every row. Each entry $w_q$ may land on a different grid point $t = \operatorname{quant}(w_q)$, but every row has the exact same free set $F = \{q, \ldots, d-1\}$.</p>
-<p>The Hessian $H = 2A^{\mathsf T}A = 2XX^{\mathsf T} \in \mathbb{R}^{d \times d}$ (<mark>depending only on the calibration inputs, never on the weights of a specific row</mark>) is already shared across the layer. A shared free set $F$ therefore means a shared restricted Hessian $H_F = 2A_F^{\mathsf T}A_F$ and a shared active inverse $G_F = H_F^{-1}$. One preparation serves all $m$ output rows.</p>
-<p>The paper finds that on its large layers, fixed-order reconstruction is competitive with the greedy method. This is an empirical trade-off, not a guarantee that every fixed order is equally accurate. Order can change the final rounding decisions.</p>
-<p>With separate greedy orders, OBQ's repeated inverse updates cost $O(md^3)$. GPTQ instead pays $O(d^3)$ for matrix preparation and $O(md^2)$ for weight corrections. This operation-count reduction is not a universal wall-clock speedup; matrix sizes, hardware, and kernels still matter.</p>
-<p>The authors' later <code>actorder</code> option permutes input columns by descending Hessian diagonal $H_{qq}$ before the pass. It still uses one shared order. It is not OBQ's adaptive greedy selection.</p>
+<h2 id="order">1. Fixed column order across all $m$ rows</h2>
+<p>As shown in <a href="hessian-and-the-update.html#formulas">Part 2</a>, quantizing columns in a single fixed order $q = 0, 1, \dots, d-1$ across all $m$ output rows gives every row the same suffix of remaining free columns $F = \{q, \dots, d-1\}$ and the same active inverse $G_F = H_F^{-1}$:</p>
+<ul>
+<li><strong>Complexity drop:</strong> instead of running $m$ separate $O(d^3)$ inverse-downdate sequences ($O(md^3)$ in greedy OBQ), GPTQ prepares the inverse directions once in $O(d^3)$ and applies weight updates in $O(md^2)$.</li>
+<li><strong>Static permutation (<code>actorder</code>):</strong> because $H_F$ only depends on calibration inputs $A$, we only need the column order to be <em>shared</em> across rows, not necessarily $0, 1, \dots, d-1$. The <code>actorder</code> option sorts columns once by descending Hessian diagonal $H_{qq}$ so high-variance input features are rounded first while the most free weights remain to compensate them.</li>
+</ul>
 
-<h2 id="precompute">Prepare the directions, not the rounded values</h2>
-<p>Use the same sample-row table $A\in\mathbb R^{n\times d}$ as in <a href="hessian-and-the-update.html#layout">Part 2</a>, with output table $Y = AW^{\mathsf T} \in \mathbb{R}^{n \times m}$ and Hessian $H=2A^{\mathsf T}A$. The paper's column-sample matrix $X=A^{\mathsf T} \in \mathbb{R}^{d \times n}$ gives $WX = WA^{\mathsf T} = Y^{\mathsf T}$ and the identical matrix $H = 2XX^{\mathsf T}$. Neither form requires transposing the stored PyTorch weight matrix $W$ away from its $(m, d)$ layout.</p>
-<p>In a fixed order, every future active Hessian $H_F$ and active inverse $G_F = H_F^{-1}$ is known from the start. It depends on which columns remain in $F$, not on the grid values $t = \operatorname{quant}(w_q)$ chosen for earlier columns. We can prepare the correction directions before rounding any weight.</p>
-<p>The rounded values cannot be prepared independently. Column $q$ must include compensation $\delta$ from columns $0,\ldots,q-1$ before its grid point $t = \operatorname{quant}(w_q)$ is chosen. Precomputing the matrix removes repeated inverse work, not this sequential dependence between weights.</p>
-
-<h2 id="batch">Update nearby columns now; later columns can wait</h2>
-<p>After each column $q$, an immediate update to every later weight in $F$ would repeatedly read and write a large $m \times d$ matrix. Lazy batching reduces that traffic. Choose an update block of $B$ consecutive input columns; the paper and authors' code use $B = 128$ by default.</p>
-<ol>
-<li>Round the first column $q$ in the block using its current working weights $W_{:,q}$.</li>
-<li>Immediately compensate the unrounded columns <em>inside</em> the block.</li>
-<li>Round the next column using those updated values and repeat.</li>
-<li>At the block's end, apply all its recorded corrections to columns <em>after</em> the block in one matrix multiplication.</li>
-</ol>
-<p>Waiting to update those distant columns is safe: none is rounded until the current block finishes. Rounding all columns inside the block at once would not be equivalent. The next rounding decision depends on the previous correction.</p>
-<p>Here is the actual blocked update in triangular-factor notation, defined below. Let $\widehat W \in \mathbb{R}^{m \times d}$ be the quantized weight matrix and $U \in \mathbb{R}^{d \times d}$ the upper-triangular Cholesky factor of the inverse Hessian. For column $q$, each row has rounding discrepancy $a = w_q - t = w_q - \operatorname{quant}(w_q)$, and the column vector $E_{:,q} \in \mathbb{R}^{m \times 1}$ stacks the normalized discrepancies $a / U_{qq}$ across all $m$ output rows:</p>
-<div class="note-equation">$$\widehat W_{:,q}=\operatorname{quant}(W_{:,q}),\qquad
- E_{:,q}=\frac{W_{:,q}-\widehat W_{:,q}}{U_{qq}}.$$</div>
-<p>The quantizer $\operatorname{quant}(\cdot)$ uses the relevant grid for each row. If the current block ends just before column $b$, apply the outer-product correction inside the block:</p>
-<div class="note-equation">$$W_{:,q:b}\leftarrow
- W_{:,q:b}-E_{:,q}U_{q,q:b}.$$</div>
-<p>The slice $q:b$ includes $q$ but excludes $b$. The product has shape $m\times(b-q)$. On coordinate $q$ itself, $U_{q,q} / U_{qq} = 1$, so the first column subtracts $a = W_{:,q}-\widehat W_{:,q}$ and places $W_{:,q}$ onto $\widehat W_{:,q}$ (matching $\delta_q = -a = t - w_q$ in <a href="hessian-and-the-update.html#obs-derivatives">Part 2</a>). Later columns in the block receive compensation before they are rounded.</p>
-<p>At the end of the block, let $J$ be the completed block indices and $T$ the remaining free columns after the block. Stack the block's recorded discrepancy vectors into $E_{:,J} \in \mathbb{R}^{m \times B}$. The delayed correction across $T$ is:</p>
-<div class="note-equation">$$W_{:,T}\leftarrow W_{:,T}-E_{:,J}U_{J,T}.$$</div>
-<p>With $|T|$ later columns, $U_{J,T}$ has shape $B\times|T|$, so this one matrix product updates an $m\times|T|$ slice of $W$. The final block may have fewer than $B$ columns. This reorganizes the exact same sequential corrections $\delta_F$; it does not solve a joint rounding problem for the whole block.</p>
-<p>A <strong>quantization group</strong> has a different purpose: its entries share scale $s$ and zero-point $z$ parameters. <code>groupsize</code> changes the grids and storage overhead; <code>blocksize</code> changes the correction schedule. Group-wise implementations may estimate grids as groups are reached, or keep them fixed. Either way, groups are not the update blocks.</p>
-
-<h2 id="cholesky">Damp the Hessian, then store a triangular factor</h2>
-<p>Input features may be correlated or rarely active, making $H = 2A^{\mathsf T}A$ singular or nearly singular. Direct inversion and repeated rank-one downdates of $G_F$ can then amplify numerical error. GPTQ adds a positive diagonal term before factorization.</p>
-<p>Let $\lambda$ be the damping strength, $I_d$ the $d\times d$ identity, and $\alpha$ a chosen fraction of the average Hessian diagonal. Call the resulting damped Hessian $H_{\mathrm{damped}}$ and its full inverse $G$. The authors' default is $\alpha=0.01$:</p>
+<h2 id="cholesky">2. Damp the Hessian and factor its inverse ($U^{\mathsf T}U = G$)</h2>
+<p>Collinear or rarely active input features can make $H = 2A^{\mathsf T}A$ nearly singular, causing repeated rank-one subtractions to accumulate floating-point error. GPTQ first adds diagonal damping $\lambda$ (with default $\alpha = 0.01$):</p>
 <div class="note-equation">$$\lambda=\alpha\frac{\operatorname{tr}(H)}{d},\qquad
  H_{\mathrm{damped}}=H+\lambda I_d,\qquad
  G=H_{\mathrm{damped}}^{-1}.$$</div>
-<p>Damping makes the solve less sensitive to weakly observed directions. It also changes the single-row objective $C(w) = \lVert Aw - y\rVert_2^2$ from <a href="hessian-and-the-update.html#why-hessian">Part 2</a>: with our sum convention it adds $\tfrac{\lambda}{2}\lVert w-w^{(0)}\rVert_2^2$ to the reconstruction cost. The resulting updates optimize this regularized quadratic, not the undamped output error alone. Consistently scaling $H$ and $\lambda$ preserves the compensation $\delta_F$.</p>
-<p>The authors' code also handles input columns with zero Hessian diagonal before damping: those features are absent on calibration data, so their weights can be set to zero without changing the observed outputs. This alone says nothing about unseen inputs.</p>
-<p>Now factor the full inverse $G$ into an upper-triangular Cholesky factor $U \in \mathbb{R}^{d \times d}$ with positive diagonal entries:</p>
+<p>Adding $\lambda I_d$ to $H$ adds an $\ell_2$ penalty $\tfrac{\lambda}{2}\lVert w-w^{(0)}\rVert_2^2$ to <a href="hessian-and-the-update.html#why-hessian">Part 2's reconstruction cost $C(w)$</a>, discouraging large compensating weight shifts along weakly observed input directions. (Columns with $H_{qq} = 0$ before damping are inactive on calibration data and zeroed directly.)</p>
+<p>Next, GPTQ computes the upper-triangular <strong>Cholesky factor $U \in \mathbb{R}^{d \times d}$ of the inverse $G$</strong>:</p>
 <div class="note-equation">$$U^{\mathsf T}U=G=H_{\mathrm{damped}}^{-1}.$$</div>
-<p>This orientation matters: $U$ factors the <em>inverse</em> $G$, not the Hessian $H_{\mathrm{damped}}$. The authors' implementation first factors $H_{\mathrm{damped}}$ to compute its inverse $G$, then takes an upper Cholesky factor of $G$.</p>
-<p>Why can this one triangle $U$ replace the active inverse $G_F = H_F^{-1}$ at every step $q$? In left-to-right order, the free set at step $q$ is the suffix $F = \{q, \ldots, d-1\}$. In <a href="hessian-and-the-update.html#eliminate">Part 2</a>, each step eliminated column $q$ via the rank-one downdate $G_{\mathrm{next}} = G_{R,R} - G_{R,q}G_{q,R}/G_{qq}$. Upper Cholesky factorization of $G$ performs those exact same rank-one eliminations in advance, storing each active inverse's pivot row scaled by $1/\sqrt{(G_F)_{qq}}$:</p>
+<p>Why factor the <em>inverse</em> $G$ instead of running <a href="hessian-and-the-update.html#eliminate">Part 2's rank-one downdate</a> $G_{\mathrm{next}} = G_{R,R} - \frac{G_{R,q}G_{q,R}}{G_{qq}}$ at every step? Because upper Cholesky factorization of $G$ performs those exact same rank-one Gaussian eliminations in advance from $q = 0$ to $d-1$, storing each step's reduced inverse row $(G_F)_{q,F}$ (for $F = \{q, \dots, d-1\}$) divided by $\sqrt{(G_F)_{qq}}$:</p>
 <div class="note-equation">$$(G_F)_{qq}=U_{qq}^2,\qquad
  (G_F)_{q,F}=U_{qq}U_{q,q:}.$$</div>
-<p>Because $G_F$ is symmetric, its column $(G_F)_{:,q}$ is the transpose of its row $(G_F)_{q,F}$. For a single output row $w$ with rounding discrepancy $a = w_q - t$, substituting these Cholesky identities directly into <a href="hessian-and-the-update.html#obs-derivatives">Part 2's update formula</a> $\delta_F = -\frac{a}{(G_F)_{qq}}(G_F)_{:,q}$ gives:</p>
+<p>Substituting these two identities into <a href="hessian-and-the-update.html#obs-derivatives">Part 2's single-row update</a> $\delta_F^{\mathsf T} = -\frac{a}{(G_F)_{qq}}(G_F)_{q,F}$ (with $a = w_q - t$) cancels one power of $U_{qq}$:</p>
 <div class="note-equation">$$\delta_F^{\mathsf T}
  =-\frac{a}{(G_F)_{qq}}(G_F)_{q,F}
  =-\frac{a}{U_{qq}^2}\bigl(U_{qq}U_{q,q:}\bigr)
  =-\frac{a}{U_{qq}}U_{q,q:}.$$</div>
-<p>This explains the normalizer in the block loop above: divide the rounding discrepancy $a = w_q - t$ by $U_{qq}$ (producing $E_{:,q}$), then multiply by the stored factor row $U_{q,q:}$. Do not divide by the original inverse diagonal $G_{qq}$, or by the Hessian diagonal $H_{qq}$.</p>
-<p>For the undamped $3\times 3$ example in <a href="hessian-and-the-update.html#example">Part 2</a>, the initial inverse $G$ starts with row $(1.92250,-2.56343,-0.35974)$. Its upper Cholesky factor $U$ starts with row approximately $(1.38654,-1.84880,-0.25945)$. Since $U_{00}^2 = 1.38654^2\approx1.92250 = G_{00}$, dividing the initial inverse row by $U_{00} = 1.38654$ produces $U_{0,:}$.</p>
-<p>Later pivots $U_{qq}^2 = (G_F)_{qq}$ correspond to the reduced active inverses $G_F$ on $F = \{q,\ldots,d-1\}$, not the initial inverse's diagonals $G_{qq}$. The triangular factor $U$ supplies those reduced pivots and directions without repeatedly modifying a running inverse during quantization. This improves numerical robustness; it is not a promise of exact arithmetic or a fixed speed multiplier.</p>
+<p>Thus row $q$ of $U$ already holds the exact compensation direction for step $q$, and its diagonal $U_{qq} = \sqrt{(G_F)_{qq}}$ is the exact normalizer.</p>
 
-<h2 id="together">The complete pass</h2>
+<h2 id="batch">3. Lazy batching: update inside block $B$ now, after block $B$ once</h2>
+<p>Updating all remaining columns $q:d$ of $W \in \mathbb{R}^{m \times d}$ after every single column $q$ would bottleneck on memory bandwidth ($d$ full-matrix reads/writes). Because rounding column $q$ only depends on corrections from earlier columns $0, \dots, q-1$, GPTQ partitions columns into blocks of size $B = 128$ and delays updates to columns outside the current block:</p>
 <ol>
-<li>Collect representative calibration inputs $A \in \mathbb{R}^{n \times d}$, form the input-feature Hessian $H = 2A^{\mathsf T}A = 2XX^{\mathsf T}$, and choose the quantization grid $\operatorname{quant}(\cdot)$.</li>
-<li>Choose one shared column order, damp the Hessian $H_{\mathrm{damped}} = H + \lambda I_d$, and compute $U$ with $U^{\mathsf T}U = G = H_{\mathrm{damped}}^{-1}$ in that order.</li>
-<li>Within each update block, round columns $q$ sequentially ($\widehat W_{:,q} = \operatorname{quant}(W_{:,q})$). Divide each current rounding discrepancy $a = w_q - t$ by $U_{qq}$ to form $E_{:,q}$ and immediately correct the remaining columns inside the block ($W_{:,q:b} \leftarrow W_{:,q:b} - E_{:,q}U_{q,q:b}$).</li>
-<li>Apply the accumulated block correction to later free columns in one matrix product ($W_{:,T} \leftarrow W_{:,T} - E_{:,J}U_{J,T}$). Keep completed columns fixed and continue.</li>
+<li><strong>Round column $q$ and normalize its error across all $m$ rows:</strong> stack the normalized discrepancies $a / U_{qq}$ into the column vector $E_{:,q} \in \mathbb{R}^{m \times 1}$:
+<div class="note-equation">$$\widehat W_{:,q}=\operatorname{quant}(W_{:,q}),\qquad
+ E_{:,q}=\frac{W_{:,q}-\widehat W_{:,q}}{U_{qq}}.$$</div></li>
+<li><strong>Immediate intra-block compensation ($q:b$):</strong> if the current block ends at column $b$, immediately update the remaining columns inside the block via the rank-one outer product:
+<div class="note-equation">$$W_{:,q:b}\leftarrow
+ W_{:,q:b}-E_{:,q}U_{q,q:b}\qquad\bigl(\text{shape } m\times(b-q)\bigr).$$</div>
+On column $q$ itself, $U_{q,q}/U_{qq} = 1$, so the first column subtracts $W_{:,q} - \widehat W_{:,q}$ and lands $W_{:,q}$ on $\widehat W_{:,q}$. Columns $q+1, \dots, b-1$ receive their compensation before their turn to be rounded.</li>
+<li><strong>Deferred inter-block update ($T = b:d$):</strong> once all $B$ columns in block $J$ finish, stack their error vectors into $E_{:,J} \in \mathbb{R}^{m \times B}$ and update all later columns $T$ in a single level-3 matrix multiply (GEMM):
+<div class="note-equation">$$W_{:,T}\leftarrow W_{:,T}-E_{:,J}U_{J,T}\qquad\bigl(\text{shape } (m\times B)\cdot(B\times |T|)\bigr).$$</div></li>
 </ol>
-<p>The result is a low-bit weight matrix chosen to preserve calibration outputs. Test the finished model's quality and serving performance separately. Calibration error is not task accuracy, and compressed storage is not by itself a fast serving kernel.</p>
-<details class="note-check"><summary>Why not use the whole inverse directly?</summary><p>The first step can use it directly. Later steps need inverses on smaller free sets. The factor stores the required reduced directions and their normalizers in advance, without repeated downdates.</p></details>
-<details class="note-check"><summary>Does a block of 128 mean all 128 columns round together?</summary><p>No. Rounding and compensation remain sequential inside the block. Only the writes to columns outside it are delayed and combined.</p></details>
+<p>Lazy batching changes <em>when</em> memory is written, not the math: every column $q$ still receives the exact same total compensation from columns $0, \dots, q-1$ before it is quantized.</p>
+
 <h2 id="sources">Sources</h2>
 <ul class="note-sources">
-<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, the fixed-order, lazy-batch, and Cholesky changes and Algorithm 1.</li>
-<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>fasterquant</code>: <code>blocksize=128</code>, <code>percdamp=.01</code>, <code>actorder</code>, and factor-diagonal normalization.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., GPTQ</a>, Algorithm 1: fixed-order, lazy-batch, and Cholesky formulation.</li>
+<li><a href="https://github.com/IST-DASLab/gptq/blob/main/gptq.py">Authors' <code>gptq.py</code></a>, <code>fasterquant</code>: <code>blocksize=128</code>, <code>percdamp=.01</code>, <code>actorder</code>, and $U_{qq}$ normalization.</li>
 </ul>
 <nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="hessian-and-the-update.html"><span>Previous</span><span>GPTQ: derive and check the Hessian update</span></a><a class="next" href="index.html"><span>Next</span><span>GPTQ: quantize the layer, then compensate</span></a></nav>
 </article></div>
