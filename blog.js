@@ -9025,7 +9025,8 @@ var BLOG_TREE = [
         "name": "llm-evaluation-datasets",
         "label": "LLM Evaluation Datasets & Benchmarks",
         "children": [
-          {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html"]}
+          {"title": "Overview & Taxonomy", "file": "nlp/llm-evaluation-datasets/index.html", "links": ["nlp/index.html", "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html"]},
+          {"title": "01 · Pretraining Perplexity, C4, The Pile & Paloma", "file": "nlp/llm-evaluation-datasets/pretraining-perplexity-and-paloma.html", "links": ["nlp/llm-evaluation-datasets/index.html"]}
         ]
       },
       {
