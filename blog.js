@@ -9803,6 +9803,36 @@ var BLOG_TREE = [
                 ]
               }
             ]
+          },
+          {
+            "name": "vit",
+            "label": "Vision Transformer (ViT)",
+            "children": [
+              {
+                "title": "Vision Transformer (ViT): From 16×16 Patch Tokenization to CLIP's Multimodal ViT",
+                "file": "dl/architectures/vit/index.html",
+                "links": [
+                  "dl/architectures/vit/vision-transformer-from-first-principles.html",
+                  "dl/architectures/vit/vit-in-clip-architecture-and-modifications.html"
+                ]
+              },
+              {
+                "title": "1. Vision Transformer (ViT) from First Principles: Patchify, Stride-P Conv2d Projection, [CLS] Token, 2D Positional Interpolation & Inductive Biases",
+                "file": "dl/architectures/vit/vision-transformer-from-first-principles.html",
+                "links": [
+                  "dl/architectures/vit/index.html",
+                  "dl/architectures/vit/vit-in-clip-architecture-and-modifications.html"
+                ]
+              },
+              {
+                "title": "2. The Vision Transformer (ViT) Used in CLIP: Pre-Encoder LayerNorm (ln_pre), Bias-Free Patch Conv, QuickGELU & Multimodal Projection",
+                "file": "dl/architectures/vit/vit-in-clip-architecture-and-modifications.html",
+                "links": [
+                  "dl/architectures/vit/vision-transformer-from-first-principles.html",
+                  "dl/clip/vision-and-text-encoders-resnet-vit.html"
+                ]
+              }
+            ]
           }
         ]
       },
