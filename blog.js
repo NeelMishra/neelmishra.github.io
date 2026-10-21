@@ -9478,36 +9478,6 @@ var BLOG_TREE = [
         ]
       },
       // APPLIED-NOTES:dl:START
-      {
-        "name": "contrastive-learning",
-        "label": "Contrastive Learning & Multimodal Retrieval",
-        "children": [
-          {
-            "title": "Contrastive Learning & Multimodal Retrieval: Reading Guide",
-            "file": "dl/contrastive-learning/index.html",
-            "links": [
-              "dl/contrastive-learning/contrastive-loss-and-clip.html",
-              "dl/architectures/clip/index.html"
-            ]
-          },
-          {
-            "title": "CLIP: Understand the Entire Contrastive Loss Through One Batch",
-            "file": "dl/contrastive-learning/contrastive-loss-and-clip.html",
-            "links": [
-              "dl/contrastive-learning/index.html",
-              "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html",
-              "dl/architectures/clip/index.html"
-            ]
-          },
-          {
-            "title": "Fine-Tune CLIP and Build a Two-Tower Retriever",
-            "file": "dl/contrastive-learning/fine-tune-clip-and-two-tower-retrieval.html",
-            "links": [
-              "dl/contrastive-learning/contrastive-loss-and-clip.html"
-            ]
-          }
-        ]
-      },
       // APPLIED-NOTES:dl:END
 
       {
