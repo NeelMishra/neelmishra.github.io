@@ -1,0 +1,191 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>System Design Case Study: Designing and Evaluating a Production E-Commerce Shopping-Assistant Agent for &ldquo;OmniMart&rdquo; | Neel Mishra</title><meta name="description" content="End-to-end system design and 4-layer evaluation blueprint for OmniMart's production e-commerce shopping-assistant agent: 50M SKU hybrid BM25 + CLIP HNSW retrieval, parallel MCP tool DAGs, deterministic groundedness verification, and offline-to-online evaluation"><link rel="canonical" href="https://neelmishra.github.io/blog/agentic-harness/design/ecommerce-shopping-assistant-system-design.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-agentic-harness--design">← Agentic Harness / Design</a><div class="post-series-nav"><a href="index.html">Agentic Harness · Design</a><span>Chapter 02</span></div><h1>System Design Case Study: Designing and Evaluating a Production E-Commerce Shopping-Assistant Agent for &ldquo;OmniMart&rdquo;</h1><p class="post-meta">October 2026 · 22 min read</p><p class="optimizer-lede">A complete, production-grade architectural and evaluation blueprint for designing a multi-turn conversational shopping assistant at <strong>OmniMart</strong> ($50\text{M}$ SKUs, $12\text{k}$ peak QPS, $&lt;1.15\text{s}$ p95 latency)—covering fast intent routing, parallel MCP tool DAGs, hybrid BM25 + fine-tuned CLIP HNSW retrieval, real-time voucher/inventory verification, and a 4-layer offline-to-online evaluation system.</p>
+
+<h2 id="problem-statement-and-slas">1. System Requirements, Scale &amp; Latency Budget</h2>
+<p>Consider the canonical ML systems design prompt: <em>&ldquo;Design a conversational shopping-assistant agent for a high-scale marketplace like OmniMart, and explain how you would evaluate it end-to-end before and after deployment.&rdquo;</em></p>
+<p>Unlike a static FAQ chatbot, a marketplace shopping assistant operates over a rapidly mutating environment: $50\text{ million}$ active SKUs across $400,000$ third-party sellers, real-time flash-sale inventory, stackable platform/seller vouchers, multimodal user inputs (text + reference photos), and multi-turn constraint refinement (e.g., <em>&ldquo;Show me waterproof trail running shoes under \$110 in US Men’s 10.5 that can arrive by Friday; actually, exclude neon colors and compare the top two on arch support.&rdquo;</em>).</p>
+
+<h3 id="non-functional-slas">1.1 Production SLAs &amp; Critical-Path Latency Budget</h3>
+<ul>
+<li><strong>Throughput &amp; Catalog Scale:</strong> $50\text{M}$ active SKUs, $1,500\text{ updates/sec}$ on price and stock, $12,000\text{ QPS}$ peak conversational turns during mega-sale events.</li>
+<li><strong>Latency SLA:</strong> Time-to-First-Token (TTFT) $\le 950\text{ ms}$ at p50 and $\le 1,150\text{ ms}$ at p95; full structured product-card render $\le 1,650\text{ ms}$ at p95.</li>
+<li><strong>Zero-Tolerance Groundedness Invariants:</strong> $0.0\%$ hallucinated SKU IDs, $0.0\%$ stale or fabricated prices/discounts, and $0.0\%$ out-of-stock recommendations shown as available.</li>
+</ul>
+
+<div class="table-wrap"><table><thead><tr><th>Pipeline Stage</th><th>Component &amp; Model Tier</th><th>Execution Mode</th><th>p50 Latency</th><th>p95 Latency</th></tr></thead><tbody>
+<tr><td><strong>Stage 1: Ingress &amp; Routing</strong></td><td>Safety Guard + Distilled Intent/Complexity Router (DeBERTa-v3-small) + Semantic Memory Fetch</td><td>Parallel CPU/ONNX + Redis Lookup</td><td>$28\text{ ms}$</td><td>$45\text{ ms}$</td></tr>
+<tr><td><strong>Stage 2: Slot Ledger &amp; DAG Plan</strong></td><td>Fine-Tuned 8B Planner (vLLM Prefix-Cached, Constrained JSON FSM)</td><td>GPU Decode (~65 tokens)</td><td>$210\text{ ms}$</td><td>$295\text{ ms}$</td></tr>
+<tr><td><strong>Stage 3: Parallel MCP Tool Mesh</strong></td><td><code>search_catalog_hybrid</code> (BM25 + CLIP HNSW + Reranker) $\parallel$ <code>get_live_inventory_vouchers</code> $\parallel$ <code>check_fit_reviews</code></td><td>Async Parallel DAG Frontier ($\max_i L_i$)</td><td>$195\text{ ms}$</td><td>$280\text{ ms}$</td></tr>
+<tr><td><strong>Stage 4: Deterministic Verifier Gate</strong></td><td>Price/Stock/SKU Grounding Check + Progressive Filter Relaxation (if hits $&lt; 3$)</td><td>In-Process Rust/Python CPU Verifier</td><td>$6\text{ ms}$</td><td>$12\text{ ms}$</td></tr>
+<tr><td><strong>Stage 5: Grounded Synthesis</strong></td><td>Streaming Response + Structured Product Cards (vLLM 8B/70B Tiered Synthesizer)</td><td>GPU Prefill + First Token Stream</td><td>$260\text{ ms}$</td><td>$380\text{ ms}$</td></tr>
+<tr><td><strong>Total Critical Path (TTFT)</strong></td><td>End-to-End Multi-Tool Turn</td><td><strong>Pipeline Sum</strong></td><td><strong>$699\text{ ms}$</strong></td><td><strong>$1,012\text{ ms}$</strong></td></tr>
+</tbody></table></div>
+
+<h2 id="end-to-end-architecture">2. End-to-End Agent Harness Architecture</h2>
+<p>Figure 1 illustrates the five-tier production architecture of the <strong>OmniMart Shopping Assistant</strong>, incorporating the fault-localization and retrieval patterns proven in <strong>Aria at VogueCart</strong> (+58.86% engaged MAU, +31.74% repeat retention) and the low-latency vLLM serving stack from <strong>AutoPulse CRM</strong>.</p>
+
+<figure class="blog-figure"><img src="assets/omnimart-shopping-agent-architecture.svg" alt="OmniMart Shopping-Assistant Agent End-to-End Architecture" loading="lazy"><figcaption><strong>Figure 1:</strong> End-to-end production architecture of the <strong>OmniMart Shopping-Assistant Agent</strong>. Incoming multimodal queries pass through a $45\text{ ms}$ Intent Router and Session Slot Ledger before the 8B DAG Planner dispatches parallel MCP tool calls across the Hybrid Retrieval Cascade (BM25 + fine-tuned CLIP HNSW + Cross-Encoder), Real-Time Inventory/Voucher Engine, and Sizing/Review Analyzer, gated by a deterministic pre-stream verifier.</figcaption></figure>
+
+<h3 id="tier-1-routing-and-slot-ledger">2.1 Tier 1: Complexity Router &amp; Deterministic Session Slot Ledger</h3>
+<p>Not every user turn requires a multi-step agent loop. A lightweight ONNX router classifies incoming turns into three execution lanes:</p>
+<ol>
+<li><strong>Lane A — Deterministic Fast-Path ($42\%$ of traffic, $190\text{ ms}$ p95):</strong> Single-intent transactional lookups (<em>&ldquo;Where is my order #OM-9921?&rdquo;</em>, <em>&ldquo;What is the return window for electronics?&rdquo;</em>) bypass the DAG planner and invoke a single bound MCP tool directly.</li>
+<li><strong>Lane B — Clarification Gate ($11\%$ of traffic):</strong> Triggered when our step-level uncertainty estimator detects high semantic entropy ($SE(h_t) &gt; \tau_{\text{clarify}}$) or missing mandatory parameters (e.g., shoe size or budget ceiling on a broad gift query), asking a single targeted disambiguation question with quick-reply chips.</li>
+<li><strong>Lane C — Parallel DAG Shopping Planner ($47\%$ of traffic):</strong> Handles multi-constraint discovery, visual similarity search, cross-SKU trade-off comparisons, and bundle optimization.</li>
+</ol>
+<p>To prevent <strong>multi-turn constraint drift</strong> (where a user’s turn-1 constraint <code>budget &lt;= $110</code> is forgotten by turn 5), the harness maintains an explicit typed <strong>Session Slot Ledger</strong> $\mathcal{L}_t = (\mathcal{C}_{\text{hard}}, \mathcal{C}_{\text{soft}}, \mathcal{E}_{\text{candidates}})$:</p>
+<ul>
+<li><strong>Hard Constraints ($\mathcal{C}_{\text{hard}}$):</strong> Budget ceiling, required size in stock, delivery deadline, allergen/material exclusions. Never relaxed without explicit user consent.</li>
+<li><strong>Soft Constraints ($\mathcal{C}_{\text{soft}}$):</strong> Sub-shade color nuances, minor style tags, secondary brand preferences. Ranked by priority weight $w_j \in (0,1)$ so the harness can deterministically relax the lowest-weight soft constraint if strict catalog intersection returns $&lt;3$ items.</li>
+</ul>
+
+<h3 id="tier-2-hybrid-retrieval-cascade">2.2 Tier 2: Three-Stage Hybrid Retrieval &amp; Ranking Cascade</h3>
+<p>E-commerce queries combine exact lexical tokens (model numbers like <code>Pegasus 41</code>, exact specs like <code>GTX</code> or <code>256GB</code>) with dense semantic/visual concepts (<em>&ldquo;breathable minimalist summer commuter sneaker&rdquo;</em>). Relying solely on dense embeddings misses exact model numbers; relying solely on BM25 fails on semantic and visual queries. Our `search_catalog_hybrid` MCP server executes a 3-stage cascade within $185\text{ ms}$:</p>
+<div class="opt-equation">$$\text{Score}_{\text{RRF}}(d \mid q) = \frac{w_{\text{lex}}}{k_0 + r_{\text{BM25}}(d, q)} + \frac{w_{\text{dense}}}{k_0 + r_{\text{HNSW}}(d, \mathbf{e}_q)} + \frac{w_{\text{vis}}}{k_0 + r_{\text{HNSW}}(d, \mathbf{e}_{\text{img}})}, \qquad k_0 = 60.$$</div>
+<ul>
+<li><strong>Stage 2a — Hard Metadata Pre-Filtering &amp; Dual Candidate Generation (Top $200$):</strong> Applies inverted-index bitmask filters for $\mathcal{C}_{\text{hard}}$ (<code>in_stock_sizes CONTAINS "10.5" AND live_price &lt;= 110 AND est_delivery_days &lt;= 3</code>), then retrieves top $150$ candidates via BM25 and top $150$ via our custom HNSW index ($M=32$, $\text{efSearch}=128$) over domain-fine-tuned 512-D CLIP product embeddings, fusing into $200$ unique candidates via Reciprocal Rank Fusion ($\text{RRF}$).</li>
+<li><strong>Stage 2b — Cross-Encoder &amp; Personalization Reranking (Top $200 \to 15$):</strong> A distilled 6-layer cross-encoder scores query–item pairs jointly alongside user semantic profile features (historical brand affinity, price elasticity, climate zone).</li>
+<li><strong>Stage 2c — MMR Diversity &amp; Live Inventory/Voucher Hydration (Top $15 \to 5$):</strong> Applies Maximal Marginal Relevance ($\lambda_{\text{MMR}} = 0.75$) so the top 5 product cards don’t show five identical colorways of the same shoe, then calls `get_live_inventory_vouchers` against Redis/Aerospike to compute exact post-coupon checkout prices.</li>
+</ul>
+
+<h3 id="tier-3-deterministic-grounding-guard">2.3 Tier 3: Deterministic Groundedness &amp; Fit Verifier</h3>
+<p>Before streaming the final comparison to the user, the harness runs a $6\text{ ms}$ deterministic verifier over the candidate product cards and synthesized prose:</p>
+<ol>
+<li><strong>Price &amp; Voucher Parity Check:</strong> Verifies that every dollar figure in the assistant response matches <code>live_hydration[sku].final_price</code> or <code>list_price</code> to the cent.</li>
+<li><strong>Return-Risk Sizing Annotation:</strong> Cross-references the SKU’s historical return reasons (`runs_small_rate = 0.34`) with the user’s semantic fit profile, automatically injecting a verified sizing callout (<em>&ldquo;Note: 34% of buyers report this model runs half a size small; consider US 11.&rdquo;</em>).</li>
+</ol>
+
+<h2 id="evaluating-the-shopping-agent">3. How to Evaluate the OmniMart Shopping Agent End-to-End</h2>
+<p>In a senior/staff interview, designing the architecture is only half the question; the decisive differentiator is designing a **rigorous, multi-layered evaluation system** that connects offline component metrics to online marketplace economics.</p>
+
+<figure class="blog-figure"><img src="assets/omnimart-offline-online-eval-loop.svg" alt="OmniMart 4-Layer Offline and Online Agent Evaluation System" loading="lazy"><figcaption><strong>Figure 2:</strong> The 4-Layer Evaluation Architecture for the <strong>OmniMart Shopping Assistant</strong>: (Layer 1) Deterministic Trajectory &amp; Counterfactual Sandbox Suite ($N=1,500$), (Layer 2) Retrieval &amp; Ranking Metrics ($\text{nDCG@10}$, $\text{HCSR@5}$, $\text{MRR}$), (Layer 3) Human-Calibrated LLM-as-Judge with Rogan–Gladen debiasing and paired significance testing, and (Layer 4) Online Interleaving &amp; User-Clustered A/B Experimentation with return-rate guardrails.</figcaption></figure>
+
+<h3 id="eval-layer-1">3.1 Layer 1: Deterministic Trajectory &amp; Stateful Sandbox Suite (CI Gate)</h3>
+<p>We curate a stratified benchmark $\mathcal{D}_{\text{eval}}$ of $N = 1,500$ multi-turn shopping conversations across 6 slices: (1) strict multi-constraint filtering, (2) zero-hit progressive relaxation, (3) multimodal image-to-product search, (4) mid-conversation constraint reversal, (5) adversarial prompt injection in seller descriptions, and (6) ambiguous/underspecified queries requiring clarification. All tools run against a <strong>deterministic snapshot sandbox</strong> of catalog, inventory, and voucher databases. Every PR must pass four hard deterministic gates:</p>
+<ul>
+<li><strong>Tool &amp; Argument Exact-Match $F_1 \ge 0.96$:</strong> Normalized AST comparison of generated tool calls against reference DAGs.</li>
+<li><strong>Hard-Constraint Satisfaction Rate ($\text{HCSR@5}$):</strong> Fraction of recommended top-$5$ SKUs that satisfy $100\%$ of active hard constraints $\mathcal{C}_{\text{hard}}$ in the session slot ledger:
+<div class="opt-equation">$$\text{HCSR@}K = \frac{1}{|\mathcal{D}_{\text{eval}}|} \sum_{i=1}^{|\mathcal{D}_{\text{eval}}|} \frac{1}{K} \sum_{k=1}^{K} \mathbb{I}\!\left[\forall c \in \mathcal{C}_{\text{hard}}^{(i)} : \text{satisfies}\!\left(\text{SKU}_{i,k},\, c\right)\right] \ge 0.992.$$</div></li>
+<li><strong>Multi-Turn Slot Retention Rate ($\text{SRR}_{T=8} \ge 0.98$):</strong> Probability that a turn-1 constraint remains enforced at turn $8$ unless explicitly overridden by the user.</li>
+<li><strong>$\text{Pass}^5$ Reliability ($\ge 0.88$):</strong> Every critical scenario is executed $k=5$ times at production temperature $T=0.2$ to verify consistency $\text{Pass}^5 = (\hat{p})^5$.</li>
+</ul>
+
+<h3 id="eval-layer-2">3.2 Layer 2: Retrieval &amp; Reranking Evaluation</h3>
+<p>Evaluated independently on $25,000$ historical search-to-purchase/cart sessions with graded relevance labels $y \in \{0\text{ (irrelevant)}, 1\text{ (clicked)}, 2\text{ (added to cart)}, 3\text{ (purchased &amp; kept)}\}$:</p>
+<ul>
+<li><strong>Stage-1 Candidate Recall:</strong> $\text{Recall@200} \ge 0.94$ for purchased items (ensuring the HNSW + BM25 stage does not drop the winning SKU).</li>
+<li><strong>Stage-2 Ranking Quality:</strong> $\text{nDCG@10} \ge 0.81$ and $\text{MRR@10} \ge 0.68$.</li>
+<li><strong>Catalog Diversity &amp; Price Spread:</strong> Intra-List Distance ($\text{ILD@5}$) over visual embeddings to prevent duplicate-looking recommendations.</li>
+</ul>
+
+<h3 id="eval-layer-3">3.3 Layer 3: Calibrated LLM-as-Judge &amp; Paired Significance Testing</h3>
+<p>For open-ended conversational qualities that cannot be checked by regex, we deploy three specialized binary/3-point LLM judges calibrated against human e-commerce merchandisers (Cohen’s $\kappa \ge 0.82$):</p>
+<ol>
+<li><strong>Factual &amp; Review Groundedness Judge:</strong> Verifies that every qualitative claim (e.g., <em>&ldquo;waterproof Gore-Tex membrane&rdquo;</em>, <em>&ldquo;reviewers praise wide toe box&rdquo;</em>) is entailed by the retrieved product spec and review snippets.</li>
+<li><strong>Trade-Off Comparison Utility Judge:</strong> Evaluates whether multi-product comparisons highlight decision-relevant differences (weight, drop, material, net price) rather than generic boilerplate.</li>
+<li><strong>Clarification Precision Judge:</strong> Penalizes both premature guessing on underspecified queries and unnecessary interrogation when constraints are already sufficient.</li>
+</ol>
+<p>Before promoting any prompt, planner, or model update, we apply the **Rogan–Gladen prevalence estimator** $\hat{p} = (\hat{q} + \hat{q}_0 - 1)/(\hat{q}_1 + \hat{q}_0 - 1)$ and run a **paired $t$-test and Wilcoxon signed-rank test** across all $1,500$ benchmark seeds with **Holm–Bonferroni family-wise error control** ($\alpha = 0.05$).</p>
+
+<h3 id="eval-layer-4">3.4 Layer 4: Online Interleaving, Shadow Traffic &amp; A/B Experimentation</h3>
+<p>Offline gains must translate into net marketplace value without inflating product returns:</p>
+<ul>
+<li><strong>Phase 1 — Team-Draft Interleaving (3 Days):</strong> For retrieval/reranker updates, interleave top-$5$ SKU cards from Control ($A$) and Treatment ($B$) within the same assistant response to measure click/add-to-cart preference with $10\times$ higher statistical power than standard A/B tests.</li>
+<li><strong>Phase 2 — User-Clustered A/B Test (14 Days, Stratified by Buyer Tenure):</strong>
+  <ul>
+    <li><strong>Primary North-Star Metrics:</strong> Session-to-Purchase Conversion Rate ($\text{CVR}$), Net GMV per Engaged User (net of 30-day returns), and 14-Day Repeat Assistant Retention.</li>
+    <li><strong>Hard Guardrail Metrics:</strong> Post-Purchase Size/Mismatch Return Rate (must not increase), User Thumbs-Down / Reformulation Rate, and p95 TTFT Latency ($\le 1,150\text{ ms}$).</li>
+  </ul>
+</li>
+</ul>
+
+<h2 id="reference-implementation">4. Reference Implementation: Progressive Constraint Relaxation &amp; Grounding Guard</h2>
+<p>Below is the core Python implementation of OmniMart’s deterministic slot-ledger progressive relaxation engine and pre-synthesis SKU/price grounding verifier.</p>
+
+<pre><code class="language-python">from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+import re
+
+@dataclass
+class SoftConstraint:
+    field_name: str
+    value: Any
+    priority_weight: float  # Lower weight = relaxed first when catalog hits &lt; min_hits
+
+@dataclass
+class ShoppingSlotLedger:
+    hard_constraints: Dict[str, Any]
+    soft_constraints: List[SoftConstraint] = field(default_factory=list)
+    min_required_hits: int = 3
+
+class OmniMartRetrievalAndVerifierEngine:
+    """Executes progressive soft-constraint relaxation and deterministic price/SKU verification."""
+    PRICE_CLAIM_RE = re.compile(r"\[SKU:(OM-\d+)\][^\$]*\$(\d+(?:\.\d{1,2})?)")
+
+    def __init__(self, hybrid_search_fn):
+        self.hybrid_search_fn = hybrid_search_fn
+
+    async def search_with_progressive_relaxation(
+        self, query: str, ledger: ShoppingSlotLedger
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        # Sort soft constraints by ascending importance so least critical relaxes first
+        active_soft = sorted(ledger.soft_constraints, key=lambda c: c.priority_weight)
+        relaxed_fields: List[str] = []
+
+        while True:
+            soft_filter_dict = {c.field_name: c.value for c in active_soft}
+            candidates = await self.hybrid_search_fn(
+                query=query,
+                hard_filters=ledger.hard_constraints,  # NEVER relaxed automatically
+                soft_filters=soft_filter_dict,
+            )
+            if len(candidates) &gt;= ledger.min_required_hits or not active_soft:
+                return candidates, relaxed_fields
+
+            # Deterministically drop the lowest-weight soft constraint and log provenance
+            dropped = active_soft.pop(0)
+            relaxed_fields.append(f"{dropped.field_name}={dropped.value}")
+
+    @staticmethod
+    def verify_response_grounding(
+        draft_text: str,
+        hydrated_skus: Dict[str, Dict[str, Any]],
+        hard_constraints: Dict[str, Any],
+    ) -> List[Dict[str, str]]:
+        violations = []
+        for match in OmniMartRetrievalAndVerifierEngine.PRICE_CLAIM_RE.finditer(draft_text):
+            sku_id, claimed_price_str = match.group(1), match.group(2)
+            claimed_price = float(claimed_price_str)
+
+            if sku_id not in hydrated_skus:
+                violations.append({
+                    "rule": "HALLUCINATED_SKU",
+                    "sku": sku_id,
+                    "fix": f"Remove {sku_id}; only reference SKUs in {list(hydrated_skus.keys())}.",
+                })
+                continue
+
+            actual_price = float(hydrated_skus[sku_id]["final_checkout_price"])
+            if abs(claimed_price - actual_price) &gt; 0.01:
+                violations.append({
+                    "rule": "PRICE_MISMATCH",
+                    "sku": sku_id,
+                    "fix": f"Replace ${claimed_price:.2f} with exact hydrated price ${actual_price:.2f}.",
+                })
+
+            max_budget = hard_constraints.get("max_price_usd")
+            if max_budget is not None and actual_price &gt; float(max_budget):
+                violations.append({
+                    "rule": "BUDGET_VIOLATION",
+                    "sku": sku_id,
+                    "fix": f"Remove {sku_id} (${actual_price:.2f}); exceeds hard budget ${max_budget:.2f}.",
+                })
+        return violations</code></pre>
+
+<div class="note-callout"><h4>Summary Checklist for Shopping-Assistant System Design Interviews</h4><ul>
+<li><strong>Decompose Latency Explicitly:</strong> Budget every millisecond across Intent Routing ($45\text{ ms}$), Prefix-Cached DAG Planning ($295\text{ ms}$), Parallel MCP Tool Execution ($280\text{ ms}$), CPU Verification ($12\text{ ms}$), and Streaming Synthesis ($380\text{ ms}$) to stay under $1.15\text{s}$ p95 TTFT.</li>
+<li><strong>Separate Hard vs. Soft Constraints:</strong> Never let a zero-hit query wipe budget or size constraints; progressively relax soft aesthetic filters while disclosing the relaxation to the user.</li>
+<li><strong>Connect Offline Eval Layers to Online Guardrails:</strong> Pair deterministic trajectory benchmarks ($\text{HCSR@5}$, $\text{Pass}^5$), retrieval metrics ($\text{nDCG@10}$), and Rogan–Gladen calibrated LLM judges with online Net GMV (net of 30-day returns) so the agent optimizes for satisfied purchases rather than clickbait.</li>
+</ul></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="planning-self-refine-and-context-engineering.html">← Ch. 01: Planning, Self-Refine &amp; Context Engineering</a><a href="index.html">Agentic Harness · Design Reading Guide →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

@@ -11519,8 +11519,9 @@ var BLOG_TREE = [
         name: 'design',
         label: 'Harness Design & Architecture',
         children: [
-          { title: 'Reading Guide: Agent Harness Design &amp; Architecture', file: 'agentic-harness/design/index.html', links: ['agentic-harness/design/planning-self-refine-and-context-engineering.html'] },
-          { title: '1. Agent Harness Design: Planning, Self-Verification &amp; Self-Refine Loops, Context Engineering, and Memory', file: 'agentic-harness/design/planning-self-refine-and-context-engineering.html', links: ['agentic-harness/design/index.html', 'agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html'] }
+          { title: 'Reading Guide: Agent Harness Design &amp; Architecture', file: 'agentic-harness/design/index.html', links: ['agentic-harness/design/planning-self-refine-and-context-engineering.html', 'agentic-harness/design/ecommerce-shopping-assistant-system-design.html'] },
+          { title: '1. Agent Harness Design: Planning, Self-Verification &amp; Self-Refine Loops, Context Engineering, and Memory', file: 'agentic-harness/design/planning-self-refine-and-context-engineering.html', links: ['agentic-harness/design/index.html', 'agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html', 'agentic-harness/design/ecommerce-shopping-assistant-system-design.html'] },
+          { title: '2. System Design Case Study: Designing and Evaluating a Production E-Commerce Shopping-Assistant Agent for "OmniMart"', file: 'agentic-harness/design/ecommerce-shopping-assistant-system-design.html', links: ['agentic-harness/design/planning-self-refine-and-context-engineering.html', 'agentic-harness/design/index.html', 'agentic-harness/evaluation/agent-eval-system-from-scratch.html'] }
         ]
       }
     ]
