@@ -1,0 +1,147 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Hands-On SFT &amp; LoRA/QLoRA Fine-Tuning Playbook: Loss Masking, FlashAttention Packing, Rank/Alpha Scaling, and Bridging to DPO | Neel Mishra</title><meta name="description" content="Practical production playbook for Supervised Fine-Tuning (SFT) and LoRA/QLoRA: assistant-only loss masking, FlashAttention varlen sequence packing with RoPE reset, target modules (all-linear vs attention-only), rank/alpha and rsLoRA scaling, and bridging SFT checkpoints to DPO."><link rel="canonical" href="https://neelmishra.github.io/blog/llm/sft-and-lora-practical-playbook.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../blog.css"><link rel="stylesheet" href="../../learning-notes.css"><link rel="stylesheet" href="../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../index.html">Home</a><a href="../../experience.html">Experience</a><a href="../../projects.html">Projects</a><a class="active" href="../../blog.html">Blog</a><a href="../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../blog.html#folder-llm">← LLM</a><div class="post-series-nav"><a href="index.html">LLM · Post-Training</a><span>Practical Playbook</span></div><h1>Hands-On SFT &amp; LoRA/QLoRA Fine-Tuning Playbook: Loss Masking, FlashAttention Packing, Rank/Alpha Scaling, and Bridging to DPO</h1><p class="post-meta">October 2026 · 20 min read</p><p class="optimizer-lede">A production engineering guide to Supervised Fine-Tuning (SFT) and Low-Rank Adaptation (LoRA/QLoRA): why multi-turn assistant-only loss masking (<code>labels = -100</code>) and `<eot_id>` supervision make or break tool-calling agents, how FlashAttention `cu_seqlens` sequence packing eliminates $71\%$ padding waste without cross-document attention leaks, why adapting all 7 linear layers outperforms attention-only LoRA, and how to hand off an SFT checkpoint to DPO without entropy collapse.</p>
+
+<h2 id="sft-loss-masking">1. Multi-Turn SFT Loss Masking &amp; Chat Template Invariants</h2>
+<p>In causal language model pretraining, every token $x_t$ in the context window is both a conditioning prefix for $x_{&gt;t}$ and a prediction target scored by cross-entropy loss. In **Supervised Fine-Tuning (SFT)** for conversational and tool-calling agents (such as **Aria at VogueCart** or **AutoPulse CRM**), a single training trajectory $\tau$ interleaves four distinct speaker roles:</p>
+<ol>
+<li><strong>System Prompt &amp; Tool Declarations ($R_{\text{sys}}$):</strong> Static instructions and JSON schemas.</li>
+<li><strong>User Turns ($R_{\text{user}}$):</strong> Potentially noisy, misspelled, or adversarial customer requests.</li>
+<li><strong>Tool Observations ($R_{\text{tool}}$):</strong> Raw JSON payloads returned by external MCP servers.</li>
+<li><strong>Assistant Reasoning, Tool Calls &amp; Final Responses ($R_{\text{asst}}$):</strong> The policy actions we actually want $\pi_\theta$ to learn.</li>
+</ol>
+<p>If you leave standard causal language modeling loss active across all tokens, **over $75\%$ of gradient updates are wasted teaching the model to memorize static tool schemas, imitate user typos, and hallucinate fake tool JSON observations**. Instead, we construct a binary target mask $m_t \in \{0, 1\}$ by setting `labels[t] = -100` (PyTorch’s default `ignore_index`) on every token outside $R_{\text{asst}}$:</p>
+<div class="opt-equation">$$\mathcal{L}_{\text{SFT}}(\theta) = -\frac{1}{\sum_{t=1}^{T} m_t} \sum_{t=1}^{T} m_t \log \pi_\theta\!\left(x_t \mid x_1, \dots, x_{t-1}\right), \qquad m_t = \mathbb{I}\!\left[x_t \in R_{\text{asst}} \cup \{\langle\text{eot\_id}\rangle_{\text{asst}}\}\right].$$</div>
+
+<h3 id="two-subtle-masking-bugs">1.1 Two Subtle Masking Bugs That Break Production Agents</h3>
+<ul>
+<li><strong>Bug 1 — Masking Out the Assistant `<eot_id>` / `<|im_end|>` Token:</strong> If your tokenizer slices assistant spans up to—but excluding—the turn-termination token `<eot_id>`, the model never receives a positive gradient to emit `<eot_id>`. At inference time, it will generate a valid answer and then ramble endlessly or hallucinate a fake `User:` turn until hitting `max_tokens`. Always verify that `labels[eot_idx] == tokenizer.eos_token_id`.</li>
+<li><strong>Bug 2 — Sample-Level vs. Token-Level Loss Reduction Under Gradient Accumulation:</strong> When accumulating gradients over $G_{\text{acc}}$ micro-batches of variable-length multi-turn dialogues, averaging the mean loss per micro-batch $\frac{1}{G_{\text{acc}}}\sum_g \bar{\mathcal{L}}_g$ over-weights short single-turn examples relative to 6-turn tool trajectories by up to $5\times$. Instead, normalize by the **total unmasked assistant tokens across the global batch**: $\sum_{g=1}^{G_{\text{acc}}} \sum_{t} m_{g,t}$.</li>
+</ul>
+
+<h2 id="sequence-packing">2. Multipack Sequence Packing with FlashAttention `cu_seqlens`</h2>
+<p>Agent trajectories follow a heavy-tailed length distribution: $60\%$ of turns are $600\text{--}1,200$ tokens, while complex multi-tool comparisons reach $4,096\text{--}8,192$ tokens. Naive right-padding to $L_{\max} = 8,192$ fills $68\text{--}75\%$ of the batch tensor with `<pad>` tokens, wasting over two-thirds of Tensor Core GEMM FLOPs.</p>
+<p>However, naive concatenation (`[Doc 1, <eos>, Doc 2, <eos>, Doc 3]`) introduces **cross-document attention contamination**: tokens in `Doc 2` attend to KV states from `Doc 1`, and `Doc 2` starts at RoPE position offset $p = |\text{Doc 1}|$ instead of $p = 0$. Production SFT pipelines use **FlashAttention-2 Variable-Length Block-Diagonal Packing** (`flash_attn_varlen_func`):</p>
+<ul>
+<li><strong>1D Flattened Token Stream (`total_tokens`):</strong> Pack $M$ trajectories into a single contiguous 1D tensor without any padding tokens via Best-Fit Decreasing bin-packing.</li>
+<li><strong>Cumulative Sequence Lengths (`cu_seqlens`):</strong> Pass the boundary index array $\text{cu\_seqlens} = [0, L_1, L_1+L_2, \dots, \sum_{i=1}^M L_i]$ (`int32`) directly to FlashAttention, which enforces a strict **block-diagonal causal mask** in SRAM—zero cross-document attention and zero compute spent on off-diagonal blocks.</li>
+<li><strong>Boundary-Reset RoPE Position IDs:</strong> Reset `position_ids` to $0, 1, \dots, L_i - 1$ at the start of every packed trajectory so rotary embeddings remain invariant to packing order.</li>
+</ul>
+
+<figure class="blog-figure"><img src="assets/sft-loss-masking-and-sequence-packing.svg" alt="Multi-Turn SFT Assistant-Only Loss Masking and FlashAttention Block-Diagonal Sequence Packing" loading="lazy"><figcaption><strong>Figure 1:</strong> (Left) Multi-turn SFT loss masking: System, User, and Tool Observation tokens condition the causal KV cache (`labels = -100`, zero gradient), while Assistant Tool Calls, Final Responses, and their terminal `&lt;eot_id&gt;` tokens receive active cross-entropy supervision ($m_t = 1$). (Right) Naive Padding ($71\%$ wasted FLOPs) vs. FlashAttention `cu_seqlens` Packing with block-diagonal attention masking and RoPE `position_ids` resets ($3.1\times$ training throughput).</figcaption></figure>
+
+<h2 id="lora-qlora-mechanics">3. LoRA &amp; QLoRA Hyperparameter Mechanics: All-Linear Modules, Rank $r$, and $\alpha$ Scaling</h2>
+<p>Given a frozen pretrained weight matrix $\mathbf{W}_0 \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ (stored in BF16 for standard LoRA, or 4-bit NormalFloat $\text{NF4}$ with block-size $64$ Double Quantization for QLoRA), Low-Rank Adaptation injects a trainable rank-$r$ update ($r \ll \min(d_{\text{in}}, d_{\text{out}})$):</p>
+<div class="opt-equation">$$\mathbf{h} = \text{dequant}(\mathbf{W}_0)\,\mathbf{x} + \gamma_r \mathbf{B}\mathbf{A}\mathbf{x}, \qquad \mathbf{A} \in \mathbb{R}^{r \times d_{\text{in}}}, \;\; \mathbf{B} \in \mathbb{R}^{d_{\text{out}} \times r},$$</div>
+<p>where $\mathbf{A}$ is initialized via Kaiming uniform / Gaussian $\mathcal{N}(0, \sigma^2)$ and $\mathbf{B} = \mathbf{0}$ so that the adapter starts as an exact identity function ($\Delta \mathbf{W}_{t=0} = \mathbf{0}$) on step $0$.</p>
+
+<h3 id="all-linear-vs-attention">3.1 Why Adapting All 7 Linear Layers Beats Attention-Only LoRA</h3>
+<p>Hu et al.’s original LoRA paper adapted only the attention query and value projections $(\mathbf{W}_q, \mathbf{W}_v)$. However, in modern SwiGLU Transformers (Llama-3, Qwen-2.5, Mistral), **over $66\%$ of per-layer parameters reside in the three MLP projections** ($\mathbf{W}_{\text{gate}}, \mathbf{W}_{\text{up}}, \mathbf{W}_{\text{down}}$). As demonstrated by Dettmers et al. (2023), adapting all 7 linear modules (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`) at rank $r=16$ consistently outperforms adapting only $(\mathbf{W}_q, \mathbf{W}_v)$ even at rank $r=64$!</p>
+
+<h3 id="rank-alpha-and-rslora">3.2 Choosing Rank $r$, Scaling $\alpha$, and rsLoRA ($\alpha / \sqrt{r}$)</h3>
+<p>The scaling factor $\gamma_r$ controls the magnitude of adapter activations relative to the frozen base weights:</p>
+<ul>
+<li><strong>Standard LoRA Scaling ($\gamma_r = \alpha / r$):</strong> Keeps initial learning dynamics roughly invariant when doubling $r$ if $\alpha$ is scaled proportionally (standard convention: $\alpha = 2r$, e.g., $r=32, \alpha=64$). However, at high ranks ($r \ge 64$), $1/r$ over-dampens gradient updates.</li>
+<li><strong>Rank-Stabilized LoRA (rsLoRA, Kalajdzievski 2023) ($\gamma_r = \alpha / \sqrt{r}$):</strong> Because the sum of $r$ independent zero-mean variance-$1$ random variables has standard deviation $\mathcal{O}(\sqrt{r})$, scaling by $\alpha / \sqrt{r}$ preserves exact $\mathcal{O}(1)$ activation and gradient variance across any rank $r \in [8, 256]$.</li>
+</ul>
+
+<div class="table-wrap"><table><thead><tr><th>Hyperparameter / Choice</th><th>Production Default (8B–70B SFT)</th><th>Production Default (LoRA DPO)</th><th>Failure Mode if Misconfigured</th></tr></thead><tbody>
+<tr><td><strong>Target Modules</strong></td><td>All 7 linear layers (<code>q,k,v,o,gate,up,down</code>)</td><td>All 7 linear layers (shared base)</td><td>Adapting only <code>q,v</code> underfits complex JSON schemas &amp; domain knowledge</td></tr>
+<tr><td><strong>Rank $r$ &amp; Alpha $\alpha$</strong></td><td>$r = 32,\; \alpha = 64$ (or rsLoRA $\alpha=16$)</td><td>$r = 16,\; \alpha = 32$</td><td>Too high $r$ on small data ($&lt;5\text{k}$ rows) memorizes surface phrasing</td></tr>
+<tr><td><strong>Peak Learning Rate</strong></td><td>$1.5\times 10^{-4}$ (8B) / $8\times 10^{-5}$ (70B), cosine</td><td>$5\times 10^{-6}$ to $1\times 10^{-5}$ ($15\times$ lower than SFT!)</td><td>Using SFT learning rates ($10^{-4}$) in DPO destroys base capabilities in $&lt;50$ steps</td></tr>
+<tr><td><strong>Training Epochs</strong></td><td>$2.0$ epochs (with early stop on val NLL)</td><td>$1.0\text{--}1.5$ epochs ($\beta = 0.1$, $\alpha_{\text{NLL}}=0.15$)</td><td>$\ge 4$ SFT epochs collapses entropy $H(\pi_{\text{SFT}})$, starving DPO of margin signal</td></tr>
+</tbody></table></div>
+
+<h2 id="bridging-sft-to-dpo">4. Bridging SFT Checkpoints to DPO Without Memory Duplication or Entropy Collapse</h2>
+<p>When transitioning from LoRA SFT to DPO, two critical engineering questions arise:</p>
+<ol>
+<li><strong>Preventing Pre-DPO Entropy Collapse:</strong> If you train SFT for too many epochs before DPO, the SFT policy becomes overly peaked ($\pi_{\text{SFT}}(y_w \mid x) \to 1$, $\pi_{\text{SFT}}(y_l \mid x) \to 0$). When used as $\pi_{\text{ref}}$ in DPO, extreme baseline log-ratios cause numerical saturation and prevent exploration. Always select the **early-stopped SFT checkpoint at minimum validation perplexity** (typically $1.5\text{--}2.0$ epochs) as the DPO starting point.</li>
+<li><strong>Zero-Overhead Reference Model via Adapter Merging or Multi-Adapter Toggling:</strong> Never load two separate 7B/70B base models in VRAM to run DPO after LoRA SFT! Instead:
+  <ul>
+    <li><strong>Pattern A (Dequantize, Merge SFT, Attach Fresh DPO LoRA):</strong> Merge the SFT adapter into the 16-bit base weights ($\mathbf{W}_{\text{SFT}} \leftarrow \mathbf{W}_0 + \frac{\alpha}{r}\mathbf{B}_{\text{SFT}}\mathbf{A}_{\text{SFT}}$), optionally re-quantize to NF4/FP8, and attach a fresh LoRA adapter $(\mathbf{B}_{\text{DPO}}, \mathbf{A}_{\text{DPO}})$. During the DPO training loop, compute $\log \pi_\theta$ with the adapter enabled and compute $\log \pi_{\text{ref}}$ under `with model.disable_adapter(): torch.no_grad()`.</li>
+    <li><strong>Pattern B (Offline Reference Precomputation):</strong> Run a single forward pass over $\mathcal{D}_{\text{pref}}$ with the SFT checkpoint once, save `ref_chosen_logps` and `ref_rejected_logps` as float32 columns in Parquet, and train DPO with only $\pi_\theta$ in memory.</li>
+  </ul>
+</li>
+</ol>
+
+<figure class="blog-figure"><img src="assets/lora-rank-alpha-and-dpo-bridge.svg" alt="LoRA All-Linear Architecture, rsLoRA Scaling, and Bridging SFT Checkpoints to DPO" loading="lazy"><figcaption><strong>Figure 2:</strong> (Left) Adapting all 7 Transformer linear projections (`q,k,v,o` + SwiGLU `gate,up,down`) with zero-initialized $\mathbf{B}=\mathbf{0}$ and rsLoRA scaling $\alpha/\sqrt{r}$. (Right) Bridging SFT to DPO on a single GPU: merging $\Delta \mathbf{W}_{\text{SFT}}$ into $\mathbf{W}_{\text{SFT}}$ (at the 2-epoch entropy-preserving checkpoint) and toggling `disable_adapter()` eliminates duplicate reference model VRAM ($0\text{ GB}$ extra overhead).</figcaption></figure>
+
+<h2 id="reference-implementation">5. Reference PyTorch Implementation: Multi-Turn Assistant Loss Masker &amp; Zero-Copy LoRA DPO Step</h2>
+<p>Below is a production-ready implementation of multi-turn chat tokenization with strict assistant-only loss masking (preserving `<eot_id>` supervision) and a single-model LoRA DPO training step using context-manager adapter toggling.</p>
+
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import Dict, List, Tuple
+
+def build_multiturn_assistant_labels(
+    messages: List[Dict[str, str]],
+    tokenizer,
+    ignore_index: int = -100,
+) -> Dict[str, torch.Tensor]:
+    """
+    Tokenizes a multi-turn trajectory (system, user, tool, assistant) and masks
+    all tokens except assistant responses + assistant &lt;eot_id&gt; delimiters.
+    """
+    input_ids: List[int] = []
+    labels: List[int] = []
+
+    for msg in messages:
+        role = msg["role"]
+        # Format single message segment including its role header and trailing &lt;eot_id&gt;
+        header_ids = tokenizer.encode(f"&lt;|start_header_id|&gt;{role}&lt;|end_header_id|&gt;\n\n", add_special_tokens=False)
+        body_ids = tokenizer.encode(msg["content"], add_special_tokens=False) + [tokenizer.eos_token_id]
+
+        input_ids.extend(header_ids + body_ids)
+        if role == "assistant":
+            # Mask role header (-100), supervise body tokens AND trailing eos_token_id!
+            labels.extend([ignore_index] * len(header_ids) + body_ids)
+        else:
+            # Mask system, user, and raw tool observation tokens completely
+            labels.extend([ignore_index] * (len(header_ids) + len(body_ids)))
+
+    return {
+        "input_ids": torch.tensor(input_ids, dtype=torch.long),
+        "labels": torch.tensor(labels, dtype=torch.long),
+    }
+
+def single_model_lora_dpo_step(
+    peft_model,
+    chosen_ids: torch.Tensor,    # [B, T_w]
+    chosen_labels: torch.Tensor, # [B, T_w] (-100 on prompt)
+    reject_ids: torch.Tensor,    # [B, T_l]
+    reject_labels: torch.Tensor, # [B, T_l] (-100 on prompt)
+    beta: float = 0.1,
+    nll_alpha: float = 0.15,
+) -> Dict[str, torch.Tensor]:
+    """Runs DPO + NLL anchor using a single base model by toggling the LoRA adapter."""
+    def _seq_logp(logits: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+        mask = (shift_labels != -100)
+        safe_targets = shift_labels.masked_fill(~mask, 0)
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+        tok_logp = torch.gather(log_probs, -1, safe_targets.unsqueeze(-1)).squeeze(-1) * mask
+        return tok_logp.sum(dim=-1), mask.sum(dim=-1).clamp(min=1)
+
+    # 1. Reference pass: disable DPO LoRA adapter -> uses frozen merged SFT weights!
+    with torch.no_grad(), peft_model.disable_adapter():
+        ref_w_logp, _ = _seq_logp(peft_model(chosen_ids).logits, chosen_labels)
+        ref_l_logp, _ = _seq_logp(peft_model(reject_ids).logits, reject_labels)
+
+    # 2. Policy pass: DPO LoRA adapter active with gradients
+    pi_w_logp, w_lens = _seq_logp(peft_model(chosen_ids).logits, chosen_labels)
+    pi_l_logp, _ = _seq_logp(peft_model(reject_ids).logits, reject_labels)
+
+    margin = (pi_w_logp - ref_w_logp) - (pi_l_logp - ref_l_logp)
+    dpo_loss = -F.logsigmoid(beta * margin).mean()
+    nll_anchor = -(pi_w_logp / w_lens).mean()
+    total_loss = dpo_loss + nll_alpha * nll_anchor
+
+    return {"loss": total_loss, "dpo_loss": dpo_loss.detach(), "margin": (beta * margin).mean().detach()}</code></pre>
+
+<div class="note-callout"><h4>Key Takeaways for Hands-On SFT &amp; LoRA</h4><ul>
+<li><strong>Supervise only Assistant + `<eot_id>` tokens:</strong> Setting `labels = -100` on system prompts, user queries, and raw tool outputs focuses $100\%$ of adapter capacity on reasoning and tool calls while `<eot_id>` supervision guarantees clean termination.</li>
+<li><strong>Pack sequences with `cu_seqlens` and RoPE resets:</strong> Block-diagonal FlashAttention packing eliminates $70\%+$ padding waste without leaking context across packed trajectories.</li>
+<li><strong>Adapt all 7 linear layers and bridge cleanly to DPO:</strong> Target `q,k,v,o,gate,up,down` with rsLoRA scaling, stop SFT at $2$ epochs before entropy collapses, and use `disable_adapter()` during DPO to avoid duplicating the reference model in VRAM.</li>
+</ul></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← LLM Reading Guide</a><a href="vllm-serving/paged-attention-and-latency-optimization.html">vLLM Serving: 24s to 0.8s Latency Story (AutoPulse CRM) →</a></nav></article></div><script src="../../script.js"></script><script src="../../blog-posts.js"></script><script src="../../blog.js"></script><script src="../../anim-speed.js"></script><script src="../dl/training-labs/training-math.js"></script><script src="../dl/training-labs/training-ui.js"></script><script src="../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

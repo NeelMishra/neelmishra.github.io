@@ -9124,7 +9124,8 @@ var BLOG_TREE = [
     "name": "llm",
     "label": "LLM",
     "children": [
-      {"title": "LLM: Large Language Models Reading Guide", "file": "llm/index.html", "links": ["llm/qlora/index.html"]},
+      {"title": "LLM: Large Language Models Reading Guide", "file": "llm/index.html", "links": ["llm/sft-and-lora-practical-playbook.html", "llm/qlora/index.html"]},
+      {"title": "Hands-On SFT &amp; LoRA/QLoRA Fine-Tuning Playbook: Loss Masking, FlashAttention Packing &amp; Bridging to DPO", "file": "llm/sft-and-lora-practical-playbook.html", "links": ["llm/index.html", "llm/qlora/index.html", "rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html"]},
       {
         "name": "qlora",
         "label": "QLoRA",
