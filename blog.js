@@ -11502,8 +11502,9 @@ var BLOG_TREE = [
         name: 'reliability',
         label: 'Agent Reliability & Debugging',
         children: [
-          { title: 'Reading Guide: Agent Reliability &amp; Debugging', file: 'agentic-harness/reliability/index.html', links: ['agentic-harness/reliability/multi-step-fault-localization-and-tracing.html'] },
-          { title: '1. Multi-Step Agent Reliability &amp; Fault Localization: Pinpointing Step and Tool-Call Failures in "Aria" at VogueCart (+58.86% Engaged MAU)', file: 'agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', links: ['agentic-harness/reliability/index.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] }
+          { title: 'Reading Guide: Agent Reliability &amp; Debugging', file: 'agentic-harness/reliability/index.html', links: ['agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', 'agentic-harness/reliability/agent-uncertainty-estimation-and-failure-flywheels.html'] },
+          { title: '1. Multi-Step Agent Reliability &amp; Fault Localization: Pinpointing Step and Tool-Call Failures in "Aria" at VogueCart (+58.86% Engaged MAU)', file: 'agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', links: ['agentic-harness/reliability/index.html', 'agentic-harness/reliability/agent-uncertainty-estimation-and-failure-flywheels.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] },
+          { title: '2. Uncertainty Estimation in Multi-Step Agent Runs &amp; Turning Failures into Deterministic Fixes', file: 'agentic-harness/reliability/agent-uncertainty-estimation-and-failure-flywheels.html', links: ['agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', 'agentic-harness/reliability/index.html'] }
         ]
       },
       {
