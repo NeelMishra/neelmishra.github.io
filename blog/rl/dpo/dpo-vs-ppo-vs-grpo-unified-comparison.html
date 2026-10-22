@@ -1,0 +1,163 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Post-Training Alignment: DPO vs. PPO vs. GRPO — Mathematical Derivations, VRAM Footprints, and Production Trade-Offs | Neel Mishra</title><meta name="description" content="Unified mathematical and systems comparison of PPO, DPO, and GRPO for LLM post-training: closed-form derivations, 4-model vs. 2-model vs. LoRA VRAM budgets, offline distribution shift, likelihood displacement, and when to use SFT, DPO, or RLVR in production."><link rel="canonical" href="https://neelmishra.github.io/blog/rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-rl--dpo">← Reinforcement Learning / DPO</a><div class="post-series-nav"><a href="index.html">Reinforcement Learning · DPO</a><span>Chapter 08</span></div><h1>Post-Training Alignment: DPO vs. PPO vs. GRPO — Mathematical Derivations, VRAM Footprints, and Production Trade-Offs</h1><p class="post-meta">October 2026 · 21 min read</p><p class="optimizer-lede">How PPO, DPO, and GRPO emerge from the same KL-regularized reward maximization objective, why PPO requires $4$ models in VRAM ($252\text{ GB}$ for 7B full-parameter) while DPO and GRPO eliminate the value critic, how offline DPO suffers from distribution shift and likelihood displacement, and a pragmatic decision framework for choosing between LoRA SFT, offline DPO, and online GRPO in production.</p>
+
+<h2 id="unified-objective">1. One Objective, Three Optimization Paths</h2>
+<p>After Supervised Fine-Tuning (SFT) teaches a base model the format and domain vocabulary of downstream tasks, post-training alignment shapes the policy $\pi_\theta(y \mid x)$ to prefer high-utility, grounded responses over plausible-sounding mistakes. Virtually all modern post-training algorithms—<strong>PPO</strong> (Ouyang et al., 2022), <strong>DPO</strong> (Rafailov et al., 2023), and <strong>GRPO</strong> (Shao et al., 2024)—start from the same KL-regularized reward maximization problem:</p>
+<div class="opt-equation">$$\max_{\pi_\theta} \; \mathcal{J}(\pi_\theta) = \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_\theta(\cdot \mid x)}\!\left[r(x, y)\right] - \beta\,\mathbb{D}_{\text{KL}}\!\left(\pi_\theta(\cdot \mid x) \,\Big\|\, \pi_{\text{ref}}(\cdot \mid x)\right),$$</div>
+<p>where $\pi_{\text{ref}}$ is the frozen SFT checkpoint and $\beta &gt; 0$ controls how far $\pi_\theta$ may deviate from $\pi_{\text{ref}}$ before the reverse-KL penalty dominates. Where the three methods diverge is <strong>how they represent the reward $r(x,y)$, how they estimate baselines/advantages, and whether they sample online from $\pi_\theta$ during training</strong>.</p>
+
+<h2 id="side-by-side-derivations">2. Mathematical Derivations: PPO vs. DPO vs. GRPO</h2>
+
+<h3 id="ppo-derivation">2.1 PPO: Explicit Reward Model + Learned Token-Level Value Critic</h3>
+<p>In standard RLHF with Proximal Policy Optimization (PPO), we first train a separate neural reward model $r_\phi(x, y)$ on preference pairs. During RL training, the policy $\pi_\theta$ autoregressively generates responses $y = (y_1, \dots, y_T)$ online. To prevent the policy from collapsing into reward-hacking degenerate text, the per-token KL penalty is folded directly into the token-level shaped reward:</p>
+<div class="opt-equation">$$\tilde{r}_t = \begin{cases} -\beta \log \dfrac{\pi_\theta(y_t \mid x, y_{&lt;t})}{\pi_{\text{ref}}(y_t \mid x, y_{&lt;t})} &amp; \text{if } t &lt; T, \\[10pt] r_\phi(x, y) - \beta \log \dfrac{\pi_\theta(y_T \mid x, y_{&lt;T})}{\pi_{\text{ref}}(y_T \mid x, y_{&lt;T})} &amp; \text{if } t = T. \end{cases}$$</div>
+<p>Because the terminal reward $r_\phi(x, y)$ only arrives at the final token $T$, credit assignment across earlier tokens $t &lt; T$ requires a learned <strong>Value Critic</strong> $V_\psi(x, y_{&lt;t})$—typically a model of the same parameter count as $\pi_\theta$—to compute Generalized Advantage Estimation ($\text{GAE}(\gamma, \lambda)$):</p>
+<div class="opt-equation">$$\delta_t = \tilde{r}_t + \gamma V_\psi(s_{t+1}) - V_\psi(s_t), \qquad \hat{A}_t^{\text{GAE}} = \sum_{l=0}^{T-t} (\gamma \lambda)^l \delta_{t+l}.$$</div>
+<p>PPO then updates $\pi_\theta$ via the clipped importance-sampling surrogate objective over token ratios $\rho_t(\theta) = \frac{\pi_\theta(y_t \mid s_t)}{\pi_{\theta_{\text{old}}}(y_t \mid s_t)}$:</p>
+<div class="opt-equation">$$\mathcal{L}_{\text{PPO}}(\theta) = -\mathbb{E}_{t}\!\left[\min\!\left(\rho_t(\theta)\hat{A}_t^{\text{GAE}},\; \text{clip}(\rho_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t^{\text{GAE}}\right)\right].$$</div>
+
+<h3 id="dpo-derivation">2.2 DPO: Closed-Form Optimal Policy Inversion (Zero Online Rollouts, Zero Critic)</h3>
+<p>Rafailov et al. (2023) observed that the KL-regularized objective $\mathcal{J}(\pi)$ has an exact, closed-form Gibbs distribution optimum for any reward function $r(x,y)$:</p>
+<div class="opt-equation">$$\pi_r^*(y \mid x) = \frac{1}{Z(x)} \pi_{\text{ref}}(y \mid x) \exp\!\left(\frac{1}{\beta} r(x, y)\right), \qquad Z(x) = \sum_{y'} \pi_{\text{ref}}(y' \mid x) \exp\!\left(\frac{1}{\beta} r(x, y')\right).$$</div>
+<p>Solving this equation algebraically for the reward $r(x, y)$ expresses the reward in terms of the optimal policy $\pi^*$ and reference policy $\pi_{\text{ref}}$:</p>
+<div class="opt-equation">$$r(x, y) = \beta \log \frac{\pi^*(y \mid x)}{\pi_{\text{ref}}(y \mid x)} + \beta \log Z(x).$$</div>
+<p>When we substitute this reparameterized reward into the Bradley–Terry pairwise preference model $P(y_w \succ y_l \mid x) = \sigma\!\left(r(x, y_w) - r(x, y_l)\right)$, the intractable partition function $\beta \log Z(x)$—which depends only on the prompt $x$—<strong>cancels out identically</strong> between $y_w$ and $y_l$, yielding the DPO loss:</p>
+<div class="opt-equation">$$\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}_{\text{pref}}}\!\left[\log \sigma\!\left(\beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)}\right)\right].$$</div>
+<p>Defining the implicit reward margin $u_\theta(x, y_w, y_l) = \beta \Delta_w - \beta \Delta_l$ where $\Delta_y = \log \frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$, the gradient with respect to $\theta$ is:</p>
+<div class="opt-equation">$$\nabla_\theta \mathcal{L}_{\text{DPO}}(\theta) = -\beta\,\mathbb{E}_{(x, y_w, y_l)}\!\left[\underbrace{\sigma\!\left(-u_\theta(x, y_w, y_l)\right)}_{\text{mistake weight } w_\theta \in (0,1)} \Big(\nabla_\theta \log \pi_\theta(y_w \mid x) - \nabla_\theta \log \pi_\theta(y_l \mid x)\Big)\right].$$</div>
+
+<h3 id="grpo-derivation">2.3 GRPO: Online Group Rollout Baseline without a Value Critic</h3>
+<p>While DPO is simple and memory-efficient, it is strictly <strong>offline</strong> by default. Conversely, PPO is online but pays an enormous memory and variance tax to train the token-level value network $V_\psi$. <strong>Group Relative Policy Optimization (GRPO)</strong> (Shao et al., 2024) gets the best of both worlds: for each prompt $x$, it samples a group of $G$ completions $\{y_1, y_2, \dots, y_G\} \sim \pi_{\theta_{\text{old}}}(\cdot \mid x)$ online, scores each completion with a reward model or deterministic rule verifier $r_i = R(x, y_i)$, and uses the <strong>group mean and standard deviation</strong> as the baseline:</p>
+<div class="opt-equation">$$\hat{A}_{i, t} = \tilde{r}_i = \frac{r_i - \text{mean}\!\left(\{r_1, \dots, r_G\}\right)}{\text{std}\!\left(\{r_1, \dots, r_G\}\right) + \epsilon}, \qquad \forall t \in \{1, \dots, |y_i|\}.$$</div>
+<p>Instead of folding the KL penalty into the reward, GRPO adds an explicit, unbiased, strictly non-negative per-token KL divergence estimator (Schulman’s $k_3$ estimator) directly to the clipped loss:</p>
+<div class="opt-equation">$$\mathcal{L}_{\text{GRPO}}(\theta) = -\frac{1}{G}\sum_{i=1}^{G} \frac{1}{|y_i|}\sum_{t=1}^{|y_i|} \left[\min\!\left(\rho_{i,t}\hat{A}_{i,t},\, \text{clip}(\rho_{i,t}, 1-\epsilon, 1+\epsilon)\hat{A}_{i,t}\right) - \beta\,\mathbb{D}_{\text{KL}}^{(i,t)}(\pi_\theta \| \pi_{\text{ref}})\right],$$</div>
+<div class="opt-equation">$$\mathbb{D}_{\text{KL}}^{(i,t)}\!\left(\pi_\theta \,\|\, \pi_{\text{ref}}\right) = \frac{\pi_{\text{ref}}(y_{i,t} \mid x, y_{i,&lt;t})}{\pi_\theta(y_{i,t} \mid x, y_{i,&lt;t})} - \log \frac{\pi_{\text{ref}}(y_{i,t} \mid x, y_{i,&lt;t})}{\pi_\theta(y_{i,t} \mid x, y_{i,&lt;t})} - 1 \ge 0.$$</div>
+
+<figure class="blog-figure"><img src="assets/ppo-vs-dpo-vs-grpo-architecture-vram.svg" alt="PPO vs DPO vs GRPO Architecture and 7B Model VRAM Footprint Comparison" loading="lazy"><figcaption><strong>Figure 1:</strong> Architectural dataflow and 7B-parameter BF16 VRAM footprint comparison across (A) <strong>PPO</strong> ($4$ models in memory: Actor $\pi_\theta$, Critic $V_\psi$, Reference $\pi_{\text{ref}}$, Reward $r_\phi$, requiring $\sim 252\text{ GB}$ for weights + AdamW states before activations), (B) <strong>DPO</strong> (offline pair scoring with precomputed $\pi_{\text{ref}}$ log-probs or LoRA adapter toggling, cutting model state memory to $112\text{ GB}$ full-param or $18\text{ GB}$ with QLoRA), and (C) <strong>GRPO</strong> (online group rollout $G=8$ with deterministic/verifier rewards and zero Value Critic).</figcaption></figure>
+
+<div class="table-wrap"><table><thead><tr><th>Dimension</th><th>PPO (Standard RLHF)</th><th>DPO (Direct Preference Opt.)</th><th>GRPO (Group Relative Policy Opt.)</th></tr></thead><tbody>
+<tr><td><strong>Models in GPU Memory</strong></td><td>$4$: $\pi_\theta$ (train), $V_\psi$ (train), $\pi_{\text{ref}}$ (frozen), $r_\phi$ (frozen)</td><td>$2$: $\pi_\theta$ (train), $\pi_{\text{ref}}$ (frozen) — or $1$ with LoRA / precomputed $\pi_{\text{ref}}$</td><td>$2$ (+ Verifier/RM): $\pi_\theta$ (train), $\pi_{\text{ref}}$ (frozen), plus rule verifier or $r_\phi$</td></tr>
+<tr><td><strong>7B Full-Param State VRAM</strong></td><td>$36\Psi \approx 252\text{ GB}$ (weights + FP32 AdamW)</td><td>$18\Psi \approx 126\text{ GB}$ ($112\text{ GB}$ precomputed $\pi_{\text{ref}}$; $18\text{ GB}$ LoRA)</td><td>$18\Psi \approx 126\text{ GB}$ + vLLM KV-cache for $G$ rollouts</td></tr>
+<tr><td><strong>Data Regime</strong></td><td>Online autoregressive rollouts $y \sim \pi_\theta$</td><td>Offline static preference triples $(x, y_w, y_l)$ (or iterative online DPO)</td><td>Online group rollouts $\{y_1,\dots,y_G\} \sim \pi_{\theta_{\text{old}}}$ per prompt</td></tr>
+<tr><td><strong>Baseline / Credit Assignment</strong></td><td>Learned per-token Value Critic $V_\psi(s_t)$ via GAE</td><td>Implicit pairwise log-ratio margin $\beta(\Delta_w - \Delta_l)$</td><td>Empirical group z-score $(r_i - \mu_G)/(\sigma_G + \epsilon)$</td></tr>
+<tr><td><strong>Primary Failure Mode</strong></td><td>Critic instability, reward hacking, high engineering complexity</td><td>Offline distribution shift, likelihood displacement, verbosity bias</td><td>Zero-variance groups (all $G$ rollouts fail or pass identically: $\sigma_G = 0$)</td></tr>
+</tbody></table></div>
+
+<h2 id="failure-modes-and-mitigations">3. Deep Dive: Offline Distribution Shift &amp; Likelihood Displacement in DPO</h2>
+<p>When discussing DPO in technical interviews, understanding its failure modes is just as important as deriving its loss:</p>
+
+<h3 id="offline-distribution-shift">3.1 Offline Distribution Shift</h3>
+<p>In offline DPO, the preference dataset $\mathcal{D}_{\text{pref}} = \{(x, y_w, y_l)\}$ is collected once before training (typically from $\pi_{\text{SFT}}$ or an external teacher). As $\pi_\theta$ updates over epochs, its high-probability support drifts away from $\mathcal{D}_{\text{pref}}$. Because DPO never samples from $\pi_\theta$ or queries a verifier on $\pi_\theta$’s new generations, the policy can assign high probability to out-of-distribution (OOD) completions that never appeared as $y_l$ in the static dataset.</p>
+
+<h3 id="likelihood-displacement">3.2 Likelihood Displacement &amp; Length Bias</h3>
+<p>Notice that the DPO loss depends only on the <em>difference</em> $\Delta_w - \Delta_l = \log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}$. During training, it is mathematically possible for $\mathcal{L}_{\text{DPO}}$ to decrease while <strong>both $\log \pi_\theta(y_w \mid x)$ and $\log \pi_\theta(y_l \mid x)$ decrease</strong>, so long as $\log \pi_\theta(y_l \mid x)$ drops faster! This phenomenon—known as <strong>likelihood displacement</strong> (Pal et al., 2024; Razin et al., 2024)—occurs especially when $y_w$ and $y_l$ share nearly identical prefixes (e.g., differing only in a single SQL clause or price token). Pushing down the rejected sequence inadvertently suppresses shared valid tokens and leaks probability mass onto verbose, repetitive tail sequences.</p>
+<p>Three practical fixes eliminate likelihood displacement and length bias in production DPO runs:</p>
+<ol>
+<li><strong>SFT Negative Log-Likelihood Anchor (RPO / CPO-style):</strong> Add a small NLL stabilization weight $\alpha \in [0.1, 0.25]$ on the winning completion $y_w$ so $\log \pi_\theta(y_w \mid x)$ is guaranteed to remain anchored:
+<div class="opt-equation">$$\mathcal{L}_{\text{DPO+NLL}}(\theta) = \mathcal{L}_{\text{DPO}}(\theta) - \alpha \frac{1}{|y_w|} \sum_{t=1}^{|y_w|} \log \pi_\theta(y_{w,t} \mid x, y_{w,&lt;t}).$$</div></li>
+<li><strong>Identity Preference Optimization (IPO, Azar et al., 2024):</strong> Replaces the unbounded logistic loss with a squared loss toward a finite target margin $\frac{1}{2\beta}$, preventing the policy from driving $\Delta_w - \Delta_l \to +\infty$ on deterministic pairs:
+<div class="opt-equation">$$\mathcal{L}_{\text{IPO}}(\theta) = \mathbb{E}_{(x, y_w, y_l)}\!\left[\left(\left(\log \frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \log \frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\right) - \frac{1}{2\beta}\right)^{\!2}\right].$$</div></li>
+<li><strong>Length-Normalized Reference-Free Margin (SimPO, Meng et al., 2024):</strong> Normalizes log-probabilities by sequence length $|y|$ with a target reward margin $\gamma &gt; 0$ so longer responses do not automatically accumulate larger log-ratio magnitudes.</li>
+</ol>
+
+<figure class="blog-figure"><img src="assets/offline-dpo-shift-vs-online-grpo.svg" alt="Offline DPO Distribution Shift and Likelihood Displacement vs Online GRPO" loading="lazy"><figcaption><strong>Figure 2:</strong> (Left) In standard offline DPO, when $y_w$ and $y_l$ share $90\%$ of their tokens, maximizing the margin $\Delta_w - \Delta_l$ can cause <strong>likelihood displacement</strong>—suppressing $\log \pi_\theta(y_w\mid x)$ alongside $\log \pi_\theta(y_l\mid x)$ and shifting mass to OOD verbose regions; anchoring with $+\alpha \mathcal{L}_{\text{NLL}}(y_w)$ or IPO fixes the drift. (Right) Online GRPO samples $G$ live rollouts from $\pi_{\theta_{\text{old}}}$ and scores them against deterministic code/schema/math verifiers (RLVR), directly penalizing OOD hallucinations as they emerge.</figcaption></figure>
+
+<h2 id="honest-production-playbook">4. Pragmatic Production Playbook: When to Use SFT, DPO, or GRPO</h2>
+<p>In real-world engineering teams, not every problem should be solved with RL. Here is the exact progression we follow across production workloads:</p>
+<ol>
+<li><strong>Stage 1 — High-Hygiene LoRA/QLoRA SFT + Deterministic Harness Verifiers (Solves 85–90% of Enterprise Tasks):</strong> When adapting an 8B/70B model to emit domain-specific CRM tool calls (<strong>AutoPulse CRM</strong>) or structured fashion catalog queries (<strong>VogueCart</strong>), curating $15\text{k}\text{--}50\text{k}$ verified trajectories and training rank-$32$ LoRA adapters across all linear projections ($\mathbf{W}_q, \mathbf{W}_k, \mathbf{W}_v, \mathbf{W}_o, \mathbf{W}_{\text{gate}}, \mathbf{W}_{\text{up}}, \mathbf{W}_{\text{down}}$) with assistant-only loss masking (`labels = -100` on prompt/tool-obs tokens) is fast, stable, and reproducible.</li>
+<li><strong>Stage 2 — Offline DPO + NLL Anchor (Eliminating Stubborn Near-Misses &amp; Tone/Formatting Drift):</strong> SFT teaches the model <em>what to imitate</em>, but because cross-entropy loss only maximizes $\log \pi_\theta(y_w \mid x)$, it does not explicitly penalize high-probability near-misses $y_l$ that the SFT model still assigns $15\%$ probability mass to (such as subtle price-hallucination phrasing or overly verbose CRM notes). Constructing $(x, y_w, y_l)$ pairs where $y_l$ is sampled directly from $\pi_{\text{SFT}}$ and rejected by our deterministic verifier or human edits, then running 1–2 epochs of LoRA DPO ($\beta = 0.1$, $\alpha_{\text{NLL}} = 0.15$, $\text{lr} = 5\times 10^{-6}$), carves away those specific failure modes at minimal compute cost.</li>
+<li><strong>Stage 3 — Online GRPO with Verifiable Rewards (RLVR for Multi-Step Tool Planning &amp; SQL/Code Generation):</strong> When the task has an automated, deterministic programmatic verifier $R(x, y) \in \{0, 1\}$ (e.g., SQL execution against a sandbox DB, unit-test pass rate, or multi-constraint slot satisfaction in an agent planner) and the model needs to discover multi-step reasoning strategies beyond static demonstrations, online GRPO with $G=8$ rollouts directly optimizes pass rate without requiring a fragile neural reward model or value critic.</li>
+</ol>
+
+<h2 id="reference-implementation">5. Reference PyTorch Implementation: DPO (+NLL / IPO) &amp; GRPO Loss Functions</h2>
+<p>Below is a clean, self-contained PyTorch implementation of masked sequence log-probability computation, stabilized DPO (with NLL anchor and IPO support), and token-level GRPO with the Schulman $k_3$ KL estimator.</p>
+
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import Tuple
+
+def compute_masked_seq_logprobs(
+    logits: torch.Tensor,       # [B, T, V]
+    labels: torch.Tensor,       # [B, T], prompt tokens set to -100
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Computes sum of token log-probs and valid token counts over response tokens only."""
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    valid_mask = (shift_labels != -100)
+
+    safe_labels = shift_labels.masked_fill(~valid_mask, 0)
+    log_probs = F.log_softmax(shift_logits, dim=-1)
+    token_log_probs = torch.gather(log_probs, dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+    token_log_probs = token_log_probs * valid_mask.to(token_log_probs.dtype)
+
+    seq_logprob_sum = token_log_probs.sum(dim=-1)                # [B]
+    valid_token_count = valid_mask.sum(dim=-1).clamp(min=1)      # [B]
+    return seq_logprob_sum, valid_token_count
+
+def dpo_with_nll_or_ipo_loss(
+    pi_w_logp: torch.Tensor,    # [B] sum log pi_theta(y_w | x)
+    pi_l_logp: torch.Tensor,    # [B] sum log pi_theta(y_l | x)
+    ref_w_logp: torch.Tensor,   # [B] sum log pi_ref(y_w | x)
+    ref_l_logp: torch.Tensor,   # [B] sum log pi_ref(y_l | x)
+    w_lengths: torch.Tensor,    # [B] token length |y_w|
+    beta: float = 0.1,
+    nll_alpha: float = 0.15,    # >0 prevents likelihood displacement
+    loss_type: str = "dpo",     # "dpo" or "ipo"
+) -> dict:
+    delta_w = pi_w_logp - ref_w_logp
+    delta_l = pi_l_logp - ref_l_logp
+    logits_diff = delta_w - delta_l
+
+    if loss_type == "ipo":
+        target_margin = 1.0 / (2.0 * beta)
+        pref_loss = ((logits_diff - target_margin) ** 2).mean()
+    else:
+        pref_loss = -F.logsigmoid(beta * logits_diff).mean()
+
+    # NLL anchor on chosen completion (normalized by response length)
+    nll_loss = -(pi_w_logp / w_lengths).mean()
+    total_loss = pref_loss + nll_alpha * nll_loss
+
+    with torch.no_grad():
+        implicit_reward_w = beta * delta_w
+        implicit_reward_l = beta * delta_l
+        reward_acc = (implicit_reward_w &gt; implicit_reward_l).float().mean()
+
+    return {
+        "loss": total_loss,
+        "pref_loss": pref_loss.detach(),
+        "nll_loss": nll_loss.detach(),
+        "reward_accuracy": reward_acc,
+        "reward_margin": (implicit_reward_w - implicit_reward_l).mean(),
+    }
+
+def grpo_token_loss(
+    curr_token_logp: torch.Tensor,  # [B*G, T] log pi_theta(y_t | s_t)
+    old_token_logp: torch.Tensor,   # [B*G, T] log pi_old(y_t | s_t)
+    ref_token_logp: torch.Tensor,   # [B*G, T] log pi_ref(y_t | s_t)
+    response_mask: torch.Tensor,    # [B*G, T] binary mask for assistant tokens
+    rewards: torch.Tensor,          # [B, G] scalar verifier/RM scores per group
+    clip_eps: float = 0.2,
+    beta_kl: float = 0.04,
+) -> torch.Tensor:
+    # 1. Compute group-relative normalized advantages: [B, G] -> [B*G, 1]
+    mean_r = rewards.mean(dim=-1, keepdim=True)
+    std_r = rewards.std(dim=-1, keepdim=True)
+    advantages = ((rewards - mean_r) / (std_r + 1e-6)).reshape(-1, 1)
+
+    # 2. Token-level importance sampling ratio &amp; clipped surrogate
+    ratio = torch.exp(curr_token_logp - old_token_logp)
+    surr1 = ratio * advantages
+    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
+    policy_obj = torch.minimum(surr1, surr2)
+
+    # 3. Unbiased positive Schulman k3 KL estimator: exp(log_ref - log_curr) - (log_ref - log_curr) - 1
+    log_r_diff = ref_token_logp - curr_token_logp
+    kl_k3 = torch.exp(log_r_diff) - log_r_diff - 1.0
+
+    per_token_loss = -(policy_obj - beta_kl * kl_k3) * response_mask
+    seq_lengths = response_mask.sum(dim=-1).clamp(min=1)
+    return (per_token_loss.sum(dim=-1) / seq_lengths).mean()</code></pre>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="dpo-and-ppo-what-changes.html">← Ch. 07: DPO and PPO: What Changes</a><a href="preference-data-curation-and-reward-model-design.html">Ch. 09: Preference Data Curation &amp; Reward Model Design →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count" async></script></body></html>
