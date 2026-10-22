@@ -11512,7 +11512,15 @@ var BLOG_TREE = [
         label: 'MCP & Tool Calling',
         children: [
           { title: 'Reading Guide: Model Context Protocol (MCP) &amp; Tool Calling', file: 'agentic-harness/mcp/index.html', links: ['agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html'] },
-          { title: '1. Model Context Protocol (MCP) &amp; Tool-Calling Internals: JSON-RPC Transports, Constrained FSMs &amp; Sandboxed Execution', file: 'agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html', links: ['agentic-harness/mcp/index.html', 'agentic-harness/reliability/agent-uncertainty-estimation-and-failure-flywheels.html'] }
+          { title: '1. Model Context Protocol (MCP) &amp; Tool-Calling Internals: JSON-RPC Transports, Constrained FSMs &amp; Sandboxed Execution', file: 'agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html', links: ['agentic-harness/mcp/index.html', 'agentic-harness/reliability/agent-uncertainty-estimation-and-failure-flywheels.html', 'agentic-harness/design/planning-self-refine-and-context-engineering.html'] }
+        ]
+      },
+      {
+        name: 'design',
+        label: 'Harness Design & Architecture',
+        children: [
+          { title: 'Reading Guide: Agent Harness Design &amp; Architecture', file: 'agentic-harness/design/index.html', links: ['agentic-harness/design/planning-self-refine-and-context-engineering.html'] },
+          { title: '1. Agent Harness Design: Planning, Self-Verification &amp; Self-Refine Loops, Context Engineering, and Memory', file: 'agentic-harness/design/planning-self-refine-and-context-engineering.html', links: ['agentic-harness/design/index.html', 'agentic-harness/mcp/mcp-architecture-and-tool-calling-internals.html'] }
         ]
       }
     ]

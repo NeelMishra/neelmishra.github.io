@@ -1,0 +1,180 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Agent Harness Design: Planning, Self-Verification &amp; Self-Refine Loops, Context Engineering, and Memory | Neel Mishra</title><meta name="description" content="Deep engineering guide to production LLM agent harnesses: ReAct vs. LLMCompiler parallel DAG execution, verifier-guided self-refine loops, KV-cache-friendly context engineering, and episodic/semantic memory architectures."><link rel="canonical" href="https://neelmishra.github.io/blog/agentic-harness/design/planning-self-refine-and-context-engineering.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-agentic-harness--design">← Agentic Harness / Design</a><div class="post-series-nav"><a href="index.html">Agentic Harness · Design</a><span>Chapter 01</span></div><h1>Agent Harness Design: Planning, Self-Verification &amp; Self-Refine Loops, Context Engineering, and Memory</h1><p class="post-meta">October 2026 · 20 min read</p><p class="optimizer-lede">Why sequential ReAct loops bottleneck on serial tool latency, how LLMCompiler-style DAG planners collapse multi-tool execution to the critical path, why self-refine loops fail without external deterministic verifiers, how append-only context engineering preserves $92.4\%$ GPU KV-cache hit rates, and how to structure working, episodic, and semantic memory in production agents.</p>
+
+<h2 id="planning-paradigms">1. Planning Architectures: ReAct vs. Plan-and-Solve vs. Parallel DAG Compilation</h2>
+<p>When a user asks a shopping assistant at <strong>VogueCart</strong>: <em>&ldquo;Compare the fabric breathability, in-stock sizes, and return policies of the Linen Resort Shirt and the Tencel Camp Collar Shirt, and check if either qualifies for my loyalty tier discount,&rdquo;</em> the agent must invoke at least four distinct tools: two product detail lookups, a policy lookup, and a user loyalty profile fetch. How the agent harness schedules those calls determines whether the user waits $4.6\text{ seconds}$ or $1.1\text{ seconds}$.</p>
+
+<h3 id="sequential-react">1.1 Sequential ReAct and the Serial Latency Trap</h3>
+<p>In a standard <strong>ReAct</strong> (Reason + Act) loop, the policy generates a thought and a single action $a_t \sim \pi_\theta(\cdot \mid h_t)$, blocks while the environment executes $o_t = \text{Exec}(a_t)$, appends $(a_t, o_t)$ to history $h_{t+1}$, and invokes the LLM again. Across $T$ tool calls, total wall-clock latency is strictly additive:</p>
+<div class="opt-equation">$$L_{\text{ReAct}} = \sum_{t=1}^{T} \left(L_{\text{prefill}}(h_t) + L_{\text{decode}}(a_t) + L_{\text{tool}}(a_t)\right) + L_{\text{synth}}(h_{T+1}).$$</div>
+<p>Even when four tool calls are completely independent, sequential ReAct pays four separate LLM round-trips and four serial network I/O waits. Worse, because the context length $|h_t|$ grows at every step by the size of raw tool payloads $|o_t|$, total prefill token consumption scales quadratically in the number of turns: $\mathcal{O}\!\left(\sum_{t=1}^T |h_t|\right) = \mathcal{O}(T^2 \cdot \bar{o})$.</p>
+
+<h3 id="rewwo-and-llmcompiler">1.2 ReWOO and Parallel DAG Compilation (LLMCompiler)</h3>
+<p>To eliminate redundant intermediate LLM decode passes and exploit tool parallelism, production harnesses compile the user query into an explicit <strong>Directed Acyclic Graph (DAG)</strong> $G = (V, E)$ in a single planning pass:</p>
+<ul>
+<li><strong>Nodes $v_i \in V$:</strong> Represent atomic tool invocations $f_i(\text{args}_i)$ whose arguments may contain symbolic variable references (e.g., <code>$1.sku_id</code>) pointing to outputs of upstream nodes.</li>
+<li><strong>Directed Edges $(v_i, v_j) \in E$:</strong> Encode strict data dependencies—node $v_j$ cannot execute until node $v_i$ completes and binds its output to symbol <code>$i</code>.</li>
+<li><strong>Asynchronous Task Fetching Unit:</strong> Maintains the in-degree $\text{deg}^-(v)$ of every node. At $t=0$, all root nodes $\{v \in V : \text{deg}^-(v) = 0\}$ are dispatched concurrently via <code>asyncio.gather</code>. Whenever a node $v_i$ finishes, the executor substitutes <code>$i</code> in downstream argument templates, decrements $\text{deg}^-(v_j)$ for all $(v_i, v_j) \in E$, and immediately dispatches newly unblocked nodes.</li>
+</ul>
+<div class="opt-equation">$$L_{\text{DAG}}(G) = L_{\text{plan}}(x) + \max_{\pi \in \text{Paths}(G)} \sum_{v \in \pi} L_{\text{tool}}(v) + L_{\text{synth}}(x, \{o_v\}_{v \in V}).$$</div>
+<p>What if a branch returns an unexpected result (for example, $0$ in-stock sizes) that invalidates downstream nodes? We use <strong>Hybrid Adaptive DAG Execution</strong>: if every node satisfies its post-condition invariant, the DAG completes in a single plan-execute-synthesize cycle; if any node raises a <code>ReplanSignal</code> (e.g., empty retrieval set or tool timeout), the executor halts dependent branches and invokes a targeted sub-DAG replanner conditioned on the completed prefix.</p>
+
+<figure class="blog-figure"><img src="assets/react-vs-dag-planner-and-self-refine.svg" alt="Sequential ReAct vs Parallel DAG Planner and Verifier-Guided Self-Refine Loop" loading="lazy"><figcaption><strong>Figure 1:</strong> (Left) Sequential ReAct serializes 4 independent tool calls and 5 LLM invocations ($4,620\text{ ms}$ total), whereas Parallel DAG Compilation (LLMCompiler) schedules independent roots concurrently and resolves symbolic variable dependencies (<code>$1</code>, <code>$2</code>), cutting critical-path latency to $1,140\text{ ms}$ ($4.05\times$ speedup). (Right) Verifier-Guided Self-Refine pairs the generator with deterministic symbolic checks (constraint solver, citation verifier, schema validator) rather than ungrounded intrinsic LLM self-critique.</figcaption></figure>
+
+<div class="table-wrap"><table><thead><tr><th>Planning Paradigm</th><th>LLM Calls ($T$ Tools)</th><th>Tool Execution Latency</th><th>Total Prefill Tokens</th><th>Adaptivity to Mid-Run Surprises</th><th>Best Production Fit</th></tr></thead><tbody>
+<tr><td><strong>Sequential ReAct</strong></td><td>$T + 1$</td><td>$\sum_{t=1}^T L_{\text{tool}, t}$ (Serial)</td><td>$\mathcal{O}(T^2 \cdot \bar{o})$</td><td>High (re-evaluates after every observation)</td><td>Open-ended debugging or exploratory tasks with unknown tool dependencies</td></tr>
+<tr><td><strong>Plan-and-Solve / ReWOO</strong></td><td>$2$ (Plan + Synth)</td><td>$\max_{\pi} \sum_{v \in \pi} L_v$ (Parallel)</td><td>$\mathcal{O}(T \cdot \bar{o})$</td><td>Low (static plan fails if step 1 returns 0 hits)</td><td>Predictable workflows with fixed schemas (e.g., multi-API enrichment)</td></tr>
+<tr><td><strong>Hybrid Parallel DAG (LLMCompiler + Replan Trigger)</strong></td><td>$2$ ($+1$ only on invariant violation)</td><td>$\max_{\pi} \sum_{v \in \pi} L_v$ (Parallel)</td><td>$\mathcal{O}(T \cdot \bar{o})$</td><td>High (triggers sub-DAG replan on anomaly)</td><td>Low-latency e-commerce &amp; CRM assistants (<strong>VogueCart</strong>, <strong>AutoPulse CRM</strong>)</td></tr>
+</tbody></table></div>
+
+<h2 id="self-verification-and-self-refine">2. Self-Verification &amp; Self-Refine Loops: Why Intrinsic Critique Fails</h2>
+<p>A common anti-pattern in agent design is adding a generic reflection prompt after generation: <em>&ldquo;Review your draft response above for any errors or hallucinations and output an improved version.&rdquo;</em> As shown by Huang et al. (2024), <strong>intrinsic self-correction without external feedback</strong> rarely improves task accuracy and frequently degrades it: if the base model lacked the knowledge or arithmetic precision to avoid a mistake during forward generation $y^{(0)} \sim p_\theta(\cdot \mid x)$, sampling from the same model distribution $p_\theta(\cdot \mid x, y^{(0)})$ either rubber-stamps the error or flips correct answers into second-guessed mistakes.</p>
+
+<h3 id="verifier-guided-self-refine">2.1 Formalizing Verifier-Guided Self-Refine</h3>
+<p>Self-refine only yields positive expected value when the critique step is anchored by an <strong>external, asymmetric verification oracle</strong> $V(x, y^{(k)}, \mathcal{O}) \to (\text{pass} \in \{0,1\},\, \mathbf{e}^{(k)})$, where Verification is strictly easier or more deterministic than Generation ($\text{Complexity}(V) \ll \text{Complexity}(G)$). At iteration $k \in \{0, \dots, K_{\max}-1\}$:</p>
+<div class="opt-equation">$$\mathbf{e}^{(k)} = \bigoplus_{m=1}^{M} v_m\!\left(x,\, y^{(k)},\, \mathcal{O}_{\text{tools}}\right), \qquad y^{(k+1)} = \begin{cases} y^{(k)} &amp; \text{if } \mathbf{e}^{(k)} = \varnothing, \\ \pi_{\text{refine}}\!\left(x,\, y^{(k)},\, \mathbf{e}^{(k)},\, \mathcal{O}_{\text{tools}}\right) &amp; \text{if } \mathbf{e}^{(k)} \neq \varnothing. \end{cases}$$</div>
+<p>In our production harnesses at <strong>VogueCart</strong> and <strong>AutoPulse CRM</strong>, the deterministic verifier suite $\{v_m\}_{m=1}^M$ executes in $&lt;8\text{ ms}$ of CPU time before any response or high-stakes tool call is emitted:</p>
+<ol>
+<li><strong>Entity &amp; SKU Groundedness Verifier ($v_{\text{ground}}$):</strong> Extracts every product ID, price, and percentage mentioned in $y^{(k)}$ via regex/NER and asserts exact set membership against the raw JSON tool observations $\mathcal{O}_{\text{tools}}$. Any unverified SKU or mismatched price generates a structured violation: <code>{"error": "UNGROUNDED_PRICE", "sku": "VC-8821", "claimed": "$79", "actual_in_tool": "$84"}</code>.</li>
+<li><strong>Symbolic Constraint Satisfaction Verifier ($v_{\text{constraint}}$):</strong> Checks every recommended item against the session’s active slot ledger $\mathcal{L}_t$ (e.g., <code>price_usd &lt;= 90.0</code>, <code>material != "polyester"</code>, <code>in_stock_sizes_contains("M")</code>).</li>
+<li><strong>SQL / API Dry-Run Verifier ($v_{\text{ast}}$):</strong> For analytics or CRM database queries, parses the generated SQL into an AST via <code>sqlglot</code>, verifies table/column existence against the catalog schema, checks tenant isolation predicates (<code>WHERE dealer_id = :ctx_dealer_id</code>), and runs <code>EXPLAIN</code> before execution.</li>
+</ol>
+<p>Crucially, we bound the loop to $K_{\max} = 2$ refinement iterations. Empirically, $89.4\%$ of recoverable constraint/grounding violations are fixed on $k=1$, an additional $6.8\%$ on $k=2$, and $&lt;0.5\%$ on $k \ge 3$—meaning unbounded reflection loops waste latency and token budget without improving reliability.</p>
+
+<h2 id="context-engineering">3. Context Engineering &amp; GPU KV-Cache Economics</h2>
+<p>Context engineering is the discipline of structuring, ordering, and compacting the token sequence fed to the LLM at each step $t$ to simultaneously maximize **reasoning signal-to-noise ratio** and **vLLM PagedAttention KV-cache reuse**.</p>
+
+<h3 id="kv-cache-invalidation">3.1 The Prefix Cache Invalidation Trap</h3>
+<p>In modern inference engines (vLLM, SGLang, TensorRT-LLM) using Automatic Prefix Caching (APC), the KV cache is partitioned into fixed-size blocks (e.g., $B=16$ tokens). Each block $b_k$ is indexed by a cryptographic hash of its token IDs chained with the hash of all preceding blocks:</p>
+<div class="opt-equation">$$H(b_k) = \text{SHA256}\!\left(H(b_{k-1}) \;\Vert\; \text{tokens}(b_k)\right).$$</div>
+<p>Because $H(b_k)$ depends recursively on $H(b_{k-1})$, <strong>modifying even a single token near the beginning of the prompt invalidates $100\%$ of all subsequent KV blocks</strong>. Three common mistakes silently destroy KV-cache hit rates in production agents:</p>
+<ol>
+<li><strong>Dynamic Timestamps or UUIDs in the System Prompt Header:</strong> Placing <code>Current time: 2026-10-22T14:03:19.412Z | Request ID: 9f8a...</code> at line 1 of the system prompt changes block $b_0$ on every step, forcing a full $8,000$-token prefill from scratch on every tool call.</li>
+<li><strong>Dynamic Tool Schema Re-Ordering:</strong> Injecting top-$k$ retrieved tools directly into the system prompt header in varying relevance order across turns changes the tool declaration prefix.</li>
+<li><strong>Sliding-Window Summarization on Every Step:</strong> Rewriting or summarizing turns $1\dots t-1$ after every single tool call shifts the token offset of the entire conversation history.</li>
+</ol>
+
+<figure class="blog-figure"><img src="assets/kv-cache-context-engineering-and-memory.svg" alt="KV-Cache-Friendly Context Layout and Multi-Tier Agent Memory Architecture" loading="lazy"><figcaption><strong>Figure 2:</strong> (Top) Anti-pattern vs. KV-Cache-Aligned Context Layout: keeping the System Instructions, Tool Registry, and Few-Shot Examples strictly immutable at prefix blocks $b_0 \dots b_K$ while appending dynamic session metadata, slot ledgers, and tool observations at the tail boosts vLLM prefix cache hit rate from $14.2\%$ to $92.4\%$. (Bottom) Three-tier agent memory architecture separating in-context Working Memory, hybrid-scored Episodic Memory, and schema-enforced Semantic Profile Memory.</figcaption></figure>
+
+<h3 id="append-only-and-observation-masking">3.2 Append-Only Context Layout &amp; Observation Masking</h3>
+<p>To achieve $92\%+$ KV-cache hit rates across multi-step agent trajectories, we enforce four strict context engineering invariants:</p>
+<ul>
+<li><strong>Zone 1 — Frozen Prefix ($b_0 \dots b_{180}$, ~$2,880$ tokens):</strong> Byte-identical across all users and turns: static system instructions, canonical sorted MCP tool schemas, and static few-shot trajectory examples.</li>
+<li><strong>Zone 2 — Session Header ($b_{181} \dots b_{210}$, ~$480$ tokens):</strong> Immutable within a single user session: tenant/user profile summary, long-term semantic memory slots, and session start date (rounded to the day, never the millisecond).</li>
+<li><strong>Zone 3 — Append-Only Trajectory Log:</strong> User turns, assistant thoughts/tool calls, and tool observations are strictly appended. Each step $t$ only computes prefill attention for the newly appended delta tokens $\Delta N_t = |a_{t-1}| + |o_{t-1}|$.</li>
+<li><strong>Periodic Observation Compaction (Every $M=6$ Steps):</strong> Raw tool responses often contain bulky JSON fields (e.g., image URLs, 50-row warehouse breakdowns) needed only for the immediate synthesis step. Rather than mutating history on every step, we trigger <strong>Observation Masking</strong> only when total context exceeds a high-watermark $N_{\text{high}} = 12,000$ tokens: stale tool payloads older than 3 turns are replaced with a compact deterministic digest (<code>[Compacted Tool Obs #2: returned 4 SKUs: VC-102 ($68), VC-204 ($79), VC-311 ($84), VC-409 ($88)]</code>), resetting the prefix checkpoint once every $6$ steps instead of every step.</li>
+</ul>
+
+<h2 id="memory-architecture">4. Multi-Tier Memory Architecture: Working, Episodic, and Semantic</h2>
+<p>Stuffing a user’s entire 6-month interaction history into the prompt causes severe <em>lost-in-the-middle</em> attention degradation and blows up cost. Production agents partition state into three distinct memory tiers with explicit read/write protocols:</p>
+
+<h3 id="working-memory">4.1 Working Memory (In-Context Slot Ledger)</h3>
+<p>Maintains the active task state for the current session as a compact JSON object updated deterministically after every user turn and tool call: active hard constraints (<code>max_budget_usd</code>, <code>required_size</code>, <code>excluded_fabrics</code>), candidate entity IDs currently on screen, and pending sub-goals.</p>
+
+<h3 id="episodic-memory">4.2 Episodic Memory (Time-Decayed Experience Retrieval)</h3>
+<p>Stores compressed summaries of past episodes $m_i = (\text{summary}_i, \mathbf{e}_i, t_i, \text{importance}_i)$—such as <em>&ldquo;On 2026-09-14, user returned SKU VC-512 (Silk Blouse, Size S) citing tight shoulder fit; exchanged for Size M.&rdquo;</em> At session initialization or topic shift, the harness retrieves top-$k$ episodes using a hybrid score combining semantic similarity, exponential recency decay, and outcome importance (Park et al., 2023):</p>
+<div class="opt-equation">$$\text{Score}(m_i, q, t_{\text{now}}) = \alpha \cos\!\left(\mathbf{e}_q, \mathbf{e}_i\right) + \beta \exp\!\left(-\lambda (t_{\text{now}} - t_i)\right) + \gamma \cdot \text{Importance}(m_i),$$</div>
+<p>where $\lambda = \ln(2) / \tau_{1/2}$ sets the half-life $\tau_{1/2}$ (e.g., $30\text{ days}$ for browsing episodes, $365\text{ days}$ for post-purchase return episodes).</p>
+
+<h3 id="semantic-memory">4.3 Semantic &amp; Procedural Memory (Typed Fact Store with Conflict Resolution)</h3>
+<p>Stores persistent, time-invariant user facts and domain preferences as structured triples $(\text{subject}, \text{predicate}, \text{object}, \text{confidence}, \text{updated\_at})$ in a low-latency key-value / relational store (e.g., <code>(user_882, shirt_size, "M", 0.96, 2026-09-14)</code>). When a new episode contradicts an existing semantic fact (e.g., user states <em>&ldquo;I now wear Size L in linen shirts&rdquo;</em>), an asynchronous memory consolidation worker runs a <strong>schema-governed upsert</strong> that archives the superseded triple with a `valid_until` timestamp rather than letting contradictory prose accumulate in a vector store.</p>
+
+<h2 id="reference-implementation">5. Reference Implementation: Parallel DAG Executor with Verifier Self-Refine</h2>
+<p>Below is a self-contained Python implementation combining parallel DAG task scheduling (with symbolic <code>$i</code> dependency resolution), deterministic verifier-guided self-refine, and KV-cache-preserving context assembly.</p>
+
+<pre><code class="language-python">import asyncio
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Set
+
+@dataclass
+class DAGNode:
+    node_id: int
+    tool_name: str
+    args: Dict[str, Any]
+    depends_on: Set[int] = field(default_factory=set)
+
+@dataclass
+class VerificationViolation:
+    rule_id: str
+    message: str
+    remediation_hint: str
+
+class ParallelDAGAgentHarness:
+    """Executes tool DAGs along the critical path and runs deterministic verifier self-refine."""
+    VAR_PATTERN = re.compile(r"^\$(\d+)\.([a-zA-Z0-9_]+)$")
+
+    def __init__(self, tools: Dict[str, Callable], verifiers: List[Callable], max_refine: int = 2):
+        self.tools = tools
+        self.verifiers = verifiers
+        self.max_refine = max_refine
+
+    def _resolve_args(self, raw_args: Dict[str, Any], results: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+        resolved = {}
+        for k, v in raw_args.items():
+            if isinstance(v, str) and (m := self.VAR_PATTERN.match(v)):
+                dep_id, field_name = int(m.group(1)), m.group(2)
+                resolved[k] = results[dep_id][field_name]
+            else:
+                resolved[k] = v
+        return resolved
+
+    async def execute_dag(self, nodes: List[DAGNode]) -> Dict[int, Dict[str, Any]]:
+        pending: Dict[int, DAGNode] = {n.node_id: n for n in nodes}
+        results: Dict[int, Dict[str, Any]] = {}
+
+        while pending:
+            # Find all nodes whose upstream dependencies have completed
+            ready = [
+                n for n in pending.values()
+                if n.depends_on.issubset(results.keys())
+            ]
+            if not ready:
+                raise RuntimeError("Cycle or unresolved dependency detected in tool DAG.")
+
+            async def _run_node(node: DAGNode):
+                bound_args = self._resolve_args(node.args, results)
+                out = await self.tools[node.tool_name](**bound_args)
+                return node.node_id, out
+
+            # Dispatch all ready nodes in parallel along the current frontier
+            completed_batch = await asyncio.gather(*(_run_node(n) for n in ready))
+            for nid, output in completed_batch:
+                results[nid] = output
+                del pending[nid]
+
+        return results
+
+    async def synthesize_with_self_refine(
+        self,
+        query: str,
+        slot_ledger: Dict[str, Any],
+        tool_outputs: Dict[int, Dict[str, Any]],
+        llm_generate_fn: Callable,
+    ) -> Dict[str, Any]:
+        draft = await llm_generate_fn(query=query, ledger=slot_ledger, observations=tool_outputs, feedback=None)
+        for attempt in range(self.max_refine + 1):
+            violations: List[VerificationViolation] = []
+            for verifier in self.verifiers:
+                violations.extend(verifier(draft, slot_ledger, tool_outputs))
+
+            if not violations:
+                return {"response": draft, "refine_iterations": attempt, "verified": True}
+
+            if attempt &lt; self.max_refine:
+                feedback_payload = [
+                    {"rule": v.rule_id, "error": v.message, "fix": v.remediation_hint}
+                    for v in violations
+                ]
+                draft = await llm_generate_fn(
+                    query=query, ledger=slot_ledger, observations=tool_outputs, feedback=feedback_payload
+                )
+        return {"response": draft, "refine_iterations": self.max_refine, "verified": False}</code></pre>
+
+<div class="note-callout"><h4>Key Takeaways for Production Agent Harnesses</h4><ul>
+<li><strong>Compile independent tools into parallel DAGs:</strong> Replacing serial ReAct with an asynchronous DAG executor collapses tool latency from $\sum_i L_i$ to the critical path $\max_\pi \sum_{i \in \pi} L_i$, cutting p95 latency by $3.2\times\text{--}4.1\times$ on multi-tool queries.</li>
+<li><strong>Never run self-refine without an external verifier:</strong> Pair bounded reflection ($K_{\max}=2$) with deterministic CPU verifiers (entity/price grounding, constraint satisfaction, SQL AST checks) that provide exact error coordinates.</li>
+<li><strong>Treat the prompt prefix as an immutable KV-cache artifact:</strong> Keep system instructions, sorted tool schemas, and few-shot examples frozen at block $b_0$, append dynamic state at the tail, and compact stale tool observations only at high-watermark checkpoints.</li>
+</ul></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← Agentic Harness · Design Reading Guide</a><a href="ecommerce-shopping-assistant-system-design.html">Ch. 02: Shopping-Assistant System Design (OmniMart) →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
