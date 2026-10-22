@@ -11441,7 +11441,8 @@ var BLOG_TREE = [
           { title: "5. Train DPO with Evidence: Data Coverage, Reference Choice, and Diagnostics", file: "rl/dpo/data-reference-and-diagnostics.html", links: ["rl/dpo/sequence-log-probabilities-and-implementation.html", "rl/dpo/dpo-math-and-training-lab.html"] },
           { title: "6. A DPO Lab You Can Verify: Exact Checks and Recorded Training Runs", file: "rl/dpo/dpo-math-and-training-lab.html", links: ["rl/dpo/data-reference-and-diagnostics.html", "rl/dpo/dpo-and-ppo-what-changes.html"] },
           { title: "7. DPO and PPO: Same Motivation, Different Learning Problems", file: "rl/dpo/dpo-and-ppo-what-changes.html", links: ["rl/dpo/dpo-math-and-training-lab.html", "rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html"] },
-          { title: "8. Post-Training Alignment: DPO vs. PPO vs. GRPO — Derivations, VRAM Footprints &amp; Trade-Offs", file: "rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html", links: ["rl/dpo/dpo-and-ppo-what-changes.html", "rl/dpo/index.html"] }
+          { title: "8. Post-Training Alignment: DPO vs. PPO vs. GRPO — Derivations, VRAM Footprints &amp; Trade-Offs", file: "rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html", links: ["rl/dpo/dpo-and-ppo-what-changes.html", "rl/dpo/preference-data-curation-and-reward-model-design.html"] },
+          { title: "9. Building Preference Datasets &amp; Designing Reward Models: Edit Mining, Bradley–Terry &amp; Anti-Hacking", file: "rl/dpo/preference-data-curation-and-reward-model-design.html", links: ["rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html", "rl/dpo/index.html"] }
         ]
       },
       {
