@@ -11495,7 +11495,15 @@ var BLOG_TREE = [
         children: [
           { title: 'Reading Guide: Agent Evaluation Systems', file: 'agentic-harness/evaluation/index.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] },
           { title: '1. Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Sandboxes &amp; CI Regression Suites', file: 'agentic-harness/evaluation/agent-eval-system-from-scratch.html', links: ['agentic-harness/evaluation/index.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] },
-          { title: '2. Human-Calibrated LLM-as-Judge &amp; Paired Significance Testing: The AutoPulse CRM Case Study (+21% Similarity &amp; +35% Relevance)', file: 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html', 'dl/evaluation-metrics/llm-judge-and-arena-elo-metrics.html', 'ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html'] }
+          { title: '2. Human-Calibrated LLM-as-Judge &amp; Paired Significance Testing: The AutoPulse CRM Case Study (+21% Similarity &amp; +35% Relevance)', file: 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html', 'agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', 'dl/evaluation-metrics/llm-judge-and-arena-elo-metrics.html'] }
+        ]
+      },
+      {
+        name: 'reliability',
+        label: 'Agent Reliability & Debugging',
+        children: [
+          { title: 'Reading Guide: Agent Reliability &amp; Debugging', file: 'agentic-harness/reliability/index.html', links: ['agentic-harness/reliability/multi-step-fault-localization-and-tracing.html'] },
+          { title: '1. Multi-Step Agent Reliability &amp; Fault Localization: Pinpointing Step and Tool-Call Failures in "Aria" at VogueCart (+58.86% Engaged MAU)', file: 'agentic-harness/reliability/multi-step-fault-localization-and-tracing.html', links: ['agentic-harness/reliability/index.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] }
         ]
       },
       {
