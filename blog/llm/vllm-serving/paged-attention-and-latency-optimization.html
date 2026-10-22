@@ -1,0 +1,140 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>vLLM Serving Internals &amp; Low-Latency Inference: How We Cut Production Latency from 24s to 0.8s at &ldquo;AutoPulse CRM&rdquo; | Neel Mishra</title><meta name="description" content="Deep dive into vLLM serving internals—Prefill vs. Decode Roofline arithmetic intensity, GQA KV-cache sizing, PagedAttention block tables, Continuous Batching, Chunked Prefill, Automatic Prefix Caching, W4A16 AWQ Marlin kernels, and the AutoPulse CRM 24s to 0.8s latency optimization waterfall."><link rel="canonical" href="https://neelmishra.github.io/blog/llm/vllm-serving/paged-attention-and-latency-optimization.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-llm--vllm-serving">← LLM / vLLM Serving</a><div class="post-series-nav"><a href="index.html">LLM · vLLM Serving</a><span>Chapter 01</span></div><h1>vLLM Serving Internals &amp; Low-Latency Inference: How We Cut Production Latency from 24s to 0.8s at &ldquo;AutoPulse CRM&rdquo;</h1><p class="post-meta">October 2026 · 21 min read</p><p class="optimizer-lede">Why LLM prefill is compute-bound while autoregressive decode is HBM memory-bandwidth-bound, how to calculate exact GQA KV-cache byte footprints, how PagedAttention eliminates $60\text{--}80\%$ KV fragmentation via virtual block tables and Copy-on-Write prefix sharing, how Continuous Batching and Chunked Prefill prevent head-of-line stalls, and the complete engineering waterfall that reduced production p95 latency at <strong>AutoPulse CRM</strong> from <strong>$24.0\text{ seconds}$ to $0.8\text{ seconds}$ ($30\times$ speedup / $96.7\%$ reduction)</strong>.</p>
+
+<h2 id="prefill-vs-decode-roofline">1. The Two Phases of LLM Inference: Prefill vs. Decode Roofline Physics</h2>
+<p>Every LLM request executes two physically distinct computational regimes whose bottlenecks sit on opposite sides of the GPU Roofline model:</p>
+
+<h3 id="prefill-compute-bound">1.1 Phase 1 — Prefill (Compute-Bound Matrix-Matrix Multiplication)</h3>
+<p>Given a prompt of $S$ tokens across a batch of $B$ sequences, the prefill pass computes hidden representations and populates the initial Key and Value tensors for all $B \times S$ tokens in parallel. For a linear layer with weight matrix $\mathbf{W} \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ stored at $b_w$ bytes per parameter, the activation tensor has shape $[B \cdot S, d_{\text{in}}]$. Total FLOPs are $2 \cdot B \cdot S \cdot d_{\text{in}} \cdot d_{\text{out}}$, while HBM memory traffic is dominated by reading $\mathbf{W}$ ($b_w d_{\text{in}} d_{\text{out}}$ bytes when $B \cdot S \ll d_{\text{in}}$):</p>
+<div class="opt-equation">$$\mathcal{I}_{\text{prefill}} = \frac{\text{FLOPs}}{\text{Bytes}_{\text{HBM}}} \approx \frac{2 \cdot B \cdot S \cdot d_{\text{in}} \cdot d_{\text{out}}}{b_w \cdot d_{\text{in}} \cdot d_{\text{out}}} = \frac{2 \cdot B \cdot S}{b_w} \;\;\text{FLOPs/Byte}.$$</div>
+<p>On an NVIDIA A100-80GB SXM4 ($312\text{ TFLOPS}$ BF16 Tensor Core peak, $2.0\text{ TB/s}$ HBM2e bandwidth), the Roofline ridge point is $\mathcal{I}_{\text{ridge}} = 312 / 2.0 = 156\text{ FLOPs/Byte}$. In BF16 ($b_w = 2$), as soon as $B \cdot S \ge 156$ tokens—which holds for a single prompt of $156+$ tokens—<strong>prefill is strictly compute-bound</strong>. Time-to-First-Token (TTFT) therefore scales linearly with uncached prompt tokens and quadratically at very long context lengths due to causal attention.</p>
+
+<h3 id="decode-bandwidth-bound">1.2 Phase 2 — Autoregressive Decode (Memory-Bandwidth-Bound Matrix-Vector)</h3>
+<p>During autoregressive generation, each sequence emits **one token at a time** ($S_{\text{step}} = 1$). At every decode step, the GPU must stream all $\Psi$ model weights plus the entire accumulated KV cache of all $B$ active sequences from HBM into SRAM just to perform $2 B \Psi$ linear FLOPs:</p>
+<div class="opt-equation">$$\mathcal{I}_{\text{decode}}(B, S) = \frac{2 B \Psi}{b_w \Psi + \text{Bytes}_{\text{KV}}(S, B)} \le \frac{2 B}{b_w} \;\;\text{FLOPs/Byte}.$$</div>
+<p>At batch size $B = 1$ in BF16 ($b_w = 2$), arithmetic intensity is $\mathcal{I}_{\text{decode}} \approx 1\text{ FLOP/Byte}$—utilizing less than **$0.65\%$ of an A100’s compute capacity**! Consequently, single-stream Inter-Token Latency (ITL) is governed by a simple lower bound:</p>
+<div class="opt-equation">$$\text{ITL}_{\min}(B, S) \approx \frac{b_w \Psi + \text{Bytes}_{\text{KV}}(S, B)}{\text{BW}_{\text{HBM}}}.$$</div>
+<p>This equation immediately reveals the only three levers that can reduce decode latency: (1) **shrink weight bytes $b_w$** via W4A16/FP8 quantization, (2) **shrink or share KV-cache bytes $\text{Bytes}_{\text{KV}}$**, and (3) **reduce the number of generated decode steps $T_{\text{out}}$** via compact structured schemas or speculative decoding.</p>
+
+<h3 id="kv-cache-sizing">1.3 Exact GQA KV-Cache Sizing Formula (Worked 8B Example)</h3>
+<p>For a Transformer with $L$ layers, $n_{\text{kv}}$ Key/Value heads per layer (under Grouped-Query Attention, $n_{\text{kv}} &lt; n_q$), head dimension $d_{\text{head}}$, and KV storage precision $b_{\text{kv}}$ bytes per element, the KV-cache footprint for batch size $B$ at sequence length $S$ is:</p>
+<div class="opt-equation">$$\text{Bytes}_{\text{KV}}(S, B) = \underbrace{2}_{\text{K and V}} \times L \times n_{\text{kv}} \times d_{\text{head}} \times b_{\text{kv}} \times S \times B.$$</div>
+<p>For **Llama-3-8B** ($L=32$, $n_{\text{kv}}=8$, $d_{\text{head}}=128$) in BF16 ($b_{\text{kv}}=2$ bytes):</p>
+<div class="opt-equation">$$\text{Bytes}_{\text{KV}}(\text{1 token}) = 2 \times 32 \times 8 \times 128 \times 2 = 131,072\text{ bytes} = 128\text{ KiB/token}.$$</div>
+<p>A single $4,096$-token request consumes $4,096 \times 128\text{ KiB} = 512\text{ MiB}$ ($0.5\text{ GiB}$), and a batch of $B=64$ concurrent sequences consumes **$32\text{ GiB}$ of HBM**—more than twice the $16\text{ GiB}$ footprint of the 8B model weights themselves! Quantizing the KV cache to FP8 ($b_{\text{kv}}=1$) immediately halves this to $64\text{ KiB/token}$ ($16\text{ GiB}$ at $B=64$).</p>
+
+<h2 id="pagedattention-and-continuous-batching">2. PagedAttention, Continuous Batching &amp; Chunked Prefill</h2>
+
+<h3 id="pagedattention-internals">2.1 How PagedAttention Eliminates 60–80% KV-Cache Fragmentation</h3>
+<p>Before vLLM (Kwon et al., 2023), serving frameworks allocated a contiguous tensor of shape $[L_{\max}, n_{\text{kv}}, d_{\text{head}}]$ in HBM for every incoming request because its final generation length was unknown a priori. This created three sources of memory waste totaling $60\text{--}80\%$ of KV-cache HBM:</p>
+<ol>
+<li><strong>Reservation Waste:</strong> Slots reserved for future tokens up to $L_{\max}=8,192$ remain unused while the request is still at token $400$.</li>
+<li><strong>Internal Fragmentation:</strong> If a request finishes after $120$ output tokens, the remaining $8,072$ pre-allocated slots were wasted for the entire lifetime of the request.</li>
+<li><strong>External Fragmentation:</strong> Variable-size contiguous allocations leave unusable memory holes between tensors.</li>
+</ol>
+<p><strong>PagedAttention</strong> borrows virtual memory paging directly from operating systems: HBM is partitioned into uniform **Physical KV Blocks** of $B_{\text{block}} = 16$ tokens ($16 \times 128\text{ KiB} = 2\text{ MiB}$ per block on Llama-3-8B). Each request sees a contiguous **Logical Block** sequence $(0, 1, 2, \dots)$, which a per-request **Block Table** translates to non-contiguous physical blocks on the fly inside the attention kernel. Physical blocks are allocated **on demand** only when the previous block fills its 16th token—bounding internal fragmentation to at most $B_{\text{block}} - 1 = 15$ tokens per request ($&lt; 3.8\%$ HBM waste) and unlocking $3\times\text{--}4\times$ larger concurrent batch sizes.</p>
+
+<h3 id="continuous-batching-and-chunked-prefill">2.2 Continuous Batching &amp; Chunked Prefill</h3>
+<p>In **Static Batching**, if Request 1 finishes in $40$ tokens while Request 2 generates $500$ tokens, Request 1’s GPU slot sits idle for $460$ steps and newly arriving requests wait in the external queue. **Iteration-Level Continuous Batching** runs scheduling after every single decode token: the moment Request 1 emits `<eos>`, its physical KV blocks are freed back to the block pool and a waiting request is inserted into the next iteration.</p>
+<p>To prevent a newly admitted $4,000$-token prompt from stalling active decode streams for $180\text{ ms}$ (the <em>prefill stall spike</em>), **Chunked Prefill** splits long incoming prompts into fixed chunks (e.g., $512$ tokens per step) and fuses them into a single mixed batch alongside the single-token decode requests, keeping inter-token latency jitter below $12\text{ ms}$.</p>
+
+<figure class="blog-figure"><img src="assets/paged-attention-and-continuous-batching.svg" alt="PagedAttention Block Tables, Copy-on-Write Prefix Sharing, and Continuous Batching vs Static Batching" loading="lazy"><figcaption><strong>Figure 1:</strong> (Left) PagedAttention translates logical 16-token KV blocks to non-contiguous physical HBM blocks on demand ($&lt;3.8\%$ internal waste) and shares frozen system-prompt blocks across requests with reference counting (`ref_count = 2`). (Right) Static Batching wastes $62\%$ of GPU slot-time waiting for the longest sequence and blocks new arrivals, whereas Iteration-Level Continuous Batching + Chunked Prefill immediately recycles freed slots without stalling active token streams.</figcaption></figure>
+
+<h2 id="autopulse-latency-story">3. Production Case Study: Cutting Latency from 24.0s to 0.8s at &ldquo;AutoPulse CRM&rdquo;</h2>
+<p>At **AutoPulse CRM**—our multi-tenant automotive dealership platform serving service advisors and parts managers across $800+$ vehicle models—the initial prototype of our AI Dealership Copilot suffered from a crippling **$24.0\text{-second}$ p95 end-to-end latency**. When a customer stood at the service desk asking whether a repair was covered under powertrain warranty and what parts were required, waiting $24\text{ seconds}$ caused advisors to abandon the tool.</p>
+<p>By systematically diagnosing the bottleneck at each layer of the inference stack, we re-engineered the serving pipeline to achieve **$0.80\text{ seconds}$ ($800\text{ ms}$) p95 end-to-end latency—a $30\times$ speedup ($96.7\%$ latency reduction)** while simultaneously increasing throughput $4.8\times$ per GPU. Here is the exact 4-stage optimization waterfall:</p>
+
+<figure class="blog-figure"><img src="assets/autopulse-24s-to-08s-latency-waterfall.svg" alt="AutoPulse CRM 24.0s to 0.8s Latency Optimization Waterfall" loading="lazy"><figcaption><strong>Figure 2:</strong> Step-by-step p95 latency waterfall for <strong>AutoPulse CRM</strong> across $800+$ vehicle models: (0) Naive HF `generate()` baseline with static batching and serial prompts ($24.0\text{s}$), (1) vLLM PagedAttention + Continuous Batching ($6.4\text{s}$), (2) Automatic Prefix Caching + Append-Only Context Layout ($2.9\text{s}$), (3) W4A16 AWQ Marlin Kernels + FP8 KV Cache ($1.45\text{s}$), and (4) Async Parallel Retrieval + Guided Compact JSON Schema Decoding ($0.80\text{s}$, $96.7\%$ total reduction).</figcaption></figure>
+
+<div class="table-wrap"><table><thead><tr><th>Optimization Stage</th><th>Key Engineering Change</th><th>p95 Queue + Prefill</th><th>p95 Decode Time</th><th>p95 End-to-End Latency</th><th>Cumulative Reduction</th></tr></thead><tbody>
+<tr><td><strong>0. Baseline Prototype</strong></td><td>HF <code>model.generate()</code> FP16, static batch $B=2$, 3 serial LLM calls, $420$ verbose output tokens</td><td>$11,200\text{ ms}$ (Queue + 3x Prefill)</td><td>$12,800\text{ ms}$ ($33\text{ tok/s}$)</td><td><strong>$24,000\text{ ms}$ ($24.0\text{s}$)</strong></td><td>Baseline</td></tr>
+<tr><td><strong>1. vLLM + Continuous Batching</strong></td><td>PagedAttention ($B_{\text{block}}=16$), iteration-level scheduling, collapse 3 serial LLM calls into 1 pass</td><td>$1,950\text{ ms}$</td><td>$4,450\text{ ms}$ ($94\text{ tok/s}$ sys)</td><td><strong>$6,400\text{ ms}$ ($6.4\text{s}$)</strong></td><td>$-73.3\%$ ($3.75\times$)</td></tr>
+<tr><td><strong>2. Prefix Caching (APC)</strong></td><td>Freeze $3,400$-token dealership prompt + vehicle schema at block $b_0$; $93.1\%$ KV prefix hit rate</td><td>$160\text{ ms}$ ($12\times$ faster TTFT)</td><td>$2,740\text{ ms}$</td><td><strong>$2,900\text{ ms}$ ($2.9\text{s}$)</strong></td><td>$-87.9\%$ ($8.28\times$)</td></tr>
+<tr><td><strong>3. W4A16 AWQ + FP8 KV</strong></td><td>4-bit Activation-Aware Weight Quantization (Marlin kernel) + FP8 KV cache ($3.8\times$ less HBM traffic)</td><td>$130\text{ ms}$</td><td>$1,320\text{ ms}$ ($2.1\times$ faster ITL)</td><td><strong>$1,450\text{ ms}$ ($1.45\text{s}$)</strong></td><td>$-94.0\%$ ($16.5\times$)</td></tr>
+<tr><td><strong>4. Async Pre-Fetch + JSON FSM</strong></td><td>Parallel async DB/vector pre-fetch ($55\text{ ms}$) + <code>xgrammar</code> compact JSON schema ($68$ tokens vs $420$)</td><td>$185\text{ ms}$ (incl. $55\text{ ms}$ DB)</td><td>$615\text{ ms}$ ($68$ tokens @ $9\text{ ms/tok}$)</td><td><strong>$800\text{ ms}$ ($0.80\text{s}$)</strong></td><td><strong>$-96.7\%$ ($30.0\times$)</strong></td></tr>
+</tbody></table></div>
+
+<h3 id="why-stage-4-was-decisive">3.1 Why Stage 4 (Output Token Economics) Was the Final Multiplier</h3>
+<p>Even with W4A16 AWQ Marlin kernels achieving $9.0\text{ ms/token}$ inter-token latency, generating $420$ tokens of chatty prose (<em>&ldquo;Based on the 2024 dealership manual for the Turbo V6 trim, I have reviewed the warranty terms and found that...&rdquo;</em>) still costs $420 \times 9.0\text{ ms} = 3,780\text{ ms}$! By enforcing a **compact, schema-constrained JSON output** via `xgrammar` FSM decoding (`{"coverage_status": "COVERED", "warranty_code": "PT-60K", "deductible_usd": 50, "required_parts": ["AP-4410", "AP-4412"], "advisor_summary": "..."}`), average output length dropped from $420$ tokens to **$68$ tokens** ($6.15\text{s}$ decode $\to 0.615\text{s}$ decode) while simultaneously improving downstream UI rendering reliability to $100\%$.</p>
+
+<h2 id="reference-implementation">4. Production vLLM Engine Configuration &amp; Paged Block Table Simulator</h2>
+<p>Below is our production Python configuration for launching the low-latency vLLM `AsyncLLMEngine` (with APC, chunked prefill, AWQ Marlin, FP8 KV cache, and guided JSON decoding) alongside a self-contained simulator of PagedAttention block allocation and Copy-on-Write prefix sharing.</p>
+
+<pre><code class="language-python">import hashlib
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+# 1. Production vLLM AsyncEngineArgs for Sub-Second Latency (AutoPulse CRM)
+VLLM_PRODUCTION_CONFIG = {
+    "model": "autopulse/llama-3.1-8b-crm-sft-dpo-awq",
+    "quantization": "awq_marlin",          # Fast W4A16 fused dequant+GEMV CUDA kernel
+    "kv_cache_dtype": "fp8_e4m3",          # Halves KV-cache HBM footprint &amp; bandwidth
+    "block_size": 16,                      # 16 tokens per physical PagedAttention block
+    "gpu_memory_utilization": 0.92,        # Reserve 92% of HBM for weights + KV block pool
+    "enable_prefix_caching": True,         # SHA-256 chained block hashing (93.1% hit rate)
+    "enable_chunked_prefill": True,        # Prevents long prompts from stalling active decodes
+    "max_num_batched_tokens": 2048,        # Chunked prefill + decode token budget per iteration
+    "max_num_seqs": 128,                   # Max concurrent sequences in continuous batch
+    "guided_decoding_backend": "xgrammar", # Zero-overhead C++ pushdown automaton for JSON
+}
+
+# 2. PagedAttention Virtual Block Table &amp; Automatic Prefix Cache Simulator
+@dataclass
+class PhysicalKVBlock:
+    block_id: int
+    prefix_hash: Optional[str] = None
+    ref_count: int = 0
+    tokens: List[int] = field(default_factory=list)
+
+class PagedKVBlockManager:
+    """Demonstrates O(1) prefix-cached block lookup and on-demand 16-token paging."""
+    def __init__(self, num_blocks: int = 1024, block_size: int = 16):
+        self.block_size = block_size
+        self.blocks = [PhysicalKVBlock(i) for i in range(num_blocks)]
+        self.free_ids: List[int] = list(range(num_blocks))
+        self.hash_to_block: Dict[str, int] = {}
+
+    @staticmethod
+    def _chain_hash(parent_hash: str, token_chunk: List[int]) -> str:
+        payload = f"{parent_hash}:{','.join(map(str, token_chunk))}".encode()
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    def allocate_sequence_prefix(self, token_ids: List[int]) -> Tuple[List[int], int]:
+        """Returns (block_table, cached_tokens_hit) for an incoming prompt."""
+        block_table: List[int] = []
+        parent_hash = "ROOT"
+        cached_hits = 0
+
+        for offset in range(0, len(token_ids), self.block_size):
+            chunk = token_ids[offset : offset + self.block_size]
+            if len(chunk) == self.block_size:
+                blk_hash = self._chain_hash(parent_hash, chunk)
+                parent_hash = blk_hash
+                if blk_hash in self.hash_to_block:
+                    phys_id = self.hash_to_block[blk_hash]
+                    self.blocks[phys_id].ref_count += 1
+                    block_table.append(phys_id)
+                    cached_hits += self.block_size
+                    continue
+            else:
+                blk_hash = None
+
+            # Cache miss or partial tail block: allocate fresh physical block
+            phys_id = self.free_ids.pop(0)
+            blk = self.blocks[phys_id]
+            blk.ref_count = 1
+            blk.tokens = list(chunk)
+            blk.prefix_hash = blk_hash
+            if blk_hash is not None:
+                self.hash_to_block[blk_hash] = phys_id
+            block_table.append(phys_id)
+
+        return block_table, cached_hits</code></pre>
+
+<div class="note-callout"><h4>Key Takeaways for vLLM Serving Interviews</h4><ul>
+<li><strong>Know the Roofline physics cold:</strong> Prefill is compute-bound ($\mathcal{I} \propto B \cdot S$), while decode is HBM-memory-bandwidth-bound ($\mathcal{I} \approx 2B/b_w$). Quantizing weights to W4A16 (AWQ Marlin) and KV cache to FP8 directly accelerates decode because it cuts HBM byte transfers per step.</li>
+<li><strong>Calculate KV-cache bytes on the whiteboard:</strong> $\text{Bytes}_{\text{KV}} = 2 \cdot L \cdot n_{\text{kv}} \cdot d_{\text{head}} \cdot b_{\text{kv}} \cdot S \cdot B$ ($128\text{ KiB/tok}$ on Llama-3-8B BF16).</li>
+<li><strong>Combine all 4 layers of the 24s $\to$ 0.8s waterfall:</strong> PagedAttention + Continuous Batching ($-73\%$), Automatic Prefix Caching ($-55\%$), AWQ Marlin + FP8 KV ($-50\%$), and Async Pre-Fetch + Compact Guided JSON Decoding ($-45\%$).</li>
+</ul></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← LLM · vLLM Serving Reading Guide</a><a href="../sft-and-lora-practical-playbook.html">← Hands-On SFT &amp; LoRA Practical Playbook</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

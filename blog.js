@@ -9124,7 +9124,7 @@ var BLOG_TREE = [
     "name": "llm",
     "label": "LLM",
     "children": [
-      {"title": "LLM: Large Language Models Reading Guide", "file": "llm/index.html", "links": ["llm/sft-and-lora-practical-playbook.html", "llm/qlora/index.html"]},
+      {"title": "LLM: Large Language Models Reading Guide", "file": "llm/index.html", "links": ["llm/sft-and-lora-practical-playbook.html", "llm/qlora/index.html", "llm/vllm-serving/index.html"]},
       {"title": "Hands-On SFT &amp; LoRA/QLoRA Fine-Tuning Playbook: Loss Masking, FlashAttention Packing &amp; Bridging to DPO", "file": "llm/sft-and-lora-practical-playbook.html", "links": ["llm/index.html", "llm/qlora/index.html", "rl/dpo/dpo-vs-ppo-vs-grpo-unified-comparison.html"]},
       {
         "name": "qlora",
@@ -9132,6 +9132,14 @@ var BLOG_TREE = [
         "children": [
           {"title": "QLoRA: Efficient Finetuning of 4-Bit Quantized LLMs (Overview)", "file": "llm/qlora/index.html", "links": ["llm/index.html", "llm/qlora/understanding-4bit-quantization-qlora-explained.html", "quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html"]},
           {"title": "Understanding 4-Bit Quantization: QLoRA Explained (with Colab)", "file": "llm/qlora/understanding-4bit-quantization-qlora-explained.html", "links": ["llm/qlora/index.html", "quantization/qlora/normalfloat4-nf4-and-double-quantization-explained.html"]}
+        ]
+      },
+      {
+        "name": "vllm-serving",
+        "label": "vLLM &amp; Inference Serving",
+        "children": [
+          {"title": "vLLM Serving &amp; Inference Optimization Reading Guide", "file": "llm/vllm-serving/index.html", "links": ["llm/index.html", "llm/vllm-serving/paged-attention-and-latency-optimization.html"]},
+          {"title": "vLLM Serving Internals: PagedAttention, Continuous Batching, Prefix Caching &amp; Optimizing Latency (24.0s to 0.8s)", "file": "llm/vllm-serving/paged-attention-and-latency-optimization.html", "links": ["llm/vllm-serving/index.html", "llm/index.html", "llm/sft-and-lora-practical-playbook.html"]}
         ]
       }
     ]
