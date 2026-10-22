@@ -11493,8 +11493,9 @@ var BLOG_TREE = [
         name: 'evaluation',
         label: 'Agent Evaluation',
         children: [
-          { title: 'Reading Guide: Agent Evaluation Systems', file: 'agentic-harness/evaluation/index.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html'] },
-          { title: '1. Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Sandboxes &amp; CI Regression Suites', file: 'agentic-harness/evaluation/agent-eval-system-from-scratch.html', links: ['agentic-harness/evaluation/index.html', 'dl/evaluation-metrics/llm-judge-and-arena-elo-metrics.html'] }
+          { title: 'Reading Guide: Agent Evaluation Systems', file: 'agentic-harness/evaluation/index.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] },
+          { title: '1. Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Sandboxes &amp; CI Regression Suites', file: 'agentic-harness/evaluation/agent-eval-system-from-scratch.html', links: ['agentic-harness/evaluation/index.html', 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html'] },
+          { title: '2. Human-Calibrated LLM-as-Judge &amp; Paired Significance Testing: The AutoPulse CRM Case Study (+21% Similarity &amp; +35% Relevance)', file: 'agentic-harness/evaluation/calibrated-llm-judge-and-significance-testing.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html', 'dl/evaluation-metrics/llm-judge-and-arena-elo-metrics.html', 'ml/search-and-retrieval/evaluation/uncertainty-and-model-comparison.html'] }
         ]
       },
       {
