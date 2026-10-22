@@ -1,0 +1,209 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Sandboxes &amp; CI Regression Suites | Neel Mishra</title><meta name="description" content="How to design a production LLM agent evaluation system from scratch: building stratified trajectory benchmarks, deterministic tool-mock sandboxes with exact state-diff verification, Pass^k vs Pass@k reliability metrics, and automated CI/CD regression suites triggered on every prompt or model change."><link rel="canonical" href="https://neelmishra.github.io/blog/agentic-harness/evaluation/agent-eval-system-from-scratch.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css"><link rel="stylesheet" href="../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../blog.html#folder-agentic-harness--evaluation">← Agentic Harness / Evaluation</a><div class="post-series-nav"><a href="index.html">Agentic Harness · Evaluation</a><span>Chapter 01 / 2</span></div><h1>Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Tool-Mock Sandboxes, $\text{Pass}^k$, and CI/CD Regression Suites</h1><p class="post-meta">October 2026 · 16 min read</p><p class="optimizer-lede">How to architect an end-to-end evaluation harness for multi-step tool-calling agents: curating stratified benchmark suites from production failures, isolating non-unique tool trajectories via stateful mock-database state diffs ($\Delta S_{\text{db}}$), measuring $\text{Pass}^k$ consistency instead of $\text{Pass}@k$, and gating every prompt or model change with a deterministic CI/CD regression suite.</p>
+
+<p>When teams ship their first LLM agent, evaluation usually starts as five hardcoded prompts run by hand in a notebook. Two weeks later, someone tweaks a system prompt to fix a formatting bug on refund requests—and silently breaks date parsing in the appointment scheduler, doubles average tool calls per session, and causes a $14\%$ spike in hallucinated order IDs. Because multi-step agents couple natural-language reasoning with stateful external APIs, <strong>every prompt edit, tool-schema update, retriever re-index, or model checkpoint upgrade is a full-system code change</strong> that requires an automated, statistically rigorous evaluation harness.</p>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/agent-eval-architecture-and-layers.svg" width="920" height="390" alt="Left: Four-Layer Agent Evaluation Stack from L1 Deterministic Schema Assertions (&lt;2ms) and L2 Trajectory DAG &amp; Sandbox State Diff (~15ms) to L3 Human-Calibrated LLM-as-Judge (~600ms) and L4 Online Canary &amp; Shadow Telemetry. Right: CI/CD Prompt &amp; Model Regression Pipeline from Versioned Change Trigger and Stratified Golden Suite through Deterministic Sandbox Replay to Hard Safety Gate (Pass^k=100%) and Paired Significance Gate."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Left: The four-layer evaluation pyramid orders checks by cost and determinism—failing fast at L1/L2 ($&lt;15\text{ ms}$) before invoking L3 calibrated LLM judges ($\sim 600\text{ ms}$). Right: Every prompt, tool-schema, or model diff triggers a side-by-side deterministic sandbox replay against the incumbent baseline before a PR can merge.</figcaption></figure>
+
+<h2 id="formalizing-agent-eval">1. Formalizing the Multi-Step Agent Evaluation Problem</h2>
+<p>Unlike single-turn generation $y = f_\theta(x)$, an agent episode on user task $x$ with initial environment state $S_0$ generates a stochastic multi-step trajectory $\tau$ of horizon $T$:</p>
+<div class="opt-equation">$$\tau = \Big( (r_1, a_1, o_1, S_1),\; (r_2, a_2, o_2, S_2),\; \dots,\; (r_T, a_T, o_T, S_T),\; y_{\text{final}} \Big) \sim \mathbb{P}_\theta(\cdot \mid x, S_0, \mathcal{T}),$$</div>
+<p>where at each step $t \in \{1,\dots,T\}$:</p>
+<ul>
+<li>$r_t$ is the internal reasoning trace or plan update,</li>
+<li>$a_t = (\text{tool}_t, \text{args}_t) \in \mathcal{T}$ is the structured tool invocation selected from tool registry $\mathcal{T}$,</li>
+<li>$o_t = \operatorname{Exec}(a_t, S_{t-1})$ is the observation returned by the tool environment,</li>
+<li>$S_t = \operatorname{Transition}(S_{t-1}, a_t)$ is the mutated backend state (e.g., rows in an orders/appointments SQLite database), and</li>
+<li>$y_{\text{final}}$ is the natural-language response synthesized for the user.</li>
+</ul>
+
+<p>Why can we not evaluate $\tau$ solely by comparing $y_{\text{final}}$ against a reference string $y^*$? And conversely, why can we not evaluate $\tau$ solely by checking exact string equality on the sequence of tool calls $(a_1,\dots,a_T) == (a_1^*,\dots,a_{T^*}^*)$?</p>
+<ol>
+<li><strong>Outcome-only grading misses policy violations and lucky shortcuts:</strong> An agent asked to <em>&ldquo;Cancel order #92 and refund the customer&rdquo;</em> might apologize or claim <em>&ldquo;Your refund of \$49.90 has been processed!&rdquo;</em> ($y_{\text{final}}$ looks great to a surface-level text judge) while never actually calling <code>issue_refund(order_id=92)</code> ($S_T = S_0$), or it might issue the refund without calling <code>verify_return_eligibility(order_id=92)</code> first.</li>
+<li><strong>Strict tool-sequence equality penalizes valid alternative paths:</strong> To look up a customer’s open orders and loyalty tier, Path A might call <code>get_user_by_email()</code> followed by <code>list_orders()</code>, whereas Path B calls a single composite tool <code>get_customer_summary()</code>. Both arrive at the exact same valid final state $S_T = S_T^*$ and grounded answer $y_{\text{final}}$.</li>
+</ol>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/trajectory-metrics-and-mock-sandbox.svg" width="920" height="390" alt="Left: Outcome vs Trajectory 2x2 Diagnostic Matrix showing Q1 Robust Success, Q2 Lucky Shortcut, Q3 Late Synthesis Fault, and Q4 Early Derailment. Right: Stateful Tool-Mock Sandbox showing Path A (3 tool calls) and Path B (2 tool calls) both mutating Seed State S_0 into identical Final State S_T, plus Composite Episode Score equation and Pass^k vs Pass@k comparison."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 2: Left: Combining final-state outcome verification with trajectory-level tool F1 partitions agent runs into four actionable diagnostic quadrants (Q1–Q4). Right: A stateful mock sandbox verifies exact database state diffs $\Delta S_{\text{db}} = S_T - S_0$, allowing multiple valid tool paths while penalizing unnecessary steps and tracking multi-trial reliability $\text{Pass}^k = p^k$.</figcaption></figure>
+
+<h2 id="benchmark-construction">2. Building an Agent Benchmark Suite from Scratch</h2>
+<p>A high-signal agent benchmark $\mathcal{B} = \{(x_i, S_{0,i}, \mathcal{G}_i)\}_{i=1}^N$ (typically $N \in [300, 1{,}000]$ curated episodes) must be constructed across four stratified buckets so that aggregate scores cannot hide tail-case failures:</p>
+
+<div class="note-table"><table><caption>Stratified composition of a production 500-episode agent benchmark suite $\mathcal{B}$.</caption><thead><tr><th>Benchmark Stratum</th><th>Share of Suite</th><th>What It Tests</th><th>Ground-Truth Oracle $\mathcal{G}_i$</th></tr></thead><tbody>
+<tr><td><strong>1. Core Happy-Path Workflows</strong></td><td>$35\%$ ($175$ cases)</td><td>Single- and multi-tool standard journeys (e.g., search $\to$ filter $\to$ book/checkout).</td><td>Expected state diff $\Delta S_{\text{db}}^*$, required tool set $\mathcal{A}_{\text{req}}^*$, reference facts.</td></tr>
+<tr><td><strong>2. Edge &amp; Disambiguation Cases</strong></td><td>$25\%$ ($125$ cases)</td><td>Missing parameters, ambiguous entity names, zero-hit search queries, pagination.</td><td>Agent must ask a clarifying question or broaden query instead of hallucinating args.</td></tr>
+<tr><td><strong>3. Tool Failure &amp; Fault Injection</strong></td><td>$20\%$ ($100$ cases)</td><td>HTTP 429/503 timeouts, malformed upstream payloads, partial batch failures.</td><td>Bounded retry with backoff or graceful fallback; zero corrupt state mutations.</td></tr>
+<tr><td><strong>4. Adversarial, Policy &amp; Incident Ratchet</strong></td><td>$20\%$ ($100$ cases)</td><td>Prompt injection in retrieved docs, unauthorized refund requests, past production bugs.</td><td>Hard invariant $\mathcal{A}_{\text{forbidden}} \cap \{a_t\} = \emptyset$ and $S_T = S_0$.</td></tr>
+</tbody></table></div>
+
+<h3 id="stateful-sandbox">Deterministic Tool Mocking &amp; State-Diff Verification ($\Delta S_{\text{db}}$)</h3>
+<p>Calling live production APIs during CI evaluation is fatal: live inventory changes between runs, rate limits cause flaky failures, and write-tools (`create_ticket`, `refund_order`) mutate real customer data. Instead, every benchmark episode $i$ defines an isolated, in-memory seed state $S_{0,i}$ (e.g., an in-memory SQLite snapshot or JSON state dictionary) and a set of deterministic tool handlers:</p>
+<ul>
+<li><strong>Read-only tools</strong> (search, retrieval, profile lookup) execute against the seeded in-memory snapshot or a content-addressed fixture cache keyed by canonicalized $(\text{tool\_name}, \text{normalized\_args})$.</li>
+<li><strong>Write/mutation tools</strong> mutate the in-memory database $S_{t-1} \to S_t$. At the end of the episode, the harness computes the exact structural state diff $\Delta S_{\text{db}}(\tau) = S_T \ominus S_0$ and verifies:
+<div class="opt-equation">$$\operatorname{StateMatch}(\tau, \mathcal{G}_i) = \mathbb{I}\!\left[\Delta S_{\text{db}}(\tau) = \Delta S_{\text{db}, i}^*\right] \;\land\; \mathbb{I}\!\left[\forall t,\; a_t \notin \mathcal{A}_{\text{forbidden}, i}\right].$$</div>
+</li>
+</ul>
+
+<h2 id="trajectory-metrics">3. Mathematical Formulation of Trajectory &amp; Reliability Metrics</h2>
+<p>To diagnose <em>why</em> an episode landed in Quadrant Q1, Q2, Q3, or Q4 of Figure 2A, we compute three complementary metrics alongside $\operatorname{StateMatch}(\tau, \mathcal{G}_i)$:</p>
+
+<h3 id="tool-f1">1. Tool-Selection Precision, Recall &amp; Argument Similarity</h3>
+<p>Let $\mathcal{A}(\tau) = \{a_1, \dots, a_T\}$ be the multiset of tool calls executed by the agent and $\mathcal{A}^* = \{a_1^*, \dots, a_M^*\}$ be the reference required tool calls. Using Hungarian maximum bipartite matching over tool names and argument similarity $\operatorname{Sim}_{\text{arg}}(a_t, a_m^*) \in [0, 1]$ (exact match for IDs/enums/booleans, token F1 or cosine similarity for free-text query strings):</p>
+<div class="opt-equation">$$\operatorname{Precision}_{\text{tool}}(\tau) = \frac{1}{|\mathcal{A}(\tau)|}\sum_{(t, m) \in \mathcal{M}^*} \mathbb{I}[\text{tool}_t = \text{tool}_m^*]\,\operatorname{Sim}_{\text{arg}}(a_t, a_m^*), \qquad \operatorname{Recall}_{\text{tool}}(\tau) = \frac{1}{|\mathcal{A}^*|}\sum_{(t, m) \in \mathcal{M}^*} \mathbb{I}[\text{tool}_t = \text{tool}_m^*]\,\operatorname{Sim}_{\text{arg}}(a_t, a_m^*),$$</div>
+<p>with harmonic mean $\operatorname{F1}_{\text{tool}}(\tau) = \frac{2\,\operatorname{Precision}_{\text{tool}}\,\operatorname{Recall}_{\text{tool}}}{\operatorname{Precision}_{\text{tool}} + \operatorname{Recall}_{\text{tool}}}$. Low $\operatorname{Recall}_{\text{tool}}$ indicates skipped mandatory checks (e.g., Quadrant Q2 Lucky Shortcut), whereas low $\operatorname{Precision}_{\text{tool}}$ indicates redundant thrashing or hallucinated tool calls.</p>
+
+<h3 id="pass-hat-k">2. Multi-Trial Consistency: Why Production Agents Need $\text{Pass}^k$, Not $\text{Pass}@k$</h3>
+<p>In competitive programming or offline code synthesis, evaluating $k$ independent rollouts uses $\text{Pass}@k = 1 - (1 - p)^k$—the probability that <em>at least one</em> rollout succeeds. In customer-facing agents, however, you do not get $k$ parallel tries on a live user session: <strong>every single customer interaction must succeed</strong>. Following the $\tau$-bench formulation (<a href="https://arxiv.org/abs/2406.12045">Yao et al., 2024</a>), we measure $\text{Pass}^k$—the probability that <em>all $k$ trials</em> of the same task succeed across stochastic decoding or paraphrased user phrasings:</p>
+<div class="opt-equation">$$\widehat{\text{Pass}@k} = 1 - \frac{\binom{N_{\text{trials}} - c}{k}}{\binom{N_{\text{trials}}}{k}} \approx 1 - (1 - \hat{p})^k \quad\text{vs.}\quad \widehat{\text{Pass}^k} = \frac{\binom{c}{k}}{\binom{N_{\text{trials}}}{k}} \approx \hat{p}^k,$$</div>
+<p>where $c$ is the number of successful trials out of $N_{\text{trials}} \ge k$ runs. Notice the dramatic divergence: an agent with a seemingly respectable single-trial success rate of $\hat{p} = 0.80$ achieves $\text{Pass}@5 = 99.97\%$, yet its 5-run reliability is $\text{Pass}^5 = 0.80^5 = \mathbf{32.77\%}$! Tracking $\text{Pass}^5$ immediately exposes brittle prompts that rely on lucky sampling.</p>
+
+<h2 id="regression-suite-code">4. Reference Implementation: Stateful Agent Eval &amp; CI Regression Gate</h2>
+<p>Below is a complete, self-contained Python reference implementation (`agent_eval_harness.py`) that implements the 4-layer evaluation stack: deterministic AST/policy checks (L1), in-memory SQLite state-diff verification + Hungarian tool-call F1 + combinatorial $\text{Pass}^k$ estimator (L2), and a CI regression gate comparing a candidate agent against the baseline across a benchmark suite.</p>
+
+<pre><code class="language-python">from __future__ import annotations
+import copy
+import math
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    args: dict[str, Any]
+
+@dataclass
+class AgentTrajectory:
+    task_id: str
+    tool_calls: list[ToolCall]
+    final_state: dict[str, Any]
+    final_response: str
+    judge_score: float = 0.0  # Calibrated L3 score in [0, 1]
+    latency_ms: float = 0.0
+
+@dataclass
+class BenchmarkCase:
+    task_id: str
+    stratum: str
+    initial_state: dict[str, Any]
+    expected_state_diff: dict[str, Any]
+    required_tools: list[ToolCall]
+    forbidden_tools: set[str] = field(default_factory=set)
+    required_facts: list[str] = field(default_factory=list)
+
+
+def compute_state_diff(initial: dict[str, Any], final: dict[str, Any]) -> dict[str, Any]:
+    """Returns only the keys whose values were added or mutated from S_0 to S_T."""
+    diff: dict[str, Any] = {}
+    for k, v in final.items():
+        if k not in initial or initial[k] != v:
+            diff[k] = copy.deepcopy(v)
+    return diff
+
+
+def arg_similarity(actual: dict[str, Any], expected: dict[str, Any]) -> float:
+    """Computes normalized argument similarity in [0, 1] across expected keys."""
+    if not expected:
+        return 1.0 if not actual else 0.5
+    scores: list[float] = []
+    for k, exp_val in expected.items():
+        if k not in actual:
+            scores.append(0.0)
+            continue
+        act_val = actual[k]
+        if isinstance(exp_val, (int, bool)) or k.endswith("_id"):
+            scores.append(1.0 if act_val == exp_val else 0.0)
+        elif isinstance(exp_val, float):
+            scores.append(1.0 if math.isclose(float(act_val), exp_val, rel_tol=1e-3) else 0.0)
+        else:
+            # Token Jaccard similarity for query strings
+            t_exp = set(str(exp_val).lower().split())
+            t_act = set(str(act_val).lower().split())
+            scores.append(len(t_exp & t_act) / max(len(t_exp | t_act), 1))
+    return sum(scores) / len(scores)
+
+
+def evaluate_trajectory(case: BenchmarkCase, traj: AgentTrajectory) -> dict[str, Any]:
+    """Evaluates L1 policy invariants and L2 state-diff + tool F1 diagnostic quadrant."""
+    # L1: Hard policy & forbidden-tool check
+    called_names = [tc.name for tc in traj.tool_calls]
+    violated_policy = any(name in case.forbidden_tools for name in called_names)
+
+    # L2a: Exact database state-diff assertion
+    actual_diff = compute_state_diff(case.initial_state, traj.final_state)
+    state_match = (actual_diff == case.expected_state_diff) and not violated_policy
+
+    # L2b: Greedy bipartite matching for Tool Precision, Recall, and F1
+    used_actual: set[int] = set()
+    matched_score_sum = 0.0
+    for req in case.required_tools:
+        best_sim, best_idx = 0.0, -1
+        for idx, act in enumerate(traj.tool_calls):
+            if idx not in used_actual and act.name == req.name:
+                sim = arg_similarity(act.args, req.args)
+                if sim > best_sim:
+                    best_sim, best_idx = sim, idx
+        if best_idx >= 0:
+            used_actual.add(best_idx)
+            matched_score_sum += best_sim
+
+    n_act = len(traj.tool_calls)
+    n_req = len(case.required_tools)
+    precision = matched_score_sum / n_act if n_act > 0 else (1.0 if n_req == 0 else 0.0)
+    recall = matched_score_sum / n_req if n_req > 0 else 1.0
+    f1_tool = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    # Fact grounding check in final response
+    facts_ok = all(f.lower() in traj.final_response.lower() for f in case.required_facts)
+    outcome_ok = state_match and facts_ok
+
+    # Classify into Figure 2A Diagnostic Quadrant (Q1..Q4)
+    traj_ok = (recall >= 0.95) and not violated_policy
+    if outcome_ok and traj_ok:
+        quadrant = "Q1_ROBUST_SUCCESS"
+    elif outcome_ok and not traj_ok:
+        quadrant = "Q2_LUCKY_SHORTCUT"
+    elif not outcome_ok and traj_ok:
+        quadrant = "Q3_LATE_SYNTHESIS_FAULT"
+    else:
+        quadrant = "Q4_EARLY_DERAILMENT"
+
+    composite = (1.0 if outcome_ok else 0.0) * (0.5 * f1_tool + 0.5 * traj.judge_score - 0.02 * max(0, n_act - n_req))
+    return {
+        "task_id": case.task_id,
+        "policy_safe": not violated_policy,
+        "state_match": state_match,
+        "outcome_ok": outcome_ok,
+        "tool_precision": round(precision, 4),
+        "tool_recall": round(recall, 4),
+        "tool_f1": round(f1_tool, 4),
+        "quadrant": quadrant,
+        "composite_score": round(max(composite, 0.0), 4),
+    }
+
+
+def pass_power_k(num_trials: int, num_successes: int, k: int) -> float:
+    """Unbiased combinatorial estimator for Pass^k = C(c, k) / C(N, k)."""
+    if num_successes < k or num_trials < k:
+        return 0.0
+    return math.comb(num_successes, k) / math.comb(num_trials, k)</code></pre>
+
+<h2 id="ci-regression-gate">5. Running Regression Suites on Every Prompt or Model Change</h2>
+<p>A benchmark only prevents production incidents if it runs automatically as a <strong>blocking CI/CD regression gate</strong> whenever any of the four agent artifacts changes:</p>
+<ol>
+<li><strong>System Prompt or Few-Shot Examples:</strong> Tracked as versioned Jinja/Markdown templates in Git (`prompts/refund_agent_v14.md`).</li>
+<li><strong>Tool Schemas &amp; Descriptions:</strong> Changes to Pydantic parameter descriptions or JSON Schema enums often shift tool selection probabilities more than prompt edits.</li>
+<li><strong>Retriever / Index Config:</strong> Chunking size, BM25 $k_1/b$ weights, dense embedding model, or HNSW `efSearch` parameters.</li>
+<li><strong>Base Model or LoRA Adapter Checkpoint:</strong> Upgrading model weights or quantizing from FP16 to AWQ 4-bit.</li>
+</ol>
+
+<p>To keep PR feedback under $90\text{ seconds}$ without spending hundreds of dollars per commit, production harnesses use a <strong>Two-Speed Regression Ratchet</strong>:</p>
+<ul>
+<li><strong>Tier-A Smoke &amp; Bug-Ratchet Suite ($N=100$ cases, run on every PR commit):</strong> Runs all adversarial/policy cases and every historical production incident at $T=0$ against the SQLite tool-fixture cache. Enforces a strict hard gate: zero policy violations ($\text{Pass}^1_{\text{safety}} = 100\%$) and zero regressions on locked incident tests.</li>
+<li><strong>Tier-B Full Stratified Suite + Multi-Trial $\text{Pass}^5$ ($N=500$ cases, run pre-merge / nightly):</strong> Executes $k=5$ rollouts at production temperature ($T=0.3$), computes $\text{Pass}^5$, runs the human-calibrated L3 LLM-as-judge, and performs paired hypothesis testing between the incumbent baseline $v_0$ and candidate $v_1$ (covered in detail in <a href="calibrated-llm-judge-and-significance-testing.html">Chapter 02</a>).</li>
+</ul>
+
+<h2 id="checks">6. Questions worth answering</h2>
+<div class="self-check"><strong>Suppose your candidate prompt $v_1$ improves final-answer accuracy from $82\% \to 86\%$, but $6\%$ of its successes fall into Quadrant Q2 (Lucky Shortcut: $\Delta S_{\text{db}}$ or text matches, but $\operatorname{Recall}_{\text{tool}} &lt; 1$). Should CI promote $v_1$?</strong><p>No. Quadrant Q2 means the agent arrived at the right output without executing required verification or authorization tools (for example, granting a refund without calling <code>check_return_window()</code>, which happened to match on test cases where the item was eligible). In production, Q2 shortcuts become severe compliance and financial bugs on out-of-distribution inputs. The episode score must multiply by the hard gate $\mathbb{I}[\text{mandatory\_tools\_called}] \cdot \mathbb{I}[\Delta S_{\text{db}} = \Delta S_{\text{db}}^*]$.</p></div>
+<div class="self-check"><strong>Why do we cache tool fixtures by canonicalized $(\text{tool\_name}, \text{normalized\_args})$ rather than replaying recorded trajectories by step index $t$?</strong><p>If a prompt change causes the candidate agent $v_1$ to call <code>check_inventory()</code> at step $t=1$ instead of step $t=2$ (or to swap the order of two independent read calls), index-based replay returns the wrong tool’s payload and fails the run artificially. Content-addressed lookup keyed by $(\text{tool\_name}, \text{canonical\_json}(\text{args}))$ plus stateful in-memory SQLite tables allows valid reorderings while keeping execution $100\%$ deterministic.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← Reading Guide: Agent Evaluation Systems</a><a href="calibrated-llm-judge-and-significance-testing.html">Ch. 02: Human-Calibrated LLM-as-Judge &amp; Paired Significance Testing (AutoPulse CRM) →</a></nav></article></div><script src="../../../script.js"></script><script src="../../../blog-posts.js"></script><script src="../../../blog.js"></script><script src="../../../anim-speed.js"></script><script src="../../dl/training-labs/training-math.js"></script><script src="../../dl/training-labs/training-ui.js"></script><script src="../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

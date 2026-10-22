@@ -11490,6 +11490,14 @@ var BLOG_TREE = [
         ]
       },
       {
+        name: 'evaluation',
+        label: 'Agent Evaluation',
+        children: [
+          { title: 'Reading Guide: Agent Evaluation Systems', file: 'agentic-harness/evaluation/index.html', links: ['agentic-harness/evaluation/agent-eval-system-from-scratch.html'] },
+          { title: '1. Designing an Agent Evaluation System from Scratch: Trajectory Benchmarks, Stateful Sandboxes &amp; CI Regression Suites', file: 'agentic-harness/evaluation/agent-eval-system-from-scratch.html', links: ['agentic-harness/evaluation/index.html', 'dl/evaluation-metrics/llm-judge-and-arena-elo-metrics.html'] }
+        ]
+      },
+      {
         name: 'mcp',
         label: 'MCP',
         children: []
