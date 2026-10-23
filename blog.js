@@ -9971,8 +9971,17 @@ var BLOG_TREE = [
         name: 'fundamentals',
         label: 'Fundamentals',
         children: [
-          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/fundamentals/grids-and-scales.html', 'quantization/llm-int8/index.html'] },
-          { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/fundamentals/index.html', 'quantization/llm-int8/outlier-features.html'] }
+          { title: 'Scales, zero points, and clipping', file: 'quantization/fundamentals/index.html', links: ['quantization/fundamentals/grids-and-scales.html', 'quantization/rtn/index.html'] },
+          { title: 'Grids, scales, and what low-bit actually means', file: 'quantization/fundamentals/grids-and-scales.html', links: ['quantization/fundamentals/index.html', 'quantization/rtn/index.html'] }
+        ]
+      },
+      {
+        name: 'rtn',
+        label: 'RTN (Round-to-Nearest)',
+        children: [
+          { title: 'RTN: Round-to-Nearest quantization from first principles', file: 'quantization/rtn/index.html', links: ['quantization/fundamentals/grids-and-scales.html', 'quantization/rtn/uniform-grids-and-rounding-error.html'] },
+          { title: '1. RTN: Symmetric vs. asymmetric grids, tie-breaking, and the Δ²/12 variance law', file: 'quantization/rtn/uniform-grids-and-rounding-error.html', links: ['quantization/rtn/index.html', 'quantization/rtn/groupwise-rtn-and-why-4bit-breaks.html'] },
+          { title: '2. RTN in LLMs: Per-group scaling, outlier magnification, and why RTN breaks below 4 bits', file: 'quantization/rtn/groupwise-rtn-and-why-4bit-breaks.html', links: ['quantization/rtn/uniform-grids-and-rounding-error.html', 'quantization/gptq/index.html', 'quantization/awq/index.html'] }
         ]
       },
       {
@@ -11822,7 +11831,7 @@ function flattenBlogTree(nodes, result) {
     llm:   { label: 'LLM', blurb: 'Large Language Model architectures, parameter-efficient fine-tuning (LoRA, QLoRA), 4-bit NormalFloat quantization, and training walkthroughs.' },
     dl:    { label: 'Deep Learning', blurb: 'Neural architectures, training, and model components.' },
     diffusion: { label: 'Diffusion & Flow Models', blurb: 'Flow matching, diffusion, and discrete generative models for continuous data and language.' },
-    quantization: { label: 'Quantization', blurb: 'Three GPTQ chapters and dedicated guides for fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, QAT, GGUF, and FP8, with supplementary examples and method comparisons.' },
+    quantization: { label: 'Quantization', blurb: 'Dedicated series on RTN (Round-to-Nearest), GPTQ, TurboQuant, fundamentals, LLM.int8, SmoothQuant, AWQ, NF4/QLoRA, QAT, GGUF, and FP8, with supplementary examples and method comparisons.' },
     'speculative-decoding': { label: 'Speculative Decoding', blurb: 'Accelerating autoregressive LLM inference with draft-target verification, EAGLE-3 feature extrapolation, and multi-token prediction.' },
     mlops: { label: 'MLOps', blurb: 'Training infra, deployment, evaluation, observability for ML.' },
     rag:   { label: 'RAG', blurb: 'Retrieval, approximate-neighbor indexes, and evidence-grounded generation.' },

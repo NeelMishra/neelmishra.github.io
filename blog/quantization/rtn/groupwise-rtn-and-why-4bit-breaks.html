@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="How groupwise Round-to-Nearest (RTN) quantization isolates LLM weight outliers, exact effective bit-width math, why minimizing weight MSE fails to minimize layer output MSE, and a complete PyTorch implementation.">
+<title>2. RTN in LLMs: Per-group scaling, outlier magnification, and why RTN breaks below 4 bits | Neel Mishra</title>
+<link rel="canonical" href="https://neelmishra.github.io/blog/quantization/rtn/groupwise-rtn-and-why-4bit-breaks.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css?v=quant-plain-20261019"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261019">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js?v=quant-plain-20261019"></script>
+</head>
+<body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
+<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
+<article class="blog-post-content learning-note">
+<a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
+<div class="post-series-nav"><a href="../../../blog.html#quantization">Quantization</a><span>&middot;</span><a href="index.html">RTN</a><span>&middot; Part 2</span></div>
+<h1>2. RTN in LLMs: Per-group scaling, outlier magnification, and why RTN breaks below 4 bits</h1><p class="post-meta">October 2026 &middot; 8 min read</p>
+
+<p>At 8 bits ($256$ levels), per-channel <strong>Round-to-Nearest (RTN)</strong> preserves LLM weight accuracy almost losslessly. Drop to 4 bits ($16$ levels) or 3 bits ($8$ levels) with one scale per output row, however, and language model perplexity degrades sharply. This post explains why heavy-tailed weight rows break per-channel RTN, how <strong>sub-channel groupwise RTN</strong> ($G \in \{32, 64, 128\}$) isolates outliers, and why even groupwise RTN fails at 3 bits compared to <a href="../gptq/index.html">GPTQ</a> and <a href="../awq/index.html">AWQ</a>.</p>
+
+<h2 id="outlier-dilation">1. How one outlier ruins a 4-bit row: crest-factor dilation</h2>
+<p>Consider a single output row $w \in \mathbb{R}^d$ of an LLM projection matrix (say $d = 4096$) with root-mean-square magnitude $\sigma_w = \sqrt{\frac{1}{d}\sum_{c=1}^{d} w_c^2}$ and maximum magnitude $M = \max_{1 \le c \le d}|w_c|$. Define the row's <strong>crest factor</strong> $\kappa = M / \sigma_w$.</p>
+<p>Substituting $\Delta = M / (2^{b-1}-1) = \kappa \sigma_w / (2^{b-1}-1)$ into the <a href="uniform-grids-and-rounding-error.html#noise-model">$\Delta^2 / 12$ variance law</a> expresses the relative weight error directly in terms of $\kappa$:</p>
+<div class="note-equation">$$\frac{\mathrm{MSE}_{\mathrm{RTN}}}{\sigma_w^2} = \frac{\Delta^2}{12\,\sigma_w^2} = \frac{\kappa^2}{12\,(2^{b-1}-1)^2}.$$</div>
+<ul>
+<li>In a trained Transformer row of length $d = 4096$, heavy tails routinely push $\kappa = M / \sigma_w \in [6, 12]$.</li>
+<li>At $b = 4$ bits ($2^{b-1}-1 = 7$), a crest factor of $\kappa = 8$ makes $\Delta = \frac{8}{7}\sigma_w \approx 1.14\,\sigma_w$. Any weight with $|w_c| &lt; \frac{\Delta}{2} \approx 0.57\,\sigma_w$&mdash;typically <strong>over $40\%$ of the weights in the row</strong>&mdash;rounds straight to $0$!</li>
+</ul>
+
+<h2 id="groupwise-rtn">2. Sub-channel groupwise RTN and effective bit-width</h2>
+<p>Instead of sharing one scale across all $d = 4096$ columns of a row, <strong>groupwise RTN</strong> slices each row into $d / G$ contiguous groups of $G$ weights (commonly $G = 128$ or $G = 64$) and computes a separate scale $\Delta_{r,g}$ (and optional zero-point $z_{r,g}$) for each group $g \in \{1, \dots, d/G\}$:</p>
+<div class="note-equation">$$\Delta_{r,g} = \frac{\max_{j \in \mathcal{I}_g} |W_{r,j}|}{2^{b-1}-1}, \qquad \widehat{W}_{r,j} = \Delta_{r,g}\cdot\operatorname{clip}\!\left(\left\lfloor \frac{W_{r,j}}{\Delta_{r,g}} \right\rceil,\; -(2^{b-1}-1),\; +(2^{b-1}-1)\right) \quad (j \in \mathcal{I}_g).$$</div>
+<p>Now a single large weight only stretches $\Delta_{r,g}$ for the $G - 1$ other weights in its own group, leaving the remaining $d - G$ weights in the row untouched.</p>
+
+<h3>Effective bits per weight ($\text{bits}_{\mathrm{eff}}$)</h3>
+<p>Each group of $G$ weights stores $G \times b$ payload bits plus metadata for its scale (typically 16-bit FP16) and, for asymmetric RTN, a $b$-bit integer zero-point:</p>
+<div class="note-equation">$$\text{bits}_{\mathrm{eff}}^{\mathrm{sym}} = b + \frac{16}{G}, \qquad \text{bits}_{\mathrm{eff}}^{\mathrm{asym}} = b + \frac{16 + b}{G}.$$</div>
+
+<div class="note-table q-table"><table><caption>Memory overhead vs. outlier isolation across RTN granularities for $b = 4$ bits ($d = 4096$).</caption>
+<thead><tr><th scope="col">Granularity</th><th scope="col">Group size $G$</th><th scope="col">Symmetric $\text{bits}_{\mathrm{eff}}$</th><th scope="col">Asymmetric $\text{bits}_{\mathrm{eff}}$</th><th scope="col">Blast radius of 1 outlier</th></tr></thead>
+<tbody>
+<tr><th scope="row">Per-channel (row)</th><td>$4096$</td><td>$4.004\text{ bits}$</td><td>$4.005\text{ bits}$</td><td>All $4096$ weights in the row</td></tr>
+<tr><th scope="row">Groupwise $G=128$</th><td>$128$</td><td>$4.125\text{ bits}$</td><td>$4.156\text{ bits}$</td><td>Only $128$ weights ($3.1\%$ of row)</td></tr>
+<tr><th scope="row">Groupwise $G=64$</th><td>$64$</td><td>$4.250\text{ bits}$</td><td>$4.313\text{ bits}$</td><td>Only $64$ weights ($1.6\%$ of row)</td></tr>
+<tr><th scope="row">Groupwise $G=32$</th><td>$32$</td><td>$4.500\text{ bits}$</td><td>$4.625\text{ bits}$</td><td>Only $32$ weights ($0.8\%$ of row)</td></tr>
+</tbody></table></div>
+
+<h2 id="worked-example">3. Worked 8-weight numerical comparison: per-row vs. groupwise RTN ($G=4$)</h2>
+<p>Take an 8-weight row where the first seven weights have typical magnitudes in $[-0.18, +0.22]$ and the last weight is an outlier $w_8 = +1.40$:</p>
+<div class="note-equation">$$w = \bigl[\underbrace{-0.18,\; +0.06,\; +0.15,\; -0.21}_{\text{Group 1}},\; \underbrace{+0.09,\; -0.04,\; +0.22,\; +1.40}_{\text{Group 2}}\bigr].$$</div>
+<ul>
+<li><strong>4-bit symmetric per-row RTN ($G = 8$):</strong>
+  The row maximum is $M = 1.40$, so the single step size is $\Delta = 1.40 / 7 = 0.20$. Dividing by $0.20$ and rounding gives
+  $$\widehat{w}_{\mathrm{row}} = \bigl[-0.20,\; 0.00,\; +0.20,\; -0.20,\; 0.00,\; 0.00,\; +0.20,\; +1.40\bigr].$$
+  Notice that three of the eight weights ($+0.06, +0.09, -0.04$) are wiped out to $0.00$, and the squared errors sum to $\sum_{i=1}^{8}(\widehat{w}_i - w_i)^2 = 0.0004 + 0.0036 + 0.0025 + 0.0001 + 0.0081 + 0.0016 + 0.0004 + 0 = 0.0167$ ($\mathrm{MSE} = 0.002088$).</li>
+<li><strong>4-bit symmetric groupwise RTN ($G = 4$):</strong>
+  <ul>
+  <li><em>Group 1</em> ($[-0.18, +0.06, +0.15, -0.21]$) has $M_1 = 0.21$ and $\Delta_1 = 0.21 / 7 = 0.03$. Every single weight in Group 1 is an exact multiple of $0.03$: $q^{(1)} = [-6, +2, +5, -7]$, reconstructing $\widehat{w}^{(1)} = [-0.18, +0.06, +0.15, -0.21]$ with <strong>zero error</strong>!</li>
+  <li><em>Group 2</em> ($[+0.09, -0.04, +0.22, +1.40]$) contains the outlier $1.40$, so $\Delta_2 = 1.40 / 7 = 0.20$ and $\widehat{w}^{(2)} = [0.00, 0.00, +0.20, +1.40]$ with squared error $0.0081 + 0.0016 + 0.0004 + 0 = 0.0101$.</li>
+  </ul>
+  Splitting the row into two groups cuts the error in Group 1 to zero and drops total row MSE from $0.002088$ to $0.0101 / 8 = 0.001263$. In a full $d = 4096$ row with $32$ groups of $G = 128$, one outlier only affects $1/32$ of the row instead of $100\%$.</li>
+</ul>
+
+<h2 id="why-rtn-breaks">4. Why even groupwise RTN breaks at 3&ndash;4 bits (and what AWQ/GPTQ change)</h2>
+<p>Even with $G = 128$, plain RTN minimizes the wrong objective for low-bit LLM layers. For a linear layer computing $y = Wx$ on an input token $x \in \mathbb{R}^d$, the actual error injected into the network's hidden state is</p>
+<div class="note-equation">$$\lVert Wx - \widehat{W}x \rVert_2^2 = \sum_{r=1}^{m} \left(\sum_{c=1}^{d} \bigl(W_{r,c} - \widehat{W}_{r,c}\bigr)\,x_c\right)^2.$$</div>
+<p>Compare this output error to RTN's elementwise weight objective $\sum_{r,c}(W_{r,c} - \widehat{W}_{r,c})^2$:</p>
+<ol>
+<li><strong>RTN treats all input channels $c$ as equally important ($x_c \equiv 1$):</strong> In pre-trained LLMs, $0.1\%$ to $1\%$ of input activation channels have magnitudes $10\times$ to $100\times$ larger than typical channels. A small RTN rounding error $\delta W_{r,c}$ on a salient activation channel $c$ is multiplied by $x_c$ and dominates $\lVert Wx - \widehat{W}x \rVert_2^2$. <strong><a href="../awq/index.html">AWQ</a></strong> fixes this while keeping RTN rounding by scaling up salient weight columns ($W_{:,c} \leftarrow s_c W_{:,c}$) before calling RTN.</li>
+<li><strong>RTN rounds each column independently without error cancellation:</strong> Inside the inner sum $\sum_{c=1}^{d} \delta W_{r,c}\,x_c$, if rounding column $1$ pushes the dot product up by $\delta W_{r,1} x_1 &gt; 0$ and input features $x_1, x_2$ are correlated, nudging $W_{r,2}$ slightly in the opposite direction before rounding it can cancel most of $\delta W_{r,1} x_1$. Because RTN never updates remaining weights after rounding a column, these errors accumulate across all $d$ columns. <strong><a href="../gptq/index.html">GPTQ</a></strong> fixes this by applying an inverse-Hessian compensation step to the remaining unquantized columns after each RTN column step.</li>
+</ol>
+
+<div class="note-table q-table"><table><caption>LLaMA-7B WikiText-2 perplexity (lower is better) comparing groupwise RTN ($G=128$) against GPTQ and AWQ (from Lin et al., MLSys 2024).</caption>
+<thead><tr><th scope="col">Method</th><th scope="col">Uses calibration $X$?</th><th scope="col">Modifies weights before/during RTN?</th><th scope="col">INT4 ($G=128$) PPL</th><th scope="col">INT3 ($G=128$) PPL</th></tr></thead>
+<tbody>
+<tr><th scope="row">FP16 baseline</th><td>&mdash;</td><td>&mdash;</td><td>$5.68$</td><td>$5.68$</td></tr>
+<tr><th scope="row"><strong>RTN ($G=128$)</strong></th><td>No (zero-shot)</td><td>No (independent rounding)</td><td>$6.12$</td><td>$43.20$</td></tr>
+<tr><th scope="row"><a href="../gptq/index.html">GPTQ ($G=128$)</a></th><td>Yes ($H = 2XX^{\mathsf T}$)</td><td>Yes (Hessian column compensation)</td><td>$5.85$</td><td>$8.18$</td></tr>
+<tr><th scope="row"><a href="../awq/index.html">AWQ ($G=128$)</a></th><td>Yes ($\mathbb{E}[|x_c|]$)</td><td>Yes (salient channel scaling $s_c$)</td><td>$5.78$</td><td>$6.46$</td></tr>
+</tbody></table></div>
+
+<h2 id="pytorch-code">5. Minimal PyTorch implementation of groupwise RTN</h2>
+<p>The function below implements both <strong>symmetric</strong> and <strong>asymmetric</strong> groupwise RTN on any 2D weight matrix <code>W</code> of shape <code>[out_features, in_features]</code>:</p>
+<pre><code class="language-python">import torch
+
+def rtn_quantize_groupwise(
+    W: torch.Tensor,
+    bits: int = 4,
+    group_size: int = 128,
+    symmetric: bool = True,
+) -&gt; tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Groupwise Round-to-Nearest (RTN) quantization and dequantization."""
+    out_features, in_features = W.shape
+    assert in_features % group_size == 0, "in_features must be divisible by group_size"
+    w_groups = W.view(out_features, in_features // group_size, group_size)
+
+    if symmetric:
+        q_max = (1 &lt;&lt; (bits - 1)) - 1
+        q_min = -q_max
+        scales = w_groups.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / q_max
+        zeros = torch.zeros_like(scales)
+        q = torch.clamp(torch.round(w_groups / scales), q_min, q_max)
+        w_hat = (q * scales).view(out_features, in_features)
+    else:
+        q_min, q_max = 0, (1 &lt;&lt; bits) - 1
+        w_min = w_groups.amin(dim=-1, keepdim=True)
+        w_max = w_groups.amax(dim=-1, keepdim=True)
+        scales = ((w_max - w_min).clamp(min=1e-8)) / (q_max - q_min)
+        zeros = torch.clamp(torch.round(-w_min / scales), q_min, q_max)
+        q = torch.clamp(torch.round(w_groups / scales) + zeros, q_min, q_max)
+        w_hat = ((q - zeros) * scales).view(out_features, in_features)
+
+    return w_hat, scales.squeeze(-1), zeros.squeeze(-1)
+</code></pre>
+
+<details class="note-check"><summary>When is plain groupwise RTN good enough in practice?</summary><p>At 8-bit (per-channel) and often at 4-bit with $G \in \{64, 128\}$ on larger models ($\ge 13\text{B}$ parameters), groupwise RTN is fast, requires zero calibration data, and comes within $0.1\text{--}0.4$ perplexity points of calibration-based methods. Below 4 bits (INT3/INT2) or on smaller models ($1\text{B}\text{--}8\text{B}$), calibration-aware methods like AWQ or GPTQ are essential.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul class="note-sources">
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., <em>GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers</em> (ICLR 2023)</a>.</li>
+<li><a href="https://arxiv.org/abs/2306.00978">Lin et al., <em>AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</em> (MLSys 2024)</a>.</li>
+<li><a href="https://arxiv.org/abs/2208.07339">Dettmers et al., <em>LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale</em> (NeurIPS 2022)</a> &mdash; emergent activation outliers in Transformers.</li>
+</ul>
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="uniform-grids-and-rounding-error.html"><span>Previous</span><span>1. RTN: Symmetric vs. asymmetric grids, tie-breaking, and the &Delta;&sup2;/12 variance law</span></a><a class="next" href="../gptq/index.html"><span>Next</span><span>GPTQ: quantize the layer, then compensate</span></a></nav>
+</article></div>
+<footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261019"></script><script src="../../../blog.js?v=quant-plain-20261019"></script><script src="../../../code-highlight.js"></script>
+<script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body></html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Learn Round-to-Nearest (RTN) quantization from first principles: symmetric and asymmetric grids, banker's rounding, the Δ²/12 quantization noise law, per-group scaling, and why plain RTN breaks below 4 bits.">
+<title>RTN: Round-to-Nearest quantization from first principles | Neel Mishra</title>
+<link rel="canonical" href="https://neelmishra.github.io/blog/quantization/rtn/index.html">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../../styles.css"><link rel="stylesheet" href="../../../blog.css"><link rel="stylesheet" href="../../../learning-notes.css?v=quant-plain-20261019"><link rel="stylesheet" href="../quantization.css?v=quant-plain-20261019">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../learning-notes.js?v=quant-plain-20261019"></script>
+</head>
+<body>
+<header class="site-header"><a class="brand" href="../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../index.html">Home</a><a href="../../../experience.html">Experience</a><a href="../../../projects.html">Projects</a><a class="active" href="../../../blog.html">Blog</a><a href="../../../index.html#contact">Contact</a></nav></header>
+<div class="blog-post-layout" data-mobile-sidebar><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of contents</h4><ul></ul></div></aside>
+<article class="blog-post-content learning-note">
+<a class="back-to-blog" href="../../../blog.html">&larr; All posts</a>
+<div class="post-series-nav"><a href="../../../blog.html#quantization">Quantization</a><span>&middot;</span><a href="index.html">RTN</a><span>&middot; Reading guide</span></div>
+<h1>RTN: Round-to-Nearest quantization from first principles</h1><p class="post-meta">October 2026 &middot; 5 min read</p>
+
+<p><strong>Round-to-Nearest (RTN)</strong> is the foundational baseline of neural network quantization. Every more sophisticated post-training quantizer&mdash;whether <a href="../gptq/index.html">GPTQ</a>, <a href="../awq/index.html">AWQ</a>, or <a href="../smoothquant/index.html">SmoothQuant</a>&mdash;still uses an RTN step under the hood; they differ only in how they rescale or compensate weights before and after calling RTN.</p>
+<p>Given a block of floating-point weights $w \in \mathbb{R}^G$ and a target bit-width $b$, RTN requires <strong>zero calibration data, zero forward passes, and zero optimization loops</strong>. It maps each weight independently to its closest point on a uniform integer grid in four steps:</p>
+<ol>
+<li><strong>Select the scale granularity:</strong> partition the weight matrix $W \in \mathbb{R}^{m \times d}$ into independent scaling blocks&mdash;per-tensor, per-output-channel (row), or per-group of $G$ consecutive weights (typically $G = 128$).</li>
+<li><strong>Compute the grid step $\Delta$ (and zero-point $z$):</strong> measure the block's extreme values ($M = \max_i |w_i|$ for symmetric grids, or $[w_{\min}, w_{\max}]$ for asymmetric grids) and divide that span into $2^b - 1$ (or $2^{b-1}-1$) equal intervals of width $\Delta$.</li>
+<li><strong>Divide, round to nearest integer, and clip:</strong> map each weight $w_i$ independently to the integer code $q_i = \operatorname{clip}\!\bigl(\lfloor w_i / \Delta \rceil + z,\, q_{\min},\, q_{\max}\bigr)$ using round-half-to-even tie-breaking.</li>
+<li><strong>Dequantize during inference:</strong> reconstruct $\widehat{w}_i = \Delta\cdot(q_i - z)$ on the fly inside the matrix-multiply kernel (for W4A16/W8A16) or accumulate directly in INT32 (for W8A8).</li>
+</ol>
+
+<h2 id="objective">What problem does RTN actually solve?</h2>
+<p>Once a block's step size $\Delta &gt; 0$ and integer zero-point $z$ are fixed, the allowed reconstruction levels form a discrete uniform grid:</p>
+<div class="note-equation">$$\mathcal{G}_{\Delta, z} = \bigl\{\,\Delta\cdot(q - z) \;\big|\; q \in \{q_{\min}, \dots, q_{\max}\}\,\bigr\}.$$</div>
+<p>RTN chooses the quantized matrix $\widehat{W} \in \mathcal{G}_{\Delta, z}^{m \times d}$ that minimizes the <strong>elementwise Frobenius reconstruction error</strong> of the weights themselves:</p>
+<div class="note-equation">$$\widehat{W}_{\mathrm{RTN}} = \operatorname*{arg\,min}_{\widehat{W} \in \mathcal{G}_{\Delta, z}^{m \times d}} \lVert W - \widehat{W} \rVert_F^2 = \sum_{r=1}^{m}\sum_{c=1}^{d} \bigl(W_{r,c} - \widehat{W}_{r,c}\bigr)^2.$$</div>
+<p>Because $\lVert W - \widehat{W} \rVert_F^2$ is a sum of independent per-weight squares $(W_{r,c} - \widehat{W}_{r,c})^2$, minimizing the sum is equivalent to snapping each scalar $W_{r,c}$ to its single closest grid point in $\mathcal{G}_{\Delta, z}$. That decoupling is both RTN's greatest strength (instant, embarrassingly parallel quantization) and its central weakness at 3&ndash;4 bits (it ignores which weights multiply large activations and cannot use unquantized columns to cancel rounding error).</p>
+
+<h2 id="route">Two posts, from exact grid math to LLM failure modes</h2>
+<div class="note-table q-table"><table><caption>Read in order, or jump to the part you need.</caption>
+<thead><tr><th scope="col">Post</th><th scope="col">What you learn</th></tr></thead>
+<tbody>
+<tr><th scope="row"><a href="uniform-grids-and-rounding-error.html">1. RTN: Symmetric vs. asymmetric grids, tie-breaking, and the $\Delta^2/12$ variance law</a><br>7 min read</th><td>Exact derivations of symmetric absmax and asymmetric min-max RTN, why round-half-to-even eliminates quantization bias, the uniform noise variance $\Delta^2/12$, the $6.02\text{ dB/bit}$ SQNR rule, and a worked 4-bit hand calculation.</td></tr>
+<tr><th scope="row"><a href="groupwise-rtn-and-why-4bit-breaks.html">2. RTN in LLMs: Per-group scaling, outlier magnification, and why RTN breaks below 4 bits</a><br>8 min read</th><td>How weight outliers stretch $\Delta$ across a channel, how sub-channel groupwise RTN ($G=128$) bounds the damage, effective bit-width overhead, why minimizing $\lVert W - \widehat{W}\rVert_F^2$ fails to minimize $\lVert WX - \widehat{W}X\rVert_F^2$, and a clean PyTorch implementation.</td></tr>
+</tbody></table></div>
+
+<h2 id="distinctions">The distinctions to keep straight</h2>
+<ul>
+<li><strong>Weight-space MSE (RTN) versus output-space MSE (<a href="../gptq/index.html">GPTQ</a>, <a href="../awq/index.html">AWQ</a>):</strong> RTN minimizes $\lVert W - \widehat{W} \rVert_F^2$ without looking at activations $X$. GPTQ and AWQ minimize $\lVert WX - \widehat{W}X \rVert_F^2$ on a calibration set.</li>
+<li><strong>Symmetric absmax versus asymmetric min-max:</strong> symmetric RTN forces $z = 0$ so zero is exact and dequantization requires only a multiply ($\widehat{w} = \Delta\cdot q$), whereas asymmetric RTN shifts the grid by $z$ to fit skewed intervals $[w_{\min}, w_{\max}]$ tightly at the cost of storing $z$ and computing $\Delta(q - z)$.</li>
+<li><strong>Rounding error versus clipping error:</strong> inside the grid, $|\widehat{w} - w| \le \Delta/2$. If $\Delta$ is chosen smaller than the true min-max span to improve interior resolution, weights outside the grid saturate at $q_{\min}$ or $q_{\max}$ and incur unbounded clipping error.</li>
+<li><strong>Per-channel versus per-group RTN:</strong> per-channel RTN stores one scale per output row ($m$ scales total). Groupwise RTN stores one scale every $G$ input columns ($m \times d / G$ scales), trading a small metadata overhead ($0.125$ to $0.25$ bits/weight) for a dramatic drop in 4-bit quantization error.</li>
+</ul>
+
+<h2 id="check">A quick numerical check</h2>
+<p>In <a href="groupwise-rtn-and-why-4bit-breaks.html#worked-example">Part 2's 8-weight example</a>, a single outlier weight $w_8 = 1.40$ sits alongside seven small weights in $[-0.21, +0.22]$. Under 4-bit symmetric per-row RTN ($\Delta = 1.40/7 = 0.20$), three of the seven small weights round to $0.00$. Splitting the row into two groups of $G = 4$ gives the first group $\Delta_1 = 0.21 / 7 = 0.03$, reconstructing all four weights in Group 1 with <strong>zero error</strong>.</p>
+
+<h2 id="sources">Sources</h2>
+<ul class="note-sources">
+<li><a href="https://arxiv.org/abs/1712.05877">Jacob et al., <em>Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference</em> (CVPR 2018)</a> &mdash; affine uniform quantization and zero-point representation.</li>
+<li><a href="https://arxiv.org/abs/2106.08295">Nagel et al., <em>A White Paper on Neural Network Quantization</em> (2021)</a> &mdash; symmetric vs. asymmetric RTN, granularity, and analytical quantization noise.</li>
+<li><a href="https://arxiv.org/abs/2210.17323">Frantar et al., <em>GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers</em> (ICLR 2023)</a> &mdash; RTN baselines vs. Hessian-compensated quantization across OPT and BLOOM.</li>
+<li><a href="https://arxiv.org/abs/2306.00978">Lin et al., <em>AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration</em> (MLSys 2024)</a> &mdash; groupwise RTN vs. salient-channel scaling on LLaMA.</li>
+</ul>
+<nav class="post-nav" aria-label="Reading navigation"><a class="prev" href="../fundamentals/grids-and-scales.html"><span>Previous</span><span>Grids, scales, and what low-bit actually means</span></a><a class="next" href="uniform-grids-and-rounding-error.html"><span>Next</span><span>1. RTN: Symmetric vs. asymmetric grids, tie-breaking, and the &Delta;&sup2;/12 variance law</span></a></nav>
+</article></div>
+<footer class="site-footer"><p>Copyright 2026 Neel Mishra</p><p>Built for GitHub Pages</p></footer>
+<script src="../../../script.js"></script><script src="../../../blog-posts.js?v=quant-plain-20261019"></script><script src="../../../blog.js?v=quant-plain-20261019"></script><script src="../../../code-highlight.js"></script>
+<script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body></html>
