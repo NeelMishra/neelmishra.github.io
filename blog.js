@@ -11599,6 +11599,28 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'statistics-and-experiment-setup',
+    label: 'Statistics & Experiment Setup',
+    children: [
+      {
+        name: 'handwritten-stats-notes',
+        label: 'Handwritten Stats Notes',
+        children: [
+          { title: 'Overview: Handwritten Statistics &amp; Experiment Setup Notes (Chapters 1–9)', file: 'statistics-and-experiment-setup/handwritten-stats-notes/index.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/examining-distributions.html'] },
+          { title: '1. Examining Distributions: EDA, Histograms, Stemplots, Mean/Median, Boxplots, Variance &amp; Normal Quantile Plots', file: 'statistics-and-experiment-setup/handwritten-stats-notes/examining-distributions.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/index.html', 'statistics-and-experiment-setup/handwritten-stats-notes/examining-relationships.html'] },
+          { title: '2. Examining Relationships: Scatterplots, Pearson Correlation r, Least-Squares Regression, Residuals &amp; Causation', file: 'statistics-and-experiment-setup/handwritten-stats-notes/examining-relationships.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/examining-distributions.html', 'statistics-and-experiment-setup/handwritten-stats-notes/producing-data.html'] },
+          { title: '3. Producing Data: SRS, Stratified &amp; Multi-Stage Sampling, Experimental Design, Matched Pairs &amp; Block Designs', file: 'statistics-and-experiment-setup/handwritten-stats-notes/producing-data.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/examining-relationships.html', 'statistics-and-experiment-setup/handwritten-stats-notes/probability-and-sampling-distributions.html'] },
+          { title: '4. Probability &amp; Sampling Distributions: Random Variables, Portfolio Variance, Law of Large Numbers &amp; CLT', file: 'statistics-and-experiment-setup/handwritten-stats-notes/probability-and-sampling-distributions.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/producing-data.html', 'statistics-and-experiment-setup/handwritten-stats-notes/probability-theory.html'] },
+          { title: '5. Probability Theory: Conditional Probability, Bayes\' Rule, Binomial Distribution &amp; Poisson Distribution', file: 'statistics-and-experiment-setup/handwritten-stats-notes/probability-theory.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/probability-and-sampling-distributions.html', 'statistics-and-experiment-setup/handwritten-stats-notes/introduction-to-inference.html'] },
+          { title: '6. Introduction to Inference: Confidence Intervals, Sample Size, P-Values, Power &amp; Type I / Type II Errors', file: 'statistics-and-experiment-setup/handwritten-stats-notes/introduction-to-inference.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/probability-theory.html', 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-distributions.html'] },
+          { title: '7. Inference for Distributions: One-Sample t, Matched Pairs t, Sign Test, Two-Sample t &amp; F Test for Variances', file: 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-distributions.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/introduction-to-inference.html', 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-proportions.html'] },
+          { title: '8. Inference for Proportions: Large-Sample &amp; Plus Four (Wilson) Intervals, Sample Size, Pooled z Test &amp; Relative Risk', file: 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-proportions.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/inference-for-distributions.html', 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-two-way-tables.html'] },
+          { title: '9. Inference for Two-Way Tables: Expected Counts, Pearson Chi-Square Test, X² = z² Equivalence &amp; Meta-Analysis', file: 'statistics-and-experiment-setup/handwritten-stats-notes/inference-for-two-way-tables.html', links: ['statistics-and-experiment-setup/handwritten-stats-notes/inference-for-proportions.html', 'statistics-and-experiment-setup/handwritten-stats-notes/index.html'] }
+        ]
+      }
+    ]
   }
 
 ];
@@ -11664,7 +11686,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -11691,7 +11713,7 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
               directoryPath[0] === 'llm' ? 'llm' :
@@ -11699,7 +11721,8 @@ function flattenBlogTree(nodes, result) {
               directoryPath[0] === 'rag' ? 'retrieval-augmented-generation' :
               directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' :
               directoryPath[0] === 'agentic-harness' ? 'agentic-harness' :
-              directoryPath[0] === 'search-ranking-and-retrieval' ? 'search-ranking-and-retrieval' : 'machine-learning';
+              directoryPath[0] === 'search-ranking-and-retrieval' ? 'search-ranking-and-retrieval' :
+              directoryPath[0] === 'statistics-and-experiment-setup' ? 'statistics-and-experiment-setup' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -11824,6 +11847,7 @@ function flattenBlogTree(nodes, result) {
     dsa:   { label: 'DSA',   blurb: 'Data structures and algorithms with animated walkthroughs.' },
     cp:    { label: 'CP',    blurb: 'Competitive programming math, techniques, and patterns.' },
     math:  { label: 'Math',  blurb: 'Probability, statistics, and pure-math foundations with worked-out proofs.' },
+    'statistics-and-experiment-setup': { label: 'Statistics & Experiment Setup', blurb: 'Exploratory data analysis, sampling & randomized experimental design, probability & sampling distributions, and statistical inference (confidence intervals, t/z/F/Chi-Square tests) with handwritten study notes.' },
     hld:   { label: 'HLD',   blurb: 'High-level system design: scale, storage, distribution.' },
     lld:   { label: 'LLD',   blurb: 'Low-level design: SOLID, patterns, interview walkthroughs.' },
     ml:    { label: 'ML',    blurb: 'Follow the prerequisite map: data and loss foundations, model families, then applications.' },
@@ -11958,7 +11982,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'llm' ? 'LLM' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'llm' ? 'LLM' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code === 'statistics-and-experiment-setup' ? 'Statistics & Experiment Setup' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -11987,6 +12011,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'speculative-decoding') catSection.id = 'speculative-decoding';
     if (code === 'agentic-harness') catSection.id = 'agentic-harness';
     if (code === 'search-ranking-and-retrieval') catSection.id = 'search-ranking-and-retrieval';
+    if (code === 'statistics-and-experiment-setup') catSection.id = 'statistics-and-experiment-setup';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -11999,7 +12024,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'llm' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'llm' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval' || code === 'statistics-and-experiment-setup') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -12086,7 +12111,8 @@ function flattenBlogTree(nodes, result) {
       id === 'retrieval-augmented-generation' || id.indexOf('folder-rag--') === 0 ? 'rag' :
       id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' :
       id === 'agentic-harness' || id.indexOf('folder-agentic-harness--') === 0 ? 'agentic-harness' :
-      id === 'search-ranking-and-retrieval' || id.indexOf('folder-search-ranking-and-retrieval--') === 0 ? 'search-ranking-and-retrieval' : '';
+      id === 'search-ranking-and-retrieval' || id.indexOf('folder-search-ranking-and-retrieval--') === 0 ? 'search-ranking-and-retrieval' :
+      id === 'statistics-and-experiment-setup' || id.indexOf('folder-statistics-and-experiment-setup--') === 0 ? 'statistics-and-experiment-setup' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
