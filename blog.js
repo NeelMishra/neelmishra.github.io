@@ -1145,14 +1145,219 @@ var BLOG_TREE = [
         name: 'handwritten_notes',
         label: 'Handwritten Notes',
         children: [
+          { title: 'Overview: Competitive Coding Handwritten Notes (24 Topics)', file: 'dsa/handwritten_notes/index.html', links: ['dsa/handwritten_notes/dynamic-programming/index.html'] },
+          {
+            name: 'dynamic-programming',
+            label: '01. Dynamic Programming',
+            children: [
+              { title: 'Overview: Dynamic Programming: Subproblem Geometries, Transitions &amp; Optimization Roadmap', file: 'dsa/handwritten_notes/dynamic-programming/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/dynamic-programming/mit-framework-and-1d-dp.html'] },
+              { title: 'The MIT 5-Step DP Framework &amp; 1D Recurrences', file: 'dsa/handwritten_notes/dynamic-programming/mit-framework-and-1d-dp.html', links: ['dsa/handwritten_notes/dynamic-programming/index.html', 'dsa/handwritten_notes/dynamic-programming/grid-dp-and-maximal-rectangle.html'] },
+              { title: 'Grid DP &amp; Maximal Rectangle Area in a Binary Matrix', file: 'dsa/handwritten_notes/dynamic-programming/grid-dp-and-maximal-rectangle.html', links: ['dsa/handwritten_notes/dynamic-programming/mit-framework-and-1d-dp.html', 'dsa/handwritten_notes/dynamic-programming/dp-on-strings-lcs-and-palindromes.html'] },
+              { title: 'DP on Strings: LCS, Substrings, Palindromes &amp; Pattern Matching', file: 'dsa/handwritten_notes/dynamic-programming/dp-on-strings-lcs-and-palindromes.html', links: ['dsa/handwritten_notes/dynamic-programming/grid-dp-and-maximal-rectangle.html', 'dsa/handwritten_notes/dynamic-programming/lis-and-boolean-parenthesization.html'] },
+              { title: 'Longest Increasing Subsequence &amp; Partition DP: Boolean Evaluation to True', file: 'dsa/handwritten_notes/dynamic-programming/lis-and-boolean-parenthesization.html', links: ['dsa/handwritten_notes/dynamic-programming/dp-on-strings-lcs-and-palindromes.html', 'dsa/handwritten_notes/maths-and-number-theory/index.html'] }
+            ]
+          },
+          {
+            name: 'maths-and-number-theory',
+            label: '02. Maths & Number Theory',
+            children: [
+              { title: 'Overview: Maths &amp; Number Theory', file: 'dsa/handwritten_notes/maths-and-number-theory/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/maths-and-number-theory/iiit-math-foundations.html'] },
+              { title: 'IIIT Math Foundations: Division, $\sqrt{n}$ Factoring, Harmonic Sums &amp; Euclidean GCD', file: 'dsa/handwritten_notes/maths-and-number-theory/iiit-math-foundations.html', links: ['dsa/handwritten_notes/maths-and-number-theory/index.html', 'dsa/handwritten_notes/maths-and-number-theory/primes-divisors-gcd-and-lcm.html'] },
+              { title: 'Primes, Divisors, GCD &amp; LCM: Brute Force to Optimal', file: 'dsa/handwritten_notes/maths-and-number-theory/primes-divisors-gcd-and-lcm.html', links: ['dsa/handwritten_notes/maths-and-number-theory/iiit-math-foundations.html', 'dsa/handwritten_notes/maths-and-number-theory/sieve-of-eratosthenes.html'] },
+              { title: 'Sieve of Eratosthenes: $O(N \log \log N)$ Primality Precomputation', file: 'dsa/handwritten_notes/maths-and-number-theory/sieve-of-eratosthenes.html', links: ['dsa/handwritten_notes/maths-and-number-theory/primes-divisors-gcd-and-lcm.html', 'dsa/handwritten_notes/disjoint-set-union/index.html'] }
+            ]
+          },
+          {
+            name: 'disjoint-set-union',
+            label: '03. Disjoint Set Union (DSU)',
+            children: [
+              { title: 'Overview: Disjoint Set Union (DSU): Handwritten Notes, Templates &amp; Problem Patterns', file: 'dsa/handwritten_notes/disjoint-set-union/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/disjoint-set-union/dsu-concept-union-by-rank-and-size.html'] },
+              { title: 'Disjoint Set Union Concept: Path Compression &amp; Union by Rank vs. Size', file: 'dsa/handwritten_notes/disjoint-set-union/dsu-concept-union-by-rank-and-size.html', links: ['dsa/handwritten_notes/disjoint-set-union/index.html', 'dsa/handwritten_notes/disjoint-set-union/dsu-on-grids-and-connectivity.html'] },
+              { title: 'DSU on 2D Grids &amp; Graph Connectivity: Islands, Enclaves, Cycles &amp; Network Operations', file: 'dsa/handwritten_notes/disjoint-set-union/dsu-on-grids-and-connectivity.html', links: ['dsa/handwritten_notes/disjoint-set-union/dsu-concept-union-by-rank-and-size.html', 'dsa/handwritten_notes/disjoint-set-union/dsu-sequences-and-string-swaps.html'] },
+              { title: 'DSU on Consecutive Sequences &amp; String Swaps (LC 128, LC 1061 &amp; LC 1202)', file: 'dsa/handwritten_notes/disjoint-set-union/dsu-sequences-and-string-swaps.html', links: ['dsa/handwritten_notes/disjoint-set-union/dsu-on-grids-and-connectivity.html', 'dsa/handwritten_notes/disjoint-set-union/dsu-prime-factors-and-malware-spread.html'] },
+              { title: 'Advanced DSU: Prime-Factor Bridges (LC 952) &amp; Clean-Component Malware Cuts (LC 928)', file: 'dsa/handwritten_notes/disjoint-set-union/dsu-prime-factors-and-malware-spread.html', links: ['dsa/handwritten_notes/disjoint-set-union/dsu-sequences-and-string-swaps.html', 'dsa/handwritten_notes/daily-notes/index.html'] }
+            ]
+          },
+          {
+            name: 'daily-notes',
+            label: '04. Daily Study Notes',
+            children: [
+              { title: 'Overview: Daily Deep-Dive Notes: Prime-Factor Keyboard Moves &amp; Subtree Average Precision', file: 'dsa/handwritten_notes/daily-notes/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/daily-notes/two-keys-keyboard.html'] },
+              { title: 'LC 650: 2 Keys Keyboard — Why Minimum Moves Equal the Sum of Prime Factors', file: 'dsa/handwritten_notes/daily-notes/two-keys-keyboard.html', links: ['dsa/handwritten_notes/daily-notes/index.html', 'dsa/handwritten_notes/daily-notes/count-nodes-equal-to-subtree-average.html'] },
+              { title: 'LC 2265: Count Nodes Equal to Average of Subtree — Why Rolling Mean Fails at 119/138', file: 'dsa/handwritten_notes/daily-notes/count-nodes-equal-to-subtree-average.html', links: ['dsa/handwritten_notes/daily-notes/two-keys-keyboard.html', 'dsa/handwritten_notes/prime-factorization/all-prime-factors.html'] }
+            ]
+          },
+          {
+            name: 'prime-factorization',
+            label: '05. Prime Factorization',
+            children: [
+              { title: 'Program to Find All Prime Factors of a Number in $O(\sqrt{n})$', file: 'dsa/handwritten_notes/prime-factorization/all-prime-factors.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/daily-questions/index.html'] }
+            ]
+          },
+          {
+            name: 'daily-questions',
+            label: '06. Daily LeetCode Questions',
+            children: [
+              { title: 'Overview: LeetCode Daily Questions: Handwritten Scratchpad to Optimal Solutions (9 Classics)', file: 'dsa/handwritten_notes/daily-questions/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/daily-questions/bits-stacks-and-greedy-338-316-456.html'] },
+              { title: 'Bit Recurrences, Greedy Deduplication &amp; Monotonic Stacks (LC 338, LC 316 &amp; LC 456)', file: 'dsa/handwritten_notes/daily-questions/bits-stacks-and-greedy-338-316-456.html', links: ['dsa/handwritten_notes/daily-questions/index.html', 'dsa/handwritten_notes/daily-questions/binary-search-and-intervals-34-2251.html'] },
+              { title: 'Boundary Binary Search &amp; Interval Event Counting (LC 34 &amp; LC 2251)', file: 'dsa/handwritten_notes/daily-questions/binary-search-and-intervals-34-2251.html', links: ['dsa/handwritten_notes/daily-questions/bits-stacks-and-greedy-338-316-456.html', 'dsa/handwritten_notes/daily-questions/dp-classics-343-1458-2742-1269.html'] },
+              { title: 'Dynamic Programming Classics: AM-GM Integer Break, Non-Empty Dot Product, Wall Knapsack &amp; Bounded Walks', file: 'dsa/handwritten_notes/daily-questions/dp-classics-343-1458-2742-1269.html', links: ['dsa/handwritten_notes/daily-questions/binary-search-and-intervals-34-2251.html', 'dsa/handwritten_notes/trie/index.html'] }
+            ]
+          },
+          {
+            name: 'trie',
+            label: '07. Trie & Bitwise XOR Trie',
+            children: [
+              { title: 'Overview: Trie (Prefix Tree): From String Dictionaries to 32-Bit Maximum XOR', file: 'dsa/handwritten_notes/trie/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/trie/trie-fundamentals-and-prefix-counting.html'] },
+              { title: 'Trie Fundamentals, Prefix Counting, Wildcard Search &amp; Camelcase Matching', file: 'dsa/handwritten_notes/trie/trie-fundamentals-and-prefix-counting.html', links: ['dsa/handwritten_notes/trie/index.html', 'dsa/handwritten_notes/trie/complete-string-and-distinct-substrings.html'] },
+              { title: 'Complete String (All Prefixes Present) &amp; Number of Distinct Substrings', file: 'dsa/handwritten_notes/trie/complete-string-and-distinct-substrings.html', links: ['dsa/handwritten_notes/trie/trie-fundamentals-and-prefix-counting.html', 'dsa/handwritten_notes/trie/bitwise-trie-and-maximum-xor.html'] },
+              { title: 'Bitwise Trie &amp; Maximum XOR of Two Numbers (LeetCode 421)', file: 'dsa/handwritten_notes/trie/bitwise-trie-and-maximum-xor.html', links: ['dsa/handwritten_notes/trie/complete-string-and-distinct-substrings.html', 'dsa/handwritten_notes/arrays/index.html'] }
+            ]
+          },
+          {
+            name: 'arrays',
+            label: '08. Arrays',
+            children: [
+              { title: 'Overview: Arrays: Handwritten Notes, Core Patterns &amp; Complete Problem Index', file: 'dsa/handwritten_notes/arrays/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/arrays/array-fundamentals-striver-lectures-1-to-4.html'] },
+              { title: 'Part 1: Array Fundamentals, In-Place Rotations, Bitwise XOR &amp; Prefix-Sum Subarrays', file: 'dsa/handwritten_notes/arrays/array-fundamentals-striver-lectures-1-to-4.html', links: ['dsa/handwritten_notes/arrays/index.html', 'dsa/handwritten_notes/arrays/subarrays-majority-and-rearrangement-lectures-5-6-8-9-11.html'] },
+              { title: 'Part 2: Two Sum, Dutch National Flag, Kadane\'s Subarray Sum &amp; Next Permutation', file: 'dsa/handwritten_notes/arrays/subarrays-majority-and-rearrangement-lectures-5-6-8-9-11.html', links: ['dsa/handwritten_notes/arrays/array-fundamentals-striver-lectures-1-to-4.html', 'dsa/handwritten_notes/arrays/trapping-rainwater-and-container-with-most-water.html'] },
+              { title: 'Part 3: Trapping Rain Water &amp; Container With Most Water — Two-Pointer Bottleneck Proofs', file: 'dsa/handwritten_notes/arrays/trapping-rainwater-and-container-with-most-water.html', links: ['dsa/handwritten_notes/arrays/subarrays-majority-and-rearrangement-lectures-5-6-8-9-11.html', 'dsa/handwritten_notes/arrays/wiggle-subsequence-and-pingalas-triangle.html'] },
+              { title: 'Part 4: Wiggle Subsequence (LC 376) &amp; Pingala\'s (Pascal\'s) Triangle Combinatorics', file: 'dsa/handwritten_notes/arrays/wiggle-subsequence-and-pingalas-triangle.html', links: ['dsa/handwritten_notes/arrays/trapping-rainwater-and-container-with-most-water.html', 'dsa/handwritten_notes/backtracking/index.html'] }
+            ]
+          },
+          {
+            name: 'backtracking',
+            label: '09. Backtracking',
+            children: [
+              { title: 'Overview: Backtracking: Choice, Constraint, Undo &amp; Recursion Trees', file: 'dsa/handwritten_notes/backtracking/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/backtracking/subsets-and-permutations.html'] },
+              { title: 'Subsets, Duplicate Pruning, and Permutations', file: 'dsa/handwritten_notes/backtracking/subsets-and-permutations.html', links: ['dsa/handwritten_notes/backtracking/index.html', 'dsa/handwritten_notes/backtracking/combination-sum-family-and-target-sum.html'] },
+              { title: 'The Combination Sum Family (I–IV) and Target Sum', file: 'dsa/handwritten_notes/backtracking/combination-sum-family-and-target-sum.html', links: ['dsa/handwritten_notes/backtracking/subsets-and-permutations.html', 'dsa/handwritten_notes/backtracking/word-search-phone-letters-palindromes-and-n-queens.html'] },
+              { title: 'Word Search, Phone Keypad, Palindrome Cuts &amp; N-Queens', file: 'dsa/handwritten_notes/backtracking/word-search-phone-letters-palindromes-and-n-queens.html', links: ['dsa/handwritten_notes/backtracking/combination-sum-family-and-target-sum.html', 'dsa/handwritten_notes/backtracking/propagating-truth-values-and-question-bank.html'] },
+              { title: 'Propagating Truth Values &amp; Curated Backtracking Question Bank', file: 'dsa/handwritten_notes/backtracking/propagating-truth-values-and-question-bank.html', links: ['dsa/handwritten_notes/backtracking/word-search-phone-letters-palindromes-and-n-queens.html', 'dsa/handwritten_notes/dfs/dfs-trees-and-balance-bst.html'] }
+            ]
+          },
+          {
+            name: 'dfs',
+            label: '10. Depth-First Search (DFS)',
+            children: [
+              { title: 'DFS on Trees, Iterative State Stacks &amp; Balancing a BST (LC 1382)', file: 'dsa/handwritten_notes/dfs/dfs-trees-and-balance-bst.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/graph-mst/index.html'] }
+            ]
+          },
+          {
+            name: 'graph-mst',
+            label: '11. Graph Minimum Spanning Trees',
+            children: [
+              { title: 'Overview: Minimum Spanning Trees (MST): Cut Property, Prim\'s PQ &amp; Kruskal\'s DSU', file: 'dsa/handwritten_notes/graph-mst/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/graph-mst/mst-theory-and-prim-algorithm.html'] },
+              { title: 'Part 1: MST Theory, Visited-on-Pop &amp; Prim\'s Min-Heap Algorithm', file: 'dsa/handwritten_notes/graph-mst/mst-theory-and-prim-algorithm.html', links: ['dsa/handwritten_notes/graph-mst/index.html', 'dsa/handwritten_notes/graph-mst/kruskal-mst-algorithm.html'] },
+              { title: 'Part 2: Kruskal\'s MST Algorithm via Edge Sorting &amp; Disjoint Set Union', file: 'dsa/handwritten_notes/graph-mst/kruskal-mst-algorithm.html', links: ['dsa/handwritten_notes/graph-mst/mst-theory-and-prim-algorithm.html', 'dsa/handwritten_notes/bfs/bfs-algorithm.html'] }
+            ]
+          },
+          {
+            name: 'bfs',
+            label: '12. Breadth-First Search (BFS)',
+            children: [
+              { title: 'BFS Algorithm: Level-Order Queue Mechanics &amp; Minimum Depth', file: 'dsa/handwritten_notes/bfs/bfs-algorithm.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/topological-sort/index.html'] }
+            ]
+          },
+          {
+            name: 'topological-sort',
+            label: '13. Topological Sort',
+            children: [
+              { title: 'Overview: Topological Sort on DAGs: DFS Post-Order Stack vs. Kahn\'s BFS', file: 'dsa/handwritten_notes/topological-sort/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/topological-sort/dfs-topological-sort.html'] },
+              { title: 'Part 1: Topological Sort via DFS &amp; Post-Order Finish Stack', file: 'dsa/handwritten_notes/topological-sort/dfs-topological-sort.html', links: ['dsa/handwritten_notes/topological-sort/index.html', 'dsa/handwritten_notes/topological-sort/kahns-bfs-topological-sort.html'] },
+              { title: 'Part 2: Kahn\'s BFS Algorithm, Indegree Peeling &amp; Course Schedule (LC 207)', file: 'dsa/handwritten_notes/topological-sort/kahns-bfs-topological-sort.html', links: ['dsa/handwritten_notes/topological-sort/dfs-topological-sort.html', 'dsa/handwritten_notes/graph-cycle-detection/index.html'] }
+            ]
+          },
+          {
+            name: 'graph-cycle-detection',
+            label: '14. Graph Cycle Detection',
+            children: [
+              { title: 'Overview: Graph Cycle Detection: The 2×2 Matrix (Undirected vs. Directed × DFS vs. BFS)', file: 'dsa/handwritten_notes/graph-cycle-detection/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/graph-cycle-detection/undirected-cycle-detection-dfs-and-bfs.html'] },
+              { title: 'Part 1: Undirected Graph Cycle Detection via DFS &amp; BFS', file: 'dsa/handwritten_notes/graph-cycle-detection/undirected-cycle-detection-dfs-and-bfs.html', links: ['dsa/handwritten_notes/graph-cycle-detection/index.html', 'dsa/handwritten_notes/graph-cycle-detection/directed-cycle-detection-dfs-and-bfs.html'] },
+              { title: 'Part 2: Directed Graph Cycle Detection via DFS (pathVis) &amp; Kahn\'s BFS', file: 'dsa/handwritten_notes/graph-cycle-detection/directed-cycle-detection-dfs-and-bfs.html', links: ['dsa/handwritten_notes/graph-cycle-detection/undirected-cycle-detection-dfs-and-bfs.html', 'dsa/handwritten_notes/strings-kmp/kmp-algorithm-and-lps-array.html'] }
+            ]
+          },
+          {
+            name: 'strings-kmp',
+            label: '15. Strings — KMP Algorithm',
+            children: [
+              { title: 'Knuth–Morris–Pratt (KMP) Algorithm &amp; the LPS Prefix Function', file: 'dsa/handwritten_notes/strings-kmp/kmp-algorithm-and-lps-array.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/graph-shortest-path/index.html'] }
+            ]
+          },
+          {
+            name: 'graph-shortest-path',
+            label: '16. Graph Shortest Paths',
+            children: [
+              { title: 'Overview: Graph Shortest Paths: Algorithm Selector &amp; Reading Guide', file: 'dsa/handwritten_notes/graph-shortest-path/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/graph-shortest-path/dijkstra-pq-and-ways-to-arrive-1976.html'] },
+              { title: 'Min-Heap Dijkstra &amp; Counting Shortest Paths (LeetCode 1976)', file: 'dsa/handwritten_notes/graph-shortest-path/dijkstra-pq-and-ways-to-arrive-1976.html', links: ['dsa/handwritten_notes/graph-shortest-path/index.html', 'dsa/handwritten_notes/graph-shortest-path/a-star-heuristic-search.html'] },
+              { title: 'A* Heuristic Search: Guiding Dijkstra with $f(n) = g(n) + h(n)$', file: 'dsa/handwritten_notes/graph-shortest-path/a-star-heuristic-search.html', links: ['dsa/handwritten_notes/graph-shortest-path/dijkstra-pq-and-ways-to-arrive-1976.html', 'dsa/handwritten_notes/graph-shortest-path/bellman-ford-and-floyd-warshall.html'] },
+              { title: 'Bellman–Ford &amp; Floyd–Warshall: Negative Weights, Cycle Detection &amp; All-Pairs DP', file: 'dsa/handwritten_notes/graph-shortest-path/bellman-ford-and-floyd-warshall.html', links: ['dsa/handwritten_notes/graph-shortest-path/a-star-heuristic-search.html', 'dsa/handwritten_notes/bipartite-graph/bipartite-graph-bfs-and-dfs.html'] }
+            ]
+          },
+          {
+            name: 'bipartite-graph',
+            label: '17. Bipartite Graphs',
+            children: [
+              { title: 'Bipartite Graphs: 2-Coloring, The Odd-Cycle Theorem &amp; BFS / DFS Checks', file: 'dsa/handwritten_notes/bipartite-graph/bipartite-graph-bfs-and-dfs.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/binary-search/ultimate-binary-search-template.html'] }
+            ]
+          },
+          {
+            name: 'binary-search',
+            label: '18. Binary Search',
+            children: [
+              { title: 'The Ultimate Binary Search Template: Monotonic Predicates &amp; Boundary Invariants', file: 'dsa/handwritten_notes/binary-search/ultimate-binary-search-template.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/sliding-window-and-two-pointers/index.html'] }
+            ]
+          },
+          {
+            name: 'sliding-window-and-two-pointers',
+            label: '19. Sliding Window & Two Pointers',
+            children: [
+              { title: 'Overview: Sliding Window &amp; Two Pointers: Master Templates &amp; Reading Guide', file: 'dsa/handwritten_notes/sliding-window-and-two-pointers/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/sliding-window-and-two-pointers/constant-window-and-sliding-window-patterns.html'] },
+              { title: 'Constant Windows &amp; The 4 Sliding Window Patterns', file: 'dsa/handwritten_notes/sliding-window-and-two-pointers/constant-window-and-sliding-window-patterns.html', links: ['dsa/handwritten_notes/sliding-window-and-two-pointers/index.html', 'dsa/handwritten_notes/sliding-window-and-two-pointers/sliding-window-problem-notes-part-1.html'] },
+              { title: 'Sliding Window Problem Notes (Part 1): Core Templates, Subarray Counting &amp; Bitwise Windows', file: 'dsa/handwritten_notes/sliding-window-and-two-pointers/sliding-window-problem-notes-part-1.html', links: ['dsa/handwritten_notes/sliding-window-and-two-pointers/constant-window-and-sliding-window-patterns.html', 'dsa/handwritten_notes/sliding-window-and-two-pointers/sliding-window-problem-notes-part-2.html'] },
+              { title: 'Sliding Window Problem Notes (Part 2): Exact-K Counting, Min Window, Bitwise OR &amp; Window Extremes', file: 'dsa/handwritten_notes/sliding-window-and-two-pointers/sliding-window-problem-notes-part-2.html', links: ['dsa/handwritten_notes/sliding-window-and-two-pointers/sliding-window-problem-notes-part-1.html', 'dsa/handwritten_notes/monotonic-stack/index.html'] }
+            ]
+          },
           {
             name: 'monotonic-stack',
-            label: 'Monotonic Stack',
+            label: '20. Monotonic Stack',
             children: [
-              { title: 'Overview: Monotonic Stack Guide &amp; Template', file: 'dsa/handwritten_notes/monotonic-stack/index.html', links: ['dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html'] },
-              { title: '1. Foundations: The 4 Monotonic Stack Types, Generic Template &amp; O(n) Proof', file: 'dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html', links: ['dsa/handwritten_notes/monotonic-stack/index.html', 'dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html'] },
-              { title: '2. Next &amp; Previous Greater / Smaller: Step-by-Step Array Traces', file: 'dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html', links: ['dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html', 'dsa/handwritten_notes/monotonic-stack/duplicate-elements-and-combined-nge-pge.html'] },
-              { title: '3. The [2, 2] Duplicate Trap: Strict vs. Non-Strict Comparisons &amp; Single-Pass NGE + PGE', file: 'dsa/handwritten_notes/monotonic-stack/duplicate-elements-and-combined-nge-pge.html', links: ['dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html', 'dsa/handwritten_notes/monotonic-stack/index.html'] }
+              { title: 'Overview: Monotonic Stack: Handwritten Notes &amp; Complete Template Guide', file: 'dsa/handwritten_notes/monotonic-stack/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html'] },
+              { title: 'Part 1: The 4 Monotonic Stack Types, Generic Index-Stack Template &amp; Amortized $\mathcal{O}(n)$ Proof', file: 'dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html', links: ['dsa/handwritten_notes/monotonic-stack/index.html', 'dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html'] },
+              { title: 'Part 2: Step-by-Step Traces for Next Greater, Previous Greater, Next Smaller &amp; Previous Smaller', file: 'dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html', links: ['dsa/handwritten_notes/monotonic-stack/foundations-and-generic-template.html', 'dsa/handwritten_notes/monotonic-stack/duplicate-elements-and-combined-nge-pge.html'] },
+              { title: 'Part 3: The [2, 2] Duplicate Trap — Strict vs. Non-Strict Comparisons &amp; Single-Pass NGE + PGE', file: 'dsa/handwritten_notes/monotonic-stack/duplicate-elements-and-combined-nge-pge.html', links: ['dsa/handwritten_notes/monotonic-stack/next-and-previous-greater-smaller-traces.html', 'dsa/handwritten_notes/recursion/pow-x-n-binary-exponentiation.html'] }
+            ]
+          },
+          {
+            name: 'recursion',
+            label: '21. Recursion — Pow(x, n)',
+            children: [
+              { title: 'Pow(x, n) &amp; Binary Exponentiation: Odd/Even Halving, Complexity Proof &amp; The INT_MIN Trap', file: 'dsa/handwritten_notes/recursion/pow-x-n-binary-exponentiation.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/trees-morris-traversal/morris-inorder-and-preorder-traversal.html'] }
+            ]
+          },
+          {
+            name: 'trees-morris-traversal',
+            label: '22. Trees — Morris Traversal',
+            children: [
+              { title: 'Morris Inorder &amp; Preorder Traversal: $O(n)$ Time &amp; $O(1)$ Space via Threaded Predecessors', file: 'dsa/handwritten_notes/trees-morris-traversal/morris-inorder-and-preorder-traversal.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/sorting/index.html'] }
+            ]
+          },
+          {
+            name: 'sorting',
+            label: '23. Sorting Algorithms',
+            children: [
+              { title: 'Overview: Sorting Algorithms: Master Comparison Table &amp; Reading Guide', file: 'dsa/handwritten_notes/sorting/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/sorting/elementary-sorts-bubble-selection-insertion.html'] },
+              { title: 'Elementary Sorts: Bubble, Selection &amp; Insertion Sort', file: 'dsa/handwritten_notes/sorting/elementary-sorts-bubble-selection-insertion.html', links: ['dsa/handwritten_notes/sorting/index.html', 'dsa/handwritten_notes/sorting/divide-and-conquer-merge-sort-and-quick-sort.html'] },
+              { title: 'Divide-and-Conquer Sorts: Merge Sort &amp; Quick Sort', file: 'dsa/handwritten_notes/sorting/divide-and-conquer-merge-sort-and-quick-sort.html', links: ['dsa/handwritten_notes/sorting/elementary-sorts-bubble-selection-insertion.html', 'dsa/handwritten_notes/scc-bridges-and-articulation-points/index.html'] }
+            ]
+          },
+          {
+            name: 'scc-bridges-and-articulation-points',
+            label: '24. SCC, Bridges & Articulation Points',
+            children: [
+              { title: 'Overview: Connectivity &amp; Cut Bottlenecks: SCCs, Bridges &amp; Articulation Points', file: 'dsa/handwritten_notes/scc-bridges-and-articulation-points/index.html', links: ['dsa/handwritten_notes/index.html', 'dsa/handwritten_notes/scc-bridges-and-articulation-points/kosaraju-strongly-connected-components.html'] },
+              { title: 'Kosaraju\'s Algorithm: Strongly Connected Components in Directed Graphs', file: 'dsa/handwritten_notes/scc-bridges-and-articulation-points/kosaraju-strongly-connected-components.html', links: ['dsa/handwritten_notes/scc-bridges-and-articulation-points/index.html', 'dsa/handwritten_notes/scc-bridges-and-articulation-points/tarjan-bridges-and-articulation-points.html'] },
+              { title: 'Tarjan\'s Undirected Cut Algorithms: Bridges (G-55) &amp; Articulation Points (G-56)', file: 'dsa/handwritten_notes/scc-bridges-and-articulation-points/tarjan-bridges-and-articulation-points.html', links: ['dsa/handwritten_notes/scc-bridges-and-articulation-points/kosaraju-strongly-connected-components.html'] }
             ]
           }
         ]
