@@ -1,0 +1,83 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Hierarchical AGENTS.md Resolution: Root Discovery, Override Precedence, Untrusted Repo Gates &amp; Mid-Session Replacements | Neel Mishra</title><meta name="description" content="Source-level deep dive into core/src/agents_md.rs and world_state/agents_md.rs in OpenAI Codex: untrusted-project prompt-injection gates, anti-traversal root-marker filtering, Windows SMB/NTLM fallback sanitization, buffered(256) remote probes, and append-only CWD transitions."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--01-prompt-and-kv-cache-engineering">← Real World Codebases / OpenAI Codex / 01 · Prompt &amp; KV-Cache Engineering</a><div class="post-series-nav"><a href="index.html">OpenAI Codex · 01 Prompt &amp; KV-Cache Engineering</a><span>Chapter 05 / 5</span></div><h1>Hierarchical <code>AGENTS.md</code> Resolution: Root Discovery, Override Precedence, Untrusted Repo Gates &amp; Mid-Session Replacements</h1><p class="post-meta">October 2026 · 15 min read</p><p class="optimizer-lede">Loading <code>AGENTS.md</code> files from a Git repository sounds like a 20-line recursive directory walk—until an untrusted repository plants a prompt-injection payload in <code>AGENTS.md</code>, a malicious <code>.codex/config.toml</code> redefines <code>project_root_markers</code> to walk into <code>$HOME</code>, or a UNC path in <code>project_doc_fallback_filenames</code> leaks Windows NTLMv2 hashes during a metadata probe. We dissect all 563 lines of <code>core/src/agents_md.rs</code> and <code>world_state/agents_md.rs</code> to see how OpenAI Codex hardens instruction discovery end-to-end.</p>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/agents-md-resolution-hierarchy.svg" width="920" height="415" alt="Left: Four security defenses in core/src/agents_md.rs: 1. Untrusted project gate, 2. Anti-traversal ConfigLayerSource::Project exclusion, 3. Executor-OS path & Windows SMB/NTLM UNC guard, 4. Sandbox-scoped reads + role=user provenance boundary. Right: Top-down [project_root ..= cwd] cascade with buffered(256) concurrent probes and append-only CWD replacement notices."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Security gates, concurrent ancestor probing, single-winner override precedence, and append-only <code>WorldState</code> CWD transitions in <code>core/src/agents_md.rs</code>.</figcaption></figure>
+
+<h2 id="four-security-gates">1. Four Security Defenses Hidden Inside <code>AGENTS.md</code> Discovery</h2>
+<p>Repository instruction files sit directly on an attacker-controlled trust boundary: anyone who convinces a developer to clone a repository controls every byte of its <code>AGENTS.md</code> and project-local <code>.codex/config.toml</code>. Before reading a single byte of project documentation, <code>core/src/agents_md.rs</code> enforces four distinct security invariants:</p>
+
+<ol>
+<li><strong>Zero-Click Untrusted Repo Gate (<code>load_project_instructions</code>, lines 63–66):</strong>
+<pre><code class="language-rust">let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
+if config.active_project.is_untrusted() {
+    return Ok((!loaded.is_empty()).then_some(loaded));
+}</code></pre>
+If the user has not explicitly marked the workspace trusted, Codex loads <em>only</em> host-supplied global instructions (<code>~/.codex/AGENTS.md</code>) and skips repository discovery completely—neutralizing zero-click prompt injection when opening unfamiliar repos.</li>
+
+<li><strong>Anti-Traversal Config Layer Exclusion (<code>agents_md_paths</code>, lines 200–206):</strong>
+<pre><code class="language-rust">let mut merged = TomlValue::Table(toml::map::Map::new());
+for layer in config.config_layer_stack.layers_low_to_high() {
+    if matches!(layer.name, ConfigLayerSource::Project { .. }) {
+        continue;
+    }
+    merge_toml_values(&amp;mut merged, &amp;layer.config);
+}</code></pre>
+Why exclude <code>ConfigLayerSource::Project</code> when reading <code>project_root_markers</code>? Suppose a trusted repository’s <code>.codex/config.toml</code> set <code>project_root_markers = [".ssh"]</code> or a marker present in <code>/home/alice</code>. Walking upward until that marker matched would let the repo escape its own <code>.git</code> boundary and ingest files from parent directories! Only user-, system-, or MDM-controlled config layers may define where upward traversal stops.</li>
+
+<li><strong>Executor-OS Path Convention &amp; Windows SMB/NTLM Leak Prevention (<code>candidate_filenames</code>, lines 281–290):</strong>
+<pre><code class="language-rust">// Use the executor's path convention, not the host's: resolving a Windows
+// network path can send ambient credentials even during metadata probes.
+if matches!(candidate, "." | "..")
+    || candidate.contains(['/', '\0'])
+    || cwd.infer_path_convention() == Some(PathConvention::Windows)
+        &amp;&amp; candidate.contains(['\\', ':'])
+{
+    tracing::warn!("ignoring project_doc_fallback_filenames entry that is not a filename");
+    continue;
+}</code></pre>
+Look at the threat model in that comment: on Windows, calling <code>stat()</code> (<code>get_metadata</code>) on a UNC path such as <code>\\198.51.100.7\share\AGENTS.md</code> causes the OS SMB redirector to initiate an outbound authentication handshake, leaking the user’s NTLMv2 hash before any file is even opened! Even sharper: Codex checks <code>cwd.infer_path_convention()</code> rather than compile-time <code>cfg!(windows)</code>, because a macOS or Linux control plane may be driving a remote Windows <code>ExecutorFileSystem</code> over <code>exec-server</code>.</li>
+
+<li><strong>Sandbox-Enforced File Reads &amp; Fail-Closed Errors (lines 75–112):</strong> Whenever a turn environment lacks unrestricted disk read access (<code>!has_full_disk_read_access()</code>), Codex constructs a <code>FileSystemSandboxContext</code> and threads it into <code>find_nearest_ancestor_with_markers</code>, <code>fs.get_metadata</code>, and <code>fs.read_file</code>. Unsandboxed I/O errors log and continue; sandboxed errors fail closed (<code>return Err(...)</code>).</li>
+</ol>
+
+<h2 id="cascade-and-precedence">2. Top-Down Cascade, Override Precedence &amp; Concurrent Remote Probes</h2>
+<p>Once root discovery locates the nearest ancestor containing a root marker (defaulting to <code>[".git"]</code>, or <code>[cwd]</code> only when <code>project_root_markers = []</code>), Codex reverses the ancestor chain into top-down order $D = (d_0, d_1, \dots, d_k)$ where $d_0 = \text{project\_root}$ and $d_k = \text{cwd}$.</p>
+<p>Within each directory $d_i$, let $C = (\texttt{AGENTS.override.md},\, \texttt{AGENTS.md},\, f_1, \dots, f_m)$ be the deduplicated candidate filename list. Codex selects <strong>at most one</strong> regular file per directory—the first match $c^* \in C$—and concatenates winners from root to leaf subject to a shared saturating byte budget $B = \texttt{project\_doc\_max\_bytes}$:</p>
+<div class="opt-equation">$$w(d_i) = \min_{\prec_C} \bigl\{ c \in C \;\big|\; \operatorname{is\_file}(d_i / c) \bigr\}, \qquad B_{i+1} = \max\bigl(0,\, B_i - \lvert \operatorname{bytes}(w(d_i)) \rvert\bigr).$$</div>
+
+<p>Two engineering details in <code>agents_md_paths</code> and <code>read_agents_md</code> (lines 142–180 and 244–269) make this fast and resilient across remote containers:</p>
+<ul>
+<li><strong>Single-Winner Directory Shadowing:</strong> Placing a gitignored <code>AGENTS.override.md</code> in <code>/repo</code> cleanly overrides <code>/repo/AGENTS.md</code> for local experimentation <em>without</em> silencing subdirectory-specific rules in <code>/repo/codex-rs/core/AGENTS.md</code>.</li>
+<li><strong><code>buffered(MAX_CONCURRENT_ANCESTOR_PROBES)</code> (256):</strong> In remote SSH/container setups backed by <code>ExecutorFileSystem</code>, sequential <code>stat()</code> calls across a 12-level monorepo hierarchy would pay 12 sequential network RTTs at startup. Piping <code>futures::stream::iter(search_dirs)</code> through <code>.buffered(256)</code> collapses discovery into a single batched flight while preserving deterministic root-to-leaf order!</li>
+<li><strong>UTF-8-Safe Truncation:</strong> If an oversized file exceeds <code>remaining</code> bytes, <code>data.truncate(remaining as usize)</code> slices raw bytes and decodes via <code>String::from_utf8_lossy(&amp;data)</code>, guaranteeing that cutting mid-codepoint never panics.</li>
+</ul>
+
+<h2 id="provenance-and-world-state">3. Provenance Separators, Multi-Environment Labels &amp; Tail Replacements</h2>
+<p>How are discovered files formatted for the LLM, and what happens to the KV cache when the agent runs work inside a nested sub-package mid-session?</p>
+
+<div class="note-table"><table><caption>Formatting and mid-session diff rules across <code>LoadedAgentsMd</code> and <code>AgentsMdState</code>.</caption><thead><tr><th>Mechanism</th><th>Source Location</th><th>Exact Runtime Behavior</th></tr></thead><tbody>
+<tr><td><strong><code>role = "user"</code> + <code>--- project-doc ---</code></strong></td><td><code>agents_md.rs:49, 407-412</code><br><code>world_state/agents_md.rs:41</code></td><td>Emits instructions as a <code>user</code>-role fragment (preserving <code>system &gt; developer &gt; user</code> authority) and inserts <code>\n\n--- project-doc ---\n\n</code> <em>once</em> on the transition from host <code>user_instructions</code> to workspace <code>Project</code> docs.</td></tr>
+<tr><td><strong>Multi-Environment Group Headers</strong></td><td><code>agents_md.rs:379-384, 421-485</code></td><td>When $\ge 2$ execution environments contribute docs, omits the outer single-<code>cwd</code> wrapper and prefixes each contiguous environment group once with <code>for `&lt;environment_id&gt;` with root &lt;cwd&gt;</code>.</td></tr>
+<tr><td><strong>Append-Only CWD Replacement</strong></td><td><code>world_state/agents_md.rs:44-80</code></td><td>Stores <code>AgentsMdSnapshot { directory, text }</code>. Unchanged snapshots emit <strong>0 bytes</strong>; moving into a sub-crate with deeper docs appends <code>REPLACEMENT_NOTICE</code> at the tail; leaving all docs appends <code>REMOVAL_NOTICE</code> once.</td></tr>
+</tbody></table></div>
+
+<p>Read lines 64–75 of <code>core/src/context/world_state/agents_md.rs</code> to see the Sub-Series 01 philosophy come full circle:</p>
+<pre><code class="language-rust">let instructions = match (&amp;self.instructions, previous_may_contain_instructions) {
+    (Some(instructions), true) =&gt; UserInstructions {
+        directory: instructions.directory.clone(),
+        text: format!("{REPLACEMENT_NOTICE}\n\n{}", instructions.text),
+    },
+    (Some(instructions), false) =&gt; instructions.clone(),
+    (None, true) =&gt; UserInstructions {
+        directory: None,
+        text: REMOVAL_NOTICE.to_string(),
+    },
+    (None, false) =&gt; return (Some(current), Vec::new()),
+};</code></pre>
+<p>Even when an agent navigates from the repo root into <code>codex-rs/execpolicy/</code> on Turn 18 and picks up a brand-new crate-level <code>AGENTS.md</code>, Turn 1’s prefix remains byte-for-byte frozen on GPU HBM—Codex simply appends a self-contained replacement block at the conversation tail.</p>
+
+<h2 id="checks">4. Questions worth answering</h2>
+<div class="self-check"><strong>What happens if a user configures <code>project_root_markers = []</code> (an empty array) in their global <code>~/.codex/config.toml</code>?</strong><p>Per the module docs (line 14) and <code>find_nearest_ancestor_with_markers</code>, an empty marker list disables upward parent traversal completely: <code>project_root</code> resolves to <code>None</code>, <code>search_dirs</code> becomes <code>vec![cwd]</code> (line 239), and only <code>cwd</code> itself is probed for <code>AGENTS.md</code>.</p></div>
+<div class="self-check"><strong>Why does <code>AgentsMdSnapshot</code> store the full rendered <code>text: Option&lt;String&gt;</code> (or compare against it) rather than caching file modification timestamps (<code>mtime</code>)?</strong><p>Filesystem <code>mtime</code> changes on <code>git checkout</code>, rebase, or touch operations even when file contents are identical, and remote executors may skew clocks. Comparing the exact rendered <code>(directory, text)</code> tuple guarantees zero false-positive KV-cache tail emissions while immediately catching real edits to <code>AGENTS.md</code> mid-session.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="collaboration-modes-and-prompt-design.html">← Ch. 04: Collaboration Modes &amp; Prompt Design</a><a href="index.html">Sub-Series 01 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
