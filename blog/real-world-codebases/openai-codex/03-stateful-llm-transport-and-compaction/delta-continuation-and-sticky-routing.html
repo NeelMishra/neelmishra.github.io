@@ -1,0 +1,126 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Delta-Only Turn Continuation (previous_response_id), x-codex-turn-state Sticky Routing &amp; In-Band Interrupts | Neel Mishra</title><meta name="description" content="How OpenAI Codex transmits only incremental ResponseItem deltas over WebSockets using server-known I_{s-1} || O_{s-1} baselines, compile-time exhaustive property diffing, turn-scoped x-codex-turn-state replica pinning, and two-frame in-band response.interrupt draining."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/delta-continuation-and-sticky-routing.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--03-stateful-llm-transport-and-compaction">← Real World Codebases / OpenAI Codex / 03 · Stateful LLM Transport &amp; Context Compaction</a><div class="post-series-nav"><a href="index.html">Sub-Series 03 Reading Guide</a><span>Chapter 03 of 04</span></div><h1>3. Delta-Only Turn Continuation (<code>previous_response_id</code>), <code>x-codex-turn-state</code> Sticky Routing &amp; In-Band Interrupts</h1><p class="post-meta">October 2026 · 16 min read · Chapter 3</p><p class="optimizer-lede">Keeping a WebSocket open and prewarming Turn 1 solves startup latency—but what happens across Steps $2, 3, \dots, 40$ of a deep debugging loop when tool outputs stream back, user permissions change mid-turn, background subagents inject results, or the user hits <code>Esc</code> to steer? Sending incremental deltas safely requires proving mathematically that the client’s prefix matches what the server already holds, pinning every intra-turn retry to the exact GPU replica holding the warm KV state, and cancelling active generations in-band without poisoning the shared socket. Here is how <code>core/src/client.rs</code> and <code>codex-api/src/endpoint/responses_websocket.rs</code> engineer all three.</p>
+
+<h2 id="baseline-invariant">1. The Server-Known Baseline Invariant ($B_{s-1} = I_{s-1} \mathbin{\Vert} O_{s-1}$)</h2>
+<p>Suppose Step $s-1$ sent logical input array $I_{s-1}$ and the model streamed back output items $O_{s-1}$ (reasoning blocks, assistant messages, and tool calls), finishing with <code>ResponseEvent::Completed { response_id }</code>. Inside <code>map_response_events</code> (<code>client.rs:2705-2753</code>), Codex records every post-interceptor <code>OutputItemDone(item)</code> into <code>items_added</code> and ships <code>LastResponse { response_id, items_added }</code> back to <code>WebsocketSession</code> over a <code>oneshot</code> channel the instant <code>Completed</code> arrives.</p>
+<p>On Step $s$, the server already associates <code>response_id</code> with the concatenated sequence $B_{s-1} = I_{s-1} \mathbin{\Vert} O_{s-1}$. Therefore, Codex can transmit a delta-only continuation if and only if two invariants hold:</p>
+<div class="opt-equation">$$\Phi(R_{s-1}) = \Phi(R_s) \quad \wedge \quad \exists\,\Delta I_s \text{ s.t. } I_s \equiv_{\text{wire}} \bigl(I_{s-1} \mathbin{\Vert} O_{s-1}\bigr) \mathbin{\Vert} \Delta I_s \implies \text{send }\bigl(\texttt{previous\_response\_id} = \text{id}_{s-1},\; \texttt{input} = \Delta I_s\bigr).$$</div>
+
+<figure class="blog-figure"><img src="assets/delta-continuation-sticky-routing.svg" alt="Architecture diagram showing how Codex computes the server-known baseline I_{s-1} || O_{s-1}, validates exhaustive request properties, transmits only the delta items alongside previous_response_id and turn-scoped x-codex-turn-state, and drains in-band response.interrupt acknowledgements without closing the socket" loading="lazy"><figcaption>Figure 1: Three interlocking mechanisms in <code>client.rs</code> and <code>responses_websocket.rs</code>: client-side baseline prefix verification ($I_{s-1} \mathbin{\Vert} O_{s-1}$), turn-scoped <code>x-codex-turn-state</code> sticky routing, and dual-frame draining on in-band <code>response.interrupt</code>.</figcaption></figure>
+
+<p>Read <code>ModelClientSession::get_incremental_items</code> (<code>client.rs:1626-1657</code>) to see how concise this proof check is in Rust:</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/client.rs (lines 1626-1657)
+fn get_incremental_items(
+    &amp;self,
+    request: &amp;ResponsesApiRequest,
+    last_response: &amp;LastResponse,
+) -&gt; std::result::Result&lt;Vec&lt;ResponseItem&gt;, NonIncrementalReason&gt; {
+    let previous_request = self
+        .websocket_session
+        .last_request
+        .as_ref()
+        .ok_or(NonIncrementalReason::NoPreviousRequest)?;
+    if let Some(reason) = responses_request_properties_mismatch(previous_request, request) {
+        return Err(NonIncrementalReason::RequestPropertyChanged { reason });
+    }
+
+    let response_items = &amp;last_response.items_added;
+    let previous_items = previous_request.input.iter().chain(response_items);
+    let mut current_items = request.input.iter();
+    for previous in previous_items {
+        let Some(current) = current_items.next() else {
+            return Err(NonIncrementalReason::InputShortened {
+                previous: previous.item_type(),
+            });
+        };
+        if !response_items_equal_ignoring_internal_metadata(previous, current) {
+            return Err(NonIncrementalReason::InputMismatch {
+                previous: previous.item_type(),
+                current: current.item_type(),
+            });
+        }
+    }
+    Ok(current_items.cloned().collect())
+}</code></pre>
+
+<h2 id="compile-time-property-diff">2. Compile-Time Exhaustive Property Diffing &amp; Late-Metadata Guards</h2>
+<p>Why didn’t OpenAI just derive <code>PartialEq</code> on <code>ResponsesApiRequest</code>? Look closely at <code>responses_request_properties_mismatch</code> (<code>client.rs:420-491</code>):</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/client.rs (lines 420-444, condensed)
+// This is intentionally not a `PartialEq` implementation: request equality includes `input` and
+// `client_metadata`, while websocket reuse compares input and late tool-result metadata separately.
+// Access programs are authorized per response, including continuations, without replaying input.
+// Keep the destructuring exhaustive so new request fields require an explicit reuse decision.
+fn responses_request_properties_mismatch(
+    previous: &amp;ResponsesApiRequest,
+    current: &amp;ResponsesApiRequest,
+) -&gt; Option&lt;&amp;'static str&gt; {
+    let ResponsesApiRequest {
+        model: previous_model,
+        input: _,
+        tools: previous_tools,
+        tool_choice: previous_tool_choice,
+        parallel_tool_calls: previous_parallel_tool_calls,
+        reasoning: previous_reasoning,
+        store: previous_store,
+        stream: previous_stream,
+        stream_options: _,
+        include: previous_include,
+        service_tier: previous_service_tier,
+        prompt_cache_key: previous_prompt_cache_key,
+        text: previous_text,
+        client_metadata: _,
+        access_programs: _,
+    } = previous;
+    // ... compares the 11 context-affecting fields and returns bounded &'static str telemetry labels
+}</code></pre>
+
+<p>Two subtle bugs are prevented right here:</p>
+<ol>
+  <li><strong>Exhaustive Struct Destructuring (No <code>..</code> Wildcard)</strong>: Four fields—<code>input</code>, <code>stream_options</code>, <code>client_metadata</code>, and <code>access_programs</code>—can legitimately vary per step without invalidating <code>previous_response_id</code>, whereas eleven fields (<code>model</code>, <code>tools</code>, <code>reasoning</code>, <code>service_tier</code>, etc.) alter server interpretation of the prefix. By destructuring <code>ResponsesApiRequest</code> <em>without</em> <code>..</code>, Rust’s compiler forces every future engineer who adds a field to <code>ResponsesApiRequest</code> to explicitly classify whether that field invalidates delta continuations!</li>
+  <li><strong>Late Tool-Result Metadata vs. Internal Passthrough Metadata (<code>client.rs:493-511</code>)</strong>: Codex attaches internal UI/chat metadata to <code>ResponseItem</code>s that is stripped on the wire, so <code>response_items_equal_ignoring_internal_metadata</code> clears <code>internal_chat_message_metadata_passthrough</code> before comparing items. However, it checks <code>previous.has_same_tool_result_metadata(current)</code> <em>first</em>: if a late tool completion retroactively updates an already-sent output item, a pure tail delta $\Delta I_s$ cannot patch $B_{s-1}$ in place—so returning <code>false</code> triggers a clean full-array resend on the same open WebSocket! Similarly, when context compaction shrinks history, <code>NonIncrementalReason::InputShortened</code> seamlessly sends the new compacted prefix without reconnecting.</li>
+</ol>
+
+<h2 id="sticky-routing">3. Turn-Scoped <code>x-codex-turn-state</code> Sticky Routing</h2>
+<p>Why does Codex maintain <em>both</em> <code>prompt_cache_key</code> (thread-scoped) and <code>x-codex-turn-state</code> (turn-scoped)? Because in a distributed LLM inference cluster, <code>prompt_cache_key</code> is a client-chosen consistent-hashing hint across turns, whereas <code>x-codex-turn-state</code> is a server-minted opaque routing token that pins all requests <strong>within a single active turn</strong>—including transient network retries, 60-minute WebSocket rotations, and HTTP SSE fallbacks—to the exact backend state and GPU replica holding that turn’s live execution context.</p>
+
+<div class="note-table"><table><thead><tr><th>Invariant</th><th>Source Mechanism</th><th>Why Violating It Hurts</th></tr></thead><tbody>
+<tr><td><strong>Capture Once at Turn Start</strong></td><td><code>turn_state: Arc&lt;OnceLock&lt;String&gt;&gt;</code> populated from HTTP upgrade headers (<code>responses_websocket.rs:626</code>) or in-band <code>event.turn_state()</code> frames (<code>line 915</code>)</td><td><code>OnceLock</code> guarantees lock-free $O(1)$ reads across both WebSocket and HTTP retry paths once the first server frame arrives.</td></tr>
+<tr><td><strong>Replay Intra-Turn Across Transports</strong></td><td>Injected into WebSocket <code>client_metadata["x-codex-turn-state"]</code> (<code>client.rs:2223</code>) and HTTP fallback headers (<code>build_responses_headers</code>, <code>client.rs:2617</code>)</td><td>Even if a corporate proxy drops the WebSocket mid-turn and Codex falls back to Zstd HTTP SSE, the retry still lands on the warm GPU replica!</td></tr>
+<tr><td><strong>Never Replay Cross-Turn</strong></td><td><code>ModelClientSession</code> owns <code>turn_state</code> and is instantiated fresh per turn (<code>client.rs:325-343</code>); only <code>WebsocketSession</code> is parked on drop</td><td>Replaying Turn $k$’s <code>x-codex-turn-state</code> into Turn $k+1$ violates the server routing contract and can pin long sessions onto overloaded or draining replicas.</td></tr>
+<tr><td><strong>Clear on Auth Rotation</strong></td><td><code>turn_state_with_auth_owner</code> checks <code>websocket_session.auth_owner_generation == client.auth_owner_generation()</code> (<code>client.rs:1614-1620</code>)</td><td>Prevents a refreshed or switched account credential from replaying routing state belonging to the previous auth principal.</td></tr>
+</tbody></table></div>
+
+<h2 id="in-band-interrupts">4. Socket-Preserving In-Band <code>response.interrupt</code> &amp; The Two-Frame Drain Interlock</h2>
+<p>Over unary HTTP SSE, preempting a streaming generation requires aborting the HTTP body stream—tearing down the TCP/TLS connection and paying a fresh handshake on the steered continuation. Over Responses WebSockets, Codex keeps the connection alive by transmitting an in-band control frame (<code>responses_websocket.rs:812-828</code>):</p>
+
+<pre><code class="language-rust">// codex-rs/codex-api/src/endpoint/responses_websocket.rs (lines 812-828 &amp; 864-891, condensed)
+request = &amp;mut interrupt_request, if response_id.is_some() =&gt; {
+    interruption = Some(request);
+    send_websocket_request(
+        ws_stream,
+        serde_json::json!({
+            "type": "response.interrupt",
+            "response_id": response_id,
+            "mode": "discard_partial_items",
+        }).to_string(),
+        idle_timeout,
+        /*telemetry*/ None,
+        timing_log_context.connection_reused,
+    ).await?;
+    awaiting_interrupt_ack = matches!(request, ResponseInterrupt::Cancel { .. });
+    continue;
+}</code></pre>
+
+<p>Look at the subtle protocol race solved by <code>awaiting_interrupt_ack</code> and <code>completion</code> on lines <code>864-975</code> of <code>responses_websocket.rs</code>. Because a WebSocket is full-duplex, the server might already be transmitting <code>response.completed</code> at the exact millisecond the client sends <code>response.interrupt</code>—meaning two terminal frames (<code>response.completed</code> and <code>response.interrupt.accepted</code>) can arrive in <em>either</em> order!</p>
+<ul>
+  <li>If the reader loop exited immediately upon seeing <code>response.completed</code> while <code>awaiting_interrupt_ack == true</code>, it would unlock the shared <code>ws_stream</code> mutex while <code>response.interrupt.accepted</code> was still in flight on the wire—delivering that stale acknowledgement into the <em>next</em> <code>response.create</code> stream!</li>
+  <li>Instead, line <code>930</code> buffers <code>ResponseEvent::Completed</code> into <code>*completion = Some(event)</code> and line <code>959</code> checks <code>if awaiting_interrupt_ack { continue; }</code>—holding the socket mutex until <strong>both</strong> terminal frames are drained (and validating <code>acknowledgement.response_id == response_id</code> on line <code>875</code>) before releasing the clean socket for immediate reuse!</li>
+</ul>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>Why do <code>NonIncrementalReason</code> variants only store <code>&amp;'static str</code> item types rather than item IDs or diff snippets (<code>client.rs:378-418</code>)?</strong><p>As the comment on line <code>378</code> notes, continuation diagnostics feed OpenTelemetry counters and logs: bounding every reason to compile-time <code>&amp;'static str</code> labels avoids both high-cardinality metric explosions and accidental leakage of prompt contents or identifiers into telemetry.</p></div>
+<div class="self-check"><strong>Why does <code>WebsocketSession::reset</code> (<code>client.rs:514-525</code>) preserve <code>continuation_reset_reason</code> across reconnects and turns until the next send?</strong><p>After a socket reconnect, per-socket server metrics would otherwise classify the next full payload as a normal <code>"initial"</code> send on a new socket, hiding why incremental continuation was lost (e.g., 60-minute limit vs. stream error). Retaining <code>continuation_reset_reason</code> tags the very next request with the true root cause.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="zero-ttft-generate-false-prewarming.html">← Ch. 02: Zero-TTFT generate: false Prewarming</a><a href="index.html">Sub-Series 03 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
