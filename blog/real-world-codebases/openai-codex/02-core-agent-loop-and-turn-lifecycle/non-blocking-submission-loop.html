@@ -1,0 +1,101 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Why submission_loop Never Awaits I/O: Atomic Turn Admission &amp; Responsive Mid-Turn Control | Neel Mishra</title><meta name="description" content="Inside core/src/session/handlers.rs, turn_input.rs, and tasks/mod.rs in OpenAI Codex: why submission_loop never awaits LLM streams or hooks, 4-mode atomic turn admission with Arc::ptr_eq reservation guards, drain bypasses for delegated subagents, and abort-before-clear approval ordering."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--02-core-agent-loop-and-turn-lifecycle">← Real World Codebases / OpenAI Codex / 02 · Core Agent Loop &amp; Turn Lifecycle</a><div class="post-series-nav"><a href="index.html">OpenAI Codex · 02 Core Agent Loop &amp; Turn Lifecycle</a><span>Chapter 02 / 4</span></div><h1>Why <code>submission_loop</code> Never Awaits I/O: Atomic Turn Admission &amp; Responsive Mid-Turn Control</h1><p class="post-meta">October 2026 · 15 min read</p><p class="optimizer-lede">If your agent’s main command loop calls <code>run_turn().await</code> directly inside its <code>while let Some(op) = rx.recv().await</code> body, your agent is already broken: the first time a tool blocks waiting for an interactive user approval, the approval reply itself gets stuck behind <code>run_turn()</code> in the very same queue. We trace <code>submission_loop</code> (<code>handlers.rs</code>), four-mode atomic admission (<code>turn_input.rs</code>), and task abort ordering (<code>tasks/mod.rs</code>) to see how Codex separates $O(1)$ control-plane routing from background turn execution.</p>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/non-blocking-submission-admission.svg" width="920" height="420" alt="Left: Biased tokio::select! loop in handlers.rs keeping rx_sub O(1) responsive so Op::ExecApproval and Op::Interrupt never block behind ActiveTurn, plus cancel-before-clear_pending ordering in tasks/mod.rs. Right: Four-mode atomic turn admission in turn_input.rs: StartOrSteer, StartIfIdle with Arc::ptr_eq reservation verification, ContinueIfIdle CAS, and target-pinned Steer."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Control-plane separation in <code>handlers.rs</code>, four-mode turn admission in <code>turn_input.rs</code>, and race-free abort ordering in <code>tasks/mod.rs</code>.</figcaption></figure>
+
+<h2 id="control-plane-separation">1. The Golden Law of <code>submission_loop</code>: Reply on Routing, Spawn Execution</h2>
+<p>Read the module invariant at the very top of <code>core/src/session/turn_input.rs</code> (lines 3–6):</p>
+<blockquote><p><em>&ldquo;This is the one place Core decides whether submitted input starts a turn, steers an active turn, or is rejected. It replies after that decision; it does not wait for user-prompt hooks, updating the in-memory model context, rollout persistence, or sampling.&rdquo;</em></p></blockquote>
+
+<p>Why is that boundary non-negotiable? Suppose a turn task $T$ takes $45\text{ s}$ of LLM streaming and shell execution, and mid-way through $T$, a sandboxed command pauses on a <code>oneshot::Receiver</code> waiting for <code>Op::ExecApproval</code>. In a single-loop design where <code>submission_loop</code> awaits $T$ inline, <code>Op::ExecApproval</code> sits unread in <code>rx_sub</code> until $T$ finishes—which never happens because $T$ is waiting for <code>Op::ExecApproval</code>!</p>
+<p>In <code>core/src/session/handlers.rs</code> (lines 470–501), <code>submission_loop</code> runs a <strong>priority-ordered (<code>biased</code>) <code>tokio::select!</code></strong> that executes only fast in-memory state transitions and spawns long-lived turns onto <code>ActiveTurn::task</code>:</p>
+
+<pre><code class="language-rust">loop {
+    let sub = tokio::select! {
+        biased;
+        _ = sess.services.local_agent_runtime.shutdown.cancelled() =&gt; {
+            shutdown_received = shutdown(&amp;sess, super::new_submission_id()).await;
+            break;
+        }
+        sub = rx_sub.recv() =&gt; match sub {
+            Ok(sub) =&gt; sub,
+            Err(_) =&gt; break,
+        },
+        update = async {
+            match &amp;mut mailbox {
+                Some(updates) =&gt; updates.changed().await.map(|()| *updates.borrow_and_update()),
+                None =&gt; std::future::pending().await,
+            }
+        } =&gt; { /* wake idle session on agent mail or durable sleep */ continue; }
+    };
+    // Match sub.op: route approvals, interrupts, steering, or spawn ActiveTurn!
+}</code></pre>
+
+<p>Notice the <code>biased;</code> directive at line 472: Tokio normally polls <code>select!</code> branches in pseudo-random order for fairness, which would allow a flooded <code>rx_sub</code> queue of 512 commands to delay a tree-wide <code>runtime.shutdown.cancelled()</code> signal. Pinning shutdown to branch 1 guarantees deterministic preemption on the very next poll.</p>
+
+<h2 id="four-mode-admission">2. Four-Mode Atomic Admission &amp; <code>Arc::ptr_eq</code> Reservation Guards</h2>
+<p>In a real IDE or multi-agent environment, concurrent turn requests race constantly: a user presses <code>Enter</code> at the exact millisecond a previous turn finishes, an automatic background mail trigger wakes an idle worker while the user toggles <strong>Plan Mode</strong>, or a delayed UI steering packet arrives $20\text{ ms}$ after the turn it meant to steer already completed.</p>
+<p>Codex funnels every entry path through four explicit <code>TurnInputMode</code> state machines in <code>turn_input.rs</code> (lines 253–297):</p>
+
+<div class="note-table"><table><caption>The four atomic turn-admission modes in <code>core/src/session/turn_input.rs</code>.</caption><thead><tr><th><code>TurnInputMode</code></th><th>Race Condition Solved</th><th>Exact Source Mechanism</th></tr></thead><tbody>
+<tr><td><strong><code>StartOrSteer</code></strong> (<code>L352-475</code>)</td><td>User hits <code>Enter</code> without knowing if the current turn will finish 1ms earlier.</td><td>Calls <code>steer_input</code> first; if active, applies settings to <em>future</em> turns via <code>apply_steered</code> without mutating the running turn’s <code>TurnContext</code>. On <code>NoActiveTurn</code>, admits and calls <code>spawn_task</code>.</td></tr>
+<tr><td><strong><code>StartIfIdle</code></strong> (<code>L481-594</code>)</td><td>Background mail or user input must start <em>only</em> if idle, and automatic wakes must never violate Plan Mode.</td><td>Atomically checks <code>active_turn.is_none()</code> and inserts an <code>ActiveTurn::default()</code> reservation; blocks <code>TurnStartKind::Automatic</code> if either current or proposed mode is <code>ModeKind::Plan</code> (<code>L84-91</code>).</td></tr>
+<tr><td><strong><code>ContinueIfIdle { expected_previous_turn_id }</code></strong> (<code>L274-293, 544-550</code>)</td><td>Automatic continuation must abort if a human turn interleaved since the last turn ended.</td><td>Performs an atomic compare-and-set check against <code>state.last_started_turn_id == Some(&amp;expected)</code>, returning <code>NotSubmittedReason::Superseded</code> on mismatch.</td></tr>
+<tr><td><strong><code>Steer { expected_turn_id }</code></strong> (<code>L294-296</code>)</td><td>User types a mid-turn correction right as Turn $k$ finishes and Turn $k+1$ starts.</td><td>Pins steering to <code>expected_turn_id</code>; rejects with <code>TurnMismatch</code> rather than injecting stale feedback into Turn $k+1$.</td></tr>
+</tbody></table></div>
+
+<p>Look closely at two subtle concurrency invariants inside <code>turn_input.rs</code> and <code>tasks/mod.rs</code>:</p>
+<ol>
+<li><strong>Preview-Before-Commit &amp; Pointer-Identity Reservation (<code>tasks/mod.rs:558-568</code>):</strong> Before touching any state, <code>PreparedTurnInputSettings::prepare</code> validates overrides via <code>session.preview_settings(&amp;updates)</code> so rejected inputs leave zero side effects. Even better: while <code>maybe_start_turn_for_pending_work</code> awaits async <code>TurnContext</code> construction after reserving <code>turn_state: Arc&lt;Mutex&lt;TurnState&gt;&gt;</code>, an interrupt or replacement turn could arrive and clear <code>active_turn</code>! Before spawning, Codex verifies pointer identity:
+<pre><code class="language-rust">// Context construction can outlive an interrupt or replacement. Do not let
+// start_task recreate a turn whose reservation is no longer ours.
+if self
+    .active_turn
+    .lock()
+    .await
+    .as_ref()
+    .is_none_or(|turn| !Arc::ptr_eq(&amp;turn.turn_state, &amp;turn_state))
+{
+    return;
+}</code></pre>
+Using <code>Arc::ptr_eq</code> serves as a zero-allocation ABA-proof capability token: even if <em>another</em> new <code>ActiveTurn::default()</code> was inserted in the meantime, its <code>Arc&lt;Mutex&lt;TurnState&gt;&gt;</code> has a distinct heap address, so the stale starter cleanly steps aside!</li>
+<li><strong>Parent-Delegated Drain Bypasses (<code>turn_input.rs:419-438, 516-535</code>):</strong> When a daemon begins graceful drain (<code>admit_turn_start() -&gt; None</code>), top-level client requests receive <code>NotSubmittedReason::ServerDraining</code>. However, if a running parent turn delegates work to a <code>ThreadSpawn</code> or <code>Review</code> subagent (<code>parent_turn_id.is_some()</code>), rejecting the child would deadlock or fail the already-admitted parent! Codex explicitly carves out parent-delegated subagent inputs from server drain rejection.</li>
+</ol>
+
+<h2 id="abort-before-clear">3. Cancelling Tasks Before Dropping Approvals (<code>tasks/mod.rs</code>)</h2>
+<p>When <code>Op::Interrupt</code> arrives or <code>spawn_task</code> replaces a running turn, how do you tear down <code>ActiveTurn</code> without corrupting conversation history? Inspect <code>Session::abort_all_tasks</code> in <code>core/src/tasks/mod.rs</code> (lines 573–601):</p>
+<pre><code class="language-rust">if let Some(mut active_turn) = self.take_active_turn(&amp;reason).await {
+    let task = active_turn.task.take();
+    aborted_turn = task.is_some();
+    if let Some(task) = task {
+        self.handle_task_abort(
+            task,
+            reason.clone(),
+            &amp;active_turn.turn_state,
+            /*error*/ None,
+        )
+        .await;
+    }
+    if aborted_turn {
+        active_turn_to_clear = Some(active_turn);
+    }
+}
+
+if let Some(active_turn) = active_turn_to_clear {
+    // Let interrupted tasks observe cancellation before dropping pending approvals, or an
+    // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
+    self.input_queue.clear_pending(&amp;active_turn).await;
+}</code></pre>
+
+<p>Formalize the two competing event orderings when a tool call is awaiting <code>rx_approval.await</code> inside <code>tokio::select!</code> alongside <code>cancellation_token.cancelled()</code>:</p>
+<div class="opt-equation">$$\begin{aligned}
+\text{Wrong order } (\text{drop } \texttt{tx\_approval} \prec \text{cancel}): &amp;\quad \texttt{rx\_approval} \to \mathsf{Err} \implies \text{writes fake “User rejected” tool output!} \\
+\text{Codex order } (\text{cancel} + 100\text{ ms wait} \prec \texttt{clear\_pending}): &amp;\quad \texttt{cancelled()} \text{ wins} \implies \text{clean } \mathsf{TurnAborted} \text{ marker.}
+\end{aligned}$$</div>
+<p>By firing <code>cancellation_token.cancel()</code>, giving the task <code>GRACEFULL_INTERRUPTION_TIMEOUT_MS = 100</code> to exit cleanly (before <code>AbortOnDropHandle</code> hard-aborts the Tokio task), and <em>only then</em> calling <code>clear_pending</code>, Codex guarantees that pressing <code>Esc</code> during an approval modal never fabricates a false user rejection in the LLM’s rollout history.</p>
+
+<h2 id="checks">4. Questions worth answering</h2>
+<div class="self-check"><strong>Why does <code>InterruptedTurnHistoryMarker</code> (<code>tasks/mod.rs:85-119</code>) emit a <code>developer</code>-role message under <code>MultiAgentVersion::V2</code> instead of a contextual <code>user</code>-role message?</strong><p>In Multi-Agent V2, a subagent turn can be interrupted by its parent orchestrator or mailbox preemption rather than a human user. Emitting <code>role = "user"</code> would falsely imply to the model that a human intervened, whereas <code>role = "developer"</code> accurately frames the interruption as harness-level control guidance.</p></div>
+<div class="self-check"><strong>When <code>StartOrSteer</code> steers an already-running turn and also carries <code>thread_settings</code> overrides (e.g., changing reasoning effort), does the currently running turn mutate its <code>TurnContext</code> mid-flight?</strong><p>No! As documented on <code>PreparedTurnInputSettings::apply_steered</code> (<code>turn_input.rs:216-225</code>), persistent settings are committed to <code>SessionState</code> so <em>subsequent</em> turns inherit them, while the active turn finishes with its immutable <code>Arc&lt;TurnContext&gt;</code> snapshot intact.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="sq-eq-actor-and-session-io.html">← Ch. 01: SQ/EQ Actor &amp; Decoupled SessionIo</a><a href="index.html">Sub-Series 02 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

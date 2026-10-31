@@ -11936,7 +11936,8 @@ var BLOG_TREE = [
             label: '02 · Core Agent Loop & Turn Lifecycle',
             children: [
               { title: 'Reading Guide: Core Agent Loop &amp; Turn Lifecycle', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html'] },
-              { title: '1. The SQ/EQ Actor Pattern &amp; Decoupling SessionIo from Arc&lt;Session&gt; for Leak-Free Teardown', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html'] }
+              { title: '1. The SQ/EQ Actor Pattern &amp; Decoupling SessionIo from Arc&lt;Session&gt; for Leak-Free Teardown', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html'] },
+              { title: '2. Why submission_loop Never Awaits I/O: Atomic Turn Admission &amp; Responsive Mid-Turn Control', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html'] }
             ]
           }
         ]
