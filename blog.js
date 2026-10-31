@@ -11909,6 +11909,19 @@ var BLOG_TREE = [
         ]
       }
     ]
+  },
+  {
+    name: 'real-world-codebases',
+    label: 'Real World Codebases',
+    children: [
+      {
+        name: 'openai-codex',
+        label: 'OpenAI Codex',
+        children: [
+          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: [] }
+        ]
+      }
+    ]
   }
 
 ];
@@ -11974,7 +11987,7 @@ function flattenBlogTree(nodes, result) {
         btn.type = 'button';
         btn.title = item.label;
         btn.setAttribute('aria-expanded', 'false');
-        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup') btn.dataset.directory = directoryPath.join('/');
+        if (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup' || directoryPath[0] === 'real-world-codebases') btn.dataset.directory = directoryPath.join('/');
         btn.innerHTML = '<span class="ft-chevron">&#9654;</span>' +
           '<span class="ft-icon ft-folder">&#128193;</span>' +
           '<span class="ft-label">' + item.label + '</span>';
@@ -12001,7 +12014,7 @@ function flattenBlogTree(nodes, result) {
           btn.classList.toggle('open');
           childContainer.classList.toggle('open');
           btn.setAttribute('aria-expanded', btn.classList.contains('open') ? 'true' : 'false');
-          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup') && btn.classList.contains('open')) {
+          if (!inBlogDir && (directoryPath[0] === 'rl' || directoryPath[0] === 'ml' || directoryPath[0] === 'nlp' || directoryPath[0] === 'llm' || directoryPath[0] === 'dl' || directoryPath[0] === 'rag' || directoryPath[0] === 'speculative-decoding' || directoryPath[0] === 'agentic-harness' || directoryPath[0] === 'search-ranking-and-retrieval' || directoryPath[0] === 'statistics-and-experiment-setup' || directoryPath[0] === 'real-world-codebases') && btn.classList.contains('open')) {
             var categoryId = directoryPath[0] === 'rl' ? 'reinforcement-learning' :
               directoryPath[0] === 'nlp' ? 'natural-language-processing' :
               directoryPath[0] === 'llm' ? 'llm' :
@@ -12010,7 +12023,8 @@ function flattenBlogTree(nodes, result) {
               directoryPath[0] === 'speculative-decoding' ? 'speculative-decoding' :
               directoryPath[0] === 'agentic-harness' ? 'agentic-harness' :
               directoryPath[0] === 'search-ranking-and-retrieval' ? 'search-ranking-and-retrieval' :
-              directoryPath[0] === 'statistics-and-experiment-setup' ? 'statistics-and-experiment-setup' : 'machine-learning';
+              directoryPath[0] === 'statistics-and-experiment-setup' ? 'statistics-and-experiment-setup' :
+              directoryPath[0] === 'real-world-codebases' ? 'real-world-codebases' : 'machine-learning';
             var targetHash = '#' + (directoryPath.length === 1 ? categoryId : 'folder-' + directoryPath.join('--'));
             if (window.location.hash === targetHash) {
               window.dispatchEvent(new Event('hashchange'));
@@ -12150,7 +12164,8 @@ function flattenBlogTree(nodes, result) {
     'search-ranking-and-retrieval': { label: 'Search, Ranking & Retrieval', blurb: 'Lexical and dense retrieval, ANN vector indexing, multi-stage learning-to-rank, collaborative filtering, and cold-start systems.' },
     rl:    { label: 'Reinforcement Learning', blurb: 'Browse popular courses, video companions, and focused PPO, DPO, and GRPO reading paths.' },
     gpu:   { label: 'GPU',   blurb: 'GPU programming and heterogeneous compute: CUDA on NVIDIA and HIP on AMD, kernels, memory, and performance.' },
-    'agentic-harness': { label: 'Agentic Harness', blurb: 'Autonomous research harnesses, tool loops, verification, and agentic execution systems.' }
+    'agentic-harness': { label: 'Agentic Harness', blurb: 'Autonomous research harnesses, tool loops, verification, and agentic execution systems.' },
+    'real-world-codebases': { label: 'Real World Codebases', blurb: 'Source-level architectural deep dives into production open-source systems — starting with OpenAI Codex (120+ Rust crates).' }
   };
 
   /* Build normalised post list: parse series breadcrumb into inner series name + Part tag. */
@@ -12270,7 +12285,7 @@ function flattenBlogTree(nodes, result) {
   catOrder.forEach(function(code) {
     if (!byCategory[code]) return;
     var count = posts.filter(function(p){ return p.category === code; }).length;
-    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'llm' ? 'LLM' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code === 'statistics-and-experiment-setup' ? 'Statistics & Experiment Setup' : code, count, false, code));
+    chipsHost.appendChild(makeChip(code === 'rl' ? 'Reinforcement Learning' : code === 'llm' ? 'LLM' : code === 'rag' ? 'RAG' : code === 'quantization' ? 'Quantization' : code === 'speculative-decoding' ? 'Speculative Decoding' : code === 'agentic-harness' ? 'Agentic Harness' : code === 'search-ranking-and-retrieval' ? 'Search, Ranking & Retrieval' : code === 'statistics-and-experiment-setup' ? 'Statistics & Experiment Setup' : code === 'real-world-codebases' ? 'Real World Codebases' : code, count, false, code));
   });
 
   if (statsHost) {
@@ -12300,6 +12315,7 @@ function flattenBlogTree(nodes, result) {
     if (code === 'agentic-harness') catSection.id = 'agentic-harness';
     if (code === 'search-ranking-and-retrieval') catSection.id = 'search-ranking-and-retrieval';
     if (code === 'statistics-and-experiment-setup') catSection.id = 'statistics-and-experiment-setup';
+    if (code === 'real-world-codebases') catSection.id = 'real-world-codebases';
 
     var totalInCat = posts.filter(function(p){ return p.category === code; }).length;
     var header = document.createElement('div');
@@ -12312,7 +12328,7 @@ function flattenBlogTree(nodes, result) {
       '<p class="blog-category-blurb">' + CATEGORY_META[code].blurb + '</p>';
     catSection.appendChild(header);
 
-    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'llm' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval' || code === 'statistics-and-experiment-setup') {
+    if (code === 'rl' || code === 'ml' || code === 'nlp' || code === 'llm' || code === 'dl' || code === 'rag' || code === 'diffusion' || code === 'quantization' || code === 'speculative-decoding' || code === 'agentic-harness' || code === 'search-ranking-and-retrieval' || code === 'statistics-and-experiment-setup' || code === 'real-world-codebases') {
       var categoryTree = BLOG_TREE.filter(function(node) { return node.name === code; })[0];
       categoryTree.children.forEach(function(node) {
         if (node.children) {
@@ -12400,7 +12416,8 @@ function flattenBlogTree(nodes, result) {
       id === 'speculative-decoding' || id.indexOf('folder-speculative-decoding--') === 0 ? 'speculative-decoding' :
       id === 'agentic-harness' || id.indexOf('folder-agentic-harness--') === 0 ? 'agentic-harness' :
       id === 'search-ranking-and-retrieval' || id.indexOf('folder-search-ranking-and-retrieval--') === 0 ? 'search-ranking-and-retrieval' :
-      id === 'statistics-and-experiment-setup' || id.indexOf('folder-statistics-and-experiment-setup--') === 0 ? 'statistics-and-experiment-setup' : '';
+      id === 'statistics-and-experiment-setup' || id.indexOf('folder-statistics-and-experiment-setup--') === 0 ? 'statistics-and-experiment-setup' :
+      id === 'real-world-codebases' || id.indexOf('folder-real-world-codebases--') === 0 ? 'real-world-codebases' : '';
     if (id === 'folder-nlp') id = 'natural-language-processing';
     if (!code) return;
     var target = document.getElementById(id);
