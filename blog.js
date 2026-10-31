@@ -11918,7 +11918,7 @@ var BLOG_TREE = [
         name: 'openai-codex',
         label: 'OpenAI Codex',
         children: [
-          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html'] },
+          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html'] },
           {
             name: '01-prompt-and-kv-cache-engineering',
             label: '01 · Prompt & KV-Cache Engineering',
@@ -11928,7 +11928,15 @@ var BLOG_TREE = [
               { title: '2. Incremental Tool Schemas in History: TopLevelToolsState, UUIDv5 Items &amp; SHA-1 Tool Hashing', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/incremental-tool-schemas-in-history.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/cache-preserving-micro-patterns.html'] },
               { title: '3. Cache-Preserving Micro-Patterns: Split Permission Hashing, Date-Only Clocks, Runtime Rejection &amp; Shared PromptCacheKey', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/cache-preserving-micro-patterns.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/incremental-tool-schemas-in-history.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/collaboration-modes-and-prompt-design.html'] },
               { title: '4. Collaboration Modes &amp; Prompt Engineering: Plan Mode State Locking, Fact-vs-Preference Splits, /review Rubrics &amp; Persistent Mode', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/collaboration-modes-and-prompt-design.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/cache-preserving-micro-patterns.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html'] },
-              { title: '5. Hierarchical AGENTS.md Resolution: Root Discovery, Override Precedence, Untrusted Repo Gates &amp; Mid-Session Replacements', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/collaboration-modes-and-prompt-design.html'] }
+              { title: '5. Hierarchical AGENTS.md Resolution: Root Discovery, Override Precedence, Untrusted Repo Gates &amp; Mid-Session Replacements', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/collaboration-modes-and-prompt-design.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html'] }
+            ]
+          },
+          {
+            name: '02-core-agent-loop-and-turn-lifecycle',
+            label: '02 · Core Agent Loop & Turn Lifecycle',
+            children: [
+              { title: 'Reading Guide: Core Agent Loop &amp; Turn Lifecycle', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/hierarchical-agents-md-resolution.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html'] },
+              { title: '1. The SQ/EQ Actor Pattern &amp; Decoupling SessionIo from Arc&lt;Session&gt; for Leak-Free Teardown', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html'] }
             ]
           }
         ]
