@@ -1,0 +1,118 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Incremental Tool Schemas in History: TopLevelToolsState, UUIDv5 Items &amp; SHA-1 Tool Hashing | Neel Mishra</title><meta name="description" content="How OpenAI Codex moves tool schemas out of top-level request headers and into append-only conversation history using ResponseItem::AdditionalTools, thread-scoped UUIDv5 identities, and two-level TopLevelToolsState SHA-1 diffing."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/incremental-tool-schemas-in-history.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--01-prompt-and-kv-cache-engineering">← Real World Codebases / OpenAI Codex / 01 · Prompt &amp; KV-Cache Engineering</a><div class="post-series-nav"><a href="index.html">OpenAI Codex · 01 Prompt &amp; KV-Cache Engineering</a><span>Chapter 02 / 5</span></div><h1>Incremental Tool Schemas in History: <code>TopLevelToolsState</code>, UUIDv5 Items &amp; SHA-1 Tool Hashing</h1><p class="post-meta">October 2026 · 14 min read</p><p class="optimizer-lede">Lazy tool discovery has a dirty secret in most agent frameworks: the moment your router hydrates a new MCP server schema at Turn 10, inserting that tool into the top-level <code>tools: [...]</code> API parameter invalidates the entire $60{,}000$-token KV cache! Here is how OpenAI Codex’s <strong>Responses Lite</strong> path (<code>top_level_tools.rs</code> + <code>client.rs</code>) moves tool declarations <em>inside</em> the append-only <code>input</code> stream with deterministic UUIDv5 item IDs and two-level SHA-1 namespace diffing.</p>
+
+<h2 id="lazy-tool-paradox">1. The Lazy Tool Discovery vs. KV-Cache Paradox</h2>
+<p>Suppose an agent starts a session with $12$ built-in tools, works through $10$ turns ($L = 62{,}000$ tokens), and then the user types <code>@linear file a bug for this race condition</code>—activating $18$ MCP tools from the Linear connector. In a standard Chat Completions or Responses API request, serialized tool definitions sit at token index $0$, ahead of every system, user, and assistant message:</p>
+
+<div class="opt-equation">$$\text{Prompt}_{\text{standard}} = \bigl[\,\underbrace{\mathcal{T}_{\text{tools}}}_{\text{Index } 0},\; \mathcal{I}_{\text{system}},\; m_1,\; m_2,\; \dots,\; m_k\,\bigr].$$</div>
+
+<p>That creates an ugly dilemma:</p>
+<ul>
+<li><strong>Eagerly load every MCP server on Turn 1:</strong> Pay a permanent $15{,}000\text{–}35{,}000$-token schema tax on every session (even trivial 2-turn bash questions) and degrade tool-selection accuracy via schema crowding.</li>
+<li><strong>Lazily hydrate tools into top-level <code>tools</code> on Turn 10:</strong> Mutate $\mathcal{T}_{\text{tools}}$ at index $0$, busting the GPU prefix cache for all $62{,}000$ tokens of $m_1 \dots m_k$!</li>
+</ul>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/incremental-tools-uuidv5-flow.svg" width="920" height="390" alt="Left: Moving Tools Inside input[] under use_responses_lite showing Turn 1 deterministic UUIDv5 BaseInstructionsFragment and AdditionalTools, 62,000 cached conversation tokens across Turns 1..9, and Turn 10 appending only changed namespace members when an MCP server connects. Right: TopLevelToolsState Two-Level SHA-1 Diffing splitting namespace headers from members, emitting text-only DeveloperInstructions when only descriptions change, and collapsing removed namespaces."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Left: Under <code>use_responses_lite</code>, top-level <code>Prompt.tools</code> is empty; tool schemas live inside <code>input[]</code> as <code>ResponseItem::AdditionalTools</code> with thread-scoped UUIDv5 IDs so mid-session MCP activation appends at the tail. Right: <code>TopLevelToolsState</code> hashes namespace headers separately from member schemas to minimize wire bytes.</figcaption></figure>
+
+<h2 id="uuidv5-prefix-items">2. Deterministic UUIDv5 Identities in <code>client.rs</code></h2>
+<p>When <code>model_info.use_responses_lite</code> (incremental tools) is active, <code>Session::build_prompt</code> leaves top-level <code>Prompt.tools</code> empty, and <code>ModelClientSession</code> (<code>codex-rs/core/src/client.rs</code>, lines 1054–1085) injects prompt-level declarations directly into the <code>input</code> item vector using deterministic <strong>RFC 4122 UUIDv5</strong> hashes:</p>
+
+<pre><code class="language-rust">// These prompt-only items are rebuilt on every request. Hash their visible payloads
+// within the thread so retries and resumed sessions preserve their identity.
+let prefix_namespace = Uuid::new_v5(
+    &amp;Uuid::NAMESPACE_OID,
+    self.state.thread_id.to_string().as_bytes(),
+);
+let mut prefix = Vec::new();
+let tools = if model_info.use_responses_lite {
+    if !prompt.tools.is_empty() {
+        let tools = create_tools_json_for_responses_lite(&amp;prompt.tools)?;
+        prefix.push(ResponseItem::AdditionalTools {
+            id: Some(ResponseItemId::with_suffix(
+                "at",
+                Uuid::new_v5(&amp;prefix_namespace, &amp;serde_json::to_vec(&amp;tools)?),
+            )),
+            role: "developer".to_string(),
+            tools: Arc::from(tools),
+        });
+    }
+    None
+} else {
+    Some(create_tools_raw_json_for_responses_api(&amp;prompt.tools)?.into())
+};
+if !prompt.base_instructions.text.is_empty() {
+    let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(
+        prompt.base_instructions.text.clone(),
+    ));
+    instructions.set_id(Some(ResponseItemId::with_suffix(
+        "msg",
+        Uuid::new_v5(&amp;prefix_namespace, prompt.base_instructions.text.as_bytes()),
+    )));
+    prefix.push(instructions);
+}
+input.splice(0..0, prefix);</code></pre>
+
+<p>Why use a two-step UUIDv5 hierarchy $\operatorname{UUIDv5}(\operatorname{UUIDv5}(\texttt{OID}, \text{thread\_id}), \text{payload})$ instead of <code>Uuid::new_v4()</code>?</p>
+<ol>
+<li><strong>Retry &amp; Resume Idempotency:</strong> If a WebSocket drops mid-turn and Codex reconnects or falls back to HTTP, rebuilding those prefix items with random UUIDv4s would break strict item-by-item equality in <code>prepare_websocket_request</code> (which verifies <code>current.input</code> extends <code>previous_request.input</code>!).</li>
+<li><strong>Cross-Thread Isolation:</strong> Scoping <code>prefix_namespace</code> to <code>thread_id</code> ensures item IDs are globally unique per thread in backend storage while remaining $100\%$ deterministic within the thread.</li>
+<li><strong>Window Mode Pinning:</strong> Look at <code>Session::current_window_uses_incremental_tools</code> in <code>session/world_state.rs</code> (lines 51–56): once a context window starts with in-history tool declarations (<code>state.history.has_tool_declarations()</code>), Codex pins that mode for the remainder of the window even if feature flags toggle mid-session, switching modes only on a fresh compaction window (<code>new_window == true</code>).</li>
+</ol>
+
+<h2 id="two-level-sha1">3. Two-Level Namespace &amp; Member Hashing in <code>TopLevelToolsState</code></h2>
+<p>In Responses Lite, tools are organized into one-level namespaces (for example, <code>functions</code>, <code>mcp__github</code>, or <code>mcp__linear</code>), where each namespace object carries its own <code>description</code> header plus a <code>"tools": [...]</code> array of member schemas. In <code>core/src/context/world_state/top_level_tools.rs</code> (lines 48–81), <code>TopLevelToolsState::new</code> decomposes every namespace into $1 + |M|$ independent canonical JSON SHA-1 hashes:</p>
+
+<pre><code class="language-rust">pub(crate) fn new(
+    messages: ResolvedIncrementalToolMessages,
+    definitions: Vec&lt;Value&gt;,
+    metrics: Option&lt;Arc&lt;dyn ExtensionMetrics&gt;&gt;,
+) -&gt; Result&lt;Self&gt; {
+    let mut hashes = BTreeMap::new();
+    let mut insert_hash = |name: String, definition: &amp;Value| -&gt; Result&lt;()&gt; {
+        let hash = WorldStateHash::from_json(definition);
+        if hashes.insert(name.clone(), hash).is_some() {
+            return Err(CodexErrorDetails::ToolCollision(name).into());
+        }
+        Ok(())
+    };
+    for definition in &amp;definitions {
+        let name = definition_name(definition);
+        let mut header = definition.clone();
+        if let Some(tools) = header
+            .as_object_mut()
+            .expect("serialized tool object")
+            .remove("tools")
+        {
+            for tool in tools.as_array().expect("serialized namespace members") {
+                insert_hash(format!("{name}.{}", definition_name(tool)), tool)?;
+            }
+        }
+        insert_hash(name.to_string(), &amp;header)?;
+    }
+    Ok(Self { messages, definitions, hashes, metrics })
+}</code></pre>
+
+<p>Notice what stripping <code>.remove("tools")</code> before hashing <code>header</code> unlocks inside <code>render_diff</code> (lines 134–264):</p>
+
+<div class="note-table"><table><caption>The four exact transition branches in <code>TopLevelToolsState::render_diff</code> and their wire behavior.</caption><thead><tr><th>Catalog Mutation</th><th>Hash Condition</th><th>Tail Items Appended to <code>input</code></th></tr></thead><tbody>
+<tr><td><strong>1. New or updated tool(s) in namespace</strong></td><td>$\exists\, m:\; H_t[\texttt{ns.m}] \ne H_{t-1}[\texttt{ns.m}]$</td><td><code>IncrementalToolsHint</code> + <code>ResponseItem::AdditionalTools</code> containing <em>only</em> <code>changed_members</code> inside <code>ns</code>.</td></tr>
+<tr><td><strong>2. Namespace description changed, 0 member schemas changed</strong></td><td>$H_t[\texttt{ns}] \ne H_{t-1}[\texttt{ns}]$ and $\forall m:\; H_t[\texttt{ns.m}] = H_{t-1}[\texttt{ns.m}]$</td><td>Plain-text <code>DeveloperInstructions</code> tagged with <code>ContentItemMetadata::tool(ns)</code>—avoiding an illegal empty <code>tools: []</code> namespace declaration <em>and</em> avoiding re-sending 30 unchanged schemas!</td></tr>
+<tr><td><strong>3. Entire namespace disconnected</strong></td><td>$\texttt{ns} \in H_{t-1} \setminus H_t$</td><td>A single standalone <code>RemovedTools</code> fragment naming <code>ns</code>; individual <code>ns.*</code> member names are suppressed on the wire via namespace subsumption while still counted in OTel metrics.</td></tr>
+<tr><td><strong>4. All tools removed (empty catalog)</strong></td><td>$H_t = \varnothing$</td><td>Persists <code>Some(BTreeMap::new())</code> (not <code>None</code>!) so step $t+1$ knows the catalog is <em>known empty</em> rather than missing state.</td></tr>
+</tbody></table></div>
+
+<h2 id="subagent-preservation">4. Preserving Parent Tool Declarations on Subagent Forks</h2>
+<p>Check one more subtle optimization at lines 175–178 of <code>core/src/session/world_state.rs</code>:</p>
+<pre><code class="language-rust">let preserve_parent_tool_declarations =
+    !new_window &amp;&amp; self.preserve_parent_tool_declarations();
+if incremental_tools &amp;&amp; !preserve_parent_tool_declarations {
+    let specs = step_context.tool_router.model_visible_specs();
+    ...
+}</code></pre>
+<p>When Codex spawns an internal sub-session that shares a forked prefix with its parent thread (such as a synchronous Guardian safety review or a forked subagent), re-running <code>TopLevelToolsState</code> with the child’s restricted tool router would immediately append a noisy <code>RemovedTools</code> delta or invalidate shared prefix assumptions. Setting <code>preserve_parent_tool_declarations</code> skips <code>TopLevelToolsState</code> on the inherited window while enforcing capability restrictions at the runtime tool-execution layer instead—letting the child reuse $100\%$ of the parent’s hot GPU KV cache!</p>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>Why can’t namespace or tool names contain a literal dot (<code>.</code>) in Responses Lite?</strong><p>Look at lines 222–248 of <code>top_level_tools.rs</code>: <code>TopLevelToolsState</code> stores both namespace header hashes (<code>"mcp__linear"</code>) and member hashes (<code>"mcp__linear.create_issue"</code>) in a single flat <code>BTreeMap&lt;String, WorldStateHash&gt;</code>. Forbidding dots in raw identifiers makes <code>key.split_once('.')</code> an unambiguous bijection between a member key and its parent namespace without needing nested snapshot structs in rollout logs.</p></div>
+<div class="self-check"><strong>Why does Codex emit an OpenTelemetry histogram of <code>description.len()</code> specifically when <code>action == "schema_changed"</code>?</strong><p>Some third-party MCP servers dynamically embed live timestamps, workspace item counts, or changing status strings inside tool <code>description</code> fields! Whenever an MCP server mutates its own tool description between turns, <code>TopLevelToolsState</code> must re-emit that schema at the tail. Recording <code>TOOL_SPEC_DESCRIPTION_BYTES_METRIC</code> per <code>tool</code> tag immediately exposes misbehaving MCP servers causing description churn in production telemetry.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="append-only-world-state-diffs.html">← Ch. 01: Append-Only WorldState &amp; RFC 7386 Diffs</a><a href="index.html">Sub-Series 01 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

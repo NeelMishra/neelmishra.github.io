@@ -11924,7 +11924,8 @@ var BLOG_TREE = [
             label: '01 · Prompt & KV-Cache Engineering',
             children: [
               { title: 'Reading Guide: Prompt &amp; KV-Cache Engineering', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html'] },
-              { title: '1. Append-Only Context State Machines: WorldState Sections &amp; RFC 7386 Tail Diffs', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html'] }
+              { title: '1. Append-Only Context State Machines: WorldState Sections &amp; RFC 7386 Tail Diffs', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/incremental-tool-schemas-in-history.html'] },
+              { title: '2. Incremental Tool Schemas in History: TopLevelToolsState, UUIDv5 Items &amp; SHA-1 Tool Hashing', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/incremental-tool-schemas-in-history.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html'] }
             ]
           }
         ]
