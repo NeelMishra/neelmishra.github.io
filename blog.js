@@ -11918,7 +11918,7 @@ var BLOG_TREE = [
         name: 'openai-codex',
         label: 'OpenAI Codex',
         children: [
-          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html'] },
+          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html'] },
           {
             name: '01-prompt-and-kv-cache-engineering',
             label: '01 · Prompt & KV-Cache Engineering',
@@ -11939,7 +11939,15 @@ var BLOG_TREE = [
               { title: '1. The SQ/EQ Actor Pattern &amp; Decoupling SessionIo from Arc&lt;Session&gt; for Leak-Free Teardown', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html'] },
               { title: '2. Why submission_loop Never Awaits I/O: Atomic Turn Admission &amp; Responsive Mid-Turn Control', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/sq-eq-actor-and-session-io.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/streaming-tool-overlap.html'] },
               { title: '3. Streaming Tool Overlap: Dispatching FuturesOrdered Tool Calls While Tokens Still Stream', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/streaming-tool-overlap.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/non-blocking-submission-loop.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html'] },
-              { title: '4. Cooperative Steering vs. Instant Preemption (discard_partial_items) &amp; Serverless Turn Recovery', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/streaming-tool-overlap.html', 'real-world-codebases/openai-codex/index.html'] }
+              { title: '4. Cooperative Steering vs. Instant Preemption (discard_partial_items) &amp; Serverless Turn Recovery', file: 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html', links: ['real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/streaming-tool-overlap.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html'] }
+            ]
+          },
+          {
+            name: '03-stateful-llm-transport-and-compaction',
+            label: '03 · Stateful LLM Transport & Context Compaction',
+            children: [
+              { title: 'Reading Guide: Stateful LLM Transport &amp; Context Compaction', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html'] },
+              { title: '1. WebSockets Over Unary SSE: Persistent Sessions, Happy Eyeballs Dialing &amp; Zstd HTTP Fallback', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html', links: ['real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html'] }
             ]
           }
         ]
