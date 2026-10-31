@@ -1,0 +1,115 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Zero-TTFT generate: false Prewarming: Warming GPU KV Caches While the User Types | Neel Mishra</title><meta name="description" content="How OpenAI Codex hides TCP/TLS dialing, MCP tool discovery, and 80,000-token GPU KV-cache prefill behind human typing time using tokio::try_join!, response.create with generate: false, PrewarmInput::History, and from_untraced_warmup trace preservation."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/zero-ttft-generate-false-prewarming.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--03-stateful-llm-transport-and-compaction">← Real World Codebases / OpenAI Codex / 03 · Stateful LLM Transport &amp; Context Compaction</a><div class="post-series-nav"><a href="index.html">Sub-Series 03 Reading Guide</a><span>Chapter 02 of 04</span></div><h1>2. Zero-TTFT <code>generate: false</code> Prewarming: Warming GPU KV Caches While the User Types</h1><p class="post-meta">October 2026 · 15 min read · Chapter 2</p><p class="optimizer-lede">Between launching <code>codex</code> in a terminal (or resuming a saved thread) and pressing <code>Enter</code> on a prompt, a human developer spends anywhere from two to twenty seconds typing. Almost every coding agent wastes 100% of that window sitting completely idle—only starting DNS lookup, TLS 1.3 handshake, WebSocket upgrade, JSON upload, and tens of thousands of tokens of GPU prefill <em>after</em> <code>Enter</code> is pressed. Inside <code>core/src/session/startup_prewarm.rs</code> and <code>core/src/client.rs</code>, OpenAI Codex exploits human typing time to pre-dial the WebSocket in parallel with MCP tool discovery and execute a zero-decode <code>generate: false</code> prefill pass on the target GPU replica before Turn 1 even begins.</p>
+
+<h2 id="ttft-anatomy">1. Decomposing First-Turn Time-to-First-Token ($\text{TTFT}_1$)</h2>
+<p>On a cold session or resumed 80k-token thread, Turn 1 carries static prefix tokens $L_{\text{prefix}} = |P_{\text{sys}}| + |P_{\text{tools}}| + |H_{\text{resumed}}|$ plus the user’s newly typed prompt $u_1$ of length $|u_1| \ll L_{\text{prefix}}$. Without prewarming, perceived $\text{TTFT}_1$ after hitting <code>Enter</code> stacks four serial latencies:</p>
+<div class="opt-equation">$$\begin{aligned}
+\text{TTFT}_1^{\text{cold}} &amp;= t_{\text{MCP/tools}} + t_{\text{TCP+TLS+WS}} + \frac{\text{bytes}(L_{\text{prefix}} + |u_1|)}{BW_{\text{up}}} + c_{\text{prefill}}\bigl(L_{\text{prefix}} + |u_1|\bigr) + c_{\text{decode}}, \\
+\text{TTFT}_1^{\text{prewarmed}} &amp;= \frac{\text{bytes}(|u_1|)}{BW_{\text{up}}} + c_{\text{cached}}\,L_{\text{prefix}} + c_{\text{prefill}}\,|u_1| + c_{\text{decode}} \approx c_{\text{prefill}}\,|u_1| + c_{\text{decode}}.
+\end{aligned}$$</div>
+<p>When $L_{\text{prefix}} = 60{,}000\text{ tokens}$ (a resumed session with 50 MCP tools) and $|u_1| = 40\text{ tokens}$, moving $t_{\text{MCP/tools}}$, $t_{\text{TCP+TLS+WS}}$, prefix upload, and $c_{\text{prefill}}\,L_{\text{prefix}}$ into the user’s typing window shaves <strong>1.2 to 3.5 seconds</strong> off the very first token!</p>
+
+<figure class="blog-figure"><img src="assets/generate-false-prewarming-timeline.svg" alt="Timeline showing how Codex overlaps local StepContext tool capture with WebSocket TLS dialing via tokio::try_join!, transmits a generate:false prefill warmup while the user types, and sends only the user message delta on Turn 1" loading="lazy"><figcaption>Figure 1: Inside <code>schedule_startup_prewarm_inner</code> (<code>startup_prewarm.rs:306-460</code>), local tool capture and remote WebSocket dialing run concurrently via <code>tokio::try_join!</code>, followed immediately by a <code>generate: false</code> prefill frame that yields a reusable <code>response_id</code>.</figcaption></figure>
+
+<h2 id="parallel-preconnect-and-modes">2. <code>tokio::try_join!</code> Parallel Setup &amp; <code>Base</code> vs. <code>History</code> Modes</h2>
+<p>Look at how <code>schedule_startup_prewarm_inner</code> (<code>startup_prewarm.rs:374-418</code>) refuses to let local tool discovery serialize against network connection setup:</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/session/startup_prewarm.rs (lines 374-418, condensed)
+// Start the handshake with the expected route while capturing tools for generate=false.
+let (step_context, ()) = tokio::try_join!(
+    async {
+        let step_context = session
+            .capture_step_context(Arc::clone(&amp;startup_turn_context), &amp;startup_cancellation_token)
+            .await?;
+        Ok(step_context)
+    },
+    client_session.preconnect_websocket(
+        &amp;preconnect_model_info,
+        preconnect_service_tier,
+        &amp;startup_turn_context.session_telemetry,
+        &amp;handshake_metadata,
+    ),
+)?;
+
+let prompt_input = match input {
+    PrewarmInput::Base =&gt; Vec::new(),
+    PrewarmInput::History =&gt; {
+        // Use the same history projection and tool metadata as a sampling request.
+        // The real turn still checks this prefix before reusing the prepared response.
+        let mut history = session
+            .clone_history()
+            .await
+            .for_prompt(
+                &amp;step_context.settings.model_info.input_modalities,
+                session.services.image_store.as_ref(),
+            )
+            .await;
+        session
+            .services
+            .executed_tool_calls
+            .attach_to_prompt(&amp;mut history, &amp;mut HashMap::new());
+        history
+    }
+};</code></pre>
+
+<p>Three subtle architectural choices stand out in <code>startup_prewarm.rs</code>:</p>
+<ol>
+  <li><strong>Two-Tier Warmup Inputs (<code>PrewarmInput::Base</code> vs. <code>PrewarmInput::History</code>)</strong>: Fresh sessions launch with <code>PrewarmInput::Base</code> (<code>session.rs:2040</code>), warming system instructions and tool declarations. Resumed or idle threads schedule <code>PrewarmInput::History</code>—running the exact same multimodal image projection (<code>for_prompt</code>) and tool-call inventory attachment (<code>attach_to_prompt</code>) as a real sampling step so the warmup prefix matches Turn 1 byte-for-byte!</li>
+  <li><strong>Co-Warming Auxiliary Subsystems (<code>startup_prewarm.rs:233-254</code>)</strong>: Alongside the LLM WebSocket, <code>schedule_startup_prewarm</code> concurrently spawns background tasks to boot the out-of-process V8 <code>CodeModeService</code> isolate (<code>Feature::CodeModePrewarm</code>) and resolve Ed25519 Agent Identity bearer tokens (<code>model_client.prewarm_auth()</code>) when WebSockets are disabled.</li>
+  <li><strong>Zero-Await Lock Discipline (<code>startup_prewarm.rs:211-231</code>)</strong>: Before registering <code>SessionStartupPrewarmHandle</code>, Codex checks <code>!state.shutting_down</code> and uses a non-blocking <code>self.active_turn.try_lock()</code> to verify no turn is already running. If an older prewarm handle already finished unused (e.g., across multiple idle resumes), <code>drop(completed)</code> returns its <code>ModelClientSession</code> back to the socket cache before re-checking whether the socket stayed open!</li>
+</ol>
+
+<h2 id="generate-false-and-handoff">3. Inside <code>generate: false</code> &amp; Deadline-Bounded Turn Handoff</h2>
+<p>Once <code>startup_prompt</code> is built, <code>client_session.prewarm_websocket</code> (<code>client.rs:2289-2298, 2438-2488</code>) sends a v2 <code>response.create</code> WebSocket frame with <code>generate: Some(false)</code> and awaits <code>ResponseEvent::Completed</code>:</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/client.rs (lines 2289-2298 &amp; 2471-2480, condensed)
+let mut ws_payload = ResponseCreateWsRequest {
+    previous_response_id,
+    input: incremental_items.as_deref().unwrap_or(&amp;request.input),
+    generate: if warmup { Some(false) } else { None },
+    client_metadata: response_create_client_metadata(Some(client_metadata), request_trace.as_ref()),
+    ..ResponseCreateWsRequest::from(&amp;request)
+};
+// ...
+Ok(WebsocketStreamOutcome::Stream(mut stream)) =&gt; {
+    // Wait for the v2 warmup request to complete before sending the first turn request.
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(ResponseEvent::Completed { .. }) =&gt; break,
+            Err(err) =&gt; return Err(err),
+            _ =&gt; {}
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<p>On the server, <code>generate: false</code> populates the GPU KV cache, pins the sticky-routing token <code>x-codex-turn-state</code>, and emits a valid <code>response_id</code> without billing or sampling output tokens. When the user finally submits Turn 1, <code>consume_startup_prewarm_for_regular_turn</code> (<code>startup_prewarm.rs:84-180, 290-303</code>) resolves the handle safely under every timing race:</p>
+
+<div class="note-table"><table><thead><tr><th>User Timing Scenario</th><th><code>SessionStartupPrewarmHandle::resolve</code> Behavior</th><th>Turn 1 Wire Outcome</th></tr></thead><tbody>
+<tr><td><strong>Normal ($t_{\text{type}} &gt; t_{\text{prewarm}}$)</strong></td><td><code>task.is_finished() == true</code>; resolves in $O(1)$ without waiting.</td><td>Reuses warm socket + <code>previous_response_id</code>; uploads <strong>only</strong> user prompt delta $[u_1]$.</td></tr>
+<tr><td><strong>Fast Typist ($t_{\text{type}} &lt; t_{\text{prewarm}} &lt; T_{\text{timeout}}$)</strong></td><td>Awaits at most <code>remaining = timeout.saturating_sub(age_at_first_turn)</code>.</td><td>Inherits in-flight warmup the instant <code>ResponseEvent::Completed</code> arrives—avoiding duplicate connections.</td></tr>
+<tr><td><strong>Stalled Network ($t_{\text{prewarm}} \ge T_{\text{timeout}}$)</strong></td><td><code>tokio::time::timeout(remaining, &amp;mut task)</code> expires $\implies$ calls <code>task.abort()</code> and returns <code>Unavailable { status: "timed_out" }</code>.</td><td>Turn 1 opens a fresh connection / HTTP fallback cleanly with zero deadlock.</td></tr>
+<tr><td><strong>User Changes Model / Effort Before Turn 1</strong></td><td>Warmup session is consumed, then <code>prepare_websocket_request</code> checks <code>responses_request_properties_mismatch</code> (<code>client.rs:1636</code>).</td><td>Reuses the warm TLS/WebSocket connection, while safely falling back from <code>incremental</code> to <code>full</code> payload!</td></tr>
+</tbody></table></div>
+
+<h2 id="untraced-warmup-invariant">4. The <code>from_untraced_warmup</code> Replay Invariant</h2>
+<p>There is a wickedly subtle interaction between <code>generate: false</code> delta compression and offline rollout debugging. Because warmup is transport setup rather than an inference step, Codex disables trace recording during warmup (<code>InferenceTraceAttempt::disabled()</code>, <code>client.rs:2260</code>). Now trace what would happen on Turn 1 if the trace logger recorded what went over the WebSocket wire:</p>
+<ul>
+  <li><strong>On the WebSocket wire:</strong> Turn 1 references <code>previous_response_id = resp_warm</code> and sends <em>only</em> the incremental user message <code>input = [u_1]</code>, omitting <code>base_instructions</code>, <code>tools</code>, and 80k tokens of <code>History</code> already sent in the untraced warmup!</li>
+  <li><strong>In offline rollout traces:</strong> Because <code>resp_warm</code> was intentionally untraced, recording only the wire delta <code>[u_1]</code> would make Turn 1’s trace completely un-replayable—its system prompt, tools, and prior context would vanish!</li>
+</ul>
+<p>Lines <code>2264-2269</code> of <code>core/src/client.rs</code> close this exact gap:</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/client.rs (lines 2264-2269)
+if previous_response_id_from_untraced_warmup {
+    // The transport can reuse an untraced warmup response id and omit the
+    // already-sent input, but rollout replay needs the logical model-visible
+    // request rather than the compressed websocket delta.
+    inference_trace_attempt.record_started(&amp;request);
+}</code></pre>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>Why does <code>handlers.rs:310-317</code> explicitly <code>take_session_startup_prewarm()</code> and call <code>startup_prewarm.abort().await</code> during session shutdown?</strong><p><code>schedule_startup_prewarm</code> clones <code>Arc&lt;Session&gt;</code> into its spawned Tokio task (<code>startup_prewarm.rs:258</code>). Explicitly taking and aborting the handle during shutdown releases that <code>Arc&lt;Session&gt;</code> immediately and closes any half-opened prewarm socket before <code>ShutdownComplete</code> fires.</p></div>
+<div class="self-check"><strong>Why does <code>startup_prewarm.rs:436-438</code> recompute <code>session.responses_metadata(...)</code> after <code>capture_step_context</code> even though it already built <code>handshake_metadata</code> on line <code>359</code>?</strong><p>Because <code>preconnect_websocket</code> needed headers immediately at <code>t = 0</code> before tool discovery ran, whereas <code>capture_step_context</code> may discover MCP/plugin state that updates Responses Lite or turn metadata headers needed for the subsequent <code>response.create</code> warmup frame!</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="websockets-over-sse-transport.html">← Ch. 01: WebSockets Over Unary SSE</a><a href="index.html">Sub-Series 03 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

@@ -11947,7 +11947,8 @@ var BLOG_TREE = [
             label: '03 · Stateful LLM Transport & Context Compaction',
             children: [
               { title: 'Reading Guide: Stateful LLM Transport &amp; Context Compaction', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html'] },
-              { title: '1. WebSockets Over Unary SSE: Persistent Sessions, Happy Eyeballs Dialing &amp; Zstd HTTP Fallback', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html', links: ['real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html'] }
+              { title: '1. WebSockets Over Unary SSE: Persistent Sessions, Happy Eyeballs Dialing &amp; Zstd HTTP Fallback', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html', links: ['real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/index.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/zero-ttft-generate-false-prewarming.html'] },
+              { title: '2. Zero-TTFT generate: false Prewarming: Warming GPU KV Caches While the User Types', file: 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/zero-ttft-generate-false-prewarming.html', links: ['real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/websockets-over-sse-transport.html'] }
             ]
           }
         ]
