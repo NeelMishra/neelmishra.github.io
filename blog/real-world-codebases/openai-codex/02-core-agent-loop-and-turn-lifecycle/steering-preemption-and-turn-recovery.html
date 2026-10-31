@@ -1,0 +1,121 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cooperative Steering vs. Instant Preemption (discard_partial_items) &amp; Serverless Turn Recovery | Neel Mishra</title><meta name="description" content="Source-level dissection of mid-turn user steering, instant WebSocket preemption via response.interrupt (discard_partial_items), turn-phase-aware subagent mailbox gating, metadata-forgery firewalls, and split-brain-free serverless turn suspension in OpenAI Codex."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/steering-preemption-and-turn-recovery.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--02-core-agent-loop-and-turn-lifecycle">← Real World Codebases / OpenAI Codex / 02 · Core Agent Loop &amp; Turn Lifecycle</a><div class="post-series-nav"><a href="index.html">Sub-Series 02 Reading Guide</a><span>Chapter 04 of 04</span></div><h1>4. Cooperative Steering vs. Instant Preemption (<code>discard_partial_items</code>) &amp; Serverless Turn Recovery</h1><p class="post-meta">October 2026 · 17 min read · Chapter 4</p><p class="optimizer-lede">What happens when a developer types <em>“Wait—use PostgreSQL instead of SQLite”</em> while the model is halfway through a multi-step refactor, or when a cloud container hosting an active Codex session must drain for deployment mid-turn? Killing the TCP socket wastes already-completed reasoning items and forces a cold TLS + KV-cache reconnect; waiting blindly until the turn ends lets the agent edit ten wrong files. Across <code>input_queue.rs</code>, <code>turn.rs</code>, <code>responses_websocket.rs</code>, <code>turn_suspension.rs</code>, and <code>daemon_recovery.rs</code>, OpenAI Codex implements two distinct mid-turn steering regimes, a turn-phase-aware mailbox gate, and a split-brain-free turn suspension protocol.</p>
+
+<figure class="blog-figure"><img src="assets/steering-preemption-suspension.svg" alt="Architecture diagram contrasting cooperative steering, instant WebSocket discard_partial_items preemption, turn-phase mailbox gating, and zero-split-brain turn suspension" loading="lazy"><figcaption>Figure 1: Codex’s three mid-turn lifecycle mechanisms: (1) cooperative step-boundary steering vs. in-band WebSocket <code>response.interrupt</code> preemption, (2) <code>MailboxDeliveryPhase</code> gating + Serde metadata stripping, and (3) four-stage serverless turn suspension.</figcaption></figure>
+
+<h2 id="steering-vs-preemption">1. Cooperative Steering vs. Instant WebSocket Preemption</h2>
+<p>When a mid-turn user message arrives in <code>TurnState.pending_input</code> (via <code>TurnAdmissionMode::StartOrSteer</code> or <code>Steer</code>), Codex supports two complementary consumption strategies depending on whether step preemption is armed:</p>
+
+<ol>
+  <li><strong>Cooperative Step-Boundary Steering (<code>turn.rs:494-561</code>)</strong>: While the current sampling request and its <code>in_flight</code> tools finish cleanly, the user message sits in <code>pending_input</code> with priority <code>InputQueueActivity::Steer &gt; InputQueueActivity::Mailbox</code> (<code>input_queue.rs:87-90</code>). At the top of the very next iteration of <code>run_turn</code>’s outer <code>loop</code>, <code>sess.input_queue.get_pending_input(&amp;sess.active_turn)</code> drains the buffered items, runs input hooks, scans the steered message for new <code>@mcp://</code> or plugin mentions via <code>required_mcp_servers_for_input</code> (<code>turn.rs:544-560</code>), rebuilds <code>StepContext</code> if new tools were referenced, and continues the same turn seamlessly.</li>
+  <li><strong>Instant In-Band WebSocket Preemption (<code>input_queue.rs:314-334</code>, <code>turn.rs:2920-2945</code>, <code>responses_websocket.rs:812-891</code>)</strong>: When <code>StepContext.preempt</code> is armed, <code>run_sampling_request</code> spawns a race-free watcher task via <code>InputQueue::watch_user_input</code>:</li>
+</ol>
+
+<pre><code class="language-rust">// codex-rs/core/src/session/input_queue.rs (lines 314-334)
+pub(crate) async fn watch_user_input(
+    &amp;self,
+    active_turn: &amp;Mutex&lt;Option&lt;ActiveTurn&gt;&gt;,
+    sub_id: &amp;str,
+    interrupt: CancellationToken,
+) -&gt; Option&lt;AbortOnDropHandle&lt;()&gt;&gt; {
+    let turn_state = self.turn_state_for_sub_id(active_turn, sub_id).await?;
+    // Subscribe before inspecting the queue so an arrival cannot be missed.
+    let mut activity = self.activity_tx.subscribe();
+    Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        loop {
+            if turn_state.lock().await.pending_input.has_user_input() {
+                interrupt.cancel();
+                return;
+            }
+            if activity.changed().await.is_err() {
+                return;
+            }
+        }
+    })))
+}</code></pre>
+
+<p>Notice line <code>322</code>: subscribing to the <code>tokio::sync::watch</code> channel <em>before</em> locking <code>turn_state</code> eliminates the classic lost-wakeup window where a user message lands between checking the queue and registering the listener.</p>
+
+<h3>Why In-Band <code>discard_partial_items</code> Beats Closing the Socket</h3>
+<p>Once <code>preempt.cancel()</code> fires, <code>stream.next().or_cancel(&amp;preempt)</code> in <code>turn.rs:2920</code> wakes up and sends <code>ResponseInterrupt::Drain</code> (or <code>Cancel</code> on hard abort) down the stream’s interrupt channel. Inside <code>codex-api/src/endpoint/responses_websocket.rs:812-828</code>, the WebSocket transport sends an <strong>in-band JSON control frame</strong> over the live socket:</p>
+
+<pre><code class="language-rust">// codex-rs/codex-api/src/endpoint/responses_websocket.rs (lines 812-828)
+request = &amp;mut interrupt_request, if response_id.is_some() =&gt; {
+    interruption = Some(request);
+    send_websocket_request(
+        ws_stream,
+        serde_json::json!({
+            "type": "response.interrupt",
+            "response_id": response_id,
+            "mode": "discard_partial_items",
+        }).to_string(),
+        idle_timeout,
+        /*telemetry*/ None,
+        timing_log_context.connection_reused,
+    )
+    .await?;
+    awaiting_interrupt_ack = matches!(request, ResponseInterrupt::Cancel { .. });
+    continue;
+}</code></pre>
+
+<p>Let output items $i_1, \dots, i_m$ be fully emitted (<code>OutputItemDone</code>) prior to $t_{\text{preempt}}$, and let $i_{m+1}$ be half-streamed when the interrupt arrives. Comparing raw socket teardown against <code>discard_partial_items</code>:</p>
+<div class="opt-equation">$$\begin{aligned}
+\text{TCP/TLS Drop:} &amp;\quad \text{Server state lost} + \text{TLS/WS reconnect } (\sim 150\text{ ms}) + \text{ambiguous prefix } \{i_1, \dots, i_{m+1}^{\text{partial}}\}, \\
+\texttt{discard\_partial\_items}\text{:} &amp;\quad \text{Server \&amp; client commit exact } (i_1, \dots, i_m), \;\text{drop } i_{m+1}^{\text{partial}}, \;\text{reuse warm WS + } \texttt{previous\_response\_id}!
+\end{aligned}$$</div>
+<p>Even better: if cancellation arrives <em>before</em> the request was even written to the socket (<code>responses_websocket.rs:785-791</code>), <code>interrupt.now_or_never()</code> short-circuits immediately and returns <code>Ok(())</code> so the prewarmed WebSocket remains clean and reusable!</p>
+
+<h2 id="mailbox-phase-and-firewall">2. Turn-Phase Mailbox Gating &amp; The Serde Metadata Firewall</h2>
+<p>In Multi-Agent V2, child agents deliver <code>InterAgentCommunication</code> messages into the parent’s <code>InputQueue</code> while the parent is mid-turn. Two subtle bugs threaten naive queue designs:</p>
+
+<div class="note-table"><table><thead><tr><th>Subsystem</th><th>Failure Mode Without Guard</th><th>Codex Implementation</th></tr></thead><tbody>
+<tr><td><strong><code>MailboxDeliveryPhase</code> (<code>stream_events_utils.rs:521-545</code>, <code>input_queue.rs:346-390</code>)</strong></td><td>If queue-only child mail (<code>trigger_turn == false</code>) arrives just as the parent finishes its <code>MessagePhase::FinalAnswer</code>, draining it as same-turn pending input would trigger an unwanted extra LLM sampling call after the final answer was already spoken!</td><td><code>Commentary</code>, <code>PartialAnswer</code>, and tool calls call <code>accept_mailbox_delivery_for_current_turn</code>. Once a <code>FinalAnswer</code> assistant message completes—and only non-triggering mail is queued—<code>defer_mailbox_delivery_to_next_turn</code> switches <code>TurnState</code> to <code>MailboxDeliveryPhase::NextTurn</code> so the mail waits quietly for the next turn.</td></tr>
+<tr><td><strong><code>turn_input_response_item</code> Serde Firewall (<code>input_queue.rs:53-83, 522-572</code>)</strong></td><td>External RPC or persisted turn-input payloads could forge internal fields like <code>{"metadata": {"client_authored": true}}</code> or <code>{"harness_authored_configuration": true}</code> to bypass trust filters.</td><td>Custom Serde module errors on <code>serialize</code> if <code>envelope.metadata.is_some()</code> (<em>“annotated response items cannot cross the turn-input serialization boundary”</em>) and wraps raw <code>ResponseItem::deserialize</code> with <code>ResponseItemEnvelope::new</code> so any injected JSON <code>metadata</code> key is unconditionally stripped to <code>None</code>!</td></tr>
+<tr><td><strong>Lock-Free Attachment Drop (<code>input_queue.rs:337-344</code>)</strong></td><td>Dropping <code>pending_input</code> while holding <code>turn_state.lock()</code> runs custom extension attachment destructors under the mutex, risking lock-order inversion.</td><td><code>clear_pending</code> swaps <code>let pending_input = std::mem::take(&amp;mut turn_state.pending_input);</code>, explicitly calls <code>drop(turn_state);</code> first, and <em>then</em> calls <code>drop(pending_input);</code> outside the lock!</td></tr>
+</tbody></table></div>
+
+<h2 id="serverless-suspension">3. Zero-Split-Brain Turn Suspension &amp; Daemon Recovery</h2>
+<p>When Codex runs inside a daemon or cloud worker pool, infrastructure must occasionally evict or restart a worker process <em>while a user’s root turn is actively running</em>, then seamlessly resume that exact <code>turn_id</code> on a replacement worker. Look at the four-phase fence inside <code>suspend_turn_and_shutdown</code> (<code>core/src/session/turn_suspension.rs:13-111</code>):</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/session/turn_suspension.rs (lines 30-110, condensed)
+// 1. Flush BEFORE canceling execution so a persistence failure leaves the original turn running!
+live_thread.flush().await.map_err(|error| {
+    CodexErr::Fatal(format!("flush before root turn suspension failed: {error}"))
+})?;
+
+// 2. Recheck under the lock (the turn may have finished while flush().await yielded!)
+let mut turn = {
+    let mut active = session.active_turn.lock().await;
+    let Some(active_turn) = active.as_ref() else { return Ok(SuspendTurnOutcome::NotActive); };
+    if active_turn.task.as_ref().is_none_or(|t| t.kind != TaskKind::Regular) {
+        return Ok(SuspendTurnOutcome::UnsupportedTask);
+    }
+    active.take().unwrap()
+};
+
+// 3. Cancel WITHOUT emitting a terminal TurnAborted/TurnComplete event so another worker
+//    can recover this turn under its original turn_id!
+let task = turn.task.take().unwrap();
+let turn_id = task.turn_context.sub_id.clone();
+task.cancellation_token.cancel();
+// ... wait up to GRACEFULL_INTERRUPTION_TIMEOUT_MS (100ms), else abort ...
+session.input_queue.clear_pending(&amp;turn).await;
+session.services.local_agent_runtime.request_shutdown();
+
+// 4. Stop all producers, flush final history, and CLOSE the rollout writer BEFORE
+//    announcing ShutdownComplete so two workers NEVER write the same thread concurrently!
+handlers::shutdown_session_runtime(session).await;
+live_thread.flush().await?;
+live_thread.shutdown().await?;
+session.deliver_event_raw(Event { id: submission_id, msg: EventMsg::ShutdownComplete }).await;
+Ok(SuspendTurnOutcome::Suspended { turn_id })</code></pre>
+
+<p>Pair this with <code>daemon_recovery.rs:8-55</code>: a sudden daemon restart only recovers an interrupted turn if three strict invariants hold simultaneously:</p>
+<div class="opt-equation">$$\text{Recoverable}(T) \iff \bigl(\text{kind}(T) = \mathsf{Regular}\bigr) \;\wedge\; \neg\text{cancelled}(T) \;\wedge\; \bigl(\mathsf{RecordedTurnInput} \in T.\text{extension\_data}\bigr) \;\wedge\; \bigl(|T.\text{local\_env}| = 1\bigr).$$</div>
+<p>Why the zero-sized marker struct <code>RecordedTurnInput</code> (inserted at <code>turn.rs:516</code>)? If a daemon crashes 2 milliseconds after turn admission—<em>before</em> <code>run_hooks_and_record_inputs</code> writes the user’s prompt into the rollout writer—recovering that <code>turn_id</code> on a new process would resume an empty turn! Requiring <code>RecordedTurnInput</code> guarantees the rollout log already contains the turn’s causal inputs before recovery is permitted.</p>
+
+<h2 id="checks">4. Questions worth answering</h2>
+<div class="self-check"><strong>Why does <code>turn.rs:724-730</code> set <code>can_drain_pending_input = !model_needs_follow_up || preempt.is_cancelled()</code> right after mid-turn auto-compaction?</strong><p>Normally, if auto-compaction runs while a tool continuation is already pending (<code>model_needs_follow_up == true</code>), Codex lets the model see its tool outputs first before draining newly queued steers. However, if the step was explicitly preempted by a user message (<code>preempt.is_cancelled()</code>), the whole point of preemption was to inject that steer immediately—so Codex overrides the deferral and drains the steer even right after compaction!</p></div>
+<div class="self-check"><strong>In <code>suspend_turn_and_shutdown</code>, what happens if the final <code>live_thread.flush()</code> or <code>live_thread.shutdown()</code> fails after the task was already cancelled?</strong><p>Lines <code>93-101</code> return <code>Err(CodexErr::Fatal(...))</code> <em>without</em> emitting <code>ShutdownComplete</code> or <code>SuspendTurnOutcome::Suspended</code>. As the comment explains, the current worker intentionally retains lease ownership so a replacement worker does not start against an unclosed or partially flushed log until worker-failure recovery fences storage.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="streaming-tool-overlap.html">← Ch. 03: Streaming Tool Overlap (FuturesOrdered)</a><a href="../index.html">Master Overview: Inside OpenAI Codex →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
