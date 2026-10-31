@@ -1,0 +1,79 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cache-Preserving Micro-Patterns: Split Permission Hashing, Date-Only Clocks, Runtime Rejection &amp; Shared PromptCacheKey | Neel Mishra</title><meta name="description" content="Five source-level KV-cache micro-optimizations inside OpenAI Codex: split empty-policy permission hashing, date-only %Y-%m-%d clocks, runtime tool rejection in Plan Mode, tail model-switch fragments, and parent_routing_affinity propagation."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/cache-preserving-micro-patterns.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--01-prompt-and-kv-cache-engineering">← Real World Codebases / OpenAI Codex / 01 · Prompt &amp; KV-Cache Engineering</a><div class="post-series-nav"><a href="index.html">OpenAI Codex · 01 Prompt &amp; KV-Cache Engineering</a><span>Chapter 03 / 5</span></div><h1>Cache-Preserving Micro-Patterns: Split Permission Hashing, Date-Only Clocks, Runtime Rejection &amp; Shared <code>PromptCacheKey</code></h1><p class="post-meta">October 2026 · 14 min read</p><p class="optimizer-lede">Even after adopting an append-only history architecture, subtle design choices—embedding approved command lists inside permission prose, formatting wall-clock seconds, hiding tools during Plan Mode, or spawning helper LLM reviewers on random load-balancer pods—still bleed thousands of uncached tokens per session. We examine five surgical micro-patterns across <code>permissions.rs</code>, <code>environment.rs</code>, <code>plan.rs</code>, <code>model.rs</code>, and <code>client.rs</code> that plug every leak.</p>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/cache-micro-patterns-matrix.svg" width="920" height="390" alt="Left: Split Empty-Policy Permission Hashing decoupling WorldStateHash(build_instructions(Policy::empty())) from approved_command_prefixes: BTreeSet so clicking Always allow appends a 1-line 28-token delta instead of 4,000 tokens. Right: Four companion micro-patterns: 1. Date-only %Y-%m-%d clock, 2. Runtime update_plan rejection in Plan Mode, 3. Tail model_switch fragments, and 4. SessionDerived PromptCacheKey + parent_routing_affinity."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Five cache-preserving micro-patterns in <code>codex-rs</code> that eliminate permission-prose bloat, clock jitter, mode-toggle tool churn, model-switch prefix invalidation, and cold sub-session routing.</figcaption></figure>
+
+<h2 id="split-permission-hashing">1. Split Empty-Policy Permission Hashing (<code>permissions.rs</code>)</h2>
+<p>Consider what happens when a user approves $k$ command prefixes over an interactive coding session (e.g., <code>cargo check</code>, <code>cargo clippy</code>, <code>pytest tests/unit</code>). On Turn 1, <code>PermissionsInstructions</code> renders the full sandbox policy, writable root list, approval rules, and pre-approved command prefixes into a single developer block—easily $2{,}000\text{–}8{,}000$ tokens in complex workspaces.</p>
+<p>If <code>PermissionsState</code> simply hashed the rendered <code>PermissionsInstructions</code> string as a single digest $H(\text{full\_text})$, every time the user clicked <em>&ldquo;Always allow prefix&rdquo;</em> in the TUI, $H(\text{full\_text})$ would change and re-append the entire multi-kilobyte block! Look at how <code>PermissionsState::new</code> and <code>render_diff</code> in <code>core/src/context/world_state/permissions.rs</code> (lines 52–130) factor the state space instead:</p>
+
+<pre><code class="language-rust">let build_instructions = |exec_policy| {
+    PermissionsInstructions::from_permission_profile(
+        permission_profile, approval_policy, approval_context, exec_policy,
+        cwd, paths, exec_permission_approvals_enabled, request_permissions_tool_enabled,
+    )
+};
+let instructions = build_instructions(exec_policy);
+let instructions_without_approved_prefixes = build_instructions(&amp;Policy::empty());
+let snapshot = PermissionsSnapshot::Current {
+    instructions: WorldStateHash::from_fragment(&amp;instructions_without_approved_prefixes),
+    approved_command_prefixes: exec_policy.get_allowed_prefixes().into_iter().collect(),
+};</code></pre>
+
+<p>Mathematically, let $I(E, P)$ denote the rendered permission instructions for environment profile $E$ and command prefix set $P$. Codex factors the state comparison into $(H(I(E, \varnothing)),\, P)$. On step $t$, if the base hash matches ($H(I(E_t, \varnothing)) = H(I(E_{t-1}, \varnothing))$) and prefixes grew monotonically ($P_{t-1} \subsetneq P_t$):</p>
+<div class="opt-equation">$$\Delta P_t = P_t \setminus P_{t-1} \neq \varnothing \;\land\; P_{t-1} \subseteq P_t \implies \text{emit } \operatorname{ApprovedCommandPrefixSaved}(\Delta P_t).$$</div>
+<p>Instead of $4{,}000$ tokens of repeated sandbox boilerplate, Codex appends a ~28-token <code>ApprovedCommandPrefixSaved</code> notice listing only $\Delta P_t$—falling back to full <code>PermissionsInstructions</code> only when a prefix is revoked ($P_{t-1} \not\subseteq P_t$) or the underlying sandbox profile $E_t$ itself changes!</p>
+
+<h2 id="date-only-clocks">2. Date-Only <code>%Y-%m-%d</code> Clocks &amp; Field-Level Environment Diffs</h2>
+<p>Injecting <code>Current time: 2026-10-31T14:22:09Z</code> into a prompt is a textbook anti-pattern: even inside a tail-appended fragment, formatting seconds or minutes forces a brand-new environment message on every single turn. In <code>core/src/session/world_state.rs</code> (lines 298–309), Codex reads the clock at day granularity only:</p>
+
+<pre><code class="language-rust">let current_date = if turn_context.config.include_environment_context_time {
+    self.read_clock_for_context(turn_context, "environment_date")
+        .await?
+        .map(|current_time| {
+            current_time
+                .with_timezone(&amp;chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+} else {
+    None
+};</code></pre>
+
+<p>Pair that with two more details in <code>core/src/context/world_state/environment.rs</code> (lines 29–31 and 148–202):</p>
+<ul>
+<li><strong>Process-Wide Shell Version Memoization:</strong> Probing PowerShell’s version via subprocess on Windows/WSL adds latency on every step; <code>static POWERSHELL_VERSIONS: LazyLock&lt;Mutex&lt;BTreeMap&lt;PathBuf, Option&lt;String&gt;&gt;&gt;&gt;</code> caches each binary’s version once per process lifetime.</li>
+<li><strong>Multi-Environment Diff Suppression:</strong> <code>EnvironmentsState::render_diff</code> diffs each environment ID’s <code>(cwd, status, error, shell, is_primary)</code> tuple plus <code>(shell_version, current_date, timezone, network, filesystem)</code>. Across 50 consecutive bash commands in the same directory on the same calendar date, <code>render_diff</code> emits <strong>zero</strong> bytes.</li>
+</ul>
+
+<h2 id="runtime-rejection">3. Runtime Tool Rejection Over Schema Removal (<code>plan.rs</code>)</h2>
+<p>Codex exposes a built-in <code>update_plan</code> checklist tool for tracking execution steps, but explicitly forbids using <code>update_plan</code> while brainstorming in conversational <strong>Plan Mode</strong>. A naive engineer would filter <code>update_plan</code> out of <code>Prompt.tools</code> whenever <code>turn.mode() == ModeKind::Plan</code>. Look at what happens if a user toggles <code>Default -&gt; Plan -&gt; Default</code>:</p>
+<ul>
+<li>On standard Responses/Chat APIs, mutating top-level <code>Prompt.tools</code> invalidates $100\%$ of the conversation KV cache twice!</li>
+<li>Even under Responses Lite, removing and re-adding the schema emits unnecessary <code>RemovedTools</code> and <code>AdditionalTools</code> deltas on every toggle.</li>
+</ul>
+<p>Instead, <code>PlanHandler</code> (<code>core/src/tools/handlers/plan.rs</code>, lines 87–91) leaves the tool schema untouched and rejects disallowed invocations in 4 lines of Rust:</p>
+
+<pre><code class="language-rust">if turn.mode() == ModeKind::Plan {
+    return Err(FunctionCallError::RespondToModel(
+        "update_plan is a TODO/checklist tool and is not allowed in Plan mode".to_string(),
+    ));
+}</code></pre>
+
+<p>Combined with a one-sentence warning in <code>plan.md</code> (<em>&ldquo;If you try to use <code>update_plan</code> in Plan mode, it will return an error&rdquo;</em>), the model almost never calls it—and toggling Plan Mode costs zero schema churn.</p>
+
+<h2 id="model-switch-and-routing">4. Tail <code>&lt;model_switch&gt;</code> &amp; Sub-Session Cluster Affinity</h2>
+<p>Two final cross-request patterns in <code>model.rs</code> and <code>client.rs</code> preserve KV caches across model switches and sub-sessions:</p>
+
+<div class="note-table"><table><caption>Cross-turn and cross-session cache affinity mechanisms in <code>model.rs</code> and <code>client.rs</code>.</caption><thead><tr><th>Scenario</th><th>Naive Failure Mode</th><th>Codex Source Mechanism</th></tr></thead><tbody>
+<tr><td><strong>Mid-thread model or effort change</strong></td><td>Replacing <code>base_instructions</code> at index 0 invalidates prefix tokens on compatible backends or breaks WebSocket state.</td><td><code>ModelInstructionsState::render_diff</code> (<code>model.rs:119-142</code>) preserves prior history, checks <code>suppress_model_change_announcements</code>, and appends <code>ModelSwitchInstructions</code> at the tail.</td></tr>
+<tr><td><strong>Guardian reviewer sub-session</strong></td><td>Fresh UUID <code>session_id</code> hashes to a random inference cluster whose radix cache is completely cold on the parent’s 60k-token transcript!</td><td><code>session_derived_cache_key</code> (<code>client.rs:723-727</code>) sets <code>"{source}:{parent_thread_id}"</code> AND copies <code>responses_metadata.parent_routing_affinity</code> (<code>client.rs:1807-1811</code>) onto the WebSocket dialer.</td></tr>
+</tbody></table></div>
+
+<p>That second row is a gem of distributed inference engineering: because Guardian’s evaluation prompt shares a common prefix (or session routing domain) with the parent session, propagating both <code>PromptCacheKey::SessionDerived</code> and <code>ChatGptRoutingAffinity</code> cookies steers the safety reviewer’s TCP/WebSocket connection to the exact same backend worker pool—turning what would be a cold $50{,}000$-token safety-review prefill into a warm cache hit.</p>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>Why does <code>PermissionsState</code> fall back to re-emitting the full <code>PermissionsInstructions</code> if a previously approved prefix is removed, instead of emitting a 1-line &ldquo;prefix revoked&rdquo; notice?</strong><p>Security asymmetry: when <em>granting</em> a new prefix ($P_{t-1} \subset P_t$), a short additive notice is purely capability-expanding and safe even if the model skims earlier text. When <em>tightening</em> permissions ($P_{t-1} \not\subseteq P_t$), restating the authoritative complete permission specification prevents the model from relying on stale permissive language earlier in the context window.</p></div>
+<div class="self-check"><strong>Why does <code>client.rs:735</code> use <code>metadata.session_id</code> instead of <code>session_derived_cache_key</code> in the <code>session-id</code> header when <code>is_non_root_agent()</code> is true?</strong><p>Read the comment at lines 732–739 of <code>client.rs</code>: spawned worker/explorer subagents have independent long-lived turn lifecycles, telemetry hooks, and rollout histories that must remain keyed to their own <code>session_id</code>, whereas ephemeral internal helper calls (<code>SessionSource::Internal</code>, such as Guardian) share the parent thread’s cache affinity.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="incremental-tool-schemas-in-history.html">← Ch. 02: Incremental Tool Schemas in History</a><a href="index.html">Sub-Series 01 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
