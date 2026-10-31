@@ -11958,7 +11958,8 @@ var BLOG_TREE = [
             label: '04 · Code Mode: V8 Tool Orchestration',
             children: [
               { title: 'Reading Guide: Code Mode — V8 Tool Orchestration', file: 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/03-stateful-llm-transport-and-compaction/five-mode-context-compaction.html', 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/json-schema-to-typescript-synthesis.html'] },
-              { title: '1. JSON Schema to Ambient TypeScript Synthesis, Recursive $ref Budgets &amp; code_mode_only Discovery', file: 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/json-schema-to-typescript-synthesis.html', links: ['real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/index.html'] }
+              { title: '1. JSON Schema to Ambient TypeScript Synthesis, Recursive $ref Budgets &amp; code_mode_only Discovery', file: 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/json-schema-to-typescript-synthesis.html', links: ['real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/index.html', 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/bypassing-context-window-in-v8.html'] },
+              { title: '2. Bypassing the LLM Context Window: Processing Untruncated MCP Payloads Inside V8 Heap Memory', file: 'real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/bypassing-context-window-in-v8.html', links: ['real-world-codebases/openai-codex/04-code-mode-v8-tool-orchestration/json-schema-to-typescript-synthesis.html'] }
             ]
           }
         ]
