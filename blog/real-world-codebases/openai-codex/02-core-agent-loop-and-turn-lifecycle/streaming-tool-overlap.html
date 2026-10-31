@@ -1,0 +1,122 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Streaming Tool Overlap: Dispatching FuturesOrdered Tool Calls While Tokens Still Stream | Neel Mishra</title><meta name="description" content="How OpenAI Codex overlaps background tool execution with live LLM token streaming: eager AbortOnDropHandle spawning on OutputItemDone, deterministic FuturesOrdered draining, persist-before-dispatch synthetic abort recovery, and live ToolCallInputDelta diff streaming."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/02-core-agent-loop-and-turn-lifecycle/streaming-tool-overlap.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--02-core-agent-loop-and-turn-lifecycle">← Real World Codebases / OpenAI Codex / 02 · Core Agent Loop &amp; Turn Lifecycle</a><div class="post-series-nav"><a href="index.html">Sub-Series 02 Reading Guide</a><span>Chapter 03 of 04</span></div><h1>3. Streaming Tool Overlap: Dispatching <code>FuturesOrdered</code> Tool Calls While Tokens Still Stream</h1><p class="post-meta">October 2026 · 16 min read · Chapter 3</p><p class="optimizer-lede">When a frontier coding model explores a repository, it routinely emits three to six parallel tool calls in a single response—reading four files and grepping two symbols—followed by several hundred tokens of JSON arguments or commentary. Naive agent harnesses buffer every item until <code>response.completed</code> arrives before spawning the first subprocess. Inside <code>codex-rs/core/src/session/turn.rs</code>, <code>stream_events_utils.rs</code>, and <code>tools/parallel.rs</code>, OpenAI Codex eliminates that end-of-stream barrier: each tool call spawns onto Tokio the exact millisecond its individual <code>OutputItemDone</code> frame arrives, executes concurrently behind remaining token generation, and drains through <code>FuturesOrdered</code> in deterministic emission order so KV-cache prefixes never permute.</p>
+
+<h2 id="latency-math">1. Breaking the End-of-Stream Barrier: The Latency Equation</h2>
+<p>Suppose a single sampling step streams for wall-clock duration $T_{\text{stream}}$ and emits $K$ tool calls $c_1, c_2, \dots, c_K$. Let $t_k^{\text{emit}} \in (0, T_{\text{stream}}]$ be the stream timestamp at which <code>ResponseEvent::OutputItemDone</code> closes tool call $c_k$, and let $d_k$ be its execution duration once admitted through the parallel gate.</p>
+<div class="opt-equation">$$\begin{aligned}
+T_{\text{step}}^{\text{sequential}} &amp;= T_{\text{stream}} + \sum_{k=1}^{K} d_k, \\
+T_{\text{step}}^{\text{post-stream batch}} &amp;= T_{\text{stream}} + \max_{1 \le k \le K} d_k, \\
+T_{\text{step}}^{\text{Codex overlap}} &amp;= \max\!\left(T_{\text{stream}},\; \max_{1 \le k \le K} \bigl(t_k^{\text{emit}} + d_k\bigr)\right) \implies T_{\text{tool\_blocking}} = \max\!\left(0,\; \max_{1 \le k \le K}\bigl(t_k^{\text{emit}} + d_k\bigr) - T_{\text{stream}}\right).
+\end{aligned}$$</div>
+<p>Look closely at $T_{\text{tool\_blocking}}$—measured directly by Codex’s <code>codex.tool_blocking</code> tracing span (<code>turn.rs:3564-3570</code>). Whenever fast local operations such as <code>rg</code> searches or file reads ($d_k \approx 15\text{–}40\text{ ms}$) finish while the model is still streaming arguments for $c_K$ ($t_k^{\text{emit}} + d_k \le T_{\text{stream}}$), <strong>post-stream tool latency collapses to zero</strong>.</p>
+
+<figure class="blog-figure"><img src="assets/streaming-tool-overlap-timeline.svg" alt="Comparison between naive post-stream batch execution and Codex streaming tool overlap using eager tokio::spawn and FuturesOrdered draining" loading="lazy"><figcaption>Figure 1: In Codex (<code>turn.rs:2870-3571</code>), each <code>OutputItemDone</code> persists the call item, spawns a background worker immediately via <code>AbortOnDropHandle::new(tokio::spawn(...))</code>, and pushes its completion future into <code>FuturesOrdered</code>. Fast tools finish while later tokens are still arriving over the socket.</figcaption></figure>
+
+<h2 id="eager-spawn-subtlety">2. The Subtle Rust Trap: Why Pushing into <code>FuturesOrdered</code> Alone Would Stall</h2>
+<p>In Rust, <code>async</code> blocks are lazy: pushing a standard unpolled future into <code>in_flight: FuturesOrdered&lt;InFlightFuture&lt;&#39;static&gt;&gt;</code> (<code>turn.rs:2870</code>) and waiting until line <code>3570</code> (<em>after</em> the <code>while stream.next().await</code> loop exits!) to call <code>drain_in_flight(&amp;mut in_flight, ...).await</code> would accomplish zero overlap—none of the futures would even be polled once during streaming!</p>
+<p>Codex avoids polling <code>in_flight</code> inside the stream <code>select!</code> loop—which would complicate borrows and interleave partial history writes—by making <code>ToolCallRuntime::handle_tool_call</code> <strong>eagerly spawn</strong> its Tokio task at call construction time before returning its outer join future (<code>stream_events_utils.rs:350-366</code> and <code>tools/parallel.rs:272-369</code>):</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/stream_events_utils.rs (lines 347-370)
+record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &amp;item).await;
+
+let cancellation_token = ctx.cancellation_token.child_token();
+let runtime = ctx.tool_runtime.clone();
+// handle_tool_call dispatches immediately, not when its future is polled.
+// Defer for post-model hooks or to cancel buffered calls during mailbox drains.
+let tool_future: InFlightFuture&lt;&#39;static&gt; = if ctx.defer_tool_dispatch {
+    Box::pin(async move {
+        if cancellation_token.is_cancelled() {
+            // The call is already in history; resume needs its output even if we never dispatch.
+            let output = ToolCallRuntime::aborted_response(&amp;call, /*elapsed_secs*/ None);
+            return Ok(output.into_response());
+        }
+        runtime.handle_tool_call(call, cancellation_token).await
+    })
+} else {
+    Box::pin(runtime.handle_tool_call(call, cancellation_token))
+};
+
+output.needs_follow_up = true;
+output.tool_future = Some(tool_future);</code></pre>
+
+<p>Inside <code>ToolCallRuntime::handle_tool_call_with_source</code> (<code>tools/parallel.rs:272-369</code>), calling the function synchronously executes <code>AbortOnDropHandle::new(tokio::spawn(async move { ... }))</code> on the Tokio runtime before returning the outer <code>completion</code> wrapper future:</p>
+
+<pre><code class="language-rust">// codex-rs/core/src/tools/parallel.rs (lines 272-335, condensed)
+let mut dispatch_handle = AbortOnDropHandle::new(tokio::spawn(
+    async move {
+        let _message_admission = message_admission?;
+        let (guard, admission_started) = async {
+            if let Some(tool_runtime) = tool_runtime
+                &amp;&amp; let Some(readiness) = tool_runtime.wait_until_ready(&amp;session)
+            {
+                readiness.await;
+            }
+            let admission_started = Instant::now();
+            let guard = if supports_parallel {
+                Either::Left(lock.read().await)   // Shared RwLock: concurrent reads/MCP/PTYs!
+            } else {
+                Either::Right(lock.write().await) // Exclusive RwLock: serializes mutations!
+            };
+            (guard, admission_started)
+        }
+        .or_cancel_tool(&amp;invocation_cancellation_token)
+        .await?;
+
+        let result = router.dispatch_tool_call_with_state(
+            session, step_context, invocation_cancellation_token,
+            tracker, dispatch_call, source, Arc::clone(&amp;dispatch_call_state),
+        ).await;
+        drop(guard);
+        result
+    }
+    .instrument(dispatch_span.clone().or_current()),
+));</code></pre>
+
+<h3>Why <code>FuturesOrdered</code> Instead of <code>FuturesUnordered</code>?</h3>
+<p>Because each tool already runs inside its own <code>tokio::spawn</code> worker task, completion order on OS threads is completely unconstrained: fast Worker #2 finishes in $8\text{ ms}$ and drops its <code>RwLockReadGuard</code> immediately without waiting for slow Worker #1 ($210\text{ ms}$). Yet when <code>drain_in_flight</code> (<code>turn.rs:2676-2704</code>) collects results after the stream ends, <code>FuturesOrdered</code> yields <code>[out_1, out_2, out_3]</code> in strict model-emission order:</p>
+<div class="opt-equation">$$\text{Execution schedule: }\text{out-of-order concurrent} \quad\wedge\quad \text{Rollout commit order: }(o_1, o_2, \dots, o_K) \equiv \text{deterministic}.$$</div>
+<p>If Codex appended tool outputs in race-condition completion order (<code>FuturesUnordered</code>), two identical replay runs or resumed rollouts would serialize tool outputs in different orders, non-deterministically scrambling conversation history and invalidating downstream KV-cache tests and replay traces.</p>
+
+<h2 id="persist-before-dispatch">3. Persist-Before-Dispatch, Deferred Hooks &amp; Cancellation Races</h2>
+<p>Three subtle failure modes arise the moment tool calls run concurrently with an active network stream. Every single one is explicitly guarded in <code>turn.rs</code> and <code>parallel.rs</code>:</p>
+
+<div class="note-table"><table><thead><tr><th>Concurrency Hazard</th><th>Failure Without Guard</th><th>Codex Invariant &amp; Source Location</th></tr></thead><tbody>
+<tr><td><strong>Stream aborts mid-turn after tool #1 already dispatched</strong></td><td>Tool #1 mutated disk or emitted UI events, yet its <code>FunctionCall</code> was never recorded in rollout history—corrupting thread state.</td><td><code>record_completed_response_item</code> runs on line <code>347</code> <em>before</em> <code>handle_tool_call</code> on line <code>365</code>, keeping rollout and conversation history synchronized at every instant.</td></tr>
+<tr><td><strong><code>defer_tool_dispatch</code> (sync <code>PostModelRequest</code> hook or mailbox drain) cancels before dispatch</strong></td><td><code>FunctionCall</code> was already persisted on line <code>347</code>, so skipping execution leaves an unmatched <code>FunctionCall</code> in history that breaks Responses API resume!</td><td>Lines <code>354-364</code> wrap the call in a lazy <code>async move</code> that checks <code>cancellation_token.is_cancelled()</code> and synthesizes <code>ToolCallRuntime::aborted_response(&amp;call, None)</code> so every persisted call gets a matching output.</td></tr>
+<tr><td><strong>Tool finishes on worker thread at the exact microsecond user hits <code>Esc</code></strong></td><td>Both the worker thread and the outer cancellation branch emit terminal UI events, double-reporting completion + abort.</td><td><code>call_state.terminal_outcome_reached</code> (<code>AtomicBool</code> with <code>AcqRel</code> swap at <code>parallel.rs:413-428</code>) ensures exactly one terminal outcome and <code>notify_tool_aborted</code> fires.</td></tr>
+<tr><td><strong><code>request_user_input</code> pauses turn while token count event fires</strong></td><td>Clients see a misleading token-usage progress update while the turn is intentionally suspended awaiting user answers.</td><td><code>send_token_count_event</code> is deferred until <code>turn.rs:3573-3579</code>—strictly <em>after</em> <code>drain_in_flight</code> resolves, yet <em>before</em> checking <code>cancellation_token.is_cancelled()</code> so completed response tokens are never lost on abort.</td></tr>
+<tr><td><strong>Sampling trace span leaks into background tool tasks</strong></td><td>Overlapping tool spans inherit <code>codex.sampling</code> as parent and stretch sampling telemetry past the end of the HTTP/WS response.</td><td><code>turn.rs:2764-2770</code> explicitly comments: <em>"Do not enter this span: overlapping tools must not retain it past sampling"</em>—passing <code>&amp;sampling_span</code> only to non-tool stream processing.</td></tr>
+</tbody></table></div>
+
+<h2 id="streaming-diffs-and-guardian">4. Live <code>ToolCallInputDelta</code> Diffs &amp; Per-Item Inline Guardian Zips</h2>
+<p>Overlapping *completed* tool items is only half the story. What about a single large <code>apply_patch</code> call whose patch body takes $3\text{ seconds}$ to stream? Codex streams tool-argument diffs <em>before</em> <code>OutputItemDone</code> ever arrives, and zips inline safety scores per tool item:</p>
+
+<ol>
+  <li><strong>Live Streaming Patch Diffs (<code>turn.rs:3183-3197, 3411-3428</code>)</strong>: When <code>ResponseEvent::OutputItemAdded(ResponseItem::CustomToolCall { id, call_id, name, .. })</code> arrives—the very first frame of a freeform tool call—Codex calls <code>tool_runtime.create_diff_consumer(&amp;tool_name)</code>. As raw grammar chunks stream in via <code>ResponseEvent::ToolCallInputDelta</code>, <code>consumer.push_delta(&amp;delta)</code> incrementally parses the in-progress patch and emits live UI diff previews while the model is still writing subsequent hunks!</li>
+  <li><strong>Per-Call Serving Assessment Handoff (<code>turn.rs:3012-3023, 3084-3086</code>)</strong>: When OpenAI’s serving stack emits an inline 1-token <code>ResponseEvent::GuardianAssessment</code> right before a risky tool call’s <code>OutputItemDone</code>, Codex stores it in <code>pending_assessment</code>, calls <code>pending_assessment.take()</code> inside <code>OutputItemDone</code>, zips it with <code>assessment_authorization</code>, and clones an item-scoped <code>StepContext::with_serving_assessment</code> onto a fresh <code>item_tool_runtime</code>. Taking the option ensures an assessment scored for tool call $c_1$ can never accidentally bleed into tool call $c_2$ later in the same stream.</li>
+</ol>
+
+<pre><code class="language-rust">// codex-rs/core/src/session/turn.rs (lines 3011-3024 &amp; 3083-3092, condensed)
+ResponseEvent::OutputItemDone(mut item) =&gt; {
+    let serving_assessment = pending_assessment
+        .take()
+        .zip(assessment_authorization.as_ref())
+        .map(|(assessment, authorization)| crate::guardian::ServingAssessment {
+            response_id: response_id_for_assessment.clone(),
+            assessment,
+            authorization: authorization.clone(),
+        });
+    // Attach the assessment ONLY to this item's cloned ToolCallRuntime:
+    let mut item_tool_runtime = tool_runtime.clone();
+    item_tool_runtime.step_context = item_step_context;
+    // ...
+    if let Some(tool_future) = output_result.tool_future {
+        in_flight.push_back(tool_future);
+    }
+}</code></pre>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>What happens if the stream drops with a network error while three background tool tasks are already running inside <code>in_flight: FuturesOrdered</code>?</strong><p>Because every background task was spawned inside an <code>AbortOnDropHandle</code> (<code>parallel.rs:272</code>) owned by its <code>InFlightFuture</code> inside <code>in_flight</code>, returning <code>Err(error)</code> from <code>try_run_sampling_request</code> drops <code>in_flight</code> at scope exit—automatically calling <code>JoinHandle::abort()</code> on every unfinished Tokio task so zero orphan workers outlive the failed sampling request.</p></div>
+<div class="self-check"><strong>Why do dynamic tools set <code>finishes_on_cancellation() == true</code> in <code>parallel.rs:372</code> instead of letting <code>dispatch_handle.abort()</code> kill their Tokio task immediately?</strong><p>Certain dynamic or external-protocol handlers must observe <code>cancellation_token.cancelled()</code> internally so they can flush clean protocol cancellation frames and publish their own terminal rollout item before exiting; hard-aborting their future mid-await would sever that cleanup handshake.</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="non-blocking-submission-loop.html">← Ch. 02: Non-Blocking submission_loop &amp; Admission</a><a href="index.html">Sub-Series 02 Reading Guide →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>
