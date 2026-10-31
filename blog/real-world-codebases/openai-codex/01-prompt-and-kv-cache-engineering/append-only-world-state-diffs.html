@@ -1,0 +1,125 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Append-Only Context State Machines: WorldState Sections &amp; RFC 7386 Tail Diffs | Neel Mishra</title><meta name="description" content="How OpenAI Codex preserves 100% LLM KV-cache hit rates across mid-session state changes using typed WorldStateSection state machines, domain-tagged SHA-1 fingerprints, retained-fragment survival checks, and RFC 7386 JSON Merge Patch rollout checkpoints."><link rel="canonical" href="https://neelmishra.github.io/blog/real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&amp;family=Playfair+Display:wght@400;500;600;700&amp;family=Syne:wght@600;700;800&amp;display=swap" rel="stylesheet"><link rel="stylesheet" href="../../../../styles.css"><link rel="stylesheet" href="../../../../blog.css"><link rel="stylesheet" href="../../../../learning-notes.css"><link rel="stylesheet" href="../../../dl/training-labs/training-notes.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script defer src="../../../dl/training-labs/math-render.js"></script></head><body>
+<header class="site-header"><a class="brand" href="../../../../index.html">Neel Mishra</a><nav class="nav-links" aria-label="Primary"><a href="../../../../index.html">Home</a><a href="../../../../experience.html">Experience</a><a href="../../../../projects.html">Projects</a><a class="active" href="../../../../blog.html">Blog</a><a href="../../../../index.html#contact">Contact</a></nav></header><div class="blog-post-layout"><aside class="blog-sidebar"><nav class="blog-nav" aria-label="Blog explorer"></nav><div class="toc-section"><h4>Table of Contents</h4><ul></ul></div></aside><article class="blog-post-content learning-note training-note"><a class="back-to-blog" href="../../../../blog.html#folder-real-world-codebases--openai-codex--01-prompt-and-kv-cache-engineering">← Real World Codebases / OpenAI Codex / 01 · Prompt &amp; KV-Cache Engineering</a><div class="post-series-nav"><a href="index.html">OpenAI Codex · 01 Prompt &amp; KV-Cache Engineering</a><span>Chapter 01 / 5</span></div><h1>Append-Only Context State Machines: <code>WorldState</code> Sections &amp; RFC 7386 Tail Diffs</h1><p class="post-meta">October 2026 · 15 min read</p><p class="optimizer-lede">Why rewriting a Jinja system-prompt template on every agent step silently destroys GPU radix prefix caches, and how OpenAI Codex’s <code>WorldState</code> subsystem (<code>core/src/context/world_state/mod.rs</code> and <code>core/src/session/world_state.rs</code>) models ~18 orthogonal slices of environment, tool, permission, and mode state as append-only tail transitions persisted via compact <strong>RFC 7386 JSON Merge Patches</strong>.</p>
+
+<h2 id="causal-cache-physics">1. Why System-Prompt Re-Templating Is a Quadratic Tax</h2>
+<p>In an autoregressive Transformer with causal attention mask $M_{ij} = \mathbb{I}[j \le i]$, the key-value projections $(\mathbf{K}_i^{(\ell)}, \mathbf{V}_i^{(\ell)})$ at position $i$ and layer $\ell$ depend deterministically on the exact token prefix $(x_1, x_2, \dots, x_i)$ and the serialized tool definitions preceding it. Modern inference engines (such as vLLM’s Automatic Prefix Caching or OpenAI’s Responses API backend) partition token sequences into fixed-size blocks of $B$ tokens (typically $B = 16$ or $64$) and address GPU KV memory by chained cryptographic block hashes:</p>
+
+<div class="opt-equation">$$h_k = \operatorname{Hash}\!\bigl(h_{k-1} \,\|\, x_{(k-1)B + 1 : kB}\bigr), \qquad h_0 = \operatorname{Hash}(\text{model\_id} \,\|\, \text{top\_level\_tools}).$$</div>
+
+<p>Look closely at what happens in a conventional agent harness that renders a fresh system prompt on every step—for example, interpolating <code>Current directory: {{ cwd }}</code>, <code>Mode: {{ mode }}</code>, or <code>Approved commands: {{ rules }}</code> near the top of the prompt. If the agent is at step $s = 25$ with $80{,}000$ tokens of accumulated code-reading and test logs, and the user clicks <em>&ldquo;Always allow <code>cargo test</code>&rdquo;</em> or toggles Plan Mode:</p>
+<ol>
+<li>One string inside block $k = 4$ (around token $250$) changes.</li>
+<li>Because $h_k$ chains $h_{k-1}$, <strong>every downstream block hash $h_4, h_5, \dots, h_{1250}$ changes simultaneously</strong>.</li>
+<li>All $79{,}750$ tokens of conversation history—despite being byte-for-byte identical—suffer a KV-cache miss, forcing a full GPU prefill pass and billing uncached input rates ($5\times\text{–}10\times$ higher than cached tokens).</li>
+</ol>
+
+<figure><div class="opt-figure-pan" tabindex="0" role="region" aria-label="Scrollable figure"><img src="assets/world-state-append-only-diff.svg" width="920" height="400" alt="Left: Naive Harness Prefix Re-Templating showing how mutating cwd or mode inside the system prompt at step 13 invalidates all 74,000 downstream history tokens in causal self-attention. Right: OpenAI Codex WorldState Tail Diffs keeping [0..N] 100% immutable and appending only a +90 token diff at the tail, backed by RFC 7386 JSON Merge Patch rollout checkpoints."></div><span class="opt-scroll-hint">Scroll the figure horizontally on small screens.</span><figcaption>Figure 1: Left: Mutating any byte near the start of the prompt invalidates every downstream KV block hash across the entire conversation window. Right: Codex’s <code>WorldState</code> freezes the prefix and emits minimal delta fragments strictly at the tail of <code>input</code>.</figcaption></figure>
+
+<h2 id="world-state-trait">2. Inside the <code>WorldStateSection</code> Trait &amp; <code>PreviousSectionState</code></h2>
+<p>Codex eliminates prefix mutation by making append-only state transitions a first-class abstraction in <code>codex-rs/core/src/context/world_state/mod.rs</code>. Rather than building a monolithic string, <code>Session::build_world_state_for_step</code> constructs an ordered <code>WorldState</code> holding an <code>IndexMap&lt;&amp;'static str, Box&lt;dyn ErasedWorldStateSection&gt;&gt;</code>. Each slice of model-visible reality implements <code>WorldStateSection</code>:</p>
+
+<pre><code class="language-rust">/// What is known about a section's previously model-visible state.
+pub(crate) enum PreviousSectionState&lt;'a, T&gt; {
+    /// No persisted snapshot or matching fragment exists in retained history.
+    Absent,
+    /// Retained history contains the section, but its typed snapshot is unavailable.
+    Unknown,
+    /// The exact persisted snapshot is available.
+    Known(&amp;'a T),
+}
+
+pub(crate) trait WorldStateSection: Send + Sync + 'static {
+    const ID: &amp;'static str;
+    type Snapshot: DeserializeOwned + Serialize;
+
+    fn should_persist(&amp;self) -&gt; bool { true }
+    fn matches_legacy_fragment(_role: &amp;str, _text: &amp;str) -&gt; bool { false }
+    fn has_retained_fragment_matcher() -&gt; bool { false }
+    fn matches_retained_fragment(_role: &amp;str, _text: &amp;str) -&gt; bool { false }
+
+    /// Returns an optional snapshot update and ordered model-context updates.
+    /// Returning `None` for the snapshot leaves the stored comparison state unchanged.
+    fn render_diff(
+        &amp;self,
+        previous: PreviousSectionState&lt;'_, Self::Snapshot&gt;,
+    ) -&gt; SectionTransition&lt;Self::Snapshot&gt;;
+}</code></pre>
+
+<p>Three subtle systems details in <code>WorldState::render_history_diff</code> (lines 506–554 of <code>world_state/mod.rs</code>) make this architecture resilient across session resumes, schema upgrades, and context compactions:</p>
+<ol>
+<li><strong>Three-Valued Prior Knowledge (<code>Absent</code> vs. <code>Unknown</code> vs. <code>Known(&amp;T)</code>):</strong> When resuming an older session logged before a section persisted typed snapshots, <code>has_legacy_fragment</code> scans retained history for matching XML tags (such as <code>&lt;permissions instructions&gt;</code> or <code>&lt;collaboration_mode&gt;</code>). If found without a snapshot, the section receives <code>PreviousSectionState::Unknown</code>—instructing it to prepend an explicit <em>&ldquo;These instructions replace all previously provided...&rdquo;</em> notice rather than silently assuming clean slate!</li>
+<li><strong>Retained-Fragment Survival Check Across Compaction:</strong> Suppose the persisted snapshot says <code>permissions</code> was already emitted, <em>but</em> context compaction or manual history trimming evicted that message from the retained <code>ResponseItem</code> slice. Sections that set <code>has_retained_fragment_matcher() -&gt; true</code> trigger a linear scan <code>has_retained_fragment(items, section)</code>; if their rendered fragment vanished from history, <code>render_history_diff</code> downgrades <code>Known(prev)</code> to <code>PreviousSectionState::Absent</code>, automatically re-hydrating the missing instructions!</li>
+<li><strong>Deterministic Insertion Order &amp; Dynamic Extension Splicing:</strong> Because <code>WorldState</code> uses <code>IndexMap</code> (not <code>HashMap</code>), the ~18 built-in sections always render in a deterministic sequence across turns. Even external plugin contributors obey strict placement: in <code>add_extension_section</code> (lines 484–498), <code>"host_skills"</code> is explicitly spliced immediately <em>before</em> <code>PermissionsState::ID</code> via <code>IndexMap::shift_insert</code> so prompt ordering never jitters.</li>
+</ol>
+
+<h2 id="ordered-sections">3. The 18-Section Inventory Assembled Per Step</h2>
+<p>In <code>core/src/session/world_state.rs</code>, <code>build_world_state_for_step</code> registers each model-visible concern as an independent state machine. Notice how cleanly unrelated domains decouple:</p>
+
+<div class="note-table"><table><caption>Representative <code>WorldStateSection</code> implementations registered in <code>Session::build_world_state_for_step</code>.</caption><thead><tr><th>Section <code>ID</code></th><th>Rust Type</th><th>Persisted <code>Snapshot</code></th><th>Tail Update Emitted on Mutation</th></tr></thead><tbody>
+<tr><td><code>top_level_tools</code></td><td><code>TopLevelToolsState</code></td><td><code>BTreeMap&lt;String, WorldStateHash&gt;</code></td><td><code>ResponseItem::AdditionalTools</code> + <code>RemovedTools</code> developer notice</td></tr>
+<tr><td><code>model</code></td><td><code>ModelInstructionsState</code></td><td>Model slug + instructions hash</td><td>Base developer instructions or <code>&lt;model_switch&gt;</code> notice</td></tr>
+<tr><td><code>token_budget</code> / <code>context_window_guidance</code></td><td><code>TokenBudgetContext</code></td><td>Window lineage IDs + guidance hash</td><td>Compaction window continuity &amp; token-budget guidance</td></tr>
+<tr><td><code>agents_md</code></td><td><code>AgentsMdState</code></td><td><code>{ directory, text }</code></td><td><code>&lt;user_instructions&gt;</code> with replacement/removal header</td></tr>
+<tr><td><code>permissions</code></td><td><code>PermissionsState</code></td><td>Empty-policy hash + <code>BTreeSet&lt;Vec&lt;String&gt;&gt;</code></td><td>Full <code>&lt;permissions instructions&gt;</code> or 1-line <code>ApprovedCommandPrefixSaved</code></td></tr>
+<tr><td><code>collaboration_mode</code></td><td><code>CollaborationModeState</code></td><td><code>{ mode, model, instructions }</code></td><td><code>&lt;collaboration_mode&gt;</code> developer block</td></tr>
+<tr><td><code>persistent_mode</code></td><td><code>PersistentModeState</code></td><td><code>{ instructions: Option&lt;WorldStateHash&gt; }</code></td><td><code>&lt;persistent_mode&gt;</code> autonomous execution rules</td></tr>
+<tr><td><code>environments</code></td><td><code>EnvironmentsState</code></td><td><code>EnvironmentsSnapshot</code> (per-env CWD, shell, date, net, FS)</td><td><code>&lt;environment_context&gt;</code> user XML diff</td></tr>
+<tr><td><code>multi_agent_mode</code> / <code>model_catalog</code></td><td><code>MultiAgentModeState</code></td><td>Mode + subagent catalog hash</td><td>Subagent orchestration instructions &amp; spawnable model catalog</td></tr>
+</tbody></table></div>
+
+<p>Notice too how <code>environment_subagents</code> in <code>session/world_state.rs</code> (lines 145–159) bounds subagent enumeration to both <code>MAX_ENVIRONMENT_SUBAGENTS</code> and <code>MAX_ENVIRONMENT_SUBAGENT_BYTES</code>—preventing an explosion of spawned child workers from blowing out the tail diff.</p>
+
+<h2 id="canonical-hashing-and-rfc7386">4. Collision-Proof <code>WorldStateHash</code> &amp; RFC 7386 Rollout Checkpoints</h2>
+<p>Comparing multi-kilobyte prompt fragments by storing raw strings on every step in the rollout JSONL log would bloat session files on disk. Instead, Codex computes compact canonical SHA-1 digests via <code>WorldStateHash</code> (lines 364–398 of <code>world_state/mod.rs</code>):</p>
+
+<pre><code class="language-rust">impl WorldStateHash {
+    pub(crate) fn from_json(value: &amp;Value) -&gt; Self {
+        let mut value = value.clone();
+        value.sort_all_objects();
+        Self(format!("{:x}", Sha1::digest(value.to_string().as_bytes())))
+    }
+
+    pub(crate) fn from_fragment(fragment: &amp;(impl ContextualUserFragment + ?Sized)) -&gt; Self {
+        let mut hasher = Sha1::new();
+        match fragment.render() {
+            ContentItem::InputText { text } =&gt; {
+                hasher.update(b"codex-world-state-fragment-v1\0");
+                hash_component(&amp;mut hasher, fragment.role());
+                hash_component(&amp;mut hasher, &amp;text);
+            }
+            content =&gt; {
+                let content = serde_json::to_vec(&amp;content)
+                    .unwrap_or_else(|_| unreachable!("ContentItem always serializes"));
+                hasher.update(b"codex-world-state-fragment-v2\0");
+                hash_component(&amp;mut hasher, fragment.role());
+                hasher.update((content.len() as u64).to_be_bytes());
+                hasher.update(content);
+            }
+        }
+        Self(format!("{:x}", hasher.finalize()))
+    }
+}
+
+fn hash_component(hasher: &amp;mut Sha1, value: &amp;str) {
+    let value = value.replace("\r\n", "\n");
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}</code></pre>
+
+<p>Every line in those 30 lines fixes a real production edge case:</p>
+<ul>
+<li><strong>Canonical JSON Key Sorting:</strong> <code>value.sort_all_objects()</code> recursively sorts JSON object keys before hashing so MCP servers returning non-deterministic map key orders never trigger false-positive tool-schema diffs.</li>
+<li><strong>Cross-OS Line-Ending Normalization:</strong> <code>value.replace("\r\n", "\n")</code> ensures resuming a session across Windows and WSL2 (sharing <code>$CODEX_HOME</code>) produces identical fragment hashes.</li>
+<li><strong>64-Bit Big-Endian Length Framing + Domain Tags:</strong> Hashing <code>role || text</code> naively without length framing permits boundary-ambiguity collisions (e.g., <code>("user", "ab")</code> vs. <code>("use", "rab")</code>). Prefixing a versioned NUL-terminated domain tag (<code>codex-world-state-fragment-v1\0</code>) and each component’s 8-byte big-endian length eliminates boundary collisions completely.</li>
+</ul>
+
+<h3 id="rfc7386-null-trap">RFC 7386 JSON Merge Patch &amp; The &ldquo;Never Serialize to <code>null</code>&rdquo; Rule</h3>
+<p>When persisting checkpoints to disk, <code>WorldStateSnapshot</code> stores <code>sections: BTreeMap&lt;String, Value&gt;</code> and writes only the <strong>RFC 7386 JSON Merge Patch</strong> delta between consecutive steps via <code>merge_patch_from(&amp;previous)</code> (lines 430–463):</p>
+<div class="opt-equation">$$\Delta S_t = \operatorname{MergePatch}(S_{t-1}, S_t), \qquad S_t[k] = \begin{cases} \text{deleted} &amp; \text{if } \Delta S_t[k] = \texttt{null}, \\ \operatorname{Apply}(S_{t-1}[k], \Delta S_t[k]) &amp; \text{otherwise.} \end{cases}$$</div>
+<p>In RFC 7386, a JSON <code>null</code> value means <em>delete this key from the target object</em>. That explains the prominent invariant documented on <code>WorldStateSection</code> (line 316) and <code>PersistentModeSnapshot</code> (line 49 of <code>persistent_mode.rs</code>): <strong>a section’s <code>Snapshot</code> type must never serialize to top-level JSON <code>null</code>!</strong> For example, when <code>PersistentModeState</code> is disabled, it persists <code>{"instructions": null}</code> (a JSON <em>object</em> wrapping an optional field) rather than <code>Option&lt;WorldStateHash&gt;</code> directly—because serializing top-level <code>None</code> as <code>null</code> would delete the <code>"persistent_mode"</code> key from the merged snapshot and lose the distinction between &ldquo;known disabled&rdquo; and &ldquo;never recorded&rdquo;!</p>
+
+<h2 id="checks">5. Questions worth answering</h2>
+<div class="self-check"><strong>What happens if a section’s <code>render_diff</code> returns <code>(None, vec![])</code> instead of <code>(Some(snapshot), vec![])</code>?</strong><p>Look at lines 538–543 of <code>world_state/mod.rs</code>: when <code>render_diff</code> returns <code>None</code> for its new snapshot (as <code>PermissionsState</code> and <code>AgentsMdState</code> do when nothing changed), <code>render_with</code> clones the existing entry from <code>stored</code> so <code>merge_patch_from</code> sees zero diff for that section—avoiding both prompt tokens and unnecessary rollout checkpoint writes.</p></div>
+<div class="self-check"><strong>Why do sections like <code>AgentsMdState</code> and <code>PersistentModeState</code> emit an explicit <code>REMOVAL_NOTICE</code> message at the tail when turned off, instead of deleting their earlier message from history?</strong><p>Deleting an earlier message from index $j &lt; N$ in <code>input</code> mutates the sequence at position $j$, invalidating the GPU KV cache for every token in $[j+1, N]$ and breaking WebSocket <code>previous_response_id</code> prefix continuation. Appending a 12-token developer/user notice (<em>&ldquo;The previously provided instructions no longer apply.&rdquo;</em>) at index $N+1$ retires the instruction semantically while preserving $100\%$ of the cached KV blocks!</p></div>
+
+<nav class="post-nav" aria-label="Series navigation"><a href="index.html">← Sub-Series 01 Reading Guide</a><a href="../index.html">Master Overview: OpenAI Codex →</a></nav></article></div><script src="../../../../script.js"></script><script src="../../../../blog-posts.js"></script><script src="../../../../blog.js"></script><script src="../../../../anim-speed.js"></script><script src="../../../dl/training-labs/training-math.js"></script><script src="../../../dl/training-labs/training-ui.js"></script><script src="../../../../code-highlight.js"></script><script data-goatcounter="https://neelmishra.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script></body></html>

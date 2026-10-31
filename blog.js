@@ -11918,7 +11918,15 @@ var BLOG_TREE = [
         name: 'openai-codex',
         label: 'OpenAI Codex',
         children: [
-          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: [] }
+          { title: 'Overview: Inside OpenAI Codex (120+ Rust Crates &amp; 11-Series Architecture Map)', file: 'real-world-codebases/openai-codex/index.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html'] },
+          {
+            name: '01-prompt-and-kv-cache-engineering',
+            label: '01 · Prompt & KV-Cache Engineering',
+            children: [
+              { title: 'Reading Guide: Prompt &amp; KV-Cache Engineering', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html', links: ['real-world-codebases/openai-codex/index.html', 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html'] },
+              { title: '1. Append-Only Context State Machines: WorldState Sections &amp; RFC 7386 Tail Diffs', file: 'real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/append-only-world-state-diffs.html', links: ['real-world-codebases/openai-codex/01-prompt-and-kv-cache-engineering/index.html'] }
+            ]
+          }
         ]
       }
     ]
