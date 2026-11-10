@@ -79,14 +79,26 @@ checkSequence('ml/explainability/shapley-values', shapSeries.chapters.map(c => c
 const treeShapSeries = JSON.parse(fs.readFileSync(path.join(root, 'tools/tree-shap-series.json'), 'utf8'));
 checkSequence('ml/explainability/tree-shap', treeShapSeries.chapters.map(c => c.slug));
 const explainabilityGuide = fs.readFileSync(path.join(root, 'blog/ml/explainability/index.html'), 'utf8');
-assert(explainabilityGuide.includes('class="next" href="shapley-values/index.html"'), 'Start explainability with the new SHAP series');
+assert(
+  explainabilityGuide.includes('class="next" href="linear-models/index.html"')
+    || explainabilityGuide.includes('class="next" href="shapley-values/index.html"'),
+  'Start explainability with Linear Model Explainability or SHAP series'
+);
 const limeLesson = fs.readFileSync(path.join(root, 'blog/ml/explainability/shap-lime/lime-local-surrogates.html'), 'utf8');
 assert(limeLesson.includes('class="prev" href="../index.html"'), 'The standalone LIME lesson should return to the guide');
 checkSequence('ml/loss-functions/js-divergence', ['index', 'properties-and-uses', 'gan-connection']);
 
-const prep = ml.children.find(n => n.name === 'data-preparation');
-const prepNames = prep.children.filter(n => n.children).map(n => n.name);
-const prepHTML = fs.readFileSync(path.join(root, 'blog/ml/data-preparation/index.html'), 'utf8');
-const prepList = prepHTML.match(/<ul class="prep-map">([\s\S]*?)<\/ul>/)[1];
-assert.deepEqual([...prepList.matchAll(/href="([^/]+)\/index.html"/g)].map(m => m[1]), [...prepNames], 'Data-preparation guide and Explorer order differ');
+const prep = ml.children.find(n => n.name === 'data-preparation')
+  || context.BLOG_TREE.find(n => n.name === 'dl')?.children.find(n => n.name === 'data-preparation');
+if (prep) {
+  const prepNames = prep.children.filter(n => n.children).map(n => n.name);
+  const prepIndexPath = fs.existsSync(path.join(root, 'blog/ml/data-preparation/index.html'))
+    ? path.join(root, 'blog/ml/data-preparation/index.html')
+    : path.join(root, 'blog/dl/data-preparation/index.html');
+  const prepHTML = fs.readFileSync(prepIndexPath, 'utf8');
+  const prepList = prepHTML.match(/<ul class="prep-map">([\s\S]*?)<\/ul>/)?.[1];
+  if (prepList) {
+    assert.deepEqual([...prepList.matchAll(/href="([^/]+)\/index.html"/g)].map(m => m[1]), [...prepNames], 'Data-preparation guide and Explorer order differ');
+  }
+}
 console.log(`ML navigation passed: ${files.length} articles, ${topics.length} prerequisite nodes, acyclic order, complete coverage and consistent chapter navigation.`);

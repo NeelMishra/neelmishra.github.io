@@ -100,6 +100,20 @@ results["linear"] = {
     "ridge_objective": float(ridge_sse+2*.75**2),
     "first_gradient": gradient.tolist(), "first_step": step.tolist(),
 }
+fig, ax = plt.subplots(figsize=(8.4, 4.8), layout="constrained")
+hx = np.linspace(0.6, 3.4, 200)
+ax.plot(hx, 2 + 1.5*(hx - 2), color=GREEN, lw=2.3, label="OLS fit: ŷ = 2 + 1.5(x − 2)")
+ax.plot(hx, 2 + 0.75*(hx - 2), color=GOLD, lw=2.0, ls="--", label="Ridge (λ = 2): ŷ = 2 + 0.75(x − 2)")
+ols_preds = ols.predict(u[:, None])
+for hi, yi, pi, nm in zip(hours, y, ols_preds, ["Asha (1, 1)", "Ben (2, 1)", "Cara (3, 4)"]):
+    ax.plot([hi, hi], [yi, pi], color=GRAY, ls=":", lw=1.4)
+    ax.annotate(nm, (hi, yi), xytext=(8, 7 if yi >= pi else -14), textcoords="offset points", fontsize=9.5, fontweight="bold")
+ax.scatter(hours, y, color="#244e78", s=85, zorder=4, label="Observed students")
+ax.scatter([2.0], [2.0], color=GRAY, marker="+", s=110, zorder=5, label="Centroid (x̄ = 2, ȳ = 2)")
+ax.set(xlim=(0.6, 3.55), ylim=(-0.1, 4.6), xlabel="Practice hours (x)",
+       ylabel="Quiz points (y)", title="Least squares vs. Ridge shrinkage through the centroid")
+ax.legend(frameon=False, loc="upper left", fontsize=9.5)
+save(fig, "linear-regression-fit.svg")
 
 # Multinomial NB: class 1 is spam. sklearn estimates the same class/word counts.
 word_rows = np.array([[2,1,0], [1,1,0], [0,0,2], [1,0,1]])
@@ -116,6 +130,23 @@ results["naive_bayes"] = {
     "spam_probability": float(spam),
     "gaussian_spam_probability": float(gaussian_spam),
 }
+fig, ax = plt.subplots(figsize=(8.4, 4.6), layout="constrained")
+gx = np.linspace(0, 18, 400)
+ham_pdf = (1 / np.sqrt(2*np.pi*4)) * np.exp(-(gx - 6)**2 / (2*4))
+spam_pdf = (1 / np.sqrt(2*np.pi*4)) * np.exp(-(gx - 12)**2 / (2*4))
+ax.plot(gx, ham_pdf, color=GREEN, lw=2.3, label="Non-spam: N(μ = 6, σ² = 4)")
+ax.plot(gx, spam_pdf, color=GOLD, lw=2.3, label="Spam: N(μ = 12, σ² = 4)")
+ax.axvline(9.0, color=GRAY, ls="--", lw=1.5, label="Equal-variance boundary: x = 9")
+ax.scatter([4, 8], [0.006, 0.006], color=GREEN, s=75, zorder=4)
+ax.scatter([10, 14], [0.006, 0.006], color=GOLD, marker="s", s=75, zorder=4)
+ax.annotate("Query x = 10 → P(spam | x) ≈ 0.818", (10, (1/np.sqrt(8*np.pi))*np.exp(-4/8)),
+            xytext=(12, 16), textcoords="offset points", fontsize=9.5, color="#244e78", fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color="#244e78", lw=1.1))
+ax.set(xlim=(0, 18), ylim=(0, 0.24), xlabel="Continuous feature value (x)",
+       ylabel="Class-conditional density p(x | c)",
+       title="Shared Gaussian variance produces a linear log-odds threshold")
+ax.legend(frameon=False, loc="upper left", fontsize=9.5)
+save(fig, "naive-bayes-gaussian.svg")
 
 # Logistic gradients checked by central differences, plus an actual loss reduction.
 x = np.array([0.,1.,2.,3.])
@@ -147,6 +178,21 @@ results["logistic"] = {
     "start_loss": float(logistic_loss(theta)),
     "updated": updated.tolist(), "updated_loss": float(logistic_loss(updated)),
 }
+fig, ax = plt.subplots(figsize=(8.4, 4.6), layout="constrained")
+lx = np.linspace(-0.5, 3.5, 300)
+p_init = 1 / (1 + np.exp(-(-1.5 + 1.0*lx)))
+p_next = 1 / (1 + np.exp(-(updated[0] + updated[1]*lx)))
+ax.plot(lx, p_init, color=GRAY, ls="--", lw=1.9, label="Initial sigmoid: σ(−1.5 + 1.0x), loss = 0.338")
+ax.plot(lx, p_next, color=GREEN, lw=2.4, label="After 1 update: σ(−1.5 + 1.116x), loss = 0.315")
+ax.axhline(0.5, color=GRAY, alpha=0.35, lw=1)
+ax.scatter(x[y==0], y[y==0], color=GOLD, s=85, zorder=4, label="Observed y = 0 (Asha, Ben)")
+ax.scatter(x[y==1], y[y==1], color=GREEN, marker="s", s=85, zorder=4, label="Observed y = 1 (Cara, Dev)")
+ax.scatter(x, prob, facecolors="none", edgecolors="#244e78", s=85, lw=1.6, zorder=5, label="Initial predicted probabilities pᵢ")
+ax.set(xlim=(-0.5, 3.5), ylim=(-0.06, 1.06), xlabel="Practice hours (x)",
+       ylabel="Predicted probability P(y = 1 | x)",
+       title="One gradient step steepens the sigmoid toward the observed labels")
+ax.legend(frameon=False, loc="center right", fontsize=9)
+save(fig, "logistic-sigmoid-update.svg")
 
 # Trace K-means and compare the result to a separate implementation.
 points = np.array([1.,2.,3.,8.,9.,10.])
