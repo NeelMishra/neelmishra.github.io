@@ -551,6 +551,95 @@ ax.set(xlim=(.5,7.5),ylim=(.5,6.5),xlabel="Measurement 1 (x₁)",
 ax.set_aspect("equal",adjustable="box")
 ax.legend(loc="upper right",frameon=False,fontsize=9)
 save(fig,"lda-classification.svg")
+
+# K-Nearest Neighbors (KNN): exact integer distances 1..6 around query (7, 5),
+# uniform vs inverse-distance voting at K=1, 3, 5, KNN regression, and scaling.
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+knn_X = np.array([
+    [5., 5.],   # A1: d = 2
+    [7., 2.],   # A2: d = 3
+    [1., 5.],   # A3: d = 6
+    [7., 6.],   # B1: d = 1
+    [11., 5.],  # B2: d = 4
+    [10., 9.],  # B3: d = 5
+])
+knn_names = ["A1", "A2", "A3", "B1", "B2", "B3"]
+knn_classes = np.array(["A", "A", "A", "B", "B", "B"])
+knn_targets = np.array([30., 24., 18., 60., 72., 84.])
+knn_query = np.array([7., 5.])
+knn_diffs = knn_X - knn_query
+knn_sq_dists = np.sum(knn_diffs**2, axis=1)
+knn_dists = np.sqrt(knn_sq_dists)
+knn_l1 = np.sum(np.abs(knn_diffs), axis=1)
+near(knn_sq_dists, [4, 9, 36, 1, 16, 25])
+near(knn_dists, [2, 3, 6, 1, 4, 5])
+near(knn_l1, [2, 3, 6, 1, 4, 7])
+knn_order = np.argsort(knn_dists)
+assert [knn_names[i] for i in knn_order] == ["B1", "A1", "A2", "B2", "B3", "A3"]
+
+for k, expected_cls, expected_prob_b in [(1, "B", 1.0), (3, "A", 1/3), (5, "B", 3/5)]:
+    clf_u = KNeighborsClassifier(n_neighbors=k, weights="uniform").fit(knn_X, knn_classes)
+    assert clf_u.predict([knn_query])[0] == expected_cls
+    near(clf_u.predict_proba([knn_query])[0], [1 - expected_prob_b, expected_prob_b])
+
+clf_w3 = KNeighborsClassifier(n_neighbors=3, weights="distance").fit(knn_X, knn_classes)
+assert clf_w3.predict([knn_query])[0] == "B"
+near(clf_w3.predict_proba([knn_query])[0], [5/11, 6/11])
+
+reg_u3 = KNeighborsRegressor(n_neighbors=3, weights="uniform").fit(knn_X, knn_targets)
+reg_w3 = KNeighborsRegressor(n_neighbors=3, weights="distance").fit(knn_X, knn_targets)
+near(reg_u3.predict([knn_query])[0], 38.0)
+near(reg_w3.predict([knn_query])[0], 498/11)
+
+# Feature-scaling example from Clustering.pdf page 4 (Income in $ vs Age in years)
+scale_X = np.array([[80000., 25.], [52000., 60.], [60000., 27.]])
+scale_query = np.array([50000., 27.])
+raw_dists = np.linalg.norm(scale_X - scale_query, axis=1)
+scale_mean = scale_X.mean(axis=0)
+scale_std = scale_X.std(axis=0, ddof=0)
+z_X = (scale_X - scale_mean) / scale_std
+z_query = (scale_query - scale_mean) / scale_std
+z_dists = np.linalg.norm(z_X - z_query, axis=1)
+assert int(np.argmin(raw_dists)) == 1  # raw units pick row 2 ($52k, age 60)
+assert int(np.argmin(z_dists)) == 2    # standardized units pick row 3 ($60k, age 27)
+
+results["knn"] = {
+    "points": knn_X.tolist(), "names": knn_names,
+    "classes": knn_classes.tolist(), "targets": knn_targets.tolist(),
+    "query": knn_query.tolist(), "euclidean": knn_dists.tolist(),
+    "manhattan": knn_l1.tolist(),
+    "order": [knn_names[i] for i in knn_order],
+    "k3_uniform_proba": [2/3, 1/3], "k3_distance_proba": [5/11, 6/11],
+    "k3_regression_uniform": 38.0, "k3_regression_distance": 498/11,
+}
+
+fig, ax = plt.subplots(figsize=(8.4, 5.2), layout="constrained")
+theta_grid = np.linspace(0, 2*np.pi, 360)
+for radius, style, lbl in [(3.0, "--", "K = 3 radius (d ≤ 3)"), (5.0, ":", "K = 5 radius (d ≤ 5)")]:
+    ax.plot(knn_query[0] + radius*np.cos(theta_grid),
+            knn_query[1] + radius*np.sin(theta_grid),
+            linestyle=style, color=GRAY, lw=1.4, label=lbl)
+mask_a = knn_classes == "A"
+mask_b = knn_classes == "B"
+ax.scatter(knn_X[mask_a, 0], knn_X[mask_a, 1], s=85, color=GREEN, zorder=3, label="Class A training points")
+ax.scatter(knn_X[mask_b, 0], knn_X[mask_b, 1], s=85, color=GOLD, zorder=3, label="Class B training points")
+ax.scatter(*knn_query, s=230, marker="*", color="#244e78", zorder=4, label="Query point q = (7, 5)")
+offsets = {"A1": (-10, -18), "A2": (8, -14), "A3": (8, -16), "B1": (8, 8), "B2": (-10, 10), "B3": (8, 6)}
+for idx_pt, name in enumerate(knn_names):
+    pt = knn_X[idx_pt]
+    d_val = int(knn_dists[idx_pt])
+    ax.annotate(f"{name} ({int(pt[0])},{int(pt[1])}) · d={d_val}",
+                pt, xytext=offsets[name], textcoords="offset points",
+                fontsize=9.5, color=GREEN if knn_classes[idx_pt]=="A" else GOLD, fontweight="bold")
+ax.annotate("q (7, 5)", knn_query, xytext=(-12, -18), textcoords="offset points",
+            ha="right", color="#244e78", fontweight="bold")
+ax.set(xlim=(0, 13.2), ylim=(0, 10.8),
+       xlabel="Measurement 1 (x₁)", ylabel="Measurement 2 (x₂)",
+       title="KNN expands a distance ball around the query point q = (7, 5)")
+ax.set_aspect("equal", adjustable="box")
+ax.legend(loc="lower left", frameon=False, fontsize=9)
+save(fig, "knn-neighborhood.svg")
+
 (OUT/"results.json").write_text(json.dumps(results, indent=2)+"\n")
-print("Verified MLE/MAP, regression, NB, logistic gradients, clustering, PCA, Fisher LDA and LDA classification.")
+print("Verified MLE/MAP, regression, NB, logistic gradients, clustering, KNN, PCA, Fisher LDA and LDA classification.")
 print("Wrote verified figures and assets/results.json.")

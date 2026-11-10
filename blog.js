@@ -8627,7 +8627,17 @@ var BLOG_TREE = [
             "file": "ml/handwritten-notes/clustering.html",
             "links": [
               "ml/handwritten-notes/index.html",
-              "ml/handwritten-notes/pca.html"
+              "ml/handwritten-notes/knn.html"
+            ]
+          },
+          {
+            "title": "K-Nearest Neighbors: Classify and Predict from Nearby Points",
+            "file": "ml/handwritten-notes/knn.html",
+            "links": [
+              "ml/handwritten-notes/index.html",
+              "ml/handwritten-notes/clustering.html",
+              "ml/handwritten-notes/pca.html",
+              "ml/knn/index.html"
             ]
           },
           {
@@ -8772,6 +8782,17 @@ var BLOG_TREE = [
           }
         ],
         "learning": {"title": "Regression", "requires": ["loss-functions"], "start": "ml/regression/index.html", "note": "Fit a linear baseline, then learn how logistic regression predicts probabilities."}
+      },
+      {
+        "name": "knn",
+        "label": "K-Nearest Neighbors (KNN)",
+        "children": [
+          {"title": "Overview & Voronoi Geometry", "file": "ml/knn/index.html", "links": ["ml/handwritten-notes/knn.html", "ml/knn/distance-metrics-and-scaling.html"]},
+          {"title": "Distance Metrics, Scaling & Mahalanobis", "file": "ml/knn/distance-metrics-and-scaling.html", "links": ["ml/knn/index.html", "ml/knn/classification-regression-and-weighting.html"]},
+          {"title": "Classification, Regression & Weighting", "file": "ml/knn/classification-regression-and-weighting.html", "links": ["ml/knn/distance-metrics-and-scaling.html", "ml/knn/k-selection-bias-variance-and-indexing.html"]},
+          {"title": "Choosing K, Bias-Variance & Spatial Indexing", "file": "ml/knn/k-selection-bias-variance-and-indexing.html", "links": ["ml/knn/classification-regression-and-weighting.html", "ml/search-and-retrieval/index.html"]}
+        ],
+        "learning": {"title": "K-Nearest Neighbors", "requires": ["loss-functions"], "start": "ml/knn/index.html", "note": "Classify and predict from nearby observations, compare distance metrics, standardize features, and balance K against the curse of dimensionality."}
       },
       {
         "name": "decision-trees",
