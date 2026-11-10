@@ -87,6 +87,9 @@ assert(
 const limeLesson = fs.readFileSync(path.join(root, 'blog/ml/explainability/shap-lime/lime-local-surrogates.html'), 'utf8');
 assert(limeLesson.includes('class="prev" href="../index.html"'), 'The standalone LIME lesson should return to the guide');
 checkSequence('ml/loss-functions/js-divergence', ['index', 'properties-and-uses', 'gan-connection']);
+checkSequence('ml/knn', ['index', 'distance-metrics-and-scaling', 'classification-regression-and-weighting', 'k-selection-bias-variance-and-indexing']);
+checkSequence('ml/svm', ['index', 'soft-margin-and-hinge-loss', 'lagrangian-dual-and-kkt', 'kernel-trick-and-rbf']);
+checkSequence('ml/clustering', ['index', 'gaussian-mixture-models-and-em', 'dbscan-and-density-clustering', 'hierarchical-clustering-and-evaluation']);
 
 const prep = ml.children.find(n => n.name === 'data-preparation')
   || context.BLOG_TREE.find(n => n.name === 'dl')?.children.find(n => n.name === 'data-preparation');

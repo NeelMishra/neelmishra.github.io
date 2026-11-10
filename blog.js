@@ -8795,6 +8795,28 @@ var BLOG_TREE = [
         "learning": {"title": "K-Nearest Neighbors", "requires": ["loss-functions"], "start": "ml/knn/index.html", "note": "Classify and predict from nearby observations, compare distance metrics, standardize features, and balance K against the curse of dimensionality."}
       },
       {
+        "name": "svm",
+        "label": "Support Vector Machines (SVM)",
+        "children": [
+          {"title": "Maximal Margin & Support Vectors", "file": "ml/svm/index.html", "links": ["ml/regression/logistic/index.html", "ml/svm/soft-margin-and-hinge-loss.html"]},
+          {"title": "Soft-Margin & Hinge Loss", "file": "ml/svm/soft-margin-and-hinge-loss.html", "links": ["ml/svm/index.html", "ml/svm/lagrangian-dual-and-kkt.html"]},
+          {"title": "Lagrangian Dual & KKT Sparsity", "file": "ml/svm/lagrangian-dual-and-kkt.html", "links": ["ml/svm/soft-margin-and-hinge-loss.html", "ml/svm/kernel-trick-and-rbf.html"]},
+          {"title": "Kernel Trick, Mercer & RBF", "file": "ml/svm/kernel-trick-and-rbf.html", "links": ["ml/svm/lagrangian-dual-and-kkt.html", "ml/clustering/index.html"]}
+        ],
+        "learning": {"title": "Support Vector Machines", "requires": ["regression"], "start": "ml/svm/index.html", "note": "Maximize geometric margins, trade off slack via hinge loss, derive KKT support-vector sparsity, and unlock curved boundaries with kernels."}
+      },
+      {
+        "name": "clustering",
+        "label": "Clustering & Mixture Models",
+        "children": [
+          {"title": "K-Means, Lloyd's & K-Means++", "file": "ml/clustering/index.html", "links": ["ml/handwritten-notes/clustering.html", "ml/clustering/gaussian-mixture-models-and-em.html"]},
+          {"title": "Gaussian Mixture Models & EM", "file": "ml/clustering/gaussian-mixture-models-and-em.html", "links": ["ml/clustering/index.html", "ml/clustering/dbscan-and-density-clustering.html"]},
+          {"title": "DBSCAN & Density Clustering", "file": "ml/clustering/dbscan-and-density-clustering.html", "links": ["ml/clustering/gaussian-mixture-models-and-em.html", "ml/clustering/hierarchical-clustering-and-evaluation.html"]},
+          {"title": "Hierarchical Linkage & Evaluation", "file": "ml/clustering/hierarchical-clustering-and-evaluation.html", "links": ["ml/clustering/dbscan-and-density-clustering.html", "ml/handwritten-notes/clustering.html"]}
+        ],
+        "learning": {"title": "Clustering & Mixture Models", "requires": ["knn"], "start": "ml/clustering/index.html", "note": "Group unlabeled observations with K-means++, soft-assignment Gaussian mixtures (EM), density-based DBSCAN, and hierarchical dendrograms."}
+      },
+      {
         "name": "decision-trees",
         "label": "Decision Trees",
         "children": [
